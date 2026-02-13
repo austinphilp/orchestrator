@@ -1,3 +1,19 @@
 # orchestrator
 
-Git repository orchestrator.
+Rust workspace for the Orchestrator bootstrap architecture.
+
+## Workspace crates
+
+- `orchestrator-app`: composition root and process entrypoint.
+- `orchestrator-core`: shared domain models, traits, and errors.
+- `orchestrator-ui`: minimal ratatui-based interface loop.
+- `orchestrator-supervisor`: OpenRouter supervisor adapter.
+- `orchestrator-github`: `gh` CLI adapter with process abstraction.
+
+## Quick start
+
+```bash
+cargo check --workspace
+cargo test --workspace
+cargo run -p orchestrator-app
+```
