@@ -1,0 +1,10 @@
+[package]
+name = "orchestrator-supervisor"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+orchestrator-core = { path = "../orchestrator-core" }
+async-trait.workspace = true
+thiserror.workspace = true

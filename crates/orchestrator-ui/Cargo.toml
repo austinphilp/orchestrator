@@ -1,0 +1,11 @@
+[package]
+name = "orchestrator-ui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+orchestrator-core = { path = "../orchestrator-core" }
+crossterm.workspace = true
+ratatui.workspace = true
+tokio.workspace = true
