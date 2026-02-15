@@ -7,7 +7,12 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 pub struct AppConfig {
     pub workspace: String,
+    #[serde(default = "default_event_store_path")]
     pub event_store_path: String,
+}
+
+fn default_event_store_path() -> String {
+    "./orchestrator-events.db".to_owned()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -20,7 +25,7 @@ impl Default for AppConfig {
     fn default() -> Self {
         Self {
             workspace: "./".to_owned(),
-            event_store_path: "./orchestrator-events.db".to_owned(),
+            event_store_path: default_event_store_path(),
         }
     }
 }
@@ -108,6 +113,25 @@ mod tests {
         let config = AppConfig::from_env().expect("parse config");
         assert_eq!(config.workspace, "/tmp/work");
         assert_eq!(config.event_store_path, "/tmp/events.db");
+        match original {
+            Some(value) => unsafe {
+                std::env::set_var("ORCHESTRATOR_CONFIG", value);
+            },
+            None => unsafe {
+                std::env::remove_var("ORCHESTRATOR_CONFIG");
+            },
+        }
+    }
+
+    #[test]
+    fn config_defaults_event_store_path_when_missing_in_toml_env() {
+        let original = std::env::var("ORCHESTRATOR_CONFIG").ok();
+        unsafe {
+            std::env::set_var("ORCHESTRATOR_CONFIG", "workspace = '/tmp/work'");
+        }
+        let config = AppConfig::from_env().expect("parse config");
+        assert_eq!(config.workspace, "/tmp/work");
+        assert_eq!(config.event_store_path, default_event_store_path());
         match original {
             Some(value) => unsafe {
                 std::env::set_var("ORCHESTRATOR_CONFIG", value);
