@@ -24,7 +24,7 @@ async fn main() -> Result<()> {
 
     let state = app.startup_state().await?;
     let mut ui = Ui::init()?;
-    ui.run(&state)?;
+    ui.run(&state.status)?;
 
     Ok(())
 }

@@ -1,9 +1,14 @@
-use orchestrator_core::{CoreError, GithubClient, OrchestrationState, Supervisor};
-use serde::Deserialize;
+use orchestrator_core::{CoreError, GithubClient, Supervisor};
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 pub struct AppConfig {
     pub workspace: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct StartupState {
+    pub status: String,
 }
 
 impl Default for AppConfig {
@@ -35,10 +40,10 @@ pub struct App<S: Supervisor, G: GithubClient> {
 }
 
 impl<S: Supervisor, G: GithubClient> App<S, G> {
-    pub async fn startup_state(&self) -> Result<OrchestrationState, CoreError> {
+    pub async fn startup_state(&self) -> Result<StartupState, CoreError> {
         self.supervisor.health_check().await?;
         self.github.health_check().await?;
-        Ok(OrchestrationState {
+        Ok(StartupState {
             status: format!("ready ({})", self.config.workspace),
         })
     }
