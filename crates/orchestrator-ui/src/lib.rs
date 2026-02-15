@@ -6,7 +6,6 @@ use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
 use crossterm::ExecutableCommand;
-use orchestrator_core::OrchestrationState;
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Layout};
 use ratatui::style::Stylize;
@@ -27,7 +26,7 @@ impl Ui {
         Ok(Self { terminal })
     }
 
-    pub fn run(&mut self, state: &OrchestrationState) -> io::Result<()> {
+    pub fn run(&mut self, status: &str) -> io::Result<()> {
         loop {
             self.terminal.draw(|frame| {
                 let area = frame.area();
@@ -35,7 +34,7 @@ impl Ui {
                 let [main] = layout.areas(area);
                 let body = Paragraph::new(format!(
                     "Orchestrator status: {}\n\nPress q to quit.",
-                    state.status
+                    status
                 ))
                 .block(Block::default().title("orchestrator").borders(Borders::ALL))
                 .cyan();
