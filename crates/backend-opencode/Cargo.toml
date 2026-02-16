@@ -13,3 +13,4 @@ tokio = { workspace = true, features = ["process", "time"] }
 
 [dev-dependencies]
 tokio.workspace = true
+orchestrator-core = { path = "../orchestrator-core" }
