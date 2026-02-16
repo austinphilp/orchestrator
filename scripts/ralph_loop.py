@@ -22,6 +22,7 @@ import os
 import re
 import shlex
 import subprocess
+import tempfile
 import sys
 import textwrap
 import time
@@ -422,7 +423,7 @@ def review_ticket_with_codex(
 
 
 def generate_plan_with_codex(codex_bin: str, repo: Path, issue: Issue, design_plan_path: Path, model: str | None) -> str:
-    with subprocess.NamedTemporaryFile(prefix="ralph-plan-", suffix=".md", delete=False) as tmp:
+    with tempfile.NamedTemporaryFile(prefix="ralph-plan-", suffix=".md", delete=False) as tmp:
         plan_path = Path(tmp.name)
     try:
         cmd = [codex_bin]
