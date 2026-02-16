@@ -3,6 +3,7 @@ use orchestrator_app::{App, AppConfig};
 use orchestrator_github::{GhCliClient, ProcessCommandRunner};
 use orchestrator_supervisor::OpenRouterSupervisor;
 use orchestrator_ui::Ui;
+use std::sync::Arc;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -23,7 +24,7 @@ async fn main() -> Result<()> {
     };
 
     let state = app.startup_state().await?;
-    let mut ui = Ui::init()?;
+    let mut ui = Ui::init()?.with_supervisor_provider(Arc::new(app.supervisor.clone()));
     ui.run(&state.status, &state.projection)?;
 
     Ok(())
