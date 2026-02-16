@@ -7,7 +7,19 @@ mod projection;
 mod status;
 mod store;
 
-pub use adapters::{GithubClient, Supervisor};
+pub use adapters::{
+    AddTicketCommentRequest, BackendArtifactEvent, BackendBlockedEvent, BackendCapabilities,
+    BackendCheckpointEvent, BackendCrashedEvent, BackendDoneEvent, BackendEvent, BackendKind,
+    BackendNeedsInputEvent, BackendOutputEvent, BackendOutputStream, CodeHostKind,
+    CodeHostProvider, CreatePullRequestRequest, CreateTicketRequest, CreateWorktreeRequest,
+    DeleteWorktreeRequest, GithubClient, LlmChatRequest, LlmFinishReason, LlmMessage, LlmProvider,
+    LlmProviderKind, LlmRateLimitState, LlmResponseStream, LlmResponseSubscription, LlmRole,
+    LlmStreamChunk, LlmTokenUsage, PullRequestRef, PullRequestSummary, RepositoryRef,
+    ReviewerRequest, SessionHandle, SpawnSpec, Supervisor, TerminalSnapshot, TicketAttachment,
+    TicketQuery, TicketSummary, TicketingProvider, UpdateTicketStateRequest, UrlOpener,
+    VcsProvider, WorkerBackend, WorkerEventStream, WorkerEventSubscription, WorktreeManager,
+    WorktreeStatus, WorktreeSummary,
+};
 pub use commands::{
     ids as command_ids, Command, CommandArgSummary, CommandDefinition, CommandMetadata,
     CommandRegistry, SupervisorQueryArgs, UntypedCommandInvocation,
