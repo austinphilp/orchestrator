@@ -12,10 +12,17 @@ use serde_json::{Map, Value};
 use tokio::sync::{mpsc, Notify};
 
 mod query_engine;
+mod template_library;
 
 pub use query_engine::{
     BoundedContextPack, RetrievalPackEvent, RetrievalPackEvidence, RetrievalPackLimits,
     RetrievalPackStats, SupervisorQueryEngine, SupervisorRetrievalSource,
+};
+pub use template_library::{
+    build_template_messages, build_template_messages_with_variables, supervisor_template_catalog,
+    SupervisorTemplate, SUPERVISOR_TEMPLATE_CURRENT_ACTIVITY,
+    SUPERVISOR_TEMPLATE_RECOMMENDED_RESPONSE, SUPERVISOR_TEMPLATE_RISK_ASSESSMENT,
+    SUPERVISOR_TEMPLATE_WHAT_CHANGED, SUPERVISOR_TEMPLATE_WHAT_NEEDS_ME,
 };
 
 const OPENROUTER_API_BASE: &str = "https://openrouter.ai/api/v1";

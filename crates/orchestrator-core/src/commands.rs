@@ -344,7 +344,42 @@ fn parse_supervisor_query(args: Option<&Value>) -> Result<Command, CoreError> {
             details: err.to_string(),
         })?;
 
-    Ok(Command::SupervisorQuery(parsed))
+    Ok(Command::SupervisorQuery(validate_supervisor_query_args(
+        parsed,
+    )?))
+}
+
+fn validate_supervisor_query_args(
+    args: SupervisorQueryArgs,
+) -> Result<SupervisorQueryArgs, CoreError> {
+    match args {
+        SupervisorQueryArgs::Template {
+            template,
+            variables,
+        } => {
+            let normalized_template = template.trim();
+            if normalized_template.is_empty() {
+                return Err(CoreError::InvalidCommandArgs {
+                    command_id: ids::SUPERVISOR_QUERY.to_owned(),
+                    reason: "template query requires a non-empty template name".to_owned(),
+                });
+            }
+            Ok(SupervisorQueryArgs::Template {
+                template: normalized_template.to_owned(),
+                variables,
+            })
+        }
+        SupervisorQueryArgs::Freeform { query } => {
+            if query.trim().is_empty() {
+                return Err(CoreError::InvalidCommandArgs {
+                    command_id: ids::SUPERVISOR_QUERY.to_owned(),
+                    reason: "freeform supervisor query requires a non-empty query string"
+                        .to_owned(),
+                });
+            }
+            Ok(SupervisorQueryArgs::Freeform { query })
+        }
+    }
 }
 
 fn ensure_no_args(command_id: &'static str, args: Option<&Value>) -> Result<(), CoreError> {
@@ -469,6 +504,43 @@ mod tests {
             .parse_invocation(&invocation)
             .expect_err("invalid shape");
         assert!(matches!(err, CoreError::CommandSchemaMismatch { .. }));
+    }
+
+    #[test]
+    fn supervisor_query_rejects_blank_template_name() {
+        let registry = CommandRegistry::new().expect("registry");
+        let invocation = UntypedCommandInvocation {
+            command_id: ids::SUPERVISOR_QUERY.to_owned(),
+            args: Some(json!({
+                "kind": "template",
+                "template": "   ",
+                "variables": {
+                    "ticket_id": "AP-129"
+                }
+            })),
+        };
+
+        let err = registry
+            .parse_invocation(&invocation)
+            .expect_err("blank template should fail");
+        assert!(matches!(err, CoreError::InvalidCommandArgs { .. }));
+    }
+
+    #[test]
+    fn supervisor_query_rejects_blank_freeform_query() {
+        let registry = CommandRegistry::new().expect("registry");
+        let invocation = UntypedCommandInvocation {
+            command_id: ids::SUPERVISOR_QUERY.to_owned(),
+            args: Some(json!({
+                "kind": "freeform",
+                "query": " \n\t "
+            })),
+        };
+
+        let err = registry
+            .parse_invocation(&invocation)
+            .expect_err("blank freeform query should fail");
+        assert!(matches!(err, CoreError::InvalidCommandArgs { .. }));
     }
 
     #[test]
