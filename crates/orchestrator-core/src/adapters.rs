@@ -3,9 +3,7 @@ use std::path::{Path, PathBuf};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
-use crate::{
-    ArtifactId, ArtifactKind, CoreError, TicketId, TicketProvider, WorkerSessionId, WorktreeId,
-};
+use crate::{CoreError, TicketId, TicketProvider, WorktreeId};
 
 #[async_trait]
 pub trait Supervisor: Send + Sync {
@@ -15,130 +13,6 @@ pub trait Supervisor: Send + Sync {
 #[async_trait]
 pub trait GithubClient: Send + Sync {
     async fn health_check(&self) -> Result<(), CoreError>;
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum BackendKind {
-    OpenCode,
-    Codex,
-    ClaudeCode,
-    Other(String),
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
-pub struct BackendCapabilities {
-    pub structured_events: bool,
-    pub session_export: bool,
-    pub diff_provider: bool,
-    pub supports_background: bool,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SpawnSpec {
-    pub session_id: WorkerSessionId,
-    pub workdir: PathBuf,
-    pub model: Option<String>,
-    pub instruction_prelude: Option<String>,
-    pub environment: Vec<(String, String)>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SessionHandle {
-    pub session_id: WorkerSessionId,
-    pub backend: BackendKind,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum BackendOutputStream {
-    Stdout,
-    Stderr,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct BackendOutputEvent {
-    pub stream: BackendOutputStream,
-    pub bytes: Vec<u8>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct BackendCheckpointEvent {
-    pub summary: String,
-    pub detail: Option<String>,
-    pub file_refs: Vec<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct BackendNeedsInputEvent {
-    pub prompt_id: String,
-    pub question: String,
-    pub options: Vec<String>,
-    pub default_option: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct BackendBlockedEvent {
-    pub reason: String,
-    pub hint: Option<String>,
-    pub log_ref: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct BackendArtifactEvent {
-    pub kind: ArtifactKind,
-    pub artifact_id: Option<ArtifactId>,
-    pub label: Option<String>,
-    pub uri: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct BackendDoneEvent {
-    pub summary: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct BackendCrashedEvent {
-    pub reason: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum BackendEvent {
-    Output(BackendOutputEvent),
-    Checkpoint(BackendCheckpointEvent),
-    NeedsInput(BackendNeedsInputEvent),
-    Blocked(BackendBlockedEvent),
-    Artifact(BackendArtifactEvent),
-    Done(BackendDoneEvent),
-    Crashed(BackendCrashedEvent),
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TerminalSnapshot {
-    pub cols: u16,
-    pub rows: u16,
-    pub cursor_col: u16,
-    pub cursor_row: u16,
-    pub lines: Vec<String>,
-}
-
-#[async_trait]
-pub trait WorkerEventSubscription: Send {
-    async fn next_event(&mut self) -> Result<Option<BackendEvent>, CoreError>;
-}
-
-pub type WorkerEventStream = Box<dyn WorkerEventSubscription>;
-
-#[async_trait]
-pub trait WorkerBackend: Send + Sync {
-    fn kind(&self) -> BackendKind;
-    fn capabilities(&self) -> BackendCapabilities;
-
-    async fn health_check(&self) -> Result<(), CoreError>;
-    async fn spawn(&self, spec: SpawnSpec) -> Result<SessionHandle, CoreError>;
-    async fn kill(&self, session: &SessionHandle) -> Result<(), CoreError>;
-    async fn send_input(&self, session: &SessionHandle, input: &[u8]) -> Result<(), CoreError>;
-    async fn resize(&self, session: &SessionHandle, cols: u16, rows: u16) -> Result<(), CoreError>;
-    async fn subscribe(&self, session: &SessionHandle) -> Result<WorkerEventStream, CoreError>;
-    async fn snapshot(&self, session: &SessionHandle) -> Result<TerminalSnapshot, CoreError>;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]

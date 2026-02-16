@@ -6,6 +6,7 @@ Rust workspace for the Orchestrator bootstrap architecture.
 
 - `orchestrator-app`: composition root and process entrypoint.
 - `orchestrator-core`: shared domain models, traits, and errors.
+- `orchestrator-runtime`: PTY/session lifecycle interfaces and runtime boundaries.
 - `orchestrator-ui`: minimal ratatui-based interface loop.
 - `orchestrator-supervisor`: OpenRouter supervisor adapter.
 - `orchestrator-github`: `gh` CLI adapter with process abstraction.

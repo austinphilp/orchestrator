@@ -10,17 +10,13 @@ mod store;
 pub mod test_support;
 
 pub use adapters::{
-    AddTicketCommentRequest, BackendArtifactEvent, BackendBlockedEvent, BackendCapabilities,
-    BackendCheckpointEvent, BackendCrashedEvent, BackendDoneEvent, BackendEvent, BackendKind,
-    BackendNeedsInputEvent, BackendOutputEvent, BackendOutputStream, CodeHostKind,
-    CodeHostProvider, CreatePullRequestRequest, CreateTicketRequest, CreateWorktreeRequest,
-    DeleteWorktreeRequest, GithubClient, LlmChatRequest, LlmFinishReason, LlmMessage, LlmProvider,
-    LlmProviderKind, LlmRateLimitState, LlmResponseStream, LlmResponseSubscription, LlmRole,
-    LlmStreamChunk, LlmTokenUsage, PullRequestRef, PullRequestSummary, RepositoryRef,
-    ReviewerRequest, SessionHandle, SpawnSpec, Supervisor, TerminalSnapshot, TicketAttachment,
-    TicketQuery, TicketSummary, TicketingProvider, UpdateTicketStateRequest, UrlOpener,
-    VcsProvider, WorkerBackend, WorkerEventStream, WorkerEventSubscription, WorktreeManager,
-    WorktreeStatus, WorktreeSummary,
+    AddTicketCommentRequest, CodeHostKind, CodeHostProvider, CreatePullRequestRequest,
+    CreateTicketRequest, CreateWorktreeRequest, DeleteWorktreeRequest, GithubClient,
+    LlmChatRequest, LlmFinishReason, LlmMessage, LlmProvider, LlmProviderKind, LlmRateLimitState,
+    LlmResponseStream, LlmResponseSubscription, LlmRole, LlmStreamChunk, LlmTokenUsage,
+    PullRequestRef, PullRequestSummary, RepositoryRef, ReviewerRequest, Supervisor,
+    TicketAttachment, TicketQuery, TicketSummary, TicketingProvider, UpdateTicketStateRequest,
+    UrlOpener, VcsProvider, WorktreeManager, WorktreeStatus, WorktreeSummary,
 };
 pub use commands::{
     ids as command_ids, Command, CommandArgSummary, CommandDefinition, CommandMetadata,
@@ -37,6 +33,13 @@ pub use events::{
 pub use identifiers::{
     ArtifactId, InboxItemId, ProjectId, TicketId, TicketProvider, WorkItemId, WorkerSessionId,
     WorktreeId,
+};
+pub use orchestrator_runtime::{
+    BackendArtifactEvent, BackendArtifactKind, BackendBlockedEvent, BackendCapabilities,
+    BackendCheckpointEvent, BackendCrashedEvent, BackendDoneEvent, BackendEvent, BackendKind,
+    BackendNeedsInputEvent, BackendOutputEvent, BackendOutputStream, RuntimeArtifactId,
+    RuntimeError, RuntimeResult, RuntimeSessionId, SessionHandle, SessionLifecycle, SpawnSpec,
+    TerminalSnapshot, WorkerBackend, WorkerEventStream, WorkerEventSubscription,
 };
 pub use projection::{
     apply_event, rebuild_projection, retrieve_events, ArtifactProjection, InboxItemProjection,
