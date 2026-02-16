@@ -361,6 +361,11 @@ impl SupervisorProtocolParser {
         if line.is_empty() {
             return None;
         }
+        if line.starts_with("@@") {
+            // Reserve @@-prefixed lines for structured protocol tags only. If parsing failed, do
+            // not reinterpret the line via heuristics because it can emit false positives.
+            return None;
+        }
 
         let (signature, event) = heuristic_event_from_line(line, self.heuristic_prompt_counter)?;
         if self.last_heuristic_signature.as_deref() == Some(signature.as_str()) {
@@ -1257,6 +1262,18 @@ sleep 1"#
         assert!(parse_protocol_line(br#"@@artifact {"kind":1}"#).is_none());
         assert!(parse_protocol_line(br#"@@blocked {"reason":true}"#).is_none());
         assert!(parse_protocol_line(br#"@@done [1,2,3]"#).is_none());
+    }
+
+    #[tokio::test]
+    async fn parser_does_not_apply_heuristics_to_malformed_protocol_lines() {
+        let mut parser = SupervisorProtocolParser::default();
+        let events = parser.ingest(
+            b"@@artifact {\"kind\":1,\"url\":\"https://github.com/example/repo/pull/42\"}\n",
+        );
+        assert!(
+            events.is_empty(),
+            "malformed protocol lines should be ignored instead of falling back to heuristics"
+        );
     }
 
     #[tokio::test]
