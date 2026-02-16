@@ -303,6 +303,8 @@ impl WorkerEventSubscription for OpenCodeEventSubscription {
 #[derive(Default)]
 struct SupervisorProtocolParser {
     line_buffer: Vec<u8>,
+    heuristic_prompt_counter: u64,
+    last_heuristic_signature: Option<String>,
 }
 
 impl SupervisorProtocolParser {
@@ -321,7 +323,7 @@ impl SupervisorProtocolParser {
             if matches!(line.last(), Some(b'\r')) {
                 line.pop();
             }
-            if let Some(event) = parse_protocol_line(&line) {
+            if let Some(event) = self.parse_line(&line) {
                 events.push(event);
             }
         }
@@ -338,7 +340,37 @@ impl SupervisorProtocolParser {
         if matches!(line.last(), Some(b'\r')) {
             line.pop();
         }
-        parse_protocol_line(&line).into_iter().collect()
+        self.parse_line(&line).into_iter().collect()
+    }
+
+    fn parse_line(&mut self, line: &[u8]) -> Option<BackendEvent> {
+        if let Some(event) = parse_protocol_line(line) {
+            self.last_heuristic_signature = None;
+            return Some(event);
+        }
+        let event = self.parse_heuristic_line(line);
+        if event.is_none() {
+            self.last_heuristic_signature = None;
+        }
+        event
+    }
+
+    fn parse_heuristic_line(&mut self, line: &[u8]) -> Option<BackendEvent> {
+        let line = sanitize_protocol_line(protocol_candidate_bytes(line));
+        let line = line.trim();
+        if line.is_empty() {
+            return None;
+        }
+
+        let (signature, event) = heuristic_event_from_line(line, self.heuristic_prompt_counter)?;
+        if self.last_heuristic_signature.as_deref() == Some(signature.as_str()) {
+            return None;
+        }
+        self.last_heuristic_signature = Some(signature);
+        if matches!(event, BackendEvent::NeedsInput(_)) {
+            self.heuristic_prompt_counter = self.heuristic_prompt_counter.saturating_add(1);
+        }
+        Some(event)
     }
 }
 
@@ -411,6 +443,259 @@ fn parse_protocol_line(line: &[u8]) -> Option<BackendEvent> {
     }
 
     None
+}
+
+fn heuristic_event_from_line(line: &str, prompt_counter: u64) -> Option<(String, BackendEvent)> {
+    let normalized = normalize_heuristic_text(line);
+    let normalized_lower = normalized.to_ascii_lowercase();
+
+    if let Some(reason) = heuristic_blocked_reason(line, &normalized_lower) {
+        return Some((
+            format!("blocked:{normalized_lower}"),
+            BackendEvent::Blocked(BackendBlockedEvent {
+                reason,
+                hint: None,
+                log_ref: None,
+            }),
+        ));
+    }
+
+    if let Some(question) = heuristic_needs_input_question(line, &normalized_lower) {
+        return Some((
+            format!("needs_input:{normalized_lower}"),
+            BackendEvent::NeedsInput(BackendNeedsInputEvent {
+                prompt_id: format!("heuristic-{prompt_counter}"),
+                question,
+                options: Vec::new(),
+                default_option: None,
+            }),
+        ));
+    }
+
+    if let Some(uri) = heuristic_artifact_uri(line, &normalized_lower) {
+        let kind = if uri.contains("/pull/") || uri.contains("/pulls/") {
+            BackendArtifactKind::PullRequest
+        } else {
+            BackendArtifactKind::Link
+        };
+        let label = match kind {
+            BackendArtifactKind::PullRequest => {
+                if normalized_lower.contains("draft") {
+                    Some("Draft PR".to_owned())
+                } else {
+                    Some("Pull request".to_owned())
+                }
+            }
+            _ => Some("Link".to_owned()),
+        };
+        return Some((
+            format!("artifact:{uri}"),
+            BackendEvent::Artifact(BackendArtifactEvent {
+                kind,
+                artifact_id: None,
+                label,
+                uri: Some(uri),
+            }),
+        ));
+    }
+
+    if let Some(summary) = heuristic_done_summary(line, &normalized_lower) {
+        return Some((
+            format!("done:{normalized_lower}"),
+            BackendEvent::Done(BackendDoneEvent {
+                summary: Some(summary),
+            }),
+        ));
+    }
+
+    if let Some((summary, detail)) = heuristic_checkpoint_summary(line) {
+        let signature = format!("checkpoint:{summary}:{}", detail.as_deref().unwrap_or(""));
+        return Some((
+            signature,
+            BackendEvent::Checkpoint(BackendCheckpointEvent {
+                summary,
+                detail,
+                file_refs: Vec::new(),
+            }),
+        ));
+    }
+
+    None
+}
+
+fn normalize_heuristic_text(line: &str) -> String {
+    line.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn heuristic_blocked_reason(line: &str, line_lower: &str) -> Option<String> {
+    if line_lower.contains("not blocked") {
+        return None;
+    }
+
+    const BLOCKED_MARKERS: [&str; 10] = [
+        "blocked:",
+        "blocker:",
+        "i'm blocked",
+        "i am blocked",
+        "stuck:",
+        "cannot continue",
+        "can't continue",
+        "unable to continue",
+        "waiting for",
+        "tests failing",
+    ];
+
+    if BLOCKED_MARKERS
+        .iter()
+        .any(|marker| line_lower.starts_with(marker) || line_lower.contains(marker))
+    {
+        Some(normalize_heuristic_text(line))
+    } else {
+        None
+    }
+}
+
+fn heuristic_needs_input_question(line: &str, line_lower: &str) -> Option<String> {
+    let question = normalize_heuristic_text(line);
+    if question.is_empty() {
+        return None;
+    }
+
+    for prefix in [
+        "needs input:",
+        "need input:",
+        "need your input:",
+        "question:",
+    ] {
+        if let Some(value) = strip_prefix_case_insensitive(line, prefix) {
+            let trimmed = value.trim();
+            if !trimmed.is_empty() {
+                return Some(trimmed.to_owned());
+            }
+        }
+    }
+
+    let contains_decision_keyword = [
+        "need your input",
+        "need your decision",
+        "please choose",
+        "which option",
+        "should i",
+        "do you want me to",
+        "can you confirm",
+    ]
+    .iter()
+    .any(|needle| line_lower.contains(needle));
+
+    if contains_decision_keyword || (line.ends_with('?') && line_lower.contains("choose")) {
+        return Some(question);
+    }
+
+    None
+}
+
+fn heuristic_artifact_uri(line: &str, line_lower: &str) -> Option<String> {
+    let uri = first_http_uri(line)?;
+    if uri.contains("/pull/") || uri.contains("/pulls/") {
+        return Some(uri);
+    }
+
+    if line_lower.starts_with("artifact:") || line_lower.starts_with("link:") {
+        return Some(uri);
+    }
+
+    None
+}
+
+fn first_http_uri(line: &str) -> Option<String> {
+    for token in line.split_whitespace() {
+        if token.starts_with("https://") || token.starts_with("http://") {
+            let trimmed = token
+                .trim_end_matches(|ch: char| ",.;:!?)]}\"'".contains(ch))
+                .to_owned();
+            if !trimmed.is_empty() {
+                return Some(trimmed);
+            }
+        }
+    }
+    None
+}
+
+fn heuristic_done_summary(line: &str, line_lower: &str) -> Option<String> {
+    if line_lower == "done"
+        || line_lower.starts_with("done:")
+        || line_lower == "all done"
+        || line_lower.starts_with("all done:")
+    {
+        Some(normalize_heuristic_text(line))
+    } else if (line_lower.starts_with("task complete")
+        || line_lower.starts_with("work complete")
+        || line_lower.starts_with("finished successfully")
+        || line_lower.starts_with("completed successfully"))
+        && line_lower.split_whitespace().count() <= 6
+    {
+        // Keep completion phrasing conservative to avoid classifying command output as session-done.
+        Some(normalize_heuristic_text(line))
+    } else {
+        None
+    }
+}
+
+fn heuristic_checkpoint_summary(line: &str) -> Option<(String, Option<String>)> {
+    if let Some(detail) = strip_prefix_case_insensitive(line, "checkpoint:") {
+        let detail = detail.trim();
+        return Some((
+            "checkpoint".to_owned(),
+            (!detail.is_empty()).then(|| detail.to_owned()),
+        ));
+    }
+    if let Some(detail) = strip_prefix_case_insensitive(line, "status:") {
+        let detail = detail.trim();
+        return Some((
+            "status".to_owned(),
+            (!detail.is_empty()).then(|| detail.to_owned()),
+        ));
+    }
+    if let Some(detail) = strip_prefix_case_insensitive(line, "progress:") {
+        let detail = detail.trim();
+        return Some((
+            "progress".to_owned(),
+            (!detail.is_empty()).then(|| detail.to_owned()),
+        ));
+    }
+    if let Some(detail) = strip_prefix_case_insensitive(line, "working on ") {
+        let detail = detail.trim();
+        return Some((
+            "working on".to_owned(),
+            (!detail.is_empty()).then(|| detail.to_owned()),
+        ));
+    }
+    if let Some(detail) = strip_prefix_case_insensitive(line, "implementing ") {
+        let detail = detail.trim();
+        return Some((
+            "implementing".to_owned(),
+            (!detail.is_empty()).then(|| detail.to_owned()),
+        ));
+    }
+    if let Some(detail) = strip_prefix_case_insensitive(line, "refactoring ") {
+        let detail = detail.trim();
+        return Some((
+            "refactoring".to_owned(),
+            (!detail.is_empty()).then(|| detail.to_owned()),
+        ));
+    }
+
+    None
+}
+
+fn strip_prefix_case_insensitive<'a>(value: &'a str, prefix: &str) -> Option<&'a str> {
+    let prefix_len = prefix.len();
+    let candidate = value.get(..prefix_len)?;
+    if candidate.eq_ignore_ascii_case(prefix) {
+        value.get(prefix_len..)
+    } else {
+        None
+    }
 }
 
 fn protocol_candidate_bytes(line: &[u8]) -> &[u8] {
@@ -629,6 +914,21 @@ sleep 1"#
     }
 
     #[cfg(unix)]
+    fn unstructured_script() -> &'static str {
+        r#"printf 'working on parser cleanup\n';
+printf 'Need your input: should I split module A/B?\n';
+printf 'I am blocked on failing tests\n';
+printf 'Draft PR ready: https://github.com/example/repo/pull/42\n';
+printf 'all done\n';
+sleep 1"#
+    }
+
+    #[cfg(windows)]
+    fn unstructured_script() -> &'static str {
+        "echo working on parser cleanup && echo Need your input: should I split module A/B? && echo I am blocked on failing tests && echo Draft PR ready: https://github.com/example/repo/pull/42 && echo all done"
+    }
+
+    #[cfg(unix)]
     fn prelude_capture_script() -> &'static str {
         "read line; printf 'prelude:%s\\n' \"$line\"; sleep 1"
     }
@@ -725,6 +1025,88 @@ sleep 1"#
         assert_eq!(events_two.len(), 1);
         assert!(matches!(events_two[0], BackendEvent::NeedsInput(_)));
         assert!(events_three.is_empty());
+    }
+
+    #[tokio::test]
+    async fn parser_extracts_heuristic_events_from_unstructured_lines() {
+        let mut parser = SupervisorProtocolParser::default();
+        let events = parser.ingest(
+            b"working on parser cleanup\nNeed your input: choose A or B?\nI am blocked on failing tests\nDraft PR ready: https://github.com/example/repo/pull/42\nall done\n",
+        );
+
+        assert_eq!(events.len(), 5);
+        assert!(matches!(
+            &events[0],
+            BackendEvent::Checkpoint(BackendCheckpointEvent {
+                summary,
+                detail: Some(ref detail),
+                ..
+            }) if summary == "working on" && detail == "parser cleanup"
+        ));
+        assert!(matches!(
+            &events[1],
+            BackendEvent::NeedsInput(BackendNeedsInputEvent {
+                ref prompt_id,
+                ref question,
+                ..
+            }) if prompt_id == "heuristic-0" && question == "choose A or B?"
+        ));
+        assert!(matches!(
+            &events[2],
+            BackendEvent::Blocked(BackendBlockedEvent { ref reason, .. }) if reason == "I am blocked on failing tests"
+        ));
+        assert!(matches!(
+            &events[3],
+            BackendEvent::Artifact(BackendArtifactEvent {
+                kind: BackendArtifactKind::PullRequest,
+                uri: Some(ref uri),
+                ..
+            }) if uri == "https://github.com/example/repo/pull/42"
+        ));
+        assert!(matches!(
+            &events[4],
+            BackendEvent::Done(BackendDoneEvent {
+                summary: Some(ref summary)
+            }) if summary == "all done"
+        ));
+    }
+
+    #[tokio::test]
+    async fn parser_suppresses_duplicate_consecutive_heuristic_lines() {
+        let mut parser = SupervisorProtocolParser::default();
+        let events =
+            parser.ingest(b"I am blocked on failing tests\nI am blocked on failing tests\n");
+        assert_eq!(events.len(), 1);
+        assert!(matches!(&events[0], BackendEvent::Blocked(_)));
+    }
+
+    #[tokio::test]
+    async fn parser_does_not_suppress_heuristics_after_non_heuristic_line() {
+        let mut parser = SupervisorProtocolParser::default();
+        let events = parser.ingest(
+            b"I am blocked on failing tests\nrunning cargo test -p foo\nI am blocked on failing tests\n",
+        );
+        assert_eq!(events.len(), 2);
+        assert!(matches!(&events[0], BackendEvent::Blocked(_)));
+        assert!(matches!(&events[1], BackendEvent::Blocked(_)));
+    }
+
+    #[tokio::test]
+    async fn parser_does_not_treat_general_build_logs_as_done() {
+        let mut parser = SupervisorProtocolParser::default();
+        let events = parser.ingest(b"build completed successfully in 12s\n");
+        assert!(
+            events.is_empty(),
+            "completion heuristics should not trigger on generic build logs"
+        );
+    }
+
+    #[test]
+    fn strip_prefix_case_insensitive_handles_non_ascii_without_panicking() {
+        assert_eq!(
+            strip_prefix_case_insensitive("🔥checkpoint: parser", "checkpoint:"),
+            None
+        );
     }
 
     #[test]
@@ -1036,6 +1418,62 @@ sleep 1"#
         assert!(events.iter().any(|event| matches!(
             event,
             BackendEvent::Done(BackendDoneEvent { summary: Some(value) }) if value == "complete"
+        )));
+    }
+
+    #[tokio::test]
+    async fn subscribe_applies_fallback_heuristics_for_unstructured_output() {
+        let backend = test_backend(shell_program(), shell_args(unstructured_script()));
+        let handle = backend
+            .spawn(spawn_spec("session-opencode-heuristics"))
+            .await
+            .expect("spawn unstructured session");
+        let mut stream = backend
+            .subscribe(&handle)
+            .await
+            .expect("subscribe to unstructured session");
+
+        let events = timeout(TEST_TIMEOUT, async {
+            let mut events = Vec::new();
+            loop {
+                match stream.next_event().await.expect("read backend event") {
+                    Some(event) => {
+                        let stop = matches!(event, BackendEvent::Done(_));
+                        events.push(event);
+                        if stop {
+                            return events;
+                        }
+                    }
+                    None => return events,
+                }
+            }
+        })
+        .await
+        .expect("collect unstructured events");
+
+        assert!(events.iter().any(|event| matches!(
+            event,
+            BackendEvent::Checkpoint(BackendCheckpointEvent { summary, .. }) if summary == "working on"
+        )));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            BackendEvent::NeedsInput(BackendNeedsInputEvent { prompt_id, .. }) if prompt_id == "heuristic-0"
+        )));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            BackendEvent::Blocked(BackendBlockedEvent { reason, .. }) if reason == "I am blocked on failing tests"
+        )));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            BackendEvent::Artifact(BackendArtifactEvent {
+                kind: BackendArtifactKind::PullRequest,
+                uri: Some(uri),
+                ..
+            }) if uri == "https://github.com/example/repo/pull/42"
+        )));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            BackendEvent::Done(BackendDoneEvent { summary: Some(summary) }) if summary == "all done"
         )));
     }
 
