@@ -1,3 +1,4 @@
+use async_trait::async_trait;
 use rusqlite::OptionalExtension;
 
 use crate::*;
@@ -605,4 +606,71 @@ fn forward_compat_schema_guard_returns_typed_error() {
     }
 
     let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn ticket_query_limit_round_trips_as_fixed_width_integer() {
+    let query = TicketQuery {
+        assigned_to_me: true,
+        states: vec!["In Progress".to_owned(), "Todo".to_owned()],
+        search: Some("provider surface".to_owned()),
+        limit: Some(50),
+    };
+
+    let value = serde_json::to_value(&query).expect("serialize ticket query");
+    assert_eq!(value["limit"], serde_json::json!(50));
+
+    let parsed: TicketQuery = serde_json::from_value(value).expect("deserialize ticket query");
+    assert_eq!(parsed, query);
+}
+
+#[test]
+fn adapter_defaults_are_stable() {
+    assert_eq!(
+        BackendCapabilities::default(),
+        BackendCapabilities {
+            structured_events: false,
+            session_export: false,
+            diff_provider: false,
+            supports_background: false,
+        }
+    );
+    let reviewers = ReviewerRequest::default();
+    assert!(reviewers.users.is_empty());
+    assert!(reviewers.teams.is_empty());
+}
+
+struct EmptyWorkerStream;
+
+#[async_trait]
+impl WorkerEventSubscription for EmptyWorkerStream {
+    async fn next_event(&mut self) -> Result<Option<BackendEvent>, CoreError> {
+        Ok(None)
+    }
+}
+
+struct EmptyLlmStream;
+
+#[async_trait]
+impl LlmResponseSubscription for EmptyLlmStream {
+    async fn next_chunk(&mut self) -> Result<Option<LlmStreamChunk>, CoreError> {
+        Ok(None)
+    }
+}
+
+#[tokio::test]
+async fn adapter_stream_type_aliases_are_object_safe() {
+    let mut worker_stream: WorkerEventStream = Box::new(EmptyWorkerStream);
+    assert!(worker_stream
+        .next_event()
+        .await
+        .expect("worker stream poll")
+        .is_none());
+
+    let mut llm_stream: LlmResponseStream = Box::new(EmptyLlmStream);
+    assert!(llm_stream
+        .next_chunk()
+        .await
+        .expect("llm stream poll")
+        .is_none());
 }
