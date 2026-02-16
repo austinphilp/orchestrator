@@ -172,6 +172,19 @@ pub enum KeymapLookupResult {
     NoMatch,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PrefixHint {
+    pub(crate) key: KeyStroke,
+    pub(crate) command_id: Option<String>,
+    pub(crate) prefix_label: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PrefixHintView {
+    pub(crate) label: Option<String>,
+    pub(crate) hints: Vec<PrefixHint>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct KeyStroke {
     key: KeyCodeToken,
@@ -299,6 +312,30 @@ impl KeymapTrie {
     pub fn lookup_prefix_label(&self, mode: UiMode, sequence: &[KeyStroke]) -> Option<&str> {
         self.lookup(mode, sequence)
             .and_then(|node| node.prefix_label.as_deref())
+    }
+
+    pub(crate) fn prefix_hints(
+        &self,
+        mode: UiMode,
+        sequence: &[KeyStroke],
+    ) -> Option<PrefixHintView> {
+        let node = self.lookup(mode, sequence)?;
+        if node.children.is_empty() {
+            return None;
+        }
+
+        Some(PrefixHintView {
+            label: node.prefix_label.clone(),
+            hints: node
+                .children
+                .iter()
+                .map(|(key, child)| PrefixHint {
+                    key: *key,
+                    command_id: child.command_id.clone(),
+                    prefix_label: child.prefix_label.clone(),
+                })
+                .collect(),
+        })
     }
 
     fn lookup(&self, mode: UiMode, sequence: &[KeyStroke]) -> Option<&TrieNode> {
@@ -740,6 +777,110 @@ mod tests {
         );
         assert!(matches!(invalid, KeymapLookupResult::InvalidPrefix));
         assert!(pending.is_empty());
+    }
+
+    #[test]
+    fn prefix_hints_include_next_keys_and_command_ids() {
+        let config = config_with_mode(ModeKeymapConfig {
+            mode: UiMode::Normal,
+            bindings: vec![
+                KeyBindingConfig {
+                    keys: vec!["z".to_owned(), "1".to_owned()],
+                    command_id: "ui.focus_next_inbox".to_owned(),
+                },
+                KeyBindingConfig {
+                    keys: vec!["z".to_owned(), "2".to_owned()],
+                    command_id: "ui.focus_previous_inbox".to_owned(),
+                },
+            ],
+            prefixes: vec![KeyPrefixConfig {
+                keys: vec!["z".to_owned()],
+                label: "jump".to_owned(),
+            }],
+        });
+        let trie = KeymapTrie::compile(&config, known_command).expect("compiles");
+        let sequence = vec![parse_key_token("z").expect("stroke")];
+
+        let hints = trie
+            .prefix_hints(UiMode::Normal, sequence.as_slice())
+            .expect("prefix hints");
+        assert_eq!(hints.label.as_deref(), Some("jump"));
+        assert_eq!(hints.hints.len(), 2);
+        assert_eq!(hints.hints[0].key, parse_key_token("1").expect("stroke"));
+        assert_eq!(
+            hints.hints[0].command_id.as_deref(),
+            Some("ui.focus_next_inbox")
+        );
+        assert_eq!(
+            hints.hints[1].command_id.as_deref(),
+            Some("ui.focus_previous_inbox")
+        );
+    }
+
+    #[test]
+    fn prefix_hints_include_nested_prefix_labels() {
+        let config = config_with_mode(ModeKeymapConfig {
+            mode: UiMode::Normal,
+            bindings: vec![
+                KeyBindingConfig {
+                    keys: vec!["z".to_owned(), "1".to_owned()],
+                    command_id: "ui.focus_next_inbox".to_owned(),
+                },
+                KeyBindingConfig {
+                    keys: vec!["z".to_owned(), "g".to_owned(), "k".to_owned()],
+                    command_id: "ui.focus_previous_inbox".to_owned(),
+                },
+            ],
+            prefixes: vec![
+                KeyPrefixConfig {
+                    keys: vec!["z".to_owned()],
+                    label: "jump".to_owned(),
+                },
+                KeyPrefixConfig {
+                    keys: vec!["z".to_owned(), "g".to_owned()],
+                    label: "group".to_owned(),
+                },
+            ],
+        });
+        let trie = KeymapTrie::compile(&config, known_command).expect("compiles");
+        let sequence = vec![parse_key_token("z").expect("stroke")];
+
+        let hints = trie
+            .prefix_hints(UiMode::Normal, sequence.as_slice())
+            .expect("prefix hints");
+        assert_eq!(hints.label.as_deref(), Some("jump"));
+        assert_eq!(hints.hints.len(), 2);
+
+        let nested = hints
+            .hints
+            .iter()
+            .find(|hint| hint.key == parse_key_token("g").expect("stroke"))
+            .expect("nested prefix hint");
+        assert!(nested.command_id.is_none());
+        assert_eq!(nested.prefix_label.as_deref(), Some("group"));
+    }
+
+    #[test]
+    fn prefix_hints_return_none_for_leaf_or_unknown_sequence() {
+        let config = config_with_mode(ModeKeymapConfig {
+            mode: UiMode::Normal,
+            bindings: vec![KeyBindingConfig {
+                keys: vec!["j".to_owned()],
+                command_id: "ui.focus_next_inbox".to_owned(),
+            }],
+            prefixes: vec![],
+        });
+        let trie = KeymapTrie::compile(&config, known_command).expect("compiles");
+
+        let leaf_sequence = vec![parse_key_token("j").expect("stroke")];
+        assert!(trie
+            .prefix_hints(UiMode::Normal, leaf_sequence.as_slice())
+            .is_none());
+
+        let missing_sequence = vec![parse_key_token("z").expect("stroke")];
+        assert!(trie
+            .prefix_hints(UiMode::Normal, missing_sequence.as_slice())
+            .is_none());
     }
 
     #[test]
