@@ -6,8 +6,13 @@ use thiserror::Error;
 
 mod pty_manager;
 mod terminal_emulator;
+mod worker_manager;
 
 pub use pty_manager::{PtyManager, PtyOutputSubscription, PtySpawnSpec, TerminalSize};
+pub use worker_manager::{
+    ManagedSessionStatus, ManagedSessionSummary, SessionEventSubscription, SessionVisibility,
+    WorkerManager, WorkerManagerConfig, WorkerManagerEvent, WorkerManagerEventSubscription,
+};
 
 macro_rules! runtime_string_id {
     ($name:ident) => {
