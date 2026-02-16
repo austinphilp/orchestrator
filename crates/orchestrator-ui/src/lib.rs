@@ -1,7 +1,7 @@
 use std::io::{self, Stdout};
 use std::time::Duration;
 
-use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind};
+use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
@@ -83,6 +83,9 @@ pub struct UiInboxRow {
     pub inbox_item_id: InboxItemId,
     pub work_item_id: WorkItemId,
     pub kind: InboxItemKind,
+    pub priority_score: i32,
+    pub priority_band: InboxPriorityBand,
+    pub batch_kind: InboxBatchKind,
     pub title: String,
     pub resolved: bool,
     pub workflow_state: Option<WorkflowState>,
@@ -96,10 +99,86 @@ pub struct CenterPaneState {
     pub lines: Vec<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum InboxPriorityBand {
+    Urgent,
+    Attention,
+    Background,
+}
+
+impl InboxPriorityBand {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Urgent => "Urgent",
+            Self::Attention => "Attention",
+            Self::Background => "Background",
+        }
+    }
+
+    fn rank(self) -> u8 {
+        match self {
+            Self::Urgent => 0,
+            Self::Attention => 1,
+            Self::Background => 2,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InboxBatchKind {
+    DecideOrUnblock,
+    Approvals,
+    ReviewReady,
+    FyiDigest,
+}
+
+impl InboxBatchKind {
+    const ORDERED: [InboxBatchKind; 4] = [
+        InboxBatchKind::DecideOrUnblock,
+        InboxBatchKind::Approvals,
+        InboxBatchKind::ReviewReady,
+        InboxBatchKind::FyiDigest,
+    ];
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::DecideOrUnblock => "Decide / Unblock",
+            Self::Approvals => "Approvals",
+            Self::ReviewReady => "PR Reviews",
+            Self::FyiDigest => "FYI Digest",
+        }
+    }
+
+    fn hotkey(self) -> char {
+        match self {
+            Self::DecideOrUnblock => '1',
+            Self::Approvals => '2',
+            Self::ReviewReady => '3',
+            Self::FyiDigest => '4',
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UiBatchSurface {
+    pub kind: InboxBatchKind,
+    pub unresolved_count: usize,
+    pub total_count: usize,
+    pub first_unresolved_index: Option<usize>,
+    pub first_any_index: Option<usize>,
+}
+
+impl UiBatchSurface {
+    fn selection_index(&self) -> Option<usize> {
+        self.first_unresolved_index.or(self.first_any_index)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UiState {
     pub status: String,
     pub inbox_rows: Vec<UiInboxRow>,
+    pub inbox_batch_surfaces: Vec<UiBatchSurface>,
     pub selected_inbox_index: Option<usize>,
     pub selected_inbox_item_id: Option<InboxItemId>,
     pub selected_work_item_id: Option<WorkItemId>,
@@ -135,23 +214,38 @@ pub fn project_ui_state(
                 .as_ref()
                 .and_then(|id| domain.sessions.get(id))
                 .and_then(|session| session.status.clone());
+            let workflow_state = work_item.and_then(|entry| entry.workflow_state.clone());
+            let priority_score = inbox_priority_score(
+                &item.kind,
+                item.resolved,
+                workflow_state.as_ref(),
+                session_status.as_ref(),
+            );
+            let priority_band = inbox_priority_band(priority_score, item.resolved);
             UiInboxRow {
                 inbox_item_id: item.id.clone(),
                 work_item_id: item.work_item_id.clone(),
                 kind: item.kind.clone(),
+                priority_score,
+                priority_band,
+                batch_kind: inbox_batch_kind(&item.kind),
                 title: item.title.clone(),
                 resolved: item.resolved,
-                workflow_state: work_item.and_then(|entry| entry.workflow_state.clone()),
+                workflow_state,
                 session_id,
                 session_status,
             }
         })
         .collect::<Vec<_>>();
     inbox_rows.sort_by(|a, b| {
-        a.resolved
-            .cmp(&b.resolved)
+        a.priority_band
+            .rank()
+            .cmp(&b.priority_band.rank())
+            .then_with(|| b.priority_score.cmp(&a.priority_score))
+            .then_with(|| a.resolved.cmp(&b.resolved))
             .then_with(|| a.inbox_item_id.as_str().cmp(b.inbox_item_id.as_str()))
     });
+    let inbox_batch_surfaces = build_batch_surfaces(&inbox_rows);
 
     let selected_inbox_index = resolve_selected_inbox(
         preferred_selected_inbox,
@@ -168,11 +262,13 @@ pub fn project_ui_state(
         .active_center()
         .cloned()
         .unwrap_or(CenterView::InboxView);
-    let center_pane = project_center_pane(&active_center, &inbox_rows, domain);
+    let center_pane =
+        project_center_pane(&active_center, &inbox_rows, &inbox_batch_surfaces, domain);
 
     UiState {
         status: status.to_owned(),
         inbox_rows,
+        inbox_batch_surfaces,
         selected_inbox_index,
         selected_inbox_item_id,
         selected_work_item_id,
@@ -203,20 +299,112 @@ fn resolve_selected_inbox(
     Some(preferred_index.unwrap_or(0).min(inbox_rows.len() - 1))
 }
 
+fn inbox_priority_score(
+    kind: &InboxItemKind,
+    resolved: bool,
+    workflow_state: Option<&WorkflowState>,
+    session_status: Option<&WorkerSessionStatus>,
+) -> i32 {
+    let mut score = match kind {
+        InboxItemKind::NeedsDecision => 100,
+        InboxItemKind::Blocked => 95,
+        InboxItemKind::NeedsApproval => 75,
+        InboxItemKind::ReadyForReview => 70,
+        InboxItemKind::FYI => 30,
+    };
+
+    if resolved {
+        score -= 500;
+    }
+
+    if matches!(session_status, Some(WorkerSessionStatus::WaitingForUser)) {
+        score += 20;
+    }
+    if matches!(session_status, Some(WorkerSessionStatus::Blocked)) {
+        score += 15;
+    }
+
+    if matches!(
+        workflow_state,
+        Some(WorkflowState::AwaitingYourReview | WorkflowState::ReadyForReview)
+    ) {
+        score += 10;
+    }
+
+    score
+}
+
+fn inbox_priority_band(score: i32, resolved: bool) -> InboxPriorityBand {
+    if resolved {
+        return InboxPriorityBand::Background;
+    }
+
+    if score >= 95 {
+        InboxPriorityBand::Urgent
+    } else if score >= 60 {
+        InboxPriorityBand::Attention
+    } else {
+        InboxPriorityBand::Background
+    }
+}
+
+fn inbox_batch_kind(kind: &InboxItemKind) -> InboxBatchKind {
+    match kind {
+        InboxItemKind::NeedsDecision | InboxItemKind::Blocked => InboxBatchKind::DecideOrUnblock,
+        InboxItemKind::NeedsApproval => InboxBatchKind::Approvals,
+        InboxItemKind::ReadyForReview => InboxBatchKind::ReviewReady,
+        InboxItemKind::FYI => InboxBatchKind::FyiDigest,
+    }
+}
+
+fn build_batch_surfaces(rows: &[UiInboxRow]) -> Vec<UiBatchSurface> {
+    InboxBatchKind::ORDERED
+        .iter()
+        .map(|kind| UiBatchSurface {
+            kind: *kind,
+            unresolved_count: rows
+                .iter()
+                .filter(|row| row.batch_kind == *kind && !row.resolved)
+                .count(),
+            total_count: rows.iter().filter(|row| row.batch_kind == *kind).count(),
+            first_unresolved_index: rows
+                .iter()
+                .position(|row| row.batch_kind == *kind && !row.resolved),
+            first_any_index: rows.iter().position(|row| row.batch_kind == *kind),
+        })
+        .collect()
+}
+
 fn project_center_pane(
     active_center: &CenterView,
     inbox_rows: &[UiInboxRow],
+    inbox_batch_surfaces: &[UiBatchSurface],
     domain: &ProjectionState,
 ) -> CenterPaneState {
     match active_center {
         CenterView::InboxView => {
             let unresolved = inbox_rows.iter().filter(|item| !item.resolved).count();
-            let lines = vec![
-                format!("{unresolved} unresolved inbox items"),
-                "Enter: open focus card".to_owned(),
-                "t: open terminal for selected item".to_owned(),
-                "Backspace: minimize top view".to_owned(),
-            ];
+            let mut lines = vec![format!("{unresolved} unresolved inbox items")];
+            lines.extend(
+                inbox_batch_surfaces
+                    .iter()
+                    .filter(|surface| surface.total_count > 0)
+                    .map(|surface| {
+                        format!(
+                            "[{}] {}: {} unresolved / {} total",
+                            surface.kind.hotkey(),
+                            surface.kind.label(),
+                            surface.unresolved_count,
+                            surface.total_count
+                        )
+                    }),
+            );
+            lines.push("j/k or arrows: move selection".to_owned());
+            lines.push("Tab/Shift+Tab: cycle batch lanes".to_owned());
+            lines.push("g/G: jump first/last item".to_owned());
+            lines.push("Enter: open focus card".to_owned());
+            lines.push("t: open terminal for selected item".to_owned());
+            lines.push("Backspace: minimize top view".to_owned());
             CenterPaneState {
                 title: "Inbox View".to_owned(),
                 lines,
@@ -333,6 +521,63 @@ impl UiShellState {
         self.set_selection(Some(next), &ui_state.inbox_rows);
     }
 
+    fn jump_to_first_item(&mut self) {
+        let ui_state = self.ui_state();
+        if ui_state.inbox_rows.is_empty() {
+            self.set_selection(None, &ui_state.inbox_rows);
+            return;
+        }
+        self.set_selection(Some(0), &ui_state.inbox_rows);
+    }
+
+    fn jump_to_last_item(&mut self) {
+        let ui_state = self.ui_state();
+        if ui_state.inbox_rows.is_empty() {
+            self.set_selection(None, &ui_state.inbox_rows);
+            return;
+        }
+        self.set_selection(Some(ui_state.inbox_rows.len() - 1), &ui_state.inbox_rows);
+    }
+
+    fn jump_to_batch(&mut self, target: InboxBatchKind) {
+        let ui_state = self.ui_state();
+        if let Some(index) = ui_state
+            .inbox_batch_surfaces
+            .iter()
+            .find(|surface| surface.kind == target)
+            .and_then(UiBatchSurface::selection_index)
+        {
+            self.set_selection(Some(index), &ui_state.inbox_rows);
+        }
+    }
+
+    fn cycle_batch(&mut self, delta: isize) {
+        let ui_state = self.ui_state();
+        let selectable_surfaces = ui_state
+            .inbox_batch_surfaces
+            .iter()
+            .filter(|surface| surface.total_count > 0)
+            .collect::<Vec<_>>();
+
+        if selectable_surfaces.is_empty() {
+            return;
+        }
+
+        let current_surface_idx = ui_state.selected_inbox_index.and_then(|selected_index| {
+            let selected_row = ui_state.inbox_rows.get(selected_index)?;
+            selectable_surfaces
+                .iter()
+                .position(|surface| selected_row.batch_kind == surface.kind)
+        });
+
+        let current = current_surface_idx.unwrap_or(0) as isize;
+        let next = (current + delta).rem_euclid(selectable_surfaces.len() as isize) as usize;
+
+        if let Some(index) = selectable_surfaces[next].selection_index() {
+            self.set_selection(Some(index), &ui_state.inbox_rows);
+        }
+    }
+
     fn open_focus_card_for_selected(&mut self) {
         let ui_state = self.ui_state();
         if let Some(inbox_item_id) = ui_state.selected_inbox_item_id {
@@ -355,8 +600,10 @@ impl UiShellState {
     }
 
     fn set_selection(&mut self, selected_index: Option<usize>, rows: &[UiInboxRow]) {
-        self.selected_inbox_index = selected_index;
-        self.selected_inbox_item_id = selected_index.map(|index| rows[index].inbox_item_id.clone());
+        let valid_selected_index = selected_index.filter(|index| *index < rows.len());
+        self.selected_inbox_index = valid_selected_index;
+        self.selected_inbox_item_id =
+            valid_selected_index.map(|index| rows[index].inbox_item_id.clone());
     }
 }
 
@@ -404,7 +651,7 @@ impl Ui {
                 );
 
                 let footer_text = format!(
-                    "status: {} | j/k or arrows: select | Enter: focus | t: terminal push | Backspace: pop | q/esc: quit",
+                    "status: {} | j/k: select | Tab/S-Tab: batch cycle | 1-4: batch jump | g/G: first/last | Enter: focus | t: terminal | Backspace: pop | q/esc: quit",
                     ui_state.status
                 );
                 frame.render_widget(
@@ -439,21 +686,49 @@ fn render_inbox_panel(ui_state: &UiState) -> String {
         return "No inbox items.".to_owned();
     }
 
-    ui_state
-        .inbox_rows
+    let mut lines = Vec::new();
+
+    let batch_lane_summary = ui_state
+        .inbox_batch_surfaces
         .iter()
-        .enumerate()
-        .map(|(index, row)| {
-            let selected = if Some(index) == ui_state.selected_inbox_index {
-                ">"
-            } else {
-                " "
-            };
-            let resolved = if row.resolved { "x" } else { " " };
-            format!("{selected} [{resolved}] {:?}: {}", row.kind, row.title)
+        .filter(|surface| surface.total_count > 0)
+        .map(|surface| {
+            format!(
+                "[{}] {} {}",
+                surface.kind.hotkey(),
+                surface.kind.label(),
+                surface.unresolved_count
+            )
         })
-        .collect::<Vec<_>>()
-        .join("\n")
+        .collect::<Vec<_>>();
+    if !batch_lane_summary.is_empty() {
+        lines.push(format!("Batch lanes: {}", batch_lane_summary.join(" | ")));
+        lines.push(String::new());
+    }
+
+    let mut active_band = None;
+    for (index, row) in ui_state.inbox_rows.iter().enumerate() {
+        if active_band != Some(row.priority_band) {
+            if active_band.is_some() {
+                lines.push(String::new());
+            }
+            lines.push(format!("{}:", row.priority_band.label()));
+            active_band = Some(row.priority_band);
+        }
+
+        let selected = if Some(index) == ui_state.selected_inbox_index {
+            ">"
+        } else {
+            " "
+        };
+        let resolved = if row.resolved { "x" } else { " " };
+        lines.push(format!(
+            "{selected} [{resolved}] {:?}: {}",
+            row.kind, row.title
+        ));
+    }
+
+    lines.join("\n")
 }
 
 fn render_center_panel(ui_state: &UiState) -> String {
@@ -465,25 +740,74 @@ fn render_center_panel(ui_state: &UiState) -> String {
 }
 
 fn handle_key_press(shell_state: &mut UiShellState, key: KeyEvent) -> bool {
+    let modifiers = key.modifiers;
+    let no_modifiers = modifiers.is_empty();
+    let shift_only = modifiers == KeyModifiers::SHIFT;
+
     match key.code {
-        KeyCode::Char('q') | KeyCode::Esc => true,
-        KeyCode::Down | KeyCode::Char('j') => {
+        KeyCode::Esc => true,
+        KeyCode::Char('q') if no_modifiers => true,
+        KeyCode::Down if no_modifiers => {
             shell_state.move_selection(1);
             false
         }
-        KeyCode::Up | KeyCode::Char('k') => {
+        KeyCode::Char('j') if no_modifiers => {
+            shell_state.move_selection(1);
+            false
+        }
+        KeyCode::Up if no_modifiers => {
             shell_state.move_selection(-1);
             false
         }
-        KeyCode::Enter => {
+        KeyCode::Char('k') if no_modifiers => {
+            shell_state.move_selection(-1);
+            false
+        }
+        KeyCode::Tab if no_modifiers => {
+            shell_state.cycle_batch(1);
+            false
+        }
+        KeyCode::BackTab if no_modifiers => {
+            shell_state.cycle_batch(-1);
+            false
+        }
+        KeyCode::Char('g') if no_modifiers => {
+            shell_state.jump_to_first_item();
+            false
+        }
+        KeyCode::Char('G') if shift_only || no_modifiers => {
+            shell_state.jump_to_last_item();
+            false
+        }
+        KeyCode::Char('g') if shift_only => {
+            shell_state.jump_to_last_item();
+            false
+        }
+        KeyCode::Char('1') if no_modifiers => {
+            shell_state.jump_to_batch(InboxBatchKind::DecideOrUnblock);
+            false
+        }
+        KeyCode::Char('2') if no_modifiers => {
+            shell_state.jump_to_batch(InboxBatchKind::Approvals);
+            false
+        }
+        KeyCode::Char('3') if no_modifiers => {
+            shell_state.jump_to_batch(InboxBatchKind::ReviewReady);
+            false
+        }
+        KeyCode::Char('4') if no_modifiers => {
+            shell_state.jump_to_batch(InboxBatchKind::FyiDigest);
+            false
+        }
+        KeyCode::Enter if no_modifiers => {
             shell_state.open_focus_card_for_selected();
             false
         }
-        KeyCode::Char('t') => {
+        KeyCode::Char('t') if no_modifiers => {
             shell_state.open_terminal_for_selected();
             false
         }
-        KeyCode::Backspace => {
+        KeyCode::Backspace if no_modifiers => {
             shell_state.minimize_center_view();
             false
         }
@@ -540,6 +864,63 @@ mod tests {
                 resolved: false,
             },
         );
+
+        projection
+    }
+
+    fn triage_projection() -> ProjectionState {
+        let mut projection = ProjectionState::default();
+        let rows = vec![
+            (
+                "wi-decision",
+                "inbox-decision",
+                InboxItemKind::NeedsDecision,
+                "Pick API shape",
+            ),
+            (
+                "wi-approval",
+                "inbox-approval",
+                InboxItemKind::NeedsApproval,
+                "Approve PR ready",
+            ),
+            (
+                "wi-review",
+                "inbox-review",
+                InboxItemKind::ReadyForReview,
+                "Review draft PR",
+            ),
+            ("wi-fyi", "inbox-fyi", InboxItemKind::FYI, "Progress digest"),
+        ];
+
+        for (work_item_raw, inbox_item_raw, kind, title) in rows {
+            let work_item_id = WorkItemId::new(work_item_raw);
+            let inbox_item_id = InboxItemId::new(inbox_item_raw);
+
+            projection.work_items.insert(
+                work_item_id.clone(),
+                WorkItemProjection {
+                    id: work_item_id.clone(),
+                    ticket_id: None,
+                    project_id: None,
+                    workflow_state: Some(WorkflowState::Implementing),
+                    session_id: None,
+                    worktree_id: None,
+                    inbox_items: vec![inbox_item_id.clone()],
+                    artifacts: vec![],
+                },
+            );
+
+            projection.inbox_items.insert(
+                inbox_item_id.clone(),
+                InboxItemProjection {
+                    id: inbox_item_id,
+                    work_item_id,
+                    kind,
+                    title: title.to_owned(),
+                    resolved: false,
+                },
+            );
+        }
 
         projection
     }
@@ -696,5 +1077,231 @@ mod tests {
                 .map(|item| item.as_str()),
             Some("inbox-b")
         );
+    }
+
+    #[test]
+    fn inbox_view_projects_priority_bands_and_batch_surfaces() {
+        let ui_state = project_ui_state(
+            "ready",
+            &triage_projection(),
+            &ViewStack::default(),
+            None,
+            None,
+        );
+        let ordered_kinds = ui_state
+            .inbox_rows
+            .iter()
+            .map(|row| row.kind.clone())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            ordered_kinds,
+            vec![
+                InboxItemKind::NeedsDecision,
+                InboxItemKind::NeedsApproval,
+                InboxItemKind::ReadyForReview,
+                InboxItemKind::FYI,
+            ]
+        );
+
+        assert_eq!(
+            ui_state
+                .inbox_rows
+                .iter()
+                .map(|row| row.priority_band)
+                .collect::<Vec<_>>(),
+            vec![
+                InboxPriorityBand::Urgent,
+                InboxPriorityBand::Attention,
+                InboxPriorityBand::Attention,
+                InboxPriorityBand::Background,
+            ]
+        );
+
+        assert_eq!(ui_state.inbox_batch_surfaces.len(), 4);
+        assert_eq!(ui_state.inbox_batch_surfaces[0].unresolved_count, 1);
+        assert_eq!(ui_state.inbox_batch_surfaces[1].unresolved_count, 1);
+        assert_eq!(ui_state.inbox_batch_surfaces[2].unresolved_count, 1);
+        assert_eq!(ui_state.inbox_batch_surfaces[3].unresolved_count, 1);
+
+        let rendered = render_inbox_panel(&ui_state);
+        assert!(rendered.contains("Batch lanes:"));
+        assert!(rendered.contains("Urgent:"));
+        assert!(rendered.contains("Attention:"));
+        assert!(rendered.contains("Background:"));
+    }
+
+    #[test]
+    fn batch_navigation_can_jump_and_cycle_surfaces() {
+        let mut shell_state = UiShellState::new("ready".to_owned(), triage_projection());
+
+        shell_state.jump_to_batch(InboxBatchKind::ReviewReady);
+        let selected = shell_state.ui_state();
+        let selected_kind = selected.inbox_rows[selected.selected_inbox_index.expect("selected")]
+            .kind
+            .clone();
+        assert_eq!(selected_kind, InboxItemKind::ReadyForReview);
+
+        shell_state.cycle_batch(1);
+        let selected = shell_state.ui_state();
+        let selected_kind = selected.inbox_rows[selected.selected_inbox_index.expect("selected")]
+            .kind
+            .clone();
+        assert_eq!(selected_kind, InboxItemKind::FYI);
+
+        shell_state.cycle_batch(-1);
+        let selected = shell_state.ui_state();
+        let selected_kind = selected.inbox_rows[selected.selected_inbox_index.expect("selected")]
+            .kind
+            .clone();
+        assert_eq!(selected_kind, InboxItemKind::ReadyForReview);
+    }
+
+    #[test]
+    fn keyboard_shortcuts_support_batch_and_range_navigation() {
+        let mut shell_state = UiShellState::new("ready".to_owned(), triage_projection());
+        let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
+
+        handle_key_press(&mut shell_state, key(KeyCode::Char('4')));
+        let selected = shell_state.ui_state();
+        let selected_kind = selected.inbox_rows[selected.selected_inbox_index.expect("selected")]
+            .kind
+            .clone();
+        assert_eq!(selected_kind, InboxItemKind::FYI);
+
+        handle_key_press(&mut shell_state, key(KeyCode::Char('g')));
+        let selected = shell_state.ui_state();
+        let selected_kind = selected.inbox_rows[selected.selected_inbox_index.expect("selected")]
+            .kind
+            .clone();
+        assert_eq!(selected_kind, InboxItemKind::NeedsDecision);
+
+        handle_key_press(&mut shell_state, key(KeyCode::Char('G')));
+        let selected = shell_state.ui_state();
+        let selected_kind = selected.inbox_rows[selected.selected_inbox_index.expect("selected")]
+            .kind
+            .clone();
+        assert_eq!(selected_kind, InboxItemKind::FYI);
+
+        handle_key_press(&mut shell_state, key(KeyCode::BackTab));
+        let selected = shell_state.ui_state();
+        let selected_kind = selected.inbox_rows[selected.selected_inbox_index.expect("selected")]
+            .kind
+            .clone();
+        assert_eq!(selected_kind, InboxItemKind::ReadyForReview);
+    }
+
+    #[test]
+    fn keyboard_shortcuts_ignore_control_modified_chars() {
+        let mut shell_state = UiShellState::new("ready".to_owned(), triage_projection());
+        let ctrl_key = |code| KeyEvent::new(code, KeyModifiers::CONTROL);
+
+        let should_quit = handle_key_press(&mut shell_state, ctrl_key(KeyCode::Char('q')));
+        assert!(!should_quit);
+        let selected = shell_state.ui_state();
+        let selected_kind = selected.inbox_rows[selected.selected_inbox_index.expect("selected")]
+            .kind
+            .clone();
+        assert_eq!(selected_kind, InboxItemKind::NeedsDecision);
+
+        handle_key_press(&mut shell_state, ctrl_key(KeyCode::Char('j')));
+        let selected = shell_state.ui_state();
+        let selected_kind = selected.inbox_rows[selected.selected_inbox_index.expect("selected")]
+            .kind
+            .clone();
+        assert_eq!(selected_kind, InboxItemKind::NeedsDecision);
+    }
+
+    #[test]
+    fn batch_jump_prefers_unresolved_then_falls_back_to_first_any() {
+        let mut projection = ProjectionState::default();
+        let resolved_approval = InboxItemId::new("inbox-approval-resolved");
+        let unresolved_approval = InboxItemId::new("inbox-approval-unresolved");
+        let resolved_work_item_id = WorkItemId::new("wi-approval-resolved");
+        let unresolved_work_item_id = WorkItemId::new("wi-approval-unresolved");
+
+        projection.work_items.insert(
+            resolved_work_item_id.clone(),
+            WorkItemProjection {
+                id: resolved_work_item_id.clone(),
+                ticket_id: None,
+                project_id: None,
+                workflow_state: Some(WorkflowState::Implementing),
+                session_id: None,
+                worktree_id: None,
+                inbox_items: vec![resolved_approval.clone()],
+                artifacts: vec![],
+            },
+        );
+        projection.work_items.insert(
+            unresolved_work_item_id.clone(),
+            WorkItemProjection {
+                id: unresolved_work_item_id.clone(),
+                ticket_id: None,
+                project_id: None,
+                workflow_state: Some(WorkflowState::Implementing),
+                session_id: None,
+                worktree_id: None,
+                inbox_items: vec![unresolved_approval.clone()],
+                artifacts: vec![],
+            },
+        );
+        projection.inbox_items.insert(
+            resolved_approval.clone(),
+            InboxItemProjection {
+                id: resolved_approval,
+                work_item_id: resolved_work_item_id,
+                kind: InboxItemKind::NeedsApproval,
+                title: "Resolved approval".to_owned(),
+                resolved: true,
+            },
+        );
+        projection.inbox_items.insert(
+            unresolved_approval.clone(),
+            InboxItemProjection {
+                id: unresolved_approval.clone(),
+                work_item_id: unresolved_work_item_id,
+                kind: InboxItemKind::NeedsApproval,
+                title: "Unresolved approval".to_owned(),
+                resolved: false,
+            },
+        );
+
+        let mut shell_state = UiShellState::new("ready".to_owned(), projection.clone());
+        shell_state.jump_to_batch(InboxBatchKind::Approvals);
+        let selected = shell_state.ui_state();
+        assert_eq!(
+            selected
+                .selected_inbox_item_id
+                .as_ref()
+                .map(|id| id.as_str())
+                .expect("selected approval"),
+            unresolved_approval.as_str()
+        );
+
+        projection
+            .inbox_items
+            .get_mut(&unresolved_approval)
+            .expect("unresolved approval exists")
+            .resolved = true;
+        let mut shell_state = UiShellState::new("ready".to_owned(), projection);
+        shell_state.jump_to_batch(InboxBatchKind::Approvals);
+        let selected = shell_state.ui_state();
+        let selected_kind = selected.inbox_rows[selected.selected_inbox_index.expect("selected")]
+            .kind
+            .clone();
+        assert_eq!(selected_kind, InboxItemKind::NeedsApproval);
+        let selected_title = selected.inbox_rows[selected.selected_inbox_index.expect("selected")]
+            .title
+            .clone();
+        assert!(selected_title.contains("approval"));
+    }
+
+    #[test]
+    fn set_selection_ignores_out_of_bounds_index() {
+        let mut shell_state = UiShellState::new("ready".to_owned(), triage_projection());
+        let rows = shell_state.ui_state().inbox_rows;
+        shell_state.set_selection(Some(usize::MAX), &rows);
+        assert_eq!(shell_state.selected_inbox_index, None);
+        assert_eq!(shell_state.selected_inbox_item_id, None);
     }
 }
