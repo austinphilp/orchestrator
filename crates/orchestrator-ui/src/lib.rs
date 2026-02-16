@@ -8,8 +8,8 @@ use crossterm::terminal::{
 };
 use crossterm::ExecutableCommand;
 use orchestrator_core::{
-    ArtifactProjection, InboxItemId, InboxItemKind, OrchestrationEventPayload, ProjectionState,
-    WorkItemId, WorkerSessionId, WorkerSessionStatus, WorkflowState,
+    command_ids, ArtifactProjection, InboxItemId, InboxItemKind, OrchestrationEventPayload,
+    ProjectionState, WorkItemId, WorkerSessionId, WorkerSessionStatus, WorkflowState,
 };
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Layout};
@@ -31,6 +31,24 @@ impl CenterView {
                 format!("FocusCard({})", inbox_item_id.as_str())
             }
             Self::TerminalView { session_id } => format!("Terminal({})", session_id.as_str()),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum UiMode {
+    #[default]
+    Normal,
+    Insert,
+    Terminal,
+}
+
+impl UiMode {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Normal => "Normal",
+            Self::Insert => "Insert",
+            Self::Terminal => "Terminal",
         }
     }
 }
@@ -714,6 +732,8 @@ struct UiShellState {
     selected_inbox_index: Option<usize>,
     selected_inbox_item_id: Option<InboxItemId>,
     view_stack: ViewStack,
+    mode: UiMode,
+    terminal_escape_pending: bool,
 }
 
 impl UiShellState {
@@ -724,6 +744,8 @@ impl UiShellState {
             selected_inbox_index: None,
             selected_inbox_item_id: None,
             view_stack: ViewStack::default(),
+            mode: UiMode::Normal,
+            terminal_escape_pending: false,
         }
     }
 
@@ -827,6 +849,9 @@ impl UiShellState {
 
     fn minimize_center_view(&mut self) {
         let _ = self.view_stack.pop_center();
+        if !self.is_terminal_view_active() {
+            self.enter_normal_mode();
+        }
     }
 
     fn set_selection(&mut self, selected_index: Option<usize>, rows: &[UiInboxRow]) {
@@ -834,6 +859,47 @@ impl UiShellState {
         self.selected_inbox_index = valid_selected_index;
         self.selected_inbox_item_id =
             valid_selected_index.map(|index| rows[index].inbox_item_id.clone());
+    }
+
+    fn enter_normal_mode(&mut self) {
+        self.mode = UiMode::Normal;
+        self.terminal_escape_pending = false;
+    }
+
+    fn enter_insert_mode(&mut self) {
+        if !self.is_terminal_view_active() {
+            self.mode = UiMode::Insert;
+            self.terminal_escape_pending = false;
+        }
+    }
+
+    fn enter_terminal_mode(&mut self) {
+        if self.is_terminal_view_active() {
+            self.mode = UiMode::Terminal;
+            self.terminal_escape_pending = false;
+        }
+    }
+
+    fn open_terminal_and_enter_mode(&mut self) {
+        self.open_terminal_for_selected();
+        self.enter_terminal_mode();
+    }
+
+    fn begin_terminal_escape_chord(&mut self) {
+        if self.mode == UiMode::Terminal {
+            self.terminal_escape_pending = true;
+        }
+    }
+
+    fn forward_terminal_key(&mut self, _key: KeyEvent) {
+        // Raw PTY input wiring is introduced in later terminal embedding tickets.
+    }
+
+    fn is_terminal_view_active(&self) -> bool {
+        matches!(
+            self.view_stack.active_center(),
+            Some(CenterView::TerminalView { .. })
+        )
     }
 }
 
@@ -881,8 +947,10 @@ impl Ui {
                 );
 
                 let footer_text = format!(
-                    "status: {} | j/k: select | Tab/S-Tab: batch cycle | 1-4: batch jump | g/G: first/last | Enter: focus | t: terminal | Backspace: pop | q/esc: quit",
-                    ui_state.status
+                    "status: {} | mode: {} | {}",
+                    ui_state.status,
+                    shell_state.mode.label(),
+                    mode_help(shell_state.mode)
                 );
                 frame.render_widget(
                     Paragraph::new(footer_text)
@@ -969,79 +1037,255 @@ fn render_center_panel(ui_state: &UiState) -> String {
     lines.join("\n")
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum UiCommand {
+    EnterNormalMode,
+    EnterInsertMode,
+    OpenTerminalForSelected,
+    StartTerminalEscapeChord,
+    QuitShell,
+    FocusNextInbox,
+    FocusPreviousInbox,
+    CycleBatchNext,
+    CycleBatchPrevious,
+    JumpFirstInbox,
+    JumpLastInbox,
+    JumpBatchDecideOrUnblock,
+    JumpBatchApprovals,
+    JumpBatchReviewReady,
+    JumpBatchFyiDigest,
+    OpenFocusCard,
+    MinimizeCenterView,
+}
+
+impl UiCommand {
+    const fn id(self) -> &'static str {
+        match self {
+            Self::EnterNormalMode => "ui.mode.normal",
+            Self::EnterInsertMode => "ui.mode.insert",
+            Self::OpenTerminalForSelected => command_ids::UI_OPEN_TERMINAL_FOR_SELECTED,
+            Self::StartTerminalEscapeChord => "ui.mode.terminal_escape_prefix",
+            Self::QuitShell => "ui.shell.quit",
+            Self::FocusNextInbox => command_ids::UI_FOCUS_NEXT_INBOX,
+            Self::FocusPreviousInbox => "ui.focus_previous_inbox",
+            Self::CycleBatchNext => "ui.cycle_batch_next",
+            Self::CycleBatchPrevious => "ui.cycle_batch_previous",
+            Self::JumpFirstInbox => "ui.jump_first_inbox",
+            Self::JumpLastInbox => "ui.jump_last_inbox",
+            Self::JumpBatchDecideOrUnblock => "ui.jump_batch.decide_or_unblock",
+            Self::JumpBatchApprovals => "ui.jump_batch.approvals",
+            Self::JumpBatchReviewReady => "ui.jump_batch.review_ready",
+            Self::JumpBatchFyiDigest => "ui.jump_batch.fyi_digest",
+            Self::OpenFocusCard => "ui.open_focus_card_for_selected",
+            Self::MinimizeCenterView => "ui.center.pop",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct TerminalPassthrough {
+    replay_escape_prefix: bool,
+    key: KeyEvent,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RoutedInput {
+    Command(UiCommand),
+    TerminalPassthrough(TerminalPassthrough),
+    Ignore,
+}
+
+fn mode_help(mode: UiMode) -> &'static str {
+    match mode {
+        UiMode::Normal => {
+            "j/k: select | Tab/S-Tab: batch cycle | 1-4: batch jump | g/G: first/last | Enter: focus | t: terminal | i: insert | q: quit"
+        }
+        UiMode::Insert => "Insert input active | Esc/Ctrl-[: Normal",
+        UiMode::Terminal => "Terminal pass-through active | Esc or Ctrl-\\ Ctrl-n: Normal",
+    }
+}
+
 fn handle_key_press(shell_state: &mut UiShellState, key: KeyEvent) -> bool {
+    match route_key_press(shell_state, key) {
+        RoutedInput::Command(command) => dispatch_command(shell_state, command),
+        RoutedInput::TerminalPassthrough(passthrough) => {
+            if passthrough.replay_escape_prefix {
+                shell_state.forward_terminal_key(KeyEvent::new(
+                    KeyCode::Char('\\'),
+                    KeyModifiers::CONTROL,
+                ));
+            }
+            shell_state.forward_terminal_key(passthrough.key);
+            shell_state.terminal_escape_pending = false;
+            false
+        }
+        RoutedInput::Ignore => false,
+    }
+}
+
+fn route_key_press(shell_state: &UiShellState, key: KeyEvent) -> RoutedInput {
+    if is_escape_to_normal(key) {
+        return RoutedInput::Command(UiCommand::EnterNormalMode);
+    }
+
+    match shell_state.mode {
+        UiMode::Normal => route_normal_mode_key(key),
+        UiMode::Insert => RoutedInput::Ignore,
+        UiMode::Terminal => {
+            if shell_state.is_terminal_view_active() {
+                route_terminal_mode_key(shell_state, key)
+            } else {
+                RoutedInput::Command(UiCommand::EnterNormalMode)
+            }
+        }
+    }
+}
+
+fn route_normal_mode_key(key: KeyEvent) -> RoutedInput {
     let modifiers = key.modifiers;
     let no_modifiers = modifiers.is_empty();
     let shift_only = modifiers == KeyModifiers::SHIFT;
 
     match key.code {
-        KeyCode::Esc => true,
-        KeyCode::Char('q') if no_modifiers => true,
-        KeyCode::Down if no_modifiers => {
+        KeyCode::Char('q') if no_modifiers => RoutedInput::Command(UiCommand::QuitShell),
+        KeyCode::Down if no_modifiers => RoutedInput::Command(UiCommand::FocusNextInbox),
+        KeyCode::Char('j') if no_modifiers => RoutedInput::Command(UiCommand::FocusNextInbox),
+        KeyCode::Up if no_modifiers => RoutedInput::Command(UiCommand::FocusPreviousInbox),
+        KeyCode::Char('k') if no_modifiers => RoutedInput::Command(UiCommand::FocusPreviousInbox),
+        KeyCode::Tab if no_modifiers => RoutedInput::Command(UiCommand::CycleBatchNext),
+        KeyCode::BackTab if no_modifiers => RoutedInput::Command(UiCommand::CycleBatchPrevious),
+        KeyCode::Char('g') if no_modifiers => RoutedInput::Command(UiCommand::JumpFirstInbox),
+        KeyCode::Char('G') if shift_only || no_modifiers => {
+            RoutedInput::Command(UiCommand::JumpLastInbox)
+        }
+        KeyCode::Char('g') if shift_only => RoutedInput::Command(UiCommand::JumpLastInbox),
+        KeyCode::Char('1') if no_modifiers => {
+            RoutedInput::Command(UiCommand::JumpBatchDecideOrUnblock)
+        }
+        KeyCode::Char('2') if no_modifiers => RoutedInput::Command(UiCommand::JumpBatchApprovals),
+        KeyCode::Char('3') if no_modifiers => RoutedInput::Command(UiCommand::JumpBatchReviewReady),
+        KeyCode::Char('4') if no_modifiers => RoutedInput::Command(UiCommand::JumpBatchFyiDigest),
+        KeyCode::Enter if no_modifiers => RoutedInput::Command(UiCommand::OpenFocusCard),
+        KeyCode::Char('t') if no_modifiers => {
+            RoutedInput::Command(UiCommand::OpenTerminalForSelected)
+        }
+        KeyCode::Backspace if no_modifiers => RoutedInput::Command(UiCommand::MinimizeCenterView),
+        KeyCode::Char('i') if no_modifiers => RoutedInput::Command(UiCommand::EnterInsertMode),
+        _ => RoutedInput::Ignore,
+    }
+}
+
+fn route_terminal_mode_key(shell_state: &UiShellState, key: KeyEvent) -> RoutedInput {
+    if shell_state.terminal_escape_pending {
+        if is_ctrl_char(key, 'n') {
+            return RoutedInput::Command(UiCommand::EnterNormalMode);
+        }
+        return RoutedInput::TerminalPassthrough(TerminalPassthrough {
+            replay_escape_prefix: true,
+            key,
+        });
+    }
+
+    if is_ctrl_char(key, '\\') {
+        return RoutedInput::Command(UiCommand::StartTerminalEscapeChord);
+    }
+
+    RoutedInput::TerminalPassthrough(TerminalPassthrough {
+        replay_escape_prefix: false,
+        key,
+    })
+}
+
+fn dispatch_command(shell_state: &mut UiShellState, command: UiCommand) -> bool {
+    let _command_id = command.id();
+    match command {
+        UiCommand::EnterNormalMode => {
+            shell_state.enter_normal_mode();
+            false
+        }
+        UiCommand::EnterInsertMode => {
+            shell_state.enter_insert_mode();
+            false
+        }
+        UiCommand::OpenTerminalForSelected => {
+            shell_state.open_terminal_and_enter_mode();
+            false
+        }
+        UiCommand::StartTerminalEscapeChord => {
+            shell_state.begin_terminal_escape_chord();
+            false
+        }
+        UiCommand::QuitShell => true,
+        UiCommand::FocusNextInbox => {
             shell_state.move_selection(1);
             false
         }
-        KeyCode::Char('j') if no_modifiers => {
-            shell_state.move_selection(1);
-            false
-        }
-        KeyCode::Up if no_modifiers => {
+        UiCommand::FocusPreviousInbox => {
             shell_state.move_selection(-1);
             false
         }
-        KeyCode::Char('k') if no_modifiers => {
-            shell_state.move_selection(-1);
-            false
-        }
-        KeyCode::Tab if no_modifiers => {
+        UiCommand::CycleBatchNext => {
             shell_state.cycle_batch(1);
             false
         }
-        KeyCode::BackTab if no_modifiers => {
+        UiCommand::CycleBatchPrevious => {
             shell_state.cycle_batch(-1);
             false
         }
-        KeyCode::Char('g') if no_modifiers => {
+        UiCommand::JumpFirstInbox => {
             shell_state.jump_to_first_item();
             false
         }
-        KeyCode::Char('G') if shift_only || no_modifiers => {
+        UiCommand::JumpLastInbox => {
             shell_state.jump_to_last_item();
             false
         }
-        KeyCode::Char('g') if shift_only => {
-            shell_state.jump_to_last_item();
-            false
-        }
-        KeyCode::Char('1') if no_modifiers => {
+        UiCommand::JumpBatchDecideOrUnblock => {
             shell_state.jump_to_batch(InboxBatchKind::DecideOrUnblock);
             false
         }
-        KeyCode::Char('2') if no_modifiers => {
+        UiCommand::JumpBatchApprovals => {
             shell_state.jump_to_batch(InboxBatchKind::Approvals);
             false
         }
-        KeyCode::Char('3') if no_modifiers => {
+        UiCommand::JumpBatchReviewReady => {
             shell_state.jump_to_batch(InboxBatchKind::ReviewReady);
             false
         }
-        KeyCode::Char('4') if no_modifiers => {
+        UiCommand::JumpBatchFyiDigest => {
             shell_state.jump_to_batch(InboxBatchKind::FyiDigest);
             false
         }
-        KeyCode::Enter if no_modifiers => {
+        UiCommand::OpenFocusCard => {
             shell_state.open_focus_card_for_selected();
             false
         }
-        KeyCode::Char('t') if no_modifiers => {
-            shell_state.open_terminal_for_selected();
-            false
-        }
-        KeyCode::Backspace if no_modifiers => {
+        UiCommand::MinimizeCenterView => {
             shell_state.minimize_center_view();
             false
         }
-        _ => false,
+    }
+}
+
+fn is_escape_to_normal(key: KeyEvent) -> bool {
+    matches!(key.code, KeyCode::Esc) && key.modifiers.is_empty() || is_ctrl_char(key, '[')
+}
+
+fn is_ctrl_char(key: KeyEvent, ch: char) -> bool {
+    matches!(key.code, KeyCode::Char(code_ch) if code_ch == ch)
+        && key.modifiers == KeyModifiers::CONTROL
+}
+
+#[cfg(test)]
+fn command_id(command: UiCommand) -> &'static str {
+    command.id()
+}
+
+#[cfg(test)]
+fn routed_command(route: RoutedInput) -> Option<UiCommand> {
+    match route {
+        RoutedInput::Command(command) => Some(command),
+        _ => None,
     }
 }
 
@@ -1054,6 +1298,14 @@ mod tests {
         SessionNeedsInputPayload, SessionProjection, StoredEventEnvelope, WorkItemProjection,
         WorkflowState,
     };
+
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    fn ctrl_key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::CONTROL)
+    }
 
     fn sample_projection(with_session: bool) -> ProjectionState {
         let work_item_id = WorkItemId::new("wi-1");
@@ -1703,8 +1955,6 @@ mod tests {
     #[test]
     fn keyboard_shortcuts_ignore_control_modified_chars() {
         let mut shell_state = UiShellState::new("ready".to_owned(), triage_projection());
-        let ctrl_key = |code| KeyEvent::new(code, KeyModifiers::CONTROL);
-
         let should_quit = handle_key_press(&mut shell_state, ctrl_key(KeyCode::Char('q')));
         assert!(!should_quit);
         let selected = shell_state.ui_state();
@@ -1813,5 +2063,162 @@ mod tests {
         shell_state.set_selection(Some(usize::MAX), &rows);
         assert_eq!(shell_state.selected_inbox_index, None);
         assert_eq!(shell_state.selected_inbox_item_id, None);
+    }
+
+    #[test]
+    fn mode_commands_have_stable_ids() {
+        assert_eq!(command_id(UiCommand::EnterNormalMode), "ui.mode.normal");
+        assert_eq!(command_id(UiCommand::EnterInsertMode), "ui.mode.insert");
+        assert_eq!(
+            command_id(UiCommand::OpenTerminalForSelected),
+            command_ids::UI_OPEN_TERMINAL_FOR_SELECTED
+        );
+        assert_eq!(
+            command_id(UiCommand::FocusNextInbox),
+            command_ids::UI_FOCUS_NEXT_INBOX
+        );
+    }
+
+    #[test]
+    fn esc_returns_to_normal_without_quitting() {
+        let mut shell_state = UiShellState::new("ready".to_owned(), triage_projection());
+        shell_state.enter_insert_mode();
+        assert_eq!(shell_state.mode, UiMode::Insert);
+
+        let should_quit = handle_key_press(&mut shell_state, key(KeyCode::Esc));
+        assert!(!should_quit);
+        assert_eq!(shell_state.mode, UiMode::Normal);
+
+        let should_quit = handle_key_press(&mut shell_state, key(KeyCode::Esc));
+        assert!(!should_quit);
+        assert_eq!(shell_state.mode, UiMode::Normal);
+    }
+
+    #[test]
+    fn insert_mode_routes_navigation_keys_to_ignore() {
+        let mut shell_state = UiShellState::new("ready".to_owned(), triage_projection());
+        shell_state.move_selection(2);
+        let before_index = shell_state.ui_state().selected_inbox_index;
+
+        let enter_insert = handle_key_press(&mut shell_state, key(KeyCode::Char('i')));
+        assert!(!enter_insert);
+        assert_eq!(shell_state.mode, UiMode::Insert);
+
+        handle_key_press(&mut shell_state, key(KeyCode::Char('j')));
+        handle_key_press(&mut shell_state, key(KeyCode::Down));
+        let after_index = shell_state.ui_state().selected_inbox_index;
+        assert_eq!(before_index, after_index);
+    }
+
+    #[test]
+    fn insert_mode_is_not_entered_while_terminal_view_is_active() {
+        let mut shell_state = UiShellState::new("ready".to_owned(), sample_projection(true));
+        handle_key_press(&mut shell_state, key(KeyCode::Char('t')));
+        assert_eq!(shell_state.mode, UiMode::Terminal);
+        assert!(shell_state.is_terminal_view_active());
+
+        handle_key_press(&mut shell_state, key(KeyCode::Esc));
+        assert_eq!(shell_state.mode, UiMode::Normal);
+        assert!(shell_state.is_terminal_view_active());
+
+        handle_key_press(&mut shell_state, key(KeyCode::Char('i')));
+        assert_eq!(shell_state.mode, UiMode::Normal);
+    }
+
+    #[test]
+    fn ctrl_left_bracket_returns_to_normal_mode() {
+        let mut shell_state = UiShellState::new("ready".to_owned(), triage_projection());
+        shell_state.enter_insert_mode();
+        assert_eq!(shell_state.mode, UiMode::Insert);
+
+        let should_quit = handle_key_press(&mut shell_state, ctrl_key(KeyCode::Char('[')));
+        assert!(!should_quit);
+        assert_eq!(shell_state.mode, UiMode::Normal);
+    }
+
+    #[test]
+    fn terminal_mode_supports_escape_chord_and_passthrough_routing() {
+        let mut shell_state = UiShellState::new("ready".to_owned(), sample_projection(true));
+        handle_key_press(&mut shell_state, key(KeyCode::Char('t')));
+        assert_eq!(shell_state.mode, UiMode::Terminal);
+        assert!(shell_state.is_terminal_view_active());
+
+        let routed = route_key_press(&shell_state, key(KeyCode::Char('j')));
+        assert!(matches!(
+            routed,
+            RoutedInput::TerminalPassthrough(TerminalPassthrough {
+                replay_escape_prefix: false,
+                ..
+            })
+        ));
+
+        let start_chord = handle_key_press(&mut shell_state, ctrl_key(KeyCode::Char('\\')));
+        assert!(!start_chord);
+        assert!(shell_state.terminal_escape_pending);
+        assert_eq!(shell_state.mode, UiMode::Terminal);
+
+        let finish_chord = handle_key_press(&mut shell_state, ctrl_key(KeyCode::Char('n')));
+        assert!(!finish_chord);
+        assert_eq!(shell_state.mode, UiMode::Normal);
+        assert!(!shell_state.terminal_escape_pending);
+    }
+
+    #[test]
+    fn terminal_mode_without_terminal_view_recovers_to_normal() {
+        let mut shell_state = UiShellState::new("ready".to_owned(), triage_projection());
+        shell_state.mode = UiMode::Terminal;
+        assert!(!shell_state.is_terminal_view_active());
+
+        let should_quit = handle_key_press(&mut shell_state, key(KeyCode::Char('j')));
+        assert!(!should_quit);
+        assert_eq!(shell_state.mode, UiMode::Normal);
+
+        handle_key_press(&mut shell_state, key(KeyCode::Char('j')));
+        let selected = shell_state.ui_state();
+        let selected_kind = selected.inbox_rows[selected.selected_inbox_index.expect("selected")]
+            .kind
+            .clone();
+        assert_eq!(selected_kind, InboxItemKind::NeedsApproval);
+    }
+
+    #[test]
+    fn terminal_escape_prefix_replays_when_chord_not_completed() {
+        let mut shell_state = UiShellState::new("ready".to_owned(), sample_projection(true));
+        handle_key_press(&mut shell_state, key(KeyCode::Char('t')));
+        assert_eq!(shell_state.mode, UiMode::Terminal);
+
+        handle_key_press(&mut shell_state, ctrl_key(KeyCode::Char('\\')));
+        let routed = route_key_press(&shell_state, key(KeyCode::Char('x')));
+        assert!(matches!(
+            routed,
+            RoutedInput::TerminalPassthrough(TerminalPassthrough {
+                replay_escape_prefix: true,
+                key: KeyEvent {
+                    code: KeyCode::Char('x'),
+                    ..
+                }
+            })
+        ));
+    }
+
+    #[test]
+    fn normal_mode_router_maps_expected_commands() {
+        let shell_state = UiShellState::new("ready".to_owned(), triage_projection());
+        assert_eq!(
+            routed_command(route_key_press(&shell_state, key(KeyCode::Char('j')))),
+            Some(UiCommand::FocusNextInbox)
+        );
+        assert_eq!(
+            routed_command(route_key_press(&shell_state, key(KeyCode::Char('i')))),
+            Some(UiCommand::EnterInsertMode)
+        );
+        assert_eq!(
+            routed_command(route_key_press(&shell_state, key(KeyCode::Char('q')))),
+            Some(UiCommand::QuitShell)
+        );
+        assert_eq!(
+            routed_command(route_key_press(&shell_state, key(KeyCode::Esc))),
+            Some(UiCommand::EnterNormalMode)
+        );
     }
 }
