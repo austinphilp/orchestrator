@@ -2300,6 +2300,8 @@ mod tests {
             payload: OrchestrationEventPayload::SessionBlocked(SessionBlockedPayload {
                 session_id: session_id.clone(),
                 reason: "cargo test fails in inspector pane tests".to_owned(),
+                hint: None,
+                log_ref: None,
             }),
             schema_version: 1,
         });
@@ -2405,6 +2407,9 @@ mod tests {
             payload: OrchestrationEventPayload::SessionNeedsInput(SessionNeedsInputPayload {
                 session_id,
                 prompt: "Choose API shape: A or B".to_owned(),
+                prompt_id: Some("q1".to_owned()),
+                options: vec!["A".to_owned(), "B".to_owned()],
+                default_option: Some("A".to_owned()),
             }),
             schema_version: 1,
         });
@@ -2470,6 +2475,9 @@ mod tests {
             payload: OrchestrationEventPayload::SessionNeedsInput(SessionNeedsInputPayload {
                 session_id: active_session_id,
                 prompt: "Active session question".to_owned(),
+                prompt_id: Some("q-active".to_owned()),
+                options: vec!["A".to_owned(), "B".to_owned()],
+                default_option: Some("A".to_owned()),
             }),
             schema_version: 1,
         });
@@ -2483,6 +2491,9 @@ mod tests {
             payload: OrchestrationEventPayload::SessionNeedsInput(SessionNeedsInputPayload {
                 session_id: prior_session_id,
                 prompt: "Prior session question".to_owned(),
+                prompt_id: Some("q-prior".to_owned()),
+                options: vec!["A".to_owned(), "B".to_owned()],
+                default_option: Some("B".to_owned()),
             }),
             schema_version: 1,
         });
