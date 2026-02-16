@@ -11,9 +11,9 @@ pub use error::CoreError;
 pub use events::{
     ArtifactCreatedPayload, InboxItemCreatedPayload, InboxItemResolvedPayload, NewEventEnvelope,
     OrchestrationEventPayload, OrchestrationEventType, SessionBlockedPayload,
-    SessionCheckpointPayload, SessionNeedsInputPayload, SessionSpawnedPayload,
-    StoredEventEnvelope, TicketSyncedPayload, UserRespondedPayload, WorkItemCreatedPayload,
-    WorkflowTransitionPayload, WorktreeCreatedPayload,
+    SessionCheckpointPayload, SessionNeedsInputPayload, SessionSpawnedPayload, StoredEventEnvelope,
+    TicketSyncedPayload, UserRespondedPayload, WorkItemCreatedPayload, WorkflowTransitionPayload,
+    WorktreeCreatedPayload,
 };
 pub use identifiers::{
     ArtifactId, InboxItemId, ProjectId, TicketId, TicketProvider, WorkItemId, WorkerSessionId,
@@ -24,7 +24,10 @@ pub use projection::{
     ProjectionState, SessionProjection, WorkItemProjection,
 };
 pub use status::{ArtifactKind, InboxItemKind, WorkerSessionStatus, WorkflowState};
-pub use store::{EventStore, RetrievalScope, SqliteEventStore};
+pub use store::{
+    ArtifactRecord, EventStore, RetrievalScope, SqliteEventStore, StoredEventWithArtifacts,
+    TicketRecord, TicketWorkItemMapping,
+};
 
 #[cfg(test)]
 mod tests;
