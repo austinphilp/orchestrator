@@ -6,7 +6,7 @@ use std::process::Command;
 
 use orchestrator_core::{
     CodeHostKind, CodeHostProvider, CoreError, CreatePullRequestRequest, GithubClient,
-    PullRequestRef, PullRequestSummary, RepositoryRef, ReviewerRequest,
+    PullRequestRef, PullRequestSummary, RepositoryRef, ReviewerRequest, UrlOpener,
 };
 use serde::Deserialize;
 
@@ -39,6 +39,128 @@ impl CommandRunner for ProcessCommandRunner {
         }
 
         command.output()
+    }
+}
+
+pub struct SystemUrlOpener<R: CommandRunner> {
+    runner: R,
+    command: UrlOpenCommand,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct UrlOpenCommand {
+    program: PathBuf,
+    prefix_args: Vec<OsString>,
+}
+
+impl<R: CommandRunner> SystemUrlOpener<R> {
+    pub fn new(runner: R) -> Result<Self, CoreError> {
+        let command = Self::command_for_os(std::env::consts::OS)?;
+        Ok(Self { runner, command })
+    }
+
+    fn command_for_os(target_os: &str) -> Result<UrlOpenCommand, CoreError> {
+        match target_os {
+            "macos" => Ok(UrlOpenCommand {
+                program: PathBuf::from("open"),
+                prefix_args: Vec::new(),
+            }),
+            "linux" => Ok(UrlOpenCommand {
+                program: PathBuf::from("xdg-open"),
+                prefix_args: Vec::new(),
+            }),
+            "windows" => Ok(UrlOpenCommand {
+                program: PathBuf::from("cmd"),
+                prefix_args: vec![
+                    OsString::from("/C"),
+                    OsString::from("start"),
+                    OsString::from(""),
+                ],
+            }),
+            _ => Err(CoreError::DependencyUnavailable(format!(
+                "URL opening is unsupported on `{target_os}`. Supported platforms are macOS, Linux, and Windows."
+            ))),
+        }
+    }
+
+    fn open_args_for_url(&self, url: &str) -> Vec<OsString> {
+        let mut args = self.command.prefix_args.clone();
+        args.push(OsString::from(url));
+        args
+    }
+
+    fn run_open_raw(&self, args: &[OsString]) -> Result<std::process::Output, CoreError> {
+        let program =
+            self.command.program.to_str().ok_or_else(|| {
+                CoreError::Configuration("Invalid URL opener binary path".to_owned())
+            })?;
+        self.runner
+            .run(program, args, None)
+            .map_err(|error| match error.kind() {
+                io::ErrorKind::NotFound => CoreError::DependencyUnavailable(format!(
+                    "URL opener `{}` was not found. Install it and retry.",
+                    self.command.program.display()
+                )),
+                _ => CoreError::DependencyUnavailable(format!(
+                    "Failed to execute URL opener `{}`: {error}",
+                    self.command.program.display()
+                )),
+            })
+    }
+
+    fn ensure_non_empty_url(url: &str) -> Result<&str, CoreError> {
+        let trimmed = url.trim();
+        if trimmed.is_empty() {
+            return Err(CoreError::Configuration(
+                "URL must be a non-empty string.".to_owned(),
+            ));
+        }
+
+        Ok(trimmed)
+    }
+
+    fn command_failed(&self, args: &[OsString], output: &std::process::Output) -> CoreError {
+        CoreError::DependencyUnavailable(format!(
+            "URL opener command failed (`{} {}`): {}",
+            self.command.program.display(),
+            Self::render_args(args),
+            Self::command_output_detail(output)
+        ))
+    }
+
+    fn render_args(args: &[OsString]) -> String {
+        args.iter()
+            .map(|arg| arg.to_string_lossy().to_string())
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    fn command_output_detail(output: &std::process::Output) -> String {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+        if !stderr.is_empty() {
+            return stderr;
+        }
+
+        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+        if !stdout.is_empty() {
+            return stdout;
+        }
+
+        format!("exit status {}", output.status)
+    }
+}
+
+#[async_trait::async_trait]
+impl<R: CommandRunner> UrlOpener for SystemUrlOpener<R> {
+    async fn open_url(&self, url: &str) -> Result<(), CoreError> {
+        let url = Self::ensure_non_empty_url(url)?;
+        let args = self.open_args_for_url(url);
+        let output = self.run_open_raw(&args)?;
+        if output.status.success() {
+            return Ok(());
+        }
+
+        Err(self.command_failed(&args, &output))
     }
 }
 
@@ -498,7 +620,7 @@ struct GhReviewQueueOwner {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use orchestrator_core::{CodeHostProvider, CreatePullRequestRequest};
+    use orchestrator_core::{CodeHostProvider, CreatePullRequestRequest, UrlOpener};
     use std::collections::VecDeque;
     use std::path::PathBuf;
     use std::sync::Mutex;
@@ -579,6 +701,114 @@ mod tests {
             name: "repo".to_owned(),
             root: PathBuf::from(env!("CARGO_MANIFEST_DIR")),
         }
+    }
+
+    #[test]
+    fn system_url_opener_selects_supported_commands() {
+        let mac = SystemUrlOpener::<ProcessCommandRunner>::command_for_os("macos")
+            .expect("macos command");
+        assert_eq!(mac.program, PathBuf::from("open"));
+        assert!(mac.prefix_args.is_empty());
+
+        let linux = SystemUrlOpener::<ProcessCommandRunner>::command_for_os("linux")
+            .expect("linux command");
+        assert_eq!(linux.program, PathBuf::from("xdg-open"));
+        assert!(linux.prefix_args.is_empty());
+
+        let windows = SystemUrlOpener::<ProcessCommandRunner>::command_for_os("windows")
+            .expect("windows command");
+        assert_eq!(
+            windows.prefix_args,
+            vec![
+                OsString::from("/C"),
+                OsString::from("start"),
+                OsString::from(""),
+            ]
+        );
+        assert_eq!(windows.program, PathBuf::from("cmd"));
+    }
+
+    #[test]
+    fn system_url_opener_rejects_unsupported_os() {
+        let err = SystemUrlOpener::<ProcessCommandRunner>::command_for_os("freebsd")
+            .expect_err("freebsd should be unsupported");
+        assert!(err.to_string().contains("unsupported"));
+    }
+
+    #[tokio::test]
+    async fn system_url_opener_uses_platform_command() {
+        let expected_program = if cfg!(target_os = "macos") {
+            "open"
+        } else if cfg!(target_os = "linux") {
+            "xdg-open"
+        } else if cfg!(target_os = "windows") {
+            "cmd"
+        } else {
+            return;
+        };
+        let expected_args = if cfg!(target_os = "windows") {
+            vec![
+                OsString::from("/C"),
+                OsString::from("start"),
+                OsString::from(""),
+                OsString::from("https://github.com/octocat/orchestrator/pull/42"),
+            ]
+        } else {
+            vec![OsString::from(
+                "https://github.com/octocat/orchestrator/pull/42",
+            )]
+        };
+        let runner = StubRunner::with_results(vec![Ok(success_output())]);
+        let opener = SystemUrlOpener::new(runner).expect("init");
+
+        UrlOpener::open_url(&opener, "https://github.com/octocat/orchestrator/pull/42")
+            .await
+            .expect("open url");
+
+        let calls = opener.runner.calls.lock().expect("lock");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, expected_program);
+        assert_eq!(calls[0].1, expected_args);
+        assert!(calls[0].2.is_none());
+    }
+
+    #[tokio::test]
+    async fn system_url_opener_rejects_empty_url() {
+        let runner = StubRunner::with_results(Vec::new());
+        let opener = SystemUrlOpener::new(runner).expect("init");
+
+        let err = UrlOpener::open_url(&opener, "   ")
+            .await
+            .expect_err("empty URL should fail");
+        assert!(err.to_string().contains("non-empty"));
+
+        let calls = opener.runner.calls.lock().expect("lock");
+        assert!(calls.is_empty());
+    }
+
+    #[tokio::test]
+    async fn system_url_opener_surfaces_missing_binary() {
+        let runner = StubRunner::with_results(vec![Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            "missing",
+        ))]);
+        let opener = SystemUrlOpener::new(runner).expect("init");
+
+        let err = UrlOpener::open_url(&opener, "https://example.com")
+            .await
+            .expect_err("missing binary should fail");
+        assert!(err.to_string().contains("was not found"));
+    }
+
+    #[tokio::test]
+    async fn system_url_opener_surfaces_command_failure() {
+        let runner = StubRunner::with_results(vec![Ok(output(1, "", "Unable to open URL"))]);
+        let opener = SystemUrlOpener::new(runner).expect("init");
+
+        let err = UrlOpener::open_url(&opener, "https://example.com")
+            .await
+            .expect_err("open failure should fail");
+        assert!(err.to_string().contains("Unable to open URL"));
     }
 
     #[tokio::test]
