@@ -11,6 +11,13 @@ use reqwest::header::HeaderMap;
 use serde_json::{Map, Value};
 use tokio::sync::{mpsc, Notify};
 
+mod query_engine;
+
+pub use query_engine::{
+    BoundedContextPack, RetrievalPackEvent, RetrievalPackEvidence, RetrievalPackLimits,
+    RetrievalPackStats, SupervisorQueryEngine, SupervisorRetrievalSource,
+};
+
 const OPENROUTER_API_BASE: &str = "https://openrouter.ai/api/v1";
 const STREAM_CHANNEL_CAPACITY: usize = 64;
 

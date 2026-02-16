@@ -156,6 +156,32 @@ impl SqliteEventStore {
             .map_err(|err| CoreError::Persistence(err.to_string()))
     }
 
+    pub fn count_events(&self, scope: RetrievalScope) -> Result<usize, CoreError> {
+        let count: i64 = match scope {
+            RetrievalScope::Global => {
+                self.conn
+                    .query_row("SELECT COUNT(*) FROM events", [], |row| row.get(0))
+            }
+            RetrievalScope::WorkItem(id) => self.conn.query_row(
+                "SELECT COUNT(*) FROM events WHERE work_item_id = ?1",
+                params![id.as_str()],
+                |row| row.get(0),
+            ),
+            RetrievalScope::Session(id) => self.conn.query_row(
+                "SELECT COUNT(*) FROM events WHERE session_id = ?1",
+                params![id.as_str()],
+                |row| row.get(0),
+            ),
+        }
+        .map_err(|err| CoreError::Persistence(err.to_string()))?;
+
+        usize::try_from(count).map_err(|_| {
+            CoreError::Persistence(format!(
+                "event count '{count}' cannot be represented as usize"
+            ))
+        })
+    }
+
     pub fn read_event_with_artifacts(
         &self,
         work_item_id: &WorkItemId,
@@ -457,7 +483,7 @@ impl SqliteEventStore {
                 LIMIT 1
                 ",
                 params![provider_to_str(provider), provider_ticket_id],
-                |row| Self::map_runtime_mapping_row(row),
+                Self::map_runtime_mapping_row,
             )
             .optional()
             .map_err(|err| CoreError::Persistence(err.to_string()))
@@ -513,7 +539,7 @@ impl SqliteEventStore {
                     waiting_for_user,
                     blocked
                 ],
-                |row| Self::map_runtime_mapping_row(row),
+                Self::map_runtime_mapping_row,
             )
             .optional()
             .map_err(|err| CoreError::Persistence(err.to_string()))
@@ -555,7 +581,7 @@ impl SqliteEventStore {
             .map_err(|err| CoreError::Persistence(err.to_string()))?;
 
         let rows = stmt
-            .query_map([], |row| Self::map_runtime_mapping_row(row))
+            .query_map([], Self::map_runtime_mapping_row)
             .map_err(|err| CoreError::Persistence(err.to_string()))?;
 
         rows.collect::<Result<Vec<_>, _>>()
@@ -1279,7 +1305,7 @@ impl SqliteEventStore {
                 LIMIT 1
                 ",
                 params![work_item_id.as_str()],
-                |row| Self::map_runtime_mapping_row(row),
+                Self::map_runtime_mapping_row,
             )
             .optional()
             .map_err(|err| CoreError::Persistence(err.to_string()))
@@ -1485,7 +1511,10 @@ impl SqliteEventStore {
         Ok((sequence, event).into())
     }
 
-    fn read_artifact_refs_for_event(&self, event_id: &str) -> Result<Vec<ArtifactId>, CoreError> {
+    pub fn read_artifact_refs_for_event(
+        &self,
+        event_id: &str,
+    ) -> Result<Vec<ArtifactId>, CoreError> {
         let mut stmt = self
             .conn
             .prepare(
@@ -1493,7 +1522,7 @@ impl SqliteEventStore {
                 SELECT artifact_id
                 FROM event_artifact_refs
                 WHERE event_id = ?1
-                ORDER BY artifact_id ASC
+                ORDER BY rowid ASC
                 ",
             )
             .map_err(|err| CoreError::Persistence(err.to_string()))?;
