@@ -868,7 +868,13 @@ impl UiShellState {
 
     fn open_terminal_for_selected(&mut self) {
         let ui_state = self.ui_state();
-        if let Some(session_id) = ui_state.selected_session_id {
+        if let (Some(inbox_item_id), Some(session_id)) = (
+            ui_state.selected_inbox_item_id,
+            ui_state.selected_session_id,
+        ) {
+            self.selected_inbox_item_id = Some(inbox_item_id.clone());
+            let focus_view = CenterView::FocusCardView { inbox_item_id };
+            self.view_stack.replace_center(focus_view);
             self.view_stack
                 .push_center(CenterView::TerminalView { session_id });
         }
@@ -2001,15 +2007,17 @@ mod tests {
     #[test]
     fn open_terminal_pushes_only_with_session_context() {
         let mut without_session = UiShellState::new("ready".to_owned(), sample_projection(false));
-        without_session.open_focus_card_for_selected();
         let before = without_session.view_stack.center_views().to_vec();
         without_session.open_terminal_for_selected();
         assert_eq!(without_session.view_stack.center_views(), before.as_slice());
 
         let mut with_session = UiShellState::new("ready".to_owned(), sample_projection(true));
-        with_session.open_focus_card_for_selected();
         with_session.open_terminal_for_selected();
         assert_eq!(with_session.view_stack.center_views().len(), 2);
+        assert!(matches!(
+            with_session.view_stack.center_views().first(),
+            Some(CenterView::FocusCardView { inbox_item_id }) if inbox_item_id.as_str() == "inbox-1"
+        ));
         assert!(matches!(
             with_session.view_stack.active_center(),
             Some(CenterView::TerminalView { .. })
@@ -2017,6 +2025,52 @@ mod tests {
 
         with_session.open_terminal_for_selected();
         assert_eq!(with_session.view_stack.center_views().len(), 2);
+    }
+
+    #[test]
+    fn minimize_after_open_terminal_returns_to_focus_card() {
+        let mut shell_state = UiShellState::new("ready".to_owned(), sample_projection(true));
+        shell_state.open_terminal_and_enter_mode();
+        assert_eq!(shell_state.mode, UiMode::Terminal);
+        assert!(matches!(
+            shell_state.view_stack.active_center(),
+            Some(CenterView::TerminalView { session_id }) if session_id.as_str() == "sess-1"
+        ));
+
+        shell_state.minimize_center_view();
+        assert_eq!(shell_state.mode, UiMode::Normal);
+        assert_eq!(shell_state.view_stack.center_views().len(), 1);
+        assert!(matches!(
+            shell_state.view_stack.active_center(),
+            Some(CenterView::FocusCardView { inbox_item_id }) if inbox_item_id.as_str() == "inbox-1"
+        ));
+    }
+
+    #[test]
+    fn open_terminal_normalizes_stack_to_focus_and_terminal() {
+        let mut shell_state = UiShellState::new("ready".to_owned(), sample_projection(true));
+        shell_state
+            .view_stack
+            .replace_center(CenterView::FocusCardView {
+                inbox_item_id: InboxItemId::new("stale-inbox"),
+            });
+        shell_state
+            .view_stack
+            .push_center(CenterView::FocusCardView {
+                inbox_item_id: InboxItemId::new("inbox-1"),
+            });
+        assert_eq!(shell_state.view_stack.center_views().len(), 2);
+
+        shell_state.open_terminal_for_selected();
+        assert_eq!(shell_state.view_stack.center_views().len(), 2);
+        assert!(matches!(
+            shell_state.view_stack.center_views().first(),
+            Some(CenterView::FocusCardView { inbox_item_id }) if inbox_item_id.as_str() == "inbox-1"
+        ));
+        assert!(matches!(
+            shell_state.view_stack.active_center(),
+            Some(CenterView::TerminalView { session_id }) if session_id.as_str() == "sess-1"
+        ));
     }
 
     #[test]
