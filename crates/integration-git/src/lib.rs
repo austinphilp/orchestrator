@@ -12,6 +12,9 @@ use orchestrator_core::{
 
 const ENV_GIT_BIN: &str = "ORCHESTRATOR_GIT_BIN";
 const ENV_ALLOW_DELETE_UNMERGED_BRANCHES: &str = "ORCHESTRATOR_GIT_ALLOW_DELETE_UNMERGED_BRANCHES";
+const DEFAULT_BASE_BRANCH: &str = "main";
+const WORKTREE_BRANCH_TEMPLATE: &str = "ap/{issue-key}-{slug}";
+const WORKTREE_BRANCH_PREFIX: &str = "ap/";
 
 pub trait CommandRunner: Send + Sync {
     fn run(&self, program: &str, args: &[OsString]) -> io::Result<std::process::Output>;
@@ -30,6 +33,10 @@ pub struct GitCliVcsProvider<R: CommandRunner> {
     runner: R,
     binary: PathBuf,
     allow_force_delete_unmerged_branches: bool,
+}
+
+struct ParsedWorktreeBranch<'a> {
+    issue_key: &'a str,
 }
 
 impl<R: CommandRunner> GitCliVcsProvider<R> {
@@ -372,14 +379,27 @@ impl<R: CommandRunner> GitCliVcsProvider<R> {
             ));
         }
 
-        let base_branch = request.base_branch.trim();
-        if base_branch.is_empty() {
-            return Err(CoreError::Configuration(
-                "Worktree base branch must be a non-empty string.".to_owned(),
-            ));
+        let parsed_branch = Self::parse_worktree_branch(branch)?;
+        if let Some(ticket_identifier) = request
+            .ticket_identifier
+            .as_deref()
+            .map(str::trim)
+            .filter(|identifier| !identifier.is_empty())
+        {
+            if !parsed_branch
+                .issue_key
+                .eq_ignore_ascii_case(ticket_identifier)
+            {
+                return Err(CoreError::Configuration(format!(
+                    "Worktree branch issue key '{}' must match ticket identifier '{}'.",
+                    parsed_branch.issue_key, ticket_identifier
+                )));
+            }
         }
 
-        Ok((branch.to_owned(), base_branch.to_owned()))
+        let normalized_base_branch = Self::normalize_base_branch(request.base_branch.trim());
+
+        Ok((branch.to_owned(), normalized_base_branch))
     }
 
     fn validate_worktree_delete_request(
@@ -392,15 +412,107 @@ impl<R: CommandRunner> GitCliVcsProvider<R> {
             ));
         }
 
-        let base_branch = request.worktree.base_branch.trim();
-        if request.delete_branch && branch == base_branch {
+        let normalized_base_branch =
+            Self::normalize_base_branch(request.worktree.base_branch.trim());
+        if request.delete_branch && branch.eq_ignore_ascii_case(&normalized_base_branch) {
             return Err(CoreError::Configuration(format!(
                 "Refusing to delete base branch '{}'.",
-                branch
+                normalized_base_branch
+            )));
+        }
+
+        if request.delete_branch && Self::parse_worktree_branch(branch).is_err() {
+            return Err(CoreError::Configuration(format!(
+                "Refusing to delete non-managed branch '{}'; managed branches must match '{}'.",
+                branch, WORKTREE_BRANCH_TEMPLATE
             )));
         }
 
         Ok(branch.to_owned())
+    }
+
+    fn normalize_base_branch(base_branch: &str) -> String {
+        if base_branch.is_empty() {
+            DEFAULT_BASE_BRANCH.to_owned()
+        } else {
+            base_branch.to_owned()
+        }
+    }
+
+    fn parse_worktree_branch(branch: &str) -> Result<ParsedWorktreeBranch<'_>, CoreError> {
+        let suffix = branch.strip_prefix(WORKTREE_BRANCH_PREFIX).ok_or_else(|| {
+            CoreError::Configuration(format!(
+                "Worktree branch '{}' must match '{}' (missing '{}' prefix).",
+                branch, WORKTREE_BRANCH_TEMPLATE, WORKTREE_BRANCH_PREFIX
+            ))
+        })?;
+
+        let bytes = suffix.as_bytes();
+        if bytes.is_empty() || !bytes[0].is_ascii_uppercase() {
+            return Err(CoreError::Configuration(format!(
+                "Worktree branch '{}' must include an uppercase issue key before the ticket number.",
+                branch
+            )));
+        }
+
+        let mut index = 1;
+        while index < bytes.len()
+            && (bytes[index].is_ascii_uppercase() || bytes[index].is_ascii_digit())
+        {
+            index += 1;
+        }
+
+        if index >= bytes.len() || bytes[index] != b'-' {
+            return Err(CoreError::Configuration(format!(
+                "Worktree branch '{}' must match '{}'.",
+                branch, WORKTREE_BRANCH_TEMPLATE
+            )));
+        }
+
+        index += 1;
+        let ticket_number_start = index;
+        while index < bytes.len() && bytes[index].is_ascii_digit() {
+            index += 1;
+        }
+
+        if ticket_number_start == index || index >= bytes.len() || bytes[index] != b'-' {
+            return Err(CoreError::Configuration(format!(
+                "Worktree branch '{}' must include a numeric issue number and a slug (e.g. '{}').",
+                branch, WORKTREE_BRANCH_TEMPLATE
+            )));
+        }
+
+        let issue_key = &suffix[..index];
+        let slug = &suffix[index + 1..];
+        if !Self::is_valid_branch_slug(slug) {
+            return Err(CoreError::Configuration(format!(
+                "Worktree branch '{}' has invalid slug '{}'; use lowercase letters, digits, and single hyphens.",
+                branch, slug
+            )));
+        }
+
+        Ok(ParsedWorktreeBranch { issue_key })
+    }
+
+    fn is_valid_branch_slug(slug: &str) -> bool {
+        if slug.is_empty() || slug.starts_with('-') || slug.ends_with('-') {
+            return false;
+        }
+
+        let mut previous_was_dash = false;
+        for byte in slug.bytes() {
+            let is_dash = byte == b'-';
+            let valid = byte.is_ascii_lowercase() || byte.is_ascii_digit() || is_dash;
+            if !valid {
+                return false;
+            }
+            if is_dash && previous_was_dash {
+                return false;
+            }
+            previous_was_dash = is_dash;
+        }
+
+        true
     }
 
     fn validate_directory_cleanup_target(
@@ -809,6 +921,125 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn create_worktree_defaults_blank_base_branch_to_main() {
+        let runner = StubRunner::with_results(vec![Ok(success_output())]);
+        let provider = GitCliVcsProvider::with_binary(runner, PathBuf::from("git"), false);
+
+        let request = CreateWorktreeRequest {
+            worktree_id: WorktreeId::new("wt-123"),
+            repository: sample_repository(PathBuf::from("/tmp/orchestrator/repo")),
+            worktree_path: PathBuf::from("/tmp/orchestrator/worktrees/wt-123"),
+            branch: "ap/AP-123-branch-policy".to_owned(),
+            base_branch: "   ".to_owned(),
+            ticket_identifier: Some("AP-123".to_owned()),
+        };
+
+        let summary = provider
+            .create_worktree(request.clone())
+            .await
+            .expect("create worktree");
+
+        let calls = provider.runner.calls.lock().expect("lock");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(
+            calls[0].1,
+            GitCliVcsProvider::<ProcessCommandRunner>::create_worktree_args(
+                &request.repository.root,
+                &request.worktree_path,
+                &request.branch,
+                "main",
+            )
+        );
+        assert_eq!(summary.base_branch, "main");
+    }
+
+    #[tokio::test]
+    async fn create_worktree_rejects_branch_outside_policy_template() {
+        let runner = StubRunner::with_results(Vec::new());
+        let provider = GitCliVcsProvider::with_binary(runner, PathBuf::from("git"), false);
+
+        let request = CreateWorktreeRequest {
+            worktree_id: WorktreeId::new("wt-124"),
+            repository: sample_repository(PathBuf::from("/tmp/orchestrator/repo")),
+            worktree_path: PathBuf::from("/tmp/orchestrator/worktrees/wt-124"),
+            branch: "feature/AP-124-branch-policy".to_owned(),
+            base_branch: "main".to_owned(),
+            ticket_identifier: Some("AP-124".to_owned()),
+        };
+
+        let err = provider
+            .create_worktree(request)
+            .await
+            .expect_err("expected branch naming validation error");
+        assert!(err.to_string().contains("must match"));
+        assert!(provider.runner.calls.lock().expect("lock").is_empty());
+    }
+
+    #[tokio::test]
+    async fn create_worktree_rejects_ticket_identifier_mismatch() {
+        let runner = StubRunner::with_results(Vec::new());
+        let provider = GitCliVcsProvider::with_binary(runner, PathBuf::from("git"), false);
+
+        let request = CreateWorktreeRequest {
+            worktree_id: WorktreeId::new("wt-125"),
+            repository: sample_repository(PathBuf::from("/tmp/orchestrator/repo")),
+            worktree_path: PathBuf::from("/tmp/orchestrator/worktrees/wt-125"),
+            branch: "ap/AP-125-branch-policy".to_owned(),
+            base_branch: "main".to_owned(),
+            ticket_identifier: Some("AP-999".to_owned()),
+        };
+
+        let err = provider
+            .create_worktree(request)
+            .await
+            .expect_err("expected branch/ticket mismatch error");
+        assert!(err.to_string().contains("must match ticket identifier"));
+        assert!(provider.runner.calls.lock().expect("lock").is_empty());
+    }
+
+    #[tokio::test]
+    async fn create_worktree_accepts_issue_keys_with_digits_and_case_insensitive_ticket_match() {
+        let runner = StubRunner::with_results(vec![Ok(success_output())]);
+        let provider = GitCliVcsProvider::with_binary(runner, PathBuf::from("git"), false);
+
+        let request = CreateWorktreeRequest {
+            worktree_id: WorktreeId::new("wt-126"),
+            repository: sample_repository(PathBuf::from("/tmp/orchestrator/repo")),
+            worktree_path: PathBuf::from("/tmp/orchestrator/worktrees/wt-126"),
+            branch: "ap/ORCH2-126-start-resume-flow".to_owned(),
+            base_branch: "main".to_owned(),
+            ticket_identifier: Some("orch2-126".to_owned()),
+        };
+
+        provider
+            .create_worktree(request)
+            .await
+            .expect("create worktree");
+    }
+
+    #[tokio::test]
+    async fn create_worktree_rejects_invalid_slug_characters() {
+        let runner = StubRunner::with_results(Vec::new());
+        let provider = GitCliVcsProvider::with_binary(runner, PathBuf::from("git"), false);
+
+        let request = CreateWorktreeRequest {
+            worktree_id: WorktreeId::new("wt-127"),
+            repository: sample_repository(PathBuf::from("/tmp/orchestrator/repo")),
+            worktree_path: PathBuf::from("/tmp/orchestrator/worktrees/wt-127"),
+            branch: "ap/AP-127-Invalid-Slug".to_owned(),
+            base_branch: "main".to_owned(),
+            ticket_identifier: Some("AP-127".to_owned()),
+        };
+
+        let err = provider
+            .create_worktree(request)
+            .await
+            .expect_err("expected invalid slug validation error");
+        assert!(err.to_string().contains("invalid slug"));
+        assert!(provider.runner.calls.lock().expect("lock").is_empty());
+    }
+
+    #[tokio::test]
     async fn delete_worktree_only_removes_branch_when_requested() {
         let runner = StubRunner::with_results(vec![Ok(success_output())]);
         let provider = GitCliVcsProvider::with_binary(runner, PathBuf::from("git"), false);
@@ -917,6 +1148,60 @@ mod tests {
         assert!(err
             .to_string()
             .contains("Refusing to delete repository root"));
+        assert!(provider.runner.calls.lock().expect("lock").is_empty());
+    }
+
+    #[tokio::test]
+    async fn delete_worktree_refuses_to_delete_non_managed_branch() {
+        let runner = StubRunner::with_results(Vec::new());
+        let provider = GitCliVcsProvider::with_binary(runner, PathBuf::from("git"), false);
+
+        let request = DeleteWorktreeRequest {
+            worktree: WorktreeSummary {
+                worktree_id: WorktreeId::new("wt-128"),
+                repository: sample_repository(PathBuf::from("/tmp/orchestrator/repo")),
+                path: PathBuf::from("/tmp/orchestrator/wt-128"),
+                branch: "feature/AP-128-workflow".to_owned(),
+                base_branch: "main".to_owned(),
+            },
+            delete_branch: true,
+            delete_directory: false,
+        };
+
+        let err = provider
+            .delete_worktree(request)
+            .await
+            .expect_err("expected managed branch safety error");
+        assert!(err
+            .to_string()
+            .contains("Refusing to delete non-managed branch"));
+        assert!(provider.runner.calls.lock().expect("lock").is_empty());
+    }
+
+    #[tokio::test]
+    async fn delete_worktree_refuses_to_delete_default_base_branch_when_base_branch_is_blank() {
+        let runner = StubRunner::with_results(Vec::new());
+        let provider = GitCliVcsProvider::with_binary(runner, PathBuf::from("git"), false);
+
+        let request = DeleteWorktreeRequest {
+            worktree: WorktreeSummary {
+                worktree_id: WorktreeId::new("wt-129"),
+                repository: sample_repository(PathBuf::from("/tmp/orchestrator/repo")),
+                path: PathBuf::from("/tmp/orchestrator/wt-129"),
+                branch: "main".to_owned(),
+                base_branch: " ".to_owned(),
+            },
+            delete_branch: true,
+            delete_directory: false,
+        };
+
+        let err = provider
+            .delete_worktree(request)
+            .await
+            .expect_err("expected base branch protection");
+        assert!(err
+            .to_string()
+            .contains("Refusing to delete base branch 'main'"));
         assert!(provider.runner.calls.lock().expect("lock").is_empty());
     }
 
