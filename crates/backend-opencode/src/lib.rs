@@ -308,7 +308,7 @@ impl SupervisorProtocolParser {
 }
 
 fn parse_protocol_line(line: &[u8]) -> Option<BackendEvent> {
-    let line = String::from_utf8_lossy(line);
+    let line = sanitize_protocol_line(protocol_candidate_bytes(line));
     let line = line.trim();
     if line.is_empty() {
         return None;
@@ -376,6 +376,90 @@ fn parse_protocol_line(line: &[u8]) -> Option<BackendEvent> {
     }
 
     None
+}
+
+fn protocol_candidate_bytes(line: &[u8]) -> &[u8] {
+    match line.iter().rposition(|byte| *byte == b'\r') {
+        Some(last_carriage_return) => &line[last_carriage_return + 1..],
+        None => line,
+    }
+}
+
+fn sanitize_protocol_line(line: &[u8]) -> String {
+    let mut out = Vec::with_capacity(line.len());
+    let mut index = 0usize;
+
+    while index < line.len() {
+        match line[index] {
+            0x1b => {
+                index += strip_escape_sequence(&line[index..]);
+            }
+            byte if byte.is_ascii_control() && byte != b'\t' => {
+                index += 1;
+            }
+            byte => {
+                out.push(byte);
+                index += 1;
+            }
+        }
+    }
+
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+fn strip_escape_sequence(remaining: &[u8]) -> usize {
+    if remaining.len() < 2 {
+        return 1;
+    }
+
+    match remaining[1] {
+        b'[' => strip_csi_sequence(remaining),
+        b']' => strip_osc_sequence(remaining),
+        b'P' | b'X' | b'^' | b'_' => strip_string_sequence(remaining),
+        _ => strip_fe_escape_sequence(remaining),
+    }
+}
+
+fn strip_csi_sequence(remaining: &[u8]) -> usize {
+    for (offset, byte) in remaining.iter().enumerate().skip(2) {
+        if (0x40..=0x7e).contains(byte) {
+            return offset + 1;
+        }
+    }
+    remaining.len()
+}
+
+fn strip_osc_sequence(remaining: &[u8]) -> usize {
+    strip_bel_or_st_terminated_sequence(remaining)
+}
+
+fn strip_string_sequence(remaining: &[u8]) -> usize {
+    strip_bel_or_st_terminated_sequence(remaining)
+}
+
+fn strip_bel_or_st_terminated_sequence(remaining: &[u8]) -> usize {
+    for (offset, byte) in remaining.iter().enumerate().skip(2) {
+        if *byte == 0x07 {
+            return offset + 1;
+        }
+        if *byte == 0x1b && remaining.get(offset + 1) == Some(&b'\\') {
+            return offset + 2;
+        }
+    }
+    remaining.len()
+}
+
+fn strip_fe_escape_sequence(remaining: &[u8]) -> usize {
+    let mut offset = 1usize;
+    while offset < remaining.len() && (0x20..=0x2f).contains(&remaining[offset]) {
+        offset += 1;
+    }
+
+    if offset < remaining.len() && (0x30..=0x7e).contains(&remaining[offset]) {
+        offset + 1
+    } else {
+        remaining.len()
+    }
 }
 
 fn protocol_payload<'a>(line: &'a str, tag: &str) -> Option<&'a str> {
@@ -588,12 +672,117 @@ sleep 1"#
     }
 
     #[tokio::test]
+    async fn parser_parses_all_supervisor_protocol_tags() {
+        let checkpoint = parse_protocol_line(
+            br#"@@checkpoint {"stage":"implementing","detail":"parser update","files":["src/lib.rs"]}"#,
+        )
+        .expect("checkpoint tag should parse");
+        assert!(matches!(
+            checkpoint,
+            BackendEvent::Checkpoint(BackendCheckpointEvent {
+                summary,
+                detail: Some(detail),
+                file_refs
+            }) if summary == "implementing" && detail == "parser update" && file_refs == vec!["src/lib.rs"]
+        ));
+
+        let needs_input = parse_protocol_line(
+            br#"@@needs_input {"id":"q1","question":"Choose A or B","options":["A","B"],"default":"A"}"#,
+        )
+        .expect("needs_input tag should parse");
+        assert!(matches!(
+            needs_input,
+            BackendEvent::NeedsInput(BackendNeedsInputEvent {
+                prompt_id,
+                question,
+                options,
+                default_option: Some(default_option),
+            }) if prompt_id == "q1" && question == "Choose A or B" && options == vec!["A", "B"] && default_option == "A"
+        ));
+
+        let blocked =
+            parse_protocol_line(br#"@@blocked {"reason":"tests failing","hint":"rerun unit tests","log_ref":"artifact:log:1"}"#)
+                .expect("blocked tag should parse");
+        assert!(matches!(
+            blocked,
+            BackendEvent::Blocked(BackendBlockedEvent {
+                reason,
+                hint: Some(hint),
+                log_ref: Some(log_ref),
+            }) if reason == "tests failing" && hint == "rerun unit tests" && log_ref == "artifact:log:1"
+        ));
+
+        let artifact = parse_protocol_line(
+            br#"@@artifact {"kind":"pr","id":"artifact-1","label":"Draft PR","url":"https://example.test/pulls/1"}"#,
+        )
+        .expect("artifact tag should parse");
+        assert!(matches!(
+            artifact,
+            BackendEvent::Artifact(BackendArtifactEvent {
+                kind: BackendArtifactKind::PullRequest,
+                artifact_id: Some(ref artifact_id),
+                label: Some(ref label),
+                uri: Some(ref uri),
+            }) if artifact_id.as_str() == "artifact-1" && label == "Draft PR" && uri == "https://example.test/pulls/1"
+        ));
+
+        let done = parse_protocol_line(br#"@@done {"summary":"all complete"}"#)
+            .expect("done tag should parse");
+        assert!(matches!(
+            done,
+            BackendEvent::Done(BackendDoneEvent {
+                summary: Some(summary)
+            }) if summary == "all complete"
+        ));
+    }
+
+    #[tokio::test]
     async fn parser_accepts_done_tag_without_payload() {
         let event = parse_protocol_line(b"@@done").expect("done tag without payload");
         assert!(matches!(
             event,
             BackendEvent::Done(BackendDoneEvent { summary: None })
         ));
+    }
+
+    #[tokio::test]
+    async fn parser_handles_ansi_wrapped_protocol_line() {
+        let line = b"\x1b[32m@@checkpoint {\"stage\":\"implementing\",\"detail\":\"ansi\",\"files\":[]}\x1b[0m";
+        let event = parse_protocol_line(line).expect("checkpoint tag wrapped in ANSI should parse");
+        assert!(matches!(
+            event,
+            BackendEvent::Checkpoint(BackendCheckpointEvent { summary, .. }) if summary == "implementing"
+        ));
+    }
+
+    #[tokio::test]
+    async fn parser_handles_carriage_return_rewrite_before_protocol_tag() {
+        let line = b"progress 25%\r@@checkpoint {\"stage\":\"implementing\",\"detail\":\"rewrite\",\"files\":[]}";
+        let event =
+            parse_protocol_line(line).expect("checkpoint tag after carriage return should parse");
+        assert!(matches!(
+            event,
+            BackendEvent::Checkpoint(BackendCheckpointEvent { summary, .. }) if summary == "implementing"
+        ));
+    }
+
+    #[tokio::test]
+    async fn parser_handles_escape_sequence_with_intermediate_bytes() {
+        let line = b"\x1b(B@@done {\"summary\":\"complete\"}";
+        let event = parse_protocol_line(line).expect("done tag after ESC sequence should parse");
+        assert!(matches!(
+            event,
+            BackendEvent::Done(BackendDoneEvent { summary: Some(summary) }) if summary == "complete"
+        ));
+    }
+
+    #[tokio::test]
+    async fn parser_ignores_invalid_json_payloads() {
+        assert!(parse_protocol_line(br#"@@checkpoint {"stage":"x""#).is_none());
+        assert!(parse_protocol_line(br#"@@needs_input not-json"#).is_none());
+        assert!(parse_protocol_line(br#"@@artifact {"kind":1}"#).is_none());
+        assert!(parse_protocol_line(br#"@@blocked {"reason":true}"#).is_none());
+        assert!(parse_protocol_line(br#"@@done [1,2,3]"#).is_none());
     }
 
     #[tokio::test]
