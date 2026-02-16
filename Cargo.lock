@@ -641,6 +641,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "integration-git"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "orchestrator-core",
+ "tokio",
+]
+
+[[package]]
 name = "integration-linear"
 version = "0.1.0"
 dependencies = [
