@@ -4,6 +4,10 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+mod pty_manager;
+
+pub use pty_manager::{PtyManager, PtyOutputSubscription, PtySpawnSpec, TerminalSize};
+
 macro_rules! runtime_string_id {
     ($name:ident) => {
         #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
