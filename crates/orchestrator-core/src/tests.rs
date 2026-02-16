@@ -35,6 +35,37 @@ fn event_envelope_serialization_round_trip() {
 }
 
 #[test]
+fn session_needs_input_and_blocked_payloads_remain_backward_compatible() {
+    let needs_input_json = r#"{"type":"SessionNeedsInput","data":{"session_id":"sess-legacy","prompt":"Choose path A or B"}}"#;
+    let needs_input: OrchestrationEventPayload =
+        serde_json::from_str(needs_input_json).expect("deserialize legacy needs_input payload");
+    match needs_input {
+        OrchestrationEventPayload::SessionNeedsInput(payload) => {
+            assert_eq!(payload.session_id, WorkerSessionId::new("sess-legacy"));
+            assert_eq!(payload.prompt, "Choose path A or B");
+            assert!(payload.prompt_id.is_none());
+            assert!(payload.options.is_empty());
+            assert!(payload.default_option.is_none());
+        }
+        other => panic!("expected SessionNeedsInput payload, got {other:?}"),
+    }
+
+    let blocked_json =
+        r#"{"type":"SessionBlocked","data":{"session_id":"sess-legacy","reason":"tests failing"}}"#;
+    let blocked: OrchestrationEventPayload =
+        serde_json::from_str(blocked_json).expect("deserialize legacy blocked payload");
+    match blocked {
+        OrchestrationEventPayload::SessionBlocked(payload) => {
+            assert_eq!(payload.session_id, WorkerSessionId::new("sess-legacy"));
+            assert_eq!(payload.reason, "tests failing");
+            assert!(payload.hint.is_none());
+            assert!(payload.log_ref.is_none());
+        }
+        other => panic!("expected SessionBlocked payload, got {other:?}"),
+    }
+}
+
+#[test]
 fn append_assigns_monotonic_sequence_and_ordered_reads() {
     let mut store = SqliteEventStore::in_memory().expect("in-memory store");
 
@@ -223,6 +254,50 @@ fn retrieval_orders_newest_first_with_limit() {
     assert_eq!(top3.len(), 3);
     assert_eq!(top3[0].sequence, 5);
     assert_eq!(top3[2].sequence, 3);
+}
+
+#[test]
+fn projection_updates_session_status_for_completed_and_crashed_signals() {
+    let events = vec![
+        StoredEventEnvelope::from((
+            1,
+            sample_event(
+                "evt-session-spawned",
+                OrchestrationEventPayload::SessionSpawned(SessionSpawnedPayload {
+                    session_id: WorkerSessionId::new("sess-1"),
+                    work_item_id: WorkItemId::new("wi-1"),
+                    model: "gpt".to_owned(),
+                }),
+            ),
+        )),
+        StoredEventEnvelope::from((
+            2,
+            sample_event(
+                "evt-session-completed",
+                OrchestrationEventPayload::SessionCompleted(SessionCompletedPayload {
+                    session_id: WorkerSessionId::new("sess-1"),
+                    summary: Some("complete".to_owned()),
+                }),
+            ),
+        )),
+        StoredEventEnvelope::from((
+            3,
+            sample_event(
+                "evt-session-crashed",
+                OrchestrationEventPayload::SessionCrashed(SessionCrashedPayload {
+                    session_id: WorkerSessionId::new("sess-1"),
+                    reason: "panic".to_owned(),
+                }),
+            ),
+        )),
+    ];
+
+    let projection = rebuild_projection(&events);
+    let session = projection
+        .sessions
+        .get(&WorkerSessionId::new("sess-1"))
+        .expect("session exists");
+    assert_eq!(session.status, Some(WorkerSessionStatus::Crashed));
 }
 
 #[test]

@@ -14,6 +14,8 @@ pub enum OrchestrationEventType {
     SessionCheckpoint,
     SessionNeedsInput,
     SessionBlocked,
+    SessionCompleted,
+    SessionCrashed,
     ArtifactCreated,
     WorkflowTransition,
     InboxItemCreated,
@@ -63,10 +65,32 @@ pub struct SessionCheckpointPayload {
 pub struct SessionNeedsInputPayload {
     pub session_id: WorkerSessionId,
     pub prompt: String,
+    #[serde(default)]
+    pub prompt_id: Option<String>,
+    #[serde(default)]
+    pub options: Vec<String>,
+    #[serde(default)]
+    pub default_option: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionBlockedPayload {
+    pub session_id: WorkerSessionId,
+    pub reason: String,
+    #[serde(default)]
+    pub hint: Option<String>,
+    #[serde(default)]
+    pub log_ref: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionCompletedPayload {
+    pub session_id: WorkerSessionId,
+    pub summary: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionCrashedPayload {
     pub session_id: WorkerSessionId,
     pub reason: String,
 }
@@ -118,6 +142,8 @@ pub enum OrchestrationEventPayload {
     SessionCheckpoint(SessionCheckpointPayload),
     SessionNeedsInput(SessionNeedsInputPayload),
     SessionBlocked(SessionBlockedPayload),
+    SessionCompleted(SessionCompletedPayload),
+    SessionCrashed(SessionCrashedPayload),
     ArtifactCreated(ArtifactCreatedPayload),
     WorkflowTransition(WorkflowTransitionPayload),
     InboxItemCreated(InboxItemCreatedPayload),
@@ -135,6 +161,8 @@ impl OrchestrationEventPayload {
             Self::SessionCheckpoint(_) => OrchestrationEventType::SessionCheckpoint,
             Self::SessionNeedsInput(_) => OrchestrationEventType::SessionNeedsInput,
             Self::SessionBlocked(_) => OrchestrationEventType::SessionBlocked,
+            Self::SessionCompleted(_) => OrchestrationEventType::SessionCompleted,
+            Self::SessionCrashed(_) => OrchestrationEventType::SessionCrashed,
             Self::ArtifactCreated(_) => OrchestrationEventType::ArtifactCreated,
             Self::WorkflowTransition(_) => OrchestrationEventType::WorkflowTransition,
             Self::InboxItemCreated(_) => OrchestrationEventType::InboxItemCreated,

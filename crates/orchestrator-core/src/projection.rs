@@ -120,6 +120,16 @@ pub fn apply_event(state: &mut ProjectionState, event: StoredEventEnvelope) {
                 session.status = Some(WorkerSessionStatus::Blocked);
             }
         }
+        OrchestrationEventPayload::SessionCompleted(payload) => {
+            if let Some(session) = state.sessions.get_mut(&payload.session_id) {
+                session.status = Some(WorkerSessionStatus::Done);
+            }
+        }
+        OrchestrationEventPayload::SessionCrashed(payload) => {
+            if let Some(session) = state.sessions.get_mut(&payload.session_id) {
+                session.status = Some(WorkerSessionStatus::Crashed);
+            }
+        }
         OrchestrationEventPayload::ArtifactCreated(payload) => {
             state.artifacts.insert(
                 payload.artifact_id.clone(),

@@ -3,6 +3,7 @@ mod commands;
 mod error;
 mod events;
 mod identifiers;
+mod normalization;
 mod projection;
 mod status;
 mod store;
@@ -26,13 +27,18 @@ pub use error::CoreError;
 pub use events::{
     ArtifactCreatedPayload, InboxItemCreatedPayload, InboxItemResolvedPayload, NewEventEnvelope,
     OrchestrationEventPayload, OrchestrationEventType, SessionBlockedPayload,
-    SessionCheckpointPayload, SessionNeedsInputPayload, SessionSpawnedPayload, StoredEventEnvelope,
-    TicketSyncedPayload, UserRespondedPayload, WorkItemCreatedPayload, WorkflowTransitionPayload,
+    SessionCheckpointPayload, SessionCompletedPayload, SessionCrashedPayload,
+    SessionNeedsInputPayload, SessionSpawnedPayload, StoredEventEnvelope, TicketSyncedPayload,
+    UserRespondedPayload, WorkItemCreatedPayload, WorkflowTransitionPayload,
     WorktreeCreatedPayload,
 };
 pub use identifiers::{
     ArtifactId, InboxItemId, ProjectId, TicketId, TicketProvider, WorkItemId, WorkerSessionId,
     WorktreeId,
+};
+pub use normalization::{
+    normalize_backend_event, BackendEventNormalizationContext, NormalizedBackendEvent,
+    NormalizedDomainEvent, DOMAIN_EVENT_SCHEMA_VERSION,
 };
 pub use orchestrator_runtime::{
     BackendArtifactEvent, BackendArtifactKind, BackendBlockedEvent, BackendCapabilities,
