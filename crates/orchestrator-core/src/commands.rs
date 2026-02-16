@@ -12,6 +12,10 @@ use crate::CoreError;
 pub mod ids {
     pub const UI_FOCUS_NEXT_INBOX: &str = "ui.focus_next_inbox";
     pub const UI_OPEN_TERMINAL_FOR_SELECTED: &str = "ui.open_terminal_for_selected";
+    pub const UI_OPEN_DIFF_INSPECTOR_FOR_SELECTED: &str = "ui.open_diff_inspector_for_selected";
+    pub const UI_OPEN_TEST_INSPECTOR_FOR_SELECTED: &str = "ui.open_test_inspector_for_selected";
+    pub const UI_OPEN_PR_INSPECTOR_FOR_SELECTED: &str = "ui.open_pr_inspector_for_selected";
+    pub const UI_OPEN_CHAT_INSPECTOR_FOR_SELECTED: &str = "ui.open_chat_inspector_for_selected";
     pub const SUPERVISOR_QUERY: &str = "supervisor.query";
     pub const WORKFLOW_APPROVE_PR_READY: &str = "workflow.approve_pr_ready";
     pub const GITHUB_OPEN_REVIEW_TABS: &str = "github.open_review_tabs";
@@ -47,6 +51,10 @@ pub enum SupervisorQueryArgs {
 pub enum Command {
     UiFocusNextInbox,
     UiOpenTerminalForSelected,
+    UiOpenDiffInspectorForSelected,
+    UiOpenTestInspectorForSelected,
+    UiOpenPrInspectorForSelected,
+    UiOpenChatInspectorForSelected,
     SupervisorQuery(SupervisorQueryArgs),
     WorkflowApprovePrReady,
     GithubOpenReviewTabs,
@@ -170,6 +178,10 @@ impl Command {
         match self {
             Command::UiFocusNextInbox => ids::UI_FOCUS_NEXT_INBOX,
             Command::UiOpenTerminalForSelected => ids::UI_OPEN_TERMINAL_FOR_SELECTED,
+            Command::UiOpenDiffInspectorForSelected => ids::UI_OPEN_DIFF_INSPECTOR_FOR_SELECTED,
+            Command::UiOpenTestInspectorForSelected => ids::UI_OPEN_TEST_INSPECTOR_FOR_SELECTED,
+            Command::UiOpenPrInspectorForSelected => ids::UI_OPEN_PR_INSPECTOR_FOR_SELECTED,
+            Command::UiOpenChatInspectorForSelected => ids::UI_OPEN_CHAT_INSPECTOR_FOR_SELECTED,
             Command::SupervisorQuery(_) => ids::SUPERVISOR_QUERY,
             Command::WorkflowApprovePrReady => ids::WORKFLOW_APPROVE_PR_READY,
             Command::GithubOpenReviewTabs => ids::GITHUB_OPEN_REVIEW_TABS,
@@ -199,6 +211,66 @@ fn canonical_definitions() -> Vec<CommandDefinition> {
                     ids::UI_OPEN_TERMINAL_FOR_SELECTED,
                     args,
                     Command::UiOpenTerminalForSelected,
+                )
+            },
+            |_| None,
+        ),
+        CommandDefinition::new(
+            CommandMetadata {
+                id: ids::UI_OPEN_DIFF_INSPECTOR_FOR_SELECTED,
+                description: "Open the diff inspector for the currently selected item.",
+                args: CommandArgSummary::None,
+            },
+            |args| {
+                parse_zero_arg(
+                    ids::UI_OPEN_DIFF_INSPECTOR_FOR_SELECTED,
+                    args,
+                    Command::UiOpenDiffInspectorForSelected,
+                )
+            },
+            |_| None,
+        ),
+        CommandDefinition::new(
+            CommandMetadata {
+                id: ids::UI_OPEN_TEST_INSPECTOR_FOR_SELECTED,
+                description: "Open the test inspector for the currently selected item.",
+                args: CommandArgSummary::None,
+            },
+            |args| {
+                parse_zero_arg(
+                    ids::UI_OPEN_TEST_INSPECTOR_FOR_SELECTED,
+                    args,
+                    Command::UiOpenTestInspectorForSelected,
+                )
+            },
+            |_| None,
+        ),
+        CommandDefinition::new(
+            CommandMetadata {
+                id: ids::UI_OPEN_PR_INSPECTOR_FOR_SELECTED,
+                description: "Open the pull request inspector for the currently selected item.",
+                args: CommandArgSummary::None,
+            },
+            |args| {
+                parse_zero_arg(
+                    ids::UI_OPEN_PR_INSPECTOR_FOR_SELECTED,
+                    args,
+                    Command::UiOpenPrInspectorForSelected,
+                )
+            },
+            |_| None,
+        ),
+        CommandDefinition::new(
+            CommandMetadata {
+                id: ids::UI_OPEN_CHAT_INSPECTOR_FOR_SELECTED,
+                description: "Open the chat inspector for the currently selected item.",
+                args: CommandArgSummary::None,
+            },
+            |args| {
+                parse_zero_arg(
+                    ids::UI_OPEN_CHAT_INSPECTOR_FOR_SELECTED,
+                    args,
+                    Command::UiOpenChatInspectorForSelected,
                 )
             },
             |_| None,
@@ -297,6 +369,10 @@ mod tests {
         for command_id in [
             ids::UI_FOCUS_NEXT_INBOX,
             ids::UI_OPEN_TERMINAL_FOR_SELECTED,
+            ids::UI_OPEN_DIFF_INSPECTOR_FOR_SELECTED,
+            ids::UI_OPEN_TEST_INSPECTOR_FOR_SELECTED,
+            ids::UI_OPEN_PR_INSPECTOR_FOR_SELECTED,
+            ids::UI_OPEN_CHAT_INSPECTOR_FOR_SELECTED,
             ids::SUPERVISOR_QUERY,
             ids::WORKFLOW_APPROVE_PR_READY,
             ids::GITHUB_OPEN_REVIEW_TABS,
@@ -426,5 +502,42 @@ mod tests {
         let parsed = registry.parse_invocation(&untyped).expect("parse untyped");
 
         assert_eq!(parsed, typed);
+    }
+
+    #[test]
+    fn inspector_commands_are_registered_as_zero_arg_commands() {
+        let registry = CommandRegistry::new().expect("registry");
+        for (command_id, expected) in [
+            (
+                ids::UI_OPEN_DIFF_INSPECTOR_FOR_SELECTED,
+                Command::UiOpenDiffInspectorForSelected,
+            ),
+            (
+                ids::UI_OPEN_TEST_INSPECTOR_FOR_SELECTED,
+                Command::UiOpenTestInspectorForSelected,
+            ),
+            (
+                ids::UI_OPEN_PR_INSPECTOR_FOR_SELECTED,
+                Command::UiOpenPrInspectorForSelected,
+            ),
+            (
+                ids::UI_OPEN_CHAT_INSPECTOR_FOR_SELECTED,
+                Command::UiOpenChatInspectorForSelected,
+            ),
+        ] {
+            let parsed = registry
+                .parse_invocation(&UntypedCommandInvocation {
+                    command_id: command_id.to_owned(),
+                    args: None,
+                })
+                .expect("new inspector command should parse");
+            assert_eq!(parsed, expected);
+
+            let untyped = registry
+                .to_untyped_invocation(&expected)
+                .expect("new inspector command should serialize");
+            assert_eq!(untyped.command_id, command_id);
+            assert!(untyped.args.is_none());
+        }
     }
 }
