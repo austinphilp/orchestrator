@@ -13,8 +13,8 @@ use orchestrator_core::{
     ProjectionState, WorkItemId, WorkerSessionId, WorkerSessionStatus, WorkflowState,
 };
 use ratatui::backend::CrosstermBackend;
-use ratatui::layout::{Constraint, Layout};
-use ratatui::widgets::{Block, Borders, Paragraph};
+use ratatui::layout::{Constraint, Layout, Rect};
+use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 use ratatui::Terminal;
 
 mod keymap;
@@ -733,6 +733,19 @@ fn format_artifact_evidence_line(artifact: &ArtifactProjection) -> String {
     )
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct WhichKeyHint {
+    key: KeyStroke,
+    description: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct WhichKeyOverlayState {
+    prefix: Vec<KeyStroke>,
+    group_label: Option<String>,
+    hints: Vec<WhichKeyHint>,
+}
+
 #[derive(Debug, Clone)]
 struct UiShellState {
     status: String,
@@ -742,6 +755,7 @@ struct UiShellState {
     view_stack: ViewStack,
     keymap: &'static KeymapTrie,
     mode_key_buffer: Vec<KeyStroke>,
+    which_key_overlay: Option<WhichKeyOverlayState>,
     mode: UiMode,
     terminal_escape_pending: bool,
 }
@@ -756,6 +770,7 @@ impl UiShellState {
             view_stack: ViewStack::default(),
             keymap: default_keymap_trie(),
             mode_key_buffer: Vec::new(),
+            which_key_overlay: None,
             mode: UiMode::Normal,
             terminal_escape_pending: false,
         }
@@ -876,6 +891,7 @@ impl UiShellState {
     fn enter_normal_mode(&mut self) {
         self.mode = UiMode::Normal;
         self.mode_key_buffer.clear();
+        self.which_key_overlay = None;
         self.terminal_escape_pending = false;
     }
 
@@ -883,6 +899,7 @@ impl UiShellState {
         if !self.is_terminal_view_active() {
             self.mode = UiMode::Insert;
             self.mode_key_buffer.clear();
+            self.which_key_overlay = None;
             self.terminal_escape_pending = false;
         }
     }
@@ -891,6 +908,7 @@ impl UiShellState {
         if self.is_terminal_view_active() {
             self.mode = UiMode::Terminal;
             self.mode_key_buffer.clear();
+            self.which_key_overlay = None;
             self.terminal_escape_pending = false;
         }
     }
@@ -915,6 +933,36 @@ impl UiShellState {
             self.view_stack.active_center(),
             Some(CenterView::TerminalView { .. })
         )
+    }
+
+    fn refresh_which_key_overlay(&mut self) {
+        if self.mode_key_buffer.is_empty() {
+            self.which_key_overlay = None;
+            return;
+        }
+
+        let Some(prefix_hint_view) = self
+            .keymap
+            .prefix_hints(self.mode, self.mode_key_buffer.as_slice())
+        else {
+            self.which_key_overlay = None;
+            return;
+        };
+
+        let hints = prefix_hint_view
+            .hints
+            .into_iter()
+            .map(|hint| WhichKeyHint {
+                key: hint.key,
+                description: describe_next_key_binding(&hint),
+            })
+            .collect();
+
+        self.which_key_overlay = Some(WhichKeyOverlayState {
+            prefix: self.mode_key_buffer.clone(),
+            group_label: prefix_hint_view.label,
+            hints,
+        });
     }
 }
 
@@ -972,6 +1020,10 @@ impl Ui {
                         .block(Block::default().title("shell").borders(Borders::ALL)),
                     footer,
                 );
+
+                if let Some(which_key) = shell_state.which_key_overlay.as_ref() {
+                    render_which_key_overlay(frame, center_area, which_key);
+                }
             })?;
 
             if event::poll(Duration::from_millis(250))? {
@@ -1052,6 +1104,78 @@ fn render_center_panel(ui_state: &UiState) -> String {
     lines.join("\n")
 }
 
+fn render_which_key_overlay(
+    frame: &mut ratatui::Frame<'_>,
+    anchor_area: Rect,
+    overlay: &WhichKeyOverlayState,
+) {
+    let content = render_which_key_overlay_text(overlay);
+    let Some(popup) = which_key_overlay_popup(anchor_area, content.as_str()) else {
+        return;
+    };
+
+    frame.render_widget(Clear, popup);
+    frame.render_widget(
+        Paragraph::new(content).block(Block::default().title("which-key").borders(Borders::ALL)),
+        popup,
+    );
+}
+
+fn which_key_overlay_popup(anchor_area: Rect, content: &str) -> Option<Rect> {
+    let line_count = content.lines().count();
+    if line_count == 0 {
+        return None;
+    }
+
+    let max_width = content.lines().map(|line| line.chars().count()).max()?;
+    let desired_width = u16::try_from(max_width)
+        .unwrap_or(u16::MAX)
+        .saturating_add(2);
+    let desired_height = u16::try_from(line_count)
+        .unwrap_or(u16::MAX)
+        .saturating_add(2);
+
+    let width = desired_width.min(anchor_area.width);
+    let height = desired_height.min(anchor_area.height);
+    if width < 4 || height < 3 {
+        return None;
+    }
+
+    Some(Rect {
+        x: anchor_area
+            .x
+            .saturating_add(anchor_area.width.saturating_sub(width)),
+        y: anchor_area
+            .y
+            .saturating_add(anchor_area.height.saturating_sub(height)),
+        width,
+        height,
+    })
+}
+
+fn render_which_key_overlay_text(overlay: &WhichKeyOverlayState) -> String {
+    let mut lines = Vec::with_capacity(overlay.hints.len() + 2);
+    let prefix = overlay
+        .prefix
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join(" ");
+    if let Some(label) = overlay.group_label.as_deref() {
+        lines.push(format!("{prefix}  ({label})"));
+    } else {
+        lines.push(prefix);
+    }
+
+    lines.extend(
+        overlay
+            .hints
+            .iter()
+            .map(|hint| format!("{:>8}  {}", hint.key, hint.description)),
+    );
+    lines.join("\n")
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum UiCommand {
     EnterNormalMode,
@@ -1074,6 +1198,26 @@ enum UiCommand {
 }
 
 impl UiCommand {
+    const ALL: [Self; 17] = [
+        Self::EnterNormalMode,
+        Self::EnterInsertMode,
+        Self::OpenTerminalForSelected,
+        Self::StartTerminalEscapeChord,
+        Self::QuitShell,
+        Self::FocusNextInbox,
+        Self::FocusPreviousInbox,
+        Self::CycleBatchNext,
+        Self::CycleBatchPrevious,
+        Self::JumpFirstInbox,
+        Self::JumpLastInbox,
+        Self::JumpBatchDecideOrUnblock,
+        Self::JumpBatchApprovals,
+        Self::JumpBatchReviewReady,
+        Self::JumpBatchFyiDigest,
+        Self::OpenFocusCard,
+        Self::MinimizeCenterView,
+    ];
+
     const fn id(self) -> &'static str {
         match self {
             Self::EnterNormalMode => "ui.mode.normal",
@@ -1096,32 +1240,48 @@ impl UiCommand {
         }
     }
 
-    fn from_id(id: &str) -> Option<Self> {
-        match id {
-            "ui.mode.normal" => Some(Self::EnterNormalMode),
-            "ui.mode.insert" => Some(Self::EnterInsertMode),
-            command_ids::UI_OPEN_TERMINAL_FOR_SELECTED => Some(Self::OpenTerminalForSelected),
-            "ui.mode.terminal_escape_prefix" => Some(Self::StartTerminalEscapeChord),
-            "ui.shell.quit" => Some(Self::QuitShell),
-            command_ids::UI_FOCUS_NEXT_INBOX => Some(Self::FocusNextInbox),
-            "ui.focus_previous_inbox" => Some(Self::FocusPreviousInbox),
-            "ui.cycle_batch_next" => Some(Self::CycleBatchNext),
-            "ui.cycle_batch_previous" => Some(Self::CycleBatchPrevious),
-            "ui.jump_first_inbox" => Some(Self::JumpFirstInbox),
-            "ui.jump_last_inbox" => Some(Self::JumpLastInbox),
-            "ui.jump_batch.decide_or_unblock" => Some(Self::JumpBatchDecideOrUnblock),
-            "ui.jump_batch.approvals" => Some(Self::JumpBatchApprovals),
-            "ui.jump_batch.review_ready" => Some(Self::JumpBatchReviewReady),
-            "ui.jump_batch.fyi_digest" => Some(Self::JumpBatchFyiDigest),
-            "ui.open_focus_card_for_selected" => Some(Self::OpenFocusCard),
-            "ui.center.pop" => Some(Self::MinimizeCenterView),
-            _ => None,
+    const fn description(self) -> &'static str {
+        match self {
+            Self::EnterNormalMode => "Return to Normal mode",
+            Self::EnterInsertMode => "Enter Insert mode",
+            Self::OpenTerminalForSelected => "Open terminal for selected item",
+            Self::StartTerminalEscapeChord => "Terminal escape chord (Ctrl-\\ Ctrl-n)",
+            Self::QuitShell => "Quit shell",
+            Self::FocusNextInbox => "Focus next inbox item",
+            Self::FocusPreviousInbox => "Focus previous inbox item",
+            Self::CycleBatchNext => "Cycle to next inbox lane",
+            Self::CycleBatchPrevious => "Cycle to previous inbox lane",
+            Self::JumpFirstInbox => "Jump to first inbox item",
+            Self::JumpLastInbox => "Jump to last inbox item",
+            Self::JumpBatchDecideOrUnblock => "Jump to Decide/Unblock lane",
+            Self::JumpBatchApprovals => "Jump to Approvals lane",
+            Self::JumpBatchReviewReady => "Jump to PR Reviews lane",
+            Self::JumpBatchFyiDigest => "Jump to FYI Digest lane",
+            Self::OpenFocusCard => "Open focus card for selected item",
+            Self::MinimizeCenterView => "Minimize active center view",
         }
+    }
+
+    fn from_id(id: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|command| command.id() == id)
     }
 
     fn is_registered(id: &str) -> bool {
         Self::from_id(id).is_some()
     }
+}
+
+fn describe_next_key_binding(hint: &keymap::PrefixHint) -> String {
+    if let Some(command_id) = hint.command_id.as_deref() {
+        return UiCommand::from_id(command_id)
+            .map(UiCommand::description)
+            .unwrap_or(command_id)
+            .to_owned();
+    }
+    if let Some(prefix_label) = hint.prefix_label.as_deref() {
+        return format!("{prefix_label} (prefix)");
+    }
+    "Prefix".to_owned()
 }
 
 fn default_keymap_config() -> KeymapConfig {
@@ -1248,11 +1408,20 @@ fn route_configured_mode_key(shell_state: &mut UiShellState, key: KeyEvent) -> R
         &mut shell_state.mode_key_buffer,
         key,
     ) {
-        KeymapLookupResult::Command { command_id } => UiCommand::from_id(command_id.as_str())
-            .map(RoutedInput::Command)
-            .unwrap_or(RoutedInput::Ignore),
-        KeymapLookupResult::Prefix { .. } => RoutedInput::Ignore,
-        KeymapLookupResult::InvalidPrefix | KeymapLookupResult::NoMatch => RoutedInput::Ignore,
+        KeymapLookupResult::Command { command_id } => {
+            shell_state.which_key_overlay = None;
+            UiCommand::from_id(command_id.as_str())
+                .map(RoutedInput::Command)
+                .unwrap_or(RoutedInput::Ignore)
+        }
+        KeymapLookupResult::Prefix { .. } => {
+            shell_state.refresh_which_key_overlay();
+            RoutedInput::Ignore
+        }
+        KeymapLookupResult::InvalidPrefix | KeymapLookupResult::NoMatch => {
+            shell_state.which_key_overlay = None;
+            RoutedInput::Ignore
+        }
     }
 }
 
@@ -2051,6 +2220,102 @@ mod tests {
             .kind
             .clone();
         assert_eq!(selected_kind, InboxItemKind::FYI);
+    }
+
+    #[test]
+    fn which_key_overlay_shows_next_keys_with_descriptions() {
+        let mut shell_state = UiShellState::new("ready".to_owned(), triage_projection());
+        let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
+
+        assert!(shell_state.which_key_overlay.is_none());
+        handle_key_press(&mut shell_state, key(KeyCode::Char('z')));
+
+        let overlay = shell_state
+            .which_key_overlay
+            .as_ref()
+            .expect("overlay is shown for valid prefix");
+        let rendered = render_which_key_overlay_text(overlay);
+        assert!(rendered.contains("z  (Batch jumps)"));
+        assert!(rendered.contains("1  Jump to Decide/Unblock lane"));
+        assert!(rendered.contains("2  Jump to Approvals lane"));
+        assert!(rendered.contains("3  Jump to PR Reviews lane"));
+        assert!(rendered.contains("4  Jump to FYI Digest lane"));
+    }
+
+    #[test]
+    fn which_key_overlay_clears_on_completion_invalid_and_cancel() {
+        let mut shell_state = UiShellState::new("ready".to_owned(), triage_projection());
+        let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
+
+        handle_key_press(&mut shell_state, key(KeyCode::Char('z')));
+        assert!(shell_state.which_key_overlay.is_some());
+
+        handle_key_press(&mut shell_state, key(KeyCode::Char('4')));
+        assert!(shell_state.which_key_overlay.is_none());
+
+        handle_key_press(&mut shell_state, key(KeyCode::Char('z')));
+        assert!(shell_state.which_key_overlay.is_some());
+        handle_key_press(&mut shell_state, key(KeyCode::Char('x')));
+        assert!(shell_state.which_key_overlay.is_none());
+        assert!(shell_state.mode_key_buffer.is_empty());
+
+        handle_key_press(&mut shell_state, key(KeyCode::Char('z')));
+        assert!(shell_state.which_key_overlay.is_some());
+        handle_key_press(&mut shell_state, key(KeyCode::Esc));
+        assert!(shell_state.which_key_overlay.is_none());
+    }
+
+    #[test]
+    fn which_key_overlay_popup_is_anchored_and_clamped() {
+        let anchor = Rect {
+            x: 10,
+            y: 5,
+            width: 24,
+            height: 8,
+        };
+        let content = "z  (Batch jumps)\n1  Jump to Decide/Unblock lane\n2  Jump to Approvals lane";
+        let popup = which_key_overlay_popup(anchor, content).expect("overlay popup");
+
+        assert!(popup.width <= anchor.width);
+        assert!(popup.height <= anchor.height);
+        assert_eq!(popup.x + popup.width, anchor.x + anchor.width);
+        assert_eq!(popup.y + popup.height, anchor.y + anchor.height);
+
+        let too_narrow = Rect {
+            x: 0,
+            y: 0,
+            width: 3,
+            height: 8,
+        };
+        assert!(which_key_overlay_popup(too_narrow, content).is_none());
+
+        let too_short = Rect {
+            x: 0,
+            y: 0,
+            width: 24,
+            height: 2,
+        };
+        assert!(which_key_overlay_popup(too_short, content).is_none());
+    }
+
+    #[test]
+    fn which_key_overlay_popup_handles_large_content_without_overflow() {
+        let anchor = Rect {
+            x: 0,
+            y: 0,
+            width: 32,
+            height: 12,
+        };
+
+        let very_wide = "x".repeat(70_000);
+        let popup = which_key_overlay_popup(anchor, very_wide.as_str()).expect("wide popup");
+        assert_eq!(popup.width, anchor.width);
+        assert_eq!(popup.height, 3);
+
+        let very_tall = "xx\n".repeat(70_000);
+        let popup = which_key_overlay_popup(anchor, very_tall.as_str()).expect("tall popup");
+        assert_eq!(popup.width, 4);
+        assert_eq!(popup.height, anchor.height);
     }
 
     #[test]
