@@ -8,4 +8,8 @@ pub enum CoreError {
     Configuration(String),
     #[error("persistence error: {0}")]
     Persistence(String),
+    #[error(
+        "unsupported database schema version {found}; this binary supports up to {supported}. Please upgrade orchestrator-core."
+    )]
+    UnsupportedSchemaVersion { supported: u32, found: u32 },
 }
