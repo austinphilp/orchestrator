@@ -69,6 +69,7 @@ impl<S: Supervisor, G: GithubClient> App<S, G> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use orchestrator_core::test_support::{with_env_var, TestDbPath};
 
     struct Healthy;
 
@@ -88,69 +89,46 @@ mod tests {
 
     #[test]
     fn config_defaults_when_env_missing() {
-        let original = std::env::var("ORCHESTRATOR_CONFIG").ok();
-        unsafe {
-            std::env::remove_var("ORCHESTRATOR_CONFIG");
-        }
-        let config = AppConfig::from_env().expect("default config");
-        assert_eq!(config, AppConfig::default());
-        if let Some(value) = original {
-            unsafe {
-                std::env::set_var("ORCHESTRATOR_CONFIG", value);
-            }
-        }
+        with_env_var("ORCHESTRATOR_CONFIG", None, || {
+            let config = AppConfig::from_env().expect("default config");
+            assert_eq!(config, AppConfig::default());
+        });
     }
 
     #[test]
     fn config_parses_from_toml_env() {
-        let original = std::env::var("ORCHESTRATOR_CONFIG").ok();
-        unsafe {
-            std::env::set_var(
-                "ORCHESTRATOR_CONFIG",
-                "workspace = '/tmp/work'\nevent_store_path = '/tmp/events.db'",
-            );
-        }
-        let config = AppConfig::from_env().expect("parse config");
-        assert_eq!(config.workspace, "/tmp/work");
-        assert_eq!(config.event_store_path, "/tmp/events.db");
-        match original {
-            Some(value) => unsafe {
-                std::env::set_var("ORCHESTRATOR_CONFIG", value);
+        with_env_var(
+            "ORCHESTRATOR_CONFIG",
+            Some("workspace = '/tmp/work'\nevent_store_path = '/tmp/events.db'"),
+            || {
+                let config = AppConfig::from_env().expect("parse config");
+                assert_eq!(config.workspace, "/tmp/work");
+                assert_eq!(config.event_store_path, "/tmp/events.db");
             },
-            None => unsafe {
-                std::env::remove_var("ORCHESTRATOR_CONFIG");
-            },
-        }
+        );
     }
 
     #[test]
     fn config_defaults_event_store_path_when_missing_in_toml_env() {
-        let original = std::env::var("ORCHESTRATOR_CONFIG").ok();
-        unsafe {
-            std::env::set_var("ORCHESTRATOR_CONFIG", "workspace = '/tmp/work'");
-        }
-        let config = AppConfig::from_env().expect("parse config");
-        assert_eq!(config.workspace, "/tmp/work");
-        assert_eq!(config.event_store_path, default_event_store_path());
-        match original {
-            Some(value) => unsafe {
-                std::env::set_var("ORCHESTRATOR_CONFIG", value);
+        with_env_var(
+            "ORCHESTRATOR_CONFIG",
+            Some("workspace = '/tmp/work'"),
+            || {
+                let config = AppConfig::from_env().expect("parse config");
+                assert_eq!(config.workspace, "/tmp/work");
+                assert_eq!(config.event_store_path, default_event_store_path());
             },
-            None => unsafe {
-                std::env::remove_var("ORCHESTRATOR_CONFIG");
-            },
-        }
+        );
     }
 
     #[tokio::test]
     async fn startup_composition_succeeds_with_mock_adapters() {
-        let temp_path = std::env::temp_dir().join("orchestrator-app-startup-test.db");
-        let _ = std::fs::remove_file(&temp_path);
+        let temp_db = TestDbPath::new("app-startup-test");
 
         let app = App {
             config: AppConfig {
                 workspace: "./".to_owned(),
-                event_store_path: temp_path.to_string_lossy().to_string(),
+                event_store_path: temp_db.path().to_string_lossy().to_string(),
             },
             supervisor: Healthy,
             github: Healthy,
@@ -159,6 +137,5 @@ mod tests {
         let state = app.startup_state().await.expect("startup state");
         assert!(state.status.contains("ready"));
         assert!(state.projection.events.is_empty());
-        let _ = std::fs::remove_file(temp_path);
     }
 }

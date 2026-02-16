@@ -6,6 +6,8 @@ mod identifiers;
 mod projection;
 mod status;
 mod store;
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_support;
 
 pub use adapters::{
     AddTicketCommentRequest, BackendArtifactEvent, BackendBlockedEvent, BackendCapabilities,
