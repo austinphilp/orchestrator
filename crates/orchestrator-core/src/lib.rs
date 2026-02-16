@@ -42,8 +42,9 @@ pub use projection::{
 };
 pub use status::{ArtifactKind, InboxItemKind, WorkerSessionStatus, WorkflowState};
 pub use store::{
-    ArtifactRecord, EventStore, RetrievalScope, SqliteEventStore, StoredEventWithArtifacts,
-    TicketRecord, TicketWorkItemMapping,
+    ArtifactRecord, EventStore, RetrievalScope, RuntimeMappingRecord, SessionRecord,
+    SqliteEventStore, StoredEventWithArtifacts, TicketRecord, TicketWorkItemMapping,
+    WorktreeRecord,
 };
 
 #[cfg(test)]

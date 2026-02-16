@@ -3,12 +3,13 @@ use std::path::Path;
 use rusqlite::{params, Connection, OptionalExtension, Transaction};
 use serde_json::Value;
 
+use crate::adapters::BackendKind;
 use crate::error::CoreError;
 use crate::events::{NewEventEnvelope, OrchestrationEventPayload, StoredEventEnvelope};
 use crate::identifiers::{ArtifactId, TicketId, TicketProvider, WorkItemId, WorkerSessionId};
-use crate::status::ArtifactKind;
+use crate::status::{ArtifactKind, WorkerSessionStatus};
 
-const CURRENT_SCHEMA_VERSION: u32 = 1;
+const CURRENT_SCHEMA_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RetrievalScope {
@@ -32,6 +33,36 @@ pub struct TicketRecord {
 pub struct TicketWorkItemMapping {
     pub ticket_id: TicketId,
     pub work_item_id: WorkItemId,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorktreeRecord {
+    pub worktree_id: crate::identifiers::WorktreeId,
+    pub work_item_id: WorkItemId,
+    pub path: String,
+    pub branch: String,
+    pub base_branch: String,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionRecord {
+    pub session_id: WorkerSessionId,
+    pub work_item_id: WorkItemId,
+    pub backend_kind: BackendKind,
+    pub workdir: String,
+    pub model: Option<String>,
+    pub status: WorkerSessionStatus,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeMappingRecord {
+    pub ticket: TicketRecord,
+    pub work_item_id: WorkItemId,
+    pub worktree: WorktreeRecord,
+    pub session: SessionRecord,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -143,6 +174,8 @@ impl SqliteEventStore {
     }
 
     pub fn upsert_ticket(&self, ticket: &TicketRecord) -> Result<(), CoreError> {
+        validate_ticket_identity(ticket)?;
+
         self.conn
             .execute(
                 "
@@ -176,6 +209,8 @@ impl SqliteEventStore {
         &self,
         mapping: &TicketWorkItemMapping,
     ) -> Result<(), CoreError> {
+        self.ensure_ticket_work_item_pairing(&mapping.ticket_id, &mapping.work_item_id)?;
+
         self.conn
             .execute(
                 "
@@ -189,6 +224,359 @@ impl SqliteEventStore {
             .map_err(|err| CoreError::Persistence(err.to_string()))?;
 
         Ok(())
+    }
+
+    pub fn upsert_worktree(&self, worktree: &WorktreeRecord) -> Result<(), CoreError> {
+        self.conn
+            .execute(
+                "
+                INSERT INTO worktrees (
+                    worktree_id, work_item_id, path, branch, base_branch, created_at
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                ON CONFLICT(work_item_id) DO UPDATE SET
+                    worktree_id = excluded.worktree_id,
+                    work_item_id = excluded.work_item_id,
+                    path = excluded.path,
+                    branch = excluded.branch,
+                    base_branch = excluded.base_branch,
+                    created_at = excluded.created_at
+                ",
+                params![
+                    worktree.worktree_id.as_str(),
+                    worktree.work_item_id.as_str(),
+                    worktree.path,
+                    worktree.branch,
+                    worktree.base_branch,
+                    worktree.created_at,
+                ],
+            )
+            .map_err(|err| CoreError::Persistence(err.to_string()))?;
+
+        Ok(())
+    }
+
+    pub fn find_worktree_by_work_item(
+        &self,
+        work_item_id: &WorkItemId,
+    ) -> Result<Option<WorktreeRecord>, CoreError> {
+        self.conn
+            .query_row(
+                "
+                SELECT worktree_id, work_item_id, path, branch, base_branch, created_at
+                FROM worktrees
+                WHERE work_item_id = ?1
+                ",
+                params![work_item_id.as_str()],
+                |row| {
+                    Ok(WorktreeRecord {
+                        worktree_id: row.get::<_, String>(0)?.into(),
+                        work_item_id: row.get::<_, String>(1)?.into(),
+                        path: row.get(2)?,
+                        branch: row.get(3)?,
+                        base_branch: row.get(4)?,
+                        created_at: row.get(5)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(|err| CoreError::Persistence(err.to_string()))
+    }
+
+    pub fn upsert_session(&self, session: &SessionRecord) -> Result<(), CoreError> {
+        self.conn
+            .execute(
+                "
+                INSERT INTO sessions (
+                    session_id, work_item_id, backend_kind, workdir, model, status, created_at, updated_at
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+                ON CONFLICT(work_item_id) DO UPDATE SET
+                    session_id = excluded.session_id,
+                    work_item_id = excluded.work_item_id,
+                    backend_kind = excluded.backend_kind,
+                    workdir = excluded.workdir,
+                    model = excluded.model,
+                    status = excluded.status,
+                    created_at = excluded.created_at,
+                    updated_at = excluded.updated_at
+                ",
+                params![
+                    session.session_id.as_str(),
+                    session.work_item_id.as_str(),
+                    backend_kind_to_json(&session.backend_kind)?,
+                    session.workdir,
+                    session.model,
+                    session_status_to_json(&session.status)?,
+                    session.created_at,
+                    session.updated_at,
+                ],
+            )
+            .map_err(|err| CoreError::Persistence(err.to_string()))?;
+
+        Ok(())
+    }
+
+    pub fn find_session_by_work_item(
+        &self,
+        work_item_id: &WorkItemId,
+    ) -> Result<Option<SessionRecord>, CoreError> {
+        self.conn
+            .query_row(
+                "
+                SELECT session_id, work_item_id, backend_kind, workdir, model, status, created_at, updated_at
+                FROM sessions
+                WHERE work_item_id = ?1
+                ",
+                params![work_item_id.as_str()],
+                |row| {
+                    Ok(SessionRecord {
+                        session_id: row.get::<_, String>(0)?.into(),
+                        work_item_id: row.get::<_, String>(1)?.into(),
+                        backend_kind: str_to_backend_kind(&row.get::<_, String>(2)?)?,
+                        workdir: row.get(3)?,
+                        model: row.get(4)?,
+                        status: str_to_session_status(&row.get::<_, String>(5)?)?,
+                        created_at: row.get(6)?,
+                        updated_at: row.get(7)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(|err| CoreError::Persistence(err.to_string()))
+    }
+
+    pub fn upsert_runtime_mapping(
+        &mut self,
+        mapping: &RuntimeMappingRecord,
+    ) -> Result<(), CoreError> {
+        validate_ticket_identity(&mapping.ticket)?;
+
+        if mapping.work_item_id != mapping.worktree.work_item_id {
+            return Err(CoreError::Persistence(
+                "runtime mapping worktree.work_item_id does not match work_item_id".to_owned(),
+            ));
+        }
+        if mapping.work_item_id != mapping.session.work_item_id {
+            return Err(CoreError::Persistence(
+                "runtime mapping session.work_item_id does not match work_item_id".to_owned(),
+            ));
+        }
+        if mapping.worktree.path != mapping.session.workdir {
+            return Err(CoreError::Persistence(
+                "runtime mapping session.workdir does not match worktree.path".to_owned(),
+            ));
+        }
+
+        self.ensure_ticket_work_item_pairing(&mapping.ticket.ticket_id, &mapping.work_item_id)?;
+
+        let tx = self
+            .conn
+            .transaction()
+            .map_err(|err| CoreError::Persistence(err.to_string()))?;
+
+        Self::upsert_ticket_tx(&tx, &mapping.ticket)?;
+        Self::map_ticket_to_work_item_tx(
+            &tx,
+            &TicketWorkItemMapping {
+                ticket_id: mapping.ticket.ticket_id.clone(),
+                work_item_id: mapping.work_item_id.clone(),
+            },
+        )?;
+        Self::upsert_worktree_tx(&tx, &mapping.worktree)?;
+        Self::upsert_session_tx(&tx, &mapping.session)?;
+
+        tx.commit()
+            .map_err(|err| CoreError::Persistence(err.to_string()))?;
+
+        Ok(())
+    }
+
+    pub fn find_runtime_mapping_by_ticket(
+        &self,
+        provider: &TicketProvider,
+        provider_ticket_id: &str,
+    ) -> Result<Option<RuntimeMappingRecord>, CoreError> {
+        self.conn
+            .query_row(
+                "
+                SELECT
+                    t.ticket_id,
+                    t.provider,
+                    t.provider_ticket_id,
+                    t.identifier,
+                    t.title,
+                    t.state,
+                    t.updated_at,
+                    wi.work_item_id,
+                    wt.worktree_id,
+                    wt.path,
+                    wt.branch,
+                    wt.base_branch,
+                    wt.created_at,
+                    s.session_id,
+                    s.backend_kind,
+                    s.workdir,
+                    s.model,
+                    s.status,
+                    s.created_at,
+                    s.updated_at
+                FROM work_items wi
+                JOIN tickets t ON t.ticket_id = wi.ticket_id
+                JOIN worktrees wt ON wt.work_item_id = wi.work_item_id
+                JOIN sessions s ON s.work_item_id = wi.work_item_id
+                WHERE t.provider = ?1 AND t.provider_ticket_id = ?2
+                ",
+                params![provider_to_str(provider), provider_ticket_id],
+                |row| Self::map_runtime_mapping_row(row),
+            )
+            .optional()
+            .map_err(|err| CoreError::Persistence(err.to_string()))
+    }
+
+    pub fn find_inflight_runtime_mapping_by_ticket(
+        &self,
+        provider: &TicketProvider,
+        provider_ticket_id: &str,
+    ) -> Result<Option<RuntimeMappingRecord>, CoreError> {
+        let running = session_status_to_json(&WorkerSessionStatus::Running)?;
+        let waiting_for_user = session_status_to_json(&WorkerSessionStatus::WaitingForUser)?;
+        let blocked = session_status_to_json(&WorkerSessionStatus::Blocked)?;
+
+        self.conn
+            .query_row(
+                "
+                SELECT
+                    t.ticket_id,
+                    t.provider,
+                    t.provider_ticket_id,
+                    t.identifier,
+                    t.title,
+                    t.state,
+                    t.updated_at,
+                    wi.work_item_id,
+                    wt.worktree_id,
+                    wt.path,
+                    wt.branch,
+                    wt.base_branch,
+                    wt.created_at,
+                    s.session_id,
+                    s.backend_kind,
+                    s.workdir,
+                    s.model,
+                    s.status,
+                    s.created_at,
+                    s.updated_at
+                FROM work_items wi
+                JOIN tickets t ON t.ticket_id = wi.ticket_id
+                JOIN worktrees wt ON wt.work_item_id = wi.work_item_id
+                JOIN sessions s ON s.work_item_id = wi.work_item_id
+                WHERE t.provider = ?1
+                  AND t.provider_ticket_id = ?2
+                  AND s.status IN (?3, ?4, ?5)
+                ",
+                params![
+                    provider_to_str(provider),
+                    provider_ticket_id,
+                    running,
+                    waiting_for_user,
+                    blocked
+                ],
+                |row| Self::map_runtime_mapping_row(row),
+            )
+            .optional()
+            .map_err(|err| CoreError::Persistence(err.to_string()))
+    }
+
+    pub fn list_runtime_mappings(&self) -> Result<Vec<RuntimeMappingRecord>, CoreError> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "
+                SELECT
+                    t.ticket_id,
+                    t.provider,
+                    t.provider_ticket_id,
+                    t.identifier,
+                    t.title,
+                    t.state,
+                    t.updated_at,
+                    wi.work_item_id,
+                    wt.worktree_id,
+                    wt.path,
+                    wt.branch,
+                    wt.base_branch,
+                    wt.created_at,
+                    s.session_id,
+                    s.backend_kind,
+                    s.workdir,
+                    s.model,
+                    s.status,
+                    s.created_at,
+                    s.updated_at
+                FROM work_items wi
+                JOIN tickets t ON t.ticket_id = wi.ticket_id
+                JOIN worktrees wt ON wt.work_item_id = wi.work_item_id
+                JOIN sessions s ON s.work_item_id = wi.work_item_id
+                ORDER BY t.identifier ASC
+                ",
+            )
+            .map_err(|err| CoreError::Persistence(err.to_string()))?;
+
+        let rows = stmt
+            .query_map([], |row| Self::map_runtime_mapping_row(row))
+            .map_err(|err| CoreError::Persistence(err.to_string()))?;
+
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|err| CoreError::Persistence(err.to_string()))
+    }
+
+    pub fn list_inflight_runtime_mappings(&self) -> Result<Vec<RuntimeMappingRecord>, CoreError> {
+        let running = session_status_to_json(&WorkerSessionStatus::Running)?;
+        let waiting_for_user = session_status_to_json(&WorkerSessionStatus::WaitingForUser)?;
+        let blocked = session_status_to_json(&WorkerSessionStatus::Blocked)?;
+
+        let mut stmt = self
+            .conn
+            .prepare(
+                "
+                SELECT
+                    t.ticket_id,
+                    t.provider,
+                    t.provider_ticket_id,
+                    t.identifier,
+                    t.title,
+                    t.state,
+                    t.updated_at,
+                    wi.work_item_id,
+                    wt.worktree_id,
+                    wt.path,
+                    wt.branch,
+                    wt.base_branch,
+                    wt.created_at,
+                    s.session_id,
+                    s.backend_kind,
+                    s.workdir,
+                    s.model,
+                    s.status,
+                    s.created_at,
+                    s.updated_at
+                FROM work_items wi
+                JOIN tickets t ON t.ticket_id = wi.ticket_id
+                JOIN worktrees wt ON wt.work_item_id = wi.work_item_id
+                JOIN sessions s ON s.work_item_id = wi.work_item_id
+                WHERE s.status IN (?1, ?2, ?3)
+                ORDER BY t.identifier ASC
+                ",
+            )
+            .map_err(|err| CoreError::Persistence(err.to_string()))?;
+
+        let rows = stmt
+            .query_map(params![running, waiting_for_user, blocked], |row| {
+                Self::map_runtime_mapping_row(row)
+            })
+            .map_err(|err| CoreError::Persistence(err.to_string()))?;
+
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|err| CoreError::Persistence(err.to_string()))
     }
 
     pub fn find_work_item_by_ticket(
@@ -380,6 +768,28 @@ impl SqliteEventStore {
                     FOREIGN KEY(work_item_id) REFERENCES work_items(work_item_id)
                 );
 
+                CREATE TABLE IF NOT EXISTS worktrees (
+                    worktree_id TEXT PRIMARY KEY,
+                    work_item_id TEXT NOT NULL UNIQUE,
+                    path TEXT NOT NULL,
+                    branch TEXT NOT NULL,
+                    base_branch TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    FOREIGN KEY(work_item_id) REFERENCES work_items(work_item_id)
+                );
+
+                CREATE TABLE IF NOT EXISTS sessions (
+                    session_id TEXT PRIMARY KEY,
+                    work_item_id TEXT NOT NULL UNIQUE,
+                    backend_kind TEXT NOT NULL,
+                    workdir TEXT NOT NULL,
+                    model TEXT,
+                    status TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    FOREIGN KEY(work_item_id) REFERENCES work_items(work_item_id)
+                );
+
                 CREATE TABLE IF NOT EXISTS event_artifact_refs (
                     event_id TEXT NOT NULL,
                     artifact_id TEXT NOT NULL,
@@ -392,6 +802,9 @@ impl SqliteEventStore {
                 CREATE INDEX IF NOT EXISTS idx_events_session ON events(session_id, sequence DESC);
                 CREATE INDEX IF NOT EXISTS idx_tickets_provider_lookup ON tickets(provider, provider_ticket_id);
                 CREATE INDEX IF NOT EXISTS idx_event_artifact_refs_event ON event_artifact_refs(event_id);
+                CREATE INDEX IF NOT EXISTS idx_worktrees_work_item_lookup ON worktrees(work_item_id);
+                CREATE INDEX IF NOT EXISTS idx_sessions_work_item_lookup ON sessions(work_item_id);
+                CREATE INDEX IF NOT EXISTS idx_sessions_status_lookup ON sessions(status);
                 ",
             )
             .map_err(|err| CoreError::Persistence(err.to_string()))?;
@@ -489,10 +902,255 @@ impl SqliteEventStore {
                     ",
                 )
                 .map_err(|err| CoreError::Persistence(err.to_string())),
+            2 => tx
+                .execute_batch(
+                    "
+                    CREATE TABLE worktrees (
+                        worktree_id TEXT PRIMARY KEY,
+                        work_item_id TEXT NOT NULL UNIQUE,
+                        path TEXT NOT NULL,
+                        branch TEXT NOT NULL,
+                        base_branch TEXT NOT NULL,
+                        created_at TEXT NOT NULL,
+                        FOREIGN KEY(work_item_id) REFERENCES work_items(work_item_id)
+                    );
+
+                    CREATE TABLE sessions (
+                        session_id TEXT PRIMARY KEY,
+                        work_item_id TEXT NOT NULL UNIQUE,
+                        backend_kind TEXT NOT NULL,
+                        workdir TEXT NOT NULL,
+                        model TEXT,
+                        status TEXT NOT NULL,
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL,
+                        FOREIGN KEY(work_item_id) REFERENCES work_items(work_item_id)
+                    );
+
+                    CREATE INDEX idx_worktrees_work_item_lookup ON worktrees(work_item_id);
+                    CREATE INDEX idx_sessions_work_item_lookup ON sessions(work_item_id);
+                    CREATE INDEX idx_sessions_status_lookup ON sessions(status);
+                    ",
+                )
+                .map_err(|err| CoreError::Persistence(err.to_string())),
             _ => Err(CoreError::Persistence(format!(
                 "no migration implementation for version {version}"
             ))),
         }
+    }
+
+    fn ensure_ticket_work_item_pairing(
+        &self,
+        ticket_id: &TicketId,
+        work_item_id: &WorkItemId,
+    ) -> Result<(), CoreError> {
+        if let Some(existing_work_item_id) = self.find_work_item_id_by_ticket_id(ticket_id)? {
+            if existing_work_item_id != *work_item_id {
+                return Err(CoreError::Persistence(format!(
+                    "ticket_id '{}' is already mapped to work_item_id '{}'",
+                    ticket_id.as_str(),
+                    existing_work_item_id.as_str()
+                )));
+            }
+        }
+
+        if let Some(existing_ticket_id) = self.find_ticket_id_by_work_item_id(work_item_id)? {
+            if existing_ticket_id != *ticket_id {
+                return Err(CoreError::Persistence(format!(
+                    "work_item_id '{}' is already mapped to ticket_id '{}'",
+                    work_item_id.as_str(),
+                    existing_ticket_id.as_str()
+                )));
+            }
+        }
+
+        Ok(())
+    }
+
+    fn find_work_item_id_by_ticket_id(
+        &self,
+        ticket_id: &TicketId,
+    ) -> Result<Option<WorkItemId>, CoreError> {
+        self.conn
+            .query_row(
+                "
+                SELECT work_item_id
+                FROM work_items
+                WHERE ticket_id = ?1
+                ",
+                params![ticket_id.as_str()],
+                |row| row.get::<_, String>(0).map(WorkItemId::from),
+            )
+            .optional()
+            .map_err(|err| CoreError::Persistence(err.to_string()))
+    }
+
+    fn find_ticket_id_by_work_item_id(
+        &self,
+        work_item_id: &WorkItemId,
+    ) -> Result<Option<TicketId>, CoreError> {
+        self.conn
+            .query_row(
+                "
+                SELECT ticket_id
+                FROM work_items
+                WHERE work_item_id = ?1
+                ",
+                params![work_item_id.as_str()],
+                |row| row.get::<_, String>(0).map(TicketId::from),
+            )
+            .optional()
+            .map_err(|err| CoreError::Persistence(err.to_string()))
+    }
+
+    fn upsert_ticket_tx(tx: &Transaction<'_>, ticket: &TicketRecord) -> Result<(), CoreError> {
+        validate_ticket_identity(ticket)?;
+
+        tx.execute(
+            "
+            INSERT INTO tickets (
+                ticket_id, provider, provider_ticket_id, identifier, title, state, updated_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+            ON CONFLICT(ticket_id) DO UPDATE SET
+                provider = excluded.provider,
+                provider_ticket_id = excluded.provider_ticket_id,
+                identifier = excluded.identifier,
+                title = excluded.title,
+                state = excluded.state,
+                updated_at = excluded.updated_at
+            ",
+            params![
+                ticket.ticket_id.as_str(),
+                provider_to_str(&ticket.provider),
+                ticket.provider_ticket_id,
+                ticket.identifier,
+                ticket.title,
+                ticket.state,
+                ticket.updated_at,
+            ],
+        )
+        .map_err(|err| CoreError::Persistence(err.to_string()))?;
+
+        Ok(())
+    }
+
+    fn map_ticket_to_work_item_tx(
+        tx: &Transaction<'_>,
+        mapping: &TicketWorkItemMapping,
+    ) -> Result<(), CoreError> {
+        tx.execute(
+            "
+            INSERT INTO work_items (work_item_id, ticket_id, created_at)
+            VALUES (?1, ?2, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+            ON CONFLICT(work_item_id) DO UPDATE SET
+                ticket_id = excluded.ticket_id
+            ",
+            params![mapping.work_item_id.as_str(), mapping.ticket_id.as_str()],
+        )
+        .map_err(|err| CoreError::Persistence(err.to_string()))?;
+
+        Ok(())
+    }
+
+    fn upsert_worktree_tx(
+        tx: &Transaction<'_>,
+        worktree: &WorktreeRecord,
+    ) -> Result<(), CoreError> {
+        tx.execute(
+            "
+            INSERT INTO worktrees (
+                worktree_id, work_item_id, path, branch, base_branch, created_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+            ON CONFLICT(work_item_id) DO UPDATE SET
+                worktree_id = excluded.worktree_id,
+                work_item_id = excluded.work_item_id,
+                path = excluded.path,
+                branch = excluded.branch,
+                base_branch = excluded.base_branch,
+                created_at = excluded.created_at
+            ",
+            params![
+                worktree.worktree_id.as_str(),
+                worktree.work_item_id.as_str(),
+                worktree.path,
+                worktree.branch,
+                worktree.base_branch,
+                worktree.created_at,
+            ],
+        )
+        .map_err(|err| CoreError::Persistence(err.to_string()))?;
+
+        Ok(())
+    }
+
+    fn upsert_session_tx(tx: &Transaction<'_>, session: &SessionRecord) -> Result<(), CoreError> {
+        tx.execute(
+            "
+            INSERT INTO sessions (
+                session_id, work_item_id, backend_kind, workdir, model, status, created_at, updated_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+            ON CONFLICT(work_item_id) DO UPDATE SET
+                session_id = excluded.session_id,
+                work_item_id = excluded.work_item_id,
+                backend_kind = excluded.backend_kind,
+                workdir = excluded.workdir,
+                model = excluded.model,
+                status = excluded.status,
+                created_at = excluded.created_at,
+                updated_at = excluded.updated_at
+            ",
+            params![
+                session.session_id.as_str(),
+                session.work_item_id.as_str(),
+                backend_kind_to_json(&session.backend_kind)?,
+                session.workdir,
+                session.model,
+                session_status_to_json(&session.status)?,
+                session.created_at,
+                session.updated_at,
+            ],
+        )
+        .map_err(|err| CoreError::Persistence(err.to_string()))?;
+
+        Ok(())
+    }
+
+    fn map_runtime_mapping_row(
+        row: &rusqlite::Row<'_>,
+    ) -> Result<RuntimeMappingRecord, rusqlite::Error> {
+        let ticket = TicketRecord {
+            ticket_id: row.get::<_, String>(0)?.into(),
+            provider: str_to_provider(&row.get::<_, String>(1)?)?,
+            provider_ticket_id: row.get(2)?,
+            identifier: row.get(3)?,
+            title: row.get(4)?,
+            state: row.get(5)?,
+            updated_at: row.get(6)?,
+        };
+        let work_item_id: WorkItemId = row.get::<_, String>(7)?.into();
+
+        Ok(RuntimeMappingRecord {
+            ticket,
+            work_item_id: work_item_id.clone(),
+            worktree: WorktreeRecord {
+                worktree_id: row.get::<_, String>(8)?.into(),
+                work_item_id: work_item_id.clone(),
+                path: row.get(9)?,
+                branch: row.get(10)?,
+                base_branch: row.get(11)?,
+                created_at: row.get(12)?,
+            },
+            session: SessionRecord {
+                session_id: row.get::<_, String>(13)?.into(),
+                work_item_id,
+                backend_kind: str_to_backend_kind(&row.get::<_, String>(14)?)?,
+                workdir: row.get(15)?,
+                model: row.get(16)?,
+                status: str_to_session_status(&row.get::<_, String>(17)?)?,
+                created_at: row.get(18)?,
+                updated_at: row.get(19)?,
+            },
+        })
     }
 
     fn append_event_tx(
@@ -710,6 +1368,38 @@ fn str_to_provider(value: &str) -> Result<TicketProvider, rusqlite::Error> {
             "unknown ticket provider: {other}"
         )))),
     }
+}
+
+fn validate_ticket_identity(ticket: &TicketRecord) -> Result<(), CoreError> {
+    let expected =
+        TicketId::from_provider_uuid(ticket.provider.clone(), &ticket.provider_ticket_id);
+    if ticket.ticket_id == expected {
+        return Ok(());
+    }
+
+    Err(CoreError::Persistence(format!(
+        "ticket_id '{}' does not match canonical id '{}' for provider '{}' and provider_ticket_id '{}'",
+        ticket.ticket_id.as_str(),
+        expected.as_str(),
+        provider_to_str(&ticket.provider),
+        ticket.provider_ticket_id
+    )))
+}
+
+fn backend_kind_to_json(kind: &BackendKind) -> Result<String, CoreError> {
+    serde_json::to_string(kind).map_err(|err| CoreError::Persistence(err.to_string()))
+}
+
+fn str_to_backend_kind(value: &str) -> Result<BackendKind, rusqlite::Error> {
+    serde_json::from_str(value).map_err(to_from_sql_error)
+}
+
+fn session_status_to_json(status: &WorkerSessionStatus) -> Result<String, CoreError> {
+    serde_json::to_string(status).map_err(|err| CoreError::Persistence(err.to_string()))
+}
+
+fn str_to_session_status(value: &str) -> Result<WorkerSessionStatus, rusqlite::Error> {
+    serde_json::from_str(value).map_err(to_from_sql_error)
 }
 
 fn to_from_sql_error<E>(err: E) -> rusqlite::Error
