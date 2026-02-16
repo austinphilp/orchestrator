@@ -1,12 +1,13 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, SystemTime};
 
 use async_trait::async_trait;
 use orchestrator_core::{
-    AddTicketCommentRequest, CoreError, CreateTicketRequest, TicketId, TicketProvider, TicketQuery,
-    TicketSummary, TicketingProvider, UpdateTicketStateRequest,
+    AddTicketCommentRequest, CoreError, CreateTicketRequest, TicketAttachment, TicketId,
+    TicketProvider, TicketQuery, TicketSummary, TicketingProvider, UpdateTicketStateRequest,
+    WorkflowState,
 };
 use serde::Deserialize;
 use serde_json::json;
@@ -17,6 +18,8 @@ use tracing::warn;
 const DEFAULT_LINEAR_API_URL: &str = "https://api.linear.app/graphql";
 const DEFAULT_SYNC_INTERVAL_SECS: u64 = 60;
 const DEFAULT_FETCH_LIMIT: u32 = 100;
+const DEFAULT_WORKFLOW_COMMENT_SUMMARIES: bool = false;
+const DEFAULT_WORKFLOW_ATTACH_PR_LINKS: bool = true;
 
 const LIST_OPEN_ISSUES_QUERY: &str = r#"
 query ListOpenIssues($first: Int!) {
@@ -64,6 +67,112 @@ query ViewerHealth {
 }
 "#;
 
+const ISSUE_TEAM_STATES_QUERY: &str = r#"
+query IssueTeamStates($id: String!) {
+  issue(id: $id) {
+    id
+    team {
+      states {
+        nodes {
+          id
+          name
+        }
+      }
+    }
+  }
+}
+"#;
+
+const UPDATE_ISSUE_STATE_MUTATION: &str = r#"
+mutation UpdateIssueState($id: String!, $stateId: String!) {
+  issueUpdate(id: $id, input: { stateId: $stateId }) {
+    success
+  }
+}
+"#;
+
+const COMMENT_CREATE_MUTATION: &str = r#"
+mutation CommentCreate($issueId: String!, $body: String!) {
+  commentCreate(input: { issueId: $issueId, body: $body }) {
+    success
+  }
+}
+"#;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkflowStateMapping {
+    pub workflow_state: WorkflowState,
+    pub linear_state: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LinearWorkflowSyncConfig {
+    pub state_mappings: Vec<WorkflowStateMapping>,
+    pub comment_summaries: bool,
+    pub attach_pr_links: bool,
+}
+
+impl Default for LinearWorkflowSyncConfig {
+    fn default() -> Self {
+        Self {
+            state_mappings: vec![
+                WorkflowStateMapping {
+                    workflow_state: WorkflowState::Implementing,
+                    linear_state: "In Progress".to_owned(),
+                },
+                WorkflowStateMapping {
+                    workflow_state: WorkflowState::Testing,
+                    linear_state: "In Progress".to_owned(),
+                },
+                WorkflowStateMapping {
+                    workflow_state: WorkflowState::PRDrafted,
+                    linear_state: "In Review".to_owned(),
+                },
+                WorkflowStateMapping {
+                    workflow_state: WorkflowState::AwaitingYourReview,
+                    linear_state: "In Review".to_owned(),
+                },
+                WorkflowStateMapping {
+                    workflow_state: WorkflowState::ReadyForReview,
+                    linear_state: "In Review".to_owned(),
+                },
+                WorkflowStateMapping {
+                    workflow_state: WorkflowState::InReview,
+                    linear_state: "In Review".to_owned(),
+                },
+                WorkflowStateMapping {
+                    workflow_state: WorkflowState::Done,
+                    linear_state: "Done".to_owned(),
+                },
+                WorkflowStateMapping {
+                    workflow_state: WorkflowState::Abandoned,
+                    linear_state: "Canceled".to_owned(),
+                },
+            ],
+            comment_summaries: DEFAULT_WORKFLOW_COMMENT_SUMMARIES,
+            attach_pr_links: DEFAULT_WORKFLOW_ATTACH_PR_LINKS,
+        }
+    }
+}
+
+impl LinearWorkflowSyncConfig {
+    fn linear_state_for(&self, workflow_state: &WorkflowState) -> Option<&str> {
+        self.state_mappings
+            .iter()
+            .find(|entry| &entry.workflow_state == workflow_state)
+            .map(|entry| entry.linear_state.as_str())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LinearWorkflowTransitionSyncRequest {
+    pub ticket_id: TicketId,
+    pub from: WorkflowState,
+    pub to: WorkflowState,
+    pub summary: Option<String>,
+    pub pull_request_url: Option<String>,
+}
+
 #[derive(Clone)]
 pub struct LinearConfig {
     pub api_url: String,
@@ -71,6 +180,7 @@ pub struct LinearConfig {
     pub poll_interval: Duration,
     pub sync_query: TicketQuery,
     pub fetch_limit: u32,
+    pub workflow_sync: LinearWorkflowSyncConfig,
 }
 
 impl fmt::Debug for LinearConfig {
@@ -82,6 +192,7 @@ impl fmt::Debug for LinearConfig {
             .field("poll_interval", &self.poll_interval)
             .field("sync_query", &self.sync_query)
             .field("fetch_limit", &self.fetch_limit)
+            .field("workflow_sync", &self.workflow_sync)
             .finish()
     }
 }
@@ -99,6 +210,7 @@ impl Default for LinearConfig {
                 limit: Some(DEFAULT_FETCH_LIMIT),
             },
             fetch_limit: DEFAULT_FETCH_LIMIT,
+            workflow_sync: LinearWorkflowSyncConfig::default(),
         }
     }
 }
@@ -157,6 +269,17 @@ impl LinearConfig {
                 .map(ToOwned::to_owned)
                 .collect();
         }
+        if let Ok(raw_mapping) = std::env::var("ORCHESTRATOR_LINEAR_WORKFLOW_STATE_MAP") {
+            config.workflow_sync.state_mappings = parse_workflow_state_map_env(&raw_mapping)?;
+        }
+        if let Ok(raw) = std::env::var("ORCHESTRATOR_LINEAR_WORKFLOW_COMMENT_SUMMARIES") {
+            config.workflow_sync.comment_summaries =
+                parse_bool_env("ORCHESTRATOR_LINEAR_WORKFLOW_COMMENT_SUMMARIES", &raw)?;
+        }
+        if let Ok(raw) = std::env::var("ORCHESTRATOR_LINEAR_WORKFLOW_ATTACH_PR_LINKS") {
+            config.workflow_sync.attach_pr_links =
+                parse_bool_env("ORCHESTRATOR_LINEAR_WORKFLOW_ATTACH_PR_LINKS", &raw)?;
+        }
 
         Ok(config)
     }
@@ -185,6 +308,92 @@ fn parse_sync_interval_secs(value: &str) -> Result<Duration, CoreError> {
     }
 
     Ok(Duration::from_secs(seconds))
+}
+
+fn parse_workflow_state_map_env(value: &str) -> Result<Vec<WorkflowStateMapping>, CoreError> {
+    let mut mappings = Vec::new();
+    let mut seen = BTreeSet::new();
+    for raw_pair in value
+        .split(',')
+        .map(str::trim)
+        .filter(|item| !item.is_empty())
+    {
+        let (raw_workflow_state, raw_linear_state) = raw_pair.split_once('=').ok_or_else(|| {
+            CoreError::Configuration(
+                "ORCHESTRATOR_LINEAR_WORKFLOW_STATE_MAP entries must use `WorkflowState=LinearState` format."
+                    .to_owned(),
+            )
+        })?;
+        let workflow_state = parse_workflow_state_name(raw_workflow_state.trim())?;
+        let linear_state = raw_linear_state.trim();
+        if linear_state.is_empty() {
+            return Err(CoreError::Configuration(
+                "ORCHESTRATOR_LINEAR_WORKFLOW_STATE_MAP target Linear state cannot be empty."
+                    .to_owned(),
+            ));
+        }
+        let state_key = workflow_state_key(&workflow_state);
+        if !seen.insert(state_key) {
+            return Err(CoreError::Configuration(format!(
+                "ORCHESTRATOR_LINEAR_WORKFLOW_STATE_MAP contains duplicate mapping for workflow state `{}`.",
+                workflow_state_label(&workflow_state)
+            )));
+        }
+        mappings.push(WorkflowStateMapping {
+            workflow_state,
+            linear_state: linear_state.to_owned(),
+        });
+    }
+
+    if mappings.is_empty() {
+        return Err(CoreError::Configuration(
+            "ORCHESTRATOR_LINEAR_WORKFLOW_STATE_MAP did not contain any valid mappings.".to_owned(),
+        ));
+    }
+
+    Ok(mappings)
+}
+
+fn parse_workflow_state_name(value: &str) -> Result<WorkflowState, CoreError> {
+    match normalize_workflow_state_name(value).as_str() {
+        "new" => Ok(WorkflowState::New),
+        "planning" => Ok(WorkflowState::Planning),
+        "implementing" => Ok(WorkflowState::Implementing),
+        "testing" => Ok(WorkflowState::Testing),
+        "prdrafted" => Ok(WorkflowState::PRDrafted),
+        "awaitingyourreview" => Ok(WorkflowState::AwaitingYourReview),
+        "readyforreview" => Ok(WorkflowState::ReadyForReview),
+        "inreview" => Ok(WorkflowState::InReview),
+        "done" => Ok(WorkflowState::Done),
+        "abandoned" => Ok(WorkflowState::Abandoned),
+        _ => Err(CoreError::Configuration(format!(
+            "Unknown workflow state `{value}` in ORCHESTRATOR_LINEAR_WORKFLOW_STATE_MAP."
+        ))),
+    }
+}
+
+fn normalize_workflow_state_name(value: &str) -> String {
+    value
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric())
+        .collect::<String>()
+        .to_ascii_lowercase()
+}
+
+fn workflow_state_key(value: &WorkflowState) -> String {
+    match value {
+        WorkflowState::New => "new",
+        WorkflowState::Planning => "planning",
+        WorkflowState::Implementing => "implementing",
+        WorkflowState::Testing => "testing",
+        WorkflowState::PRDrafted => "prdrafted",
+        WorkflowState::AwaitingYourReview => "awaitingyourreview",
+        WorkflowState::ReadyForReview => "readyforreview",
+        WorkflowState::InReview => "inreview",
+        WorkflowState::Done => "done",
+        WorkflowState::Abandoned => "abandoned",
+    }
+    .to_owned()
 }
 
 #[derive(Debug, Clone)]
@@ -370,6 +579,10 @@ impl LinearTicketingProvider {
         self.config.sync_query.clone()
     }
 
+    pub fn workflow_sync_config(&self) -> LinearWorkflowSyncConfig {
+        self.config.workflow_sync.clone()
+    }
+
     pub fn cache_snapshot(&self) -> TicketCacheSnapshot {
         let cache = self.cache.read().expect("linear ticket cache read lock");
         TicketCacheSnapshot {
@@ -461,6 +674,66 @@ impl LinearTicketingProvider {
             query,
         )
         .await
+    }
+
+    pub async fn sync_workflow_transition(
+        &self,
+        request: LinearWorkflowTransitionSyncRequest,
+    ) -> Result<(), CoreError> {
+        if let Some(linear_state) = self.config.workflow_sync.linear_state_for(&request.to) {
+            self.update_ticket_state(UpdateTicketStateRequest {
+                ticket_id: request.ticket_id.clone(),
+                state: linear_state.to_owned(),
+            })
+            .await?;
+        } else {
+            warn!(
+                ticket_id = %request.ticket_id.as_str(),
+                target_workflow_state = workflow_state_label(&request.to),
+                "no Linear workflow-state mapping configured; skipping Linear state update"
+            );
+        }
+
+        let mut comment = String::new();
+        if self.config.workflow_sync.comment_summaries {
+            comment = request
+                .summary
+                .clone()
+                .filter(|value| !value.trim().is_empty())
+                .unwrap_or_else(|| {
+                    format!(
+                        "Workflow transitioned from `{}` to `{}`.",
+                        workflow_state_label(&request.from),
+                        workflow_state_label(&request.to)
+                    )
+                });
+        }
+
+        let mut attachments = Vec::new();
+        if self.config.workflow_sync.attach_pr_links {
+            if let Some(url) = request
+                .pull_request_url
+                .as_deref()
+                .map(str::trim)
+                .filter(|url| !url.is_empty())
+            {
+                attachments.push(TicketAttachment {
+                    label: "Pull Request".to_owned(),
+                    url: url.to_owned(),
+                });
+            }
+        }
+
+        if !comment.trim().is_empty() || !attachments.is_empty() {
+            self.add_comment(AddTicketCommentRequest {
+                ticket_id: request.ticket_id,
+                comment,
+                attachments,
+            })
+            .await?;
+        }
+
+        Ok(())
     }
 }
 
@@ -629,6 +902,139 @@ fn issue_to_summary(issue: &LinearIssueNode) -> TicketSummary {
     }
 }
 
+async fn resolve_linear_state_id(
+    transport: &Arc<dyn GraphqlTransport>,
+    issue_id: &str,
+    target_state: &str,
+) -> Result<ResolvedLinearState, CoreError> {
+    let data = transport
+        .execute(GraphqlRequest::new(
+            ISSUE_TEAM_STATES_QUERY,
+            json!({ "id": issue_id }),
+        ))
+        .await?;
+    let payload: IssueTeamStatesResponse = serde_json::from_value(data).map_err(|error| {
+        CoreError::DependencyUnavailable(format!(
+            "failed to decode Linear issue/team states payload: {error}"
+        ))
+    })?;
+    let issue = payload.issue.ok_or_else(|| {
+        CoreError::DependencyUnavailable(format!(
+            "Linear issue lookup returned no issue for id `{issue_id}`."
+        ))
+    })?;
+    let team = issue.team.ok_or_else(|| {
+        CoreError::DependencyUnavailable(format!(
+            "Linear issue `{issue_id}` does not include team state metadata."
+        ))
+    })?;
+
+    let target_state = target_state.trim();
+    let matched_state = team
+        .states
+        .nodes
+        .iter()
+        .find(|state| state.name.eq_ignore_ascii_case(target_state))
+        .ok_or_else(|| {
+            let available = team
+                .states
+                .nodes
+                .iter()
+                .map(|state| state.name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            CoreError::Configuration(format!(
+                "Linear issue `{issue_id}` has no state named `{target_state}`. Available states: {available}"
+            ))
+        })?;
+
+    Ok(ResolvedLinearState {
+        id: matched_state.id.clone(),
+        name: matched_state.name.clone(),
+    })
+}
+
+#[derive(Debug, Clone)]
+struct ResolvedLinearState {
+    id: String,
+    name: String,
+}
+
+fn linear_provider_ticket_id(ticket_id: &TicketId) -> Result<&str, CoreError> {
+    let raw = ticket_id.as_str();
+    let (provider, provider_ticket_id) = raw.split_once(':').ok_or_else(|| {
+        CoreError::Configuration(format!(
+            "Ticket id `{raw}` is invalid; expected `linear:<issue-id>`."
+        ))
+    })?;
+
+    if provider != "linear" {
+        return Err(CoreError::Configuration(format!(
+            "Ticket id `{raw}` is not a Linear ticket id."
+        )));
+    }
+    let provider_ticket_id = provider_ticket_id.trim();
+    if provider_ticket_id.is_empty() {
+        return Err(CoreError::Configuration(format!(
+            "Ticket id `{raw}` is invalid; provider issue id is empty."
+        )));
+    }
+
+    Ok(provider_ticket_id)
+}
+
+fn compose_linear_comment_body(
+    comment: &str,
+    attachments: &[TicketAttachment],
+) -> Result<String, CoreError> {
+    let mut body = comment.trim().to_owned();
+    if !attachments.is_empty() {
+        let mut attachment_lines = Vec::new();
+        for attachment in attachments {
+            let url = attachment.url.trim();
+            if url.is_empty() {
+                return Err(CoreError::Configuration(
+                    "Linear comment attachment URLs cannot be empty.".to_owned(),
+                ));
+            }
+            let label = attachment.label.trim();
+            if label.is_empty() {
+                attachment_lines.push(format!("- {url}"));
+            } else {
+                attachment_lines.push(format!("- [{label}]({url})"));
+            }
+        }
+        if !body.is_empty() {
+            body.push_str("\n\n");
+        }
+        body.push_str("Attachments:\n");
+        body.push_str(&attachment_lines.join("\n"));
+    }
+
+    if body.trim().is_empty() {
+        return Err(CoreError::Configuration(
+            "Linear comments require non-empty content or at least one attachment.".to_owned(),
+        ));
+    }
+
+    Ok(body)
+}
+
+fn workflow_state_label(state: &WorkflowState) -> &'static str {
+    match state {
+        WorkflowState::New => "New",
+        WorkflowState::Planning => "Planning",
+        WorkflowState::Implementing => "Implementing",
+        WorkflowState::Testing => "Testing",
+        WorkflowState::PRDrafted => "PRDrafted",
+        WorkflowState::AwaitingYourReview => "AwaitingYourReview",
+        WorkflowState::ReadyForReview => "ReadyForReview",
+        WorkflowState::InReview => "InReview",
+        WorkflowState::Done => "Done",
+        WorkflowState::Abandoned => "Abandoned",
+    }
+}
+
 #[async_trait]
 impl TicketingProvider for LinearTicketingProvider {
     fn provider(&self) -> TicketProvider {
@@ -696,19 +1102,75 @@ impl TicketingProvider for LinearTicketingProvider {
 
     async fn update_ticket_state(
         &self,
-        _request: UpdateTicketStateRequest,
+        request: UpdateTicketStateRequest,
     ) -> Result<(), CoreError> {
-        Err(CoreError::Configuration(
-            "Linear update_ticket_state is out of scope for AP-119; this adapter currently supports list/search and polling sync."
-                .to_owned(),
-        ))
+        let issue_id = linear_provider_ticket_id(&request.ticket_id)?;
+        let target_state = request.state.trim();
+        if target_state.is_empty() {
+            return Err(CoreError::Configuration(
+                "Linear ticket state updates require a non-empty target state.".to_owned(),
+            ));
+        }
+        let state = resolve_linear_state_id(&self.transport, issue_id, target_state).await?;
+
+        let response = self
+            .transport
+            .execute(GraphqlRequest::new(
+                UPDATE_ISSUE_STATE_MUTATION,
+                json!({
+                    "id": issue_id,
+                    "stateId": state.id,
+                }),
+            ))
+            .await?;
+        let payload: UpdateIssueStateResponse =
+            serde_json::from_value(response).map_err(|error| {
+                CoreError::DependencyUnavailable(format!(
+                    "failed to decode Linear update-state payload: {error}"
+                ))
+            })?;
+        if !payload.issue_update.success {
+            return Err(CoreError::DependencyUnavailable(
+                "Linear issueUpdate mutation returned success=false.".to_owned(),
+            ));
+        }
+
+        {
+            let mut cache = self.cache.write().expect("linear ticket cache write lock");
+            if let Some(entry) = cache.tickets.get_mut(issue_id) {
+                entry.summary.state = state.name;
+            }
+        }
+
+        Ok(())
     }
 
-    async fn add_comment(&self, _request: AddTicketCommentRequest) -> Result<(), CoreError> {
-        Err(CoreError::Configuration(
-            "Linear add_comment is out of scope for AP-119; this adapter currently supports list/search and polling sync."
-                .to_owned(),
-        ))
+    async fn add_comment(&self, request: AddTicketCommentRequest) -> Result<(), CoreError> {
+        let issue_id = linear_provider_ticket_id(&request.ticket_id)?;
+        let body = compose_linear_comment_body(request.comment.as_str(), &request.attachments)?;
+
+        let response = self
+            .transport
+            .execute(GraphqlRequest::new(
+                COMMENT_CREATE_MUTATION,
+                json!({
+                    "issueId": issue_id,
+                    "body": body,
+                }),
+            ))
+            .await?;
+        let payload: CommentCreateResponse = serde_json::from_value(response).map_err(|error| {
+            CoreError::DependencyUnavailable(format!(
+                "failed to decode Linear commentCreate payload: {error}"
+            ))
+        })?;
+        if !payload.comment_create.success {
+            return Err(CoreError::DependencyUnavailable(
+                "Linear commentCreate mutation returned success=false.".to_owned(),
+            ));
+        }
+
+        Ok(())
     }
 }
 
@@ -770,6 +1232,49 @@ struct GraphqlError {
 #[derive(Debug, Deserialize)]
 struct ViewerHealthData {
     viewer: ViewerNode,
+}
+
+#[derive(Debug, Deserialize)]
+struct IssueTeamStatesResponse {
+    issue: Option<IssueTeamStateIssueNode>,
+}
+
+#[derive(Debug, Deserialize)]
+struct IssueTeamStateIssueNode {
+    team: Option<IssueTeamStateTeamNode>,
+}
+
+#[derive(Debug, Deserialize)]
+struct IssueTeamStateTeamNode {
+    states: IssueTeamStateConnection,
+}
+
+#[derive(Debug, Deserialize)]
+struct IssueTeamStateConnection {
+    nodes: Vec<IssueTeamStateNode>,
+}
+
+#[derive(Debug, Deserialize)]
+struct IssueTeamStateNode {
+    id: String,
+    name: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct UpdateIssueStateResponse {
+    #[serde(rename = "issueUpdate")]
+    issue_update: MutationResult,
+}
+
+#[derive(Debug, Deserialize)]
+struct CommentCreateResponse {
+    #[serde(rename = "commentCreate")]
+    comment_create: MutationResult,
+}
+
+#[derive(Debug, Deserialize)]
+struct MutationResult {
+    success: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -842,6 +1347,10 @@ mod tests {
         async fn request_count(&self) -> usize {
             self.requests.lock().await.len()
         }
+
+        async fn requests(&self) -> Vec<GraphqlRequest> {
+            self.requests.lock().await.clone()
+        }
     }
 
     #[async_trait]
@@ -866,6 +1375,7 @@ mod tests {
             poll_interval: interval,
             sync_query: query,
             fetch_limit: 50,
+            workflow_sync: LinearWorkflowSyncConfig::default(),
         }
     }
 
@@ -894,6 +1404,21 @@ mod tests {
         json!({
             "viewer": { "id": viewer_id },
             "issues": { "nodes": issues }
+        })
+    }
+
+    fn issue_team_states_payload(states: &[(&str, &str)]) -> serde_json::Value {
+        json!({
+            "issue": {
+                "team": {
+                    "states": {
+                        "nodes": states
+                            .iter()
+                            .map(|(id, name)| json!({ "id": id, "name": name }))
+                            .collect::<Vec<_>>()
+                    }
+                }
+            }
         })
     }
 
@@ -1215,7 +1740,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn mutating_methods_are_explicitly_out_of_scope() {
+    async fn create_ticket_remains_explicitly_out_of_scope() {
         let sync_query = TicketQuery::default();
         let config = config_with(Duration::from_secs(60), sync_query);
         let transport = Arc::new(StubTransport::default());
@@ -1232,25 +1757,269 @@ mod tests {
             .await
             .expect_err("create is out of scope");
         assert!(create_error.to_string().contains("out of scope"));
+    }
 
-        let update_error = provider
+    #[tokio::test]
+    async fn update_ticket_state_resolves_target_state_id_and_mutates_issue() {
+        let sync_query = TicketQuery::default();
+        let config = config_with(Duration::from_secs(60), sync_query);
+        let transport = Arc::new(StubTransport::default());
+        transport
+            .push_response(issue_team_states_payload(&[
+                ("state-todo", "Todo"),
+                ("state-done", "Done"),
+            ]))
+            .await;
+        transport
+            .push_response(json!({ "issueUpdate": { "success": true } }))
+            .await;
+        let provider = LinearTicketingProvider::with_transport(config, transport.clone());
+
+        provider
             .update_ticket_state(UpdateTicketStateRequest {
-                ticket_id: TicketId::from("linear:x"),
+                ticket_id: TicketId::from("linear:issue-777"),
                 state: "Done".to_owned(),
             })
             .await
-            .expect_err("update is out of scope");
-        assert!(update_error.to_string().contains("out of scope"));
+            .expect("update succeeds");
 
-        let comment_error = provider
+        let requests = transport.requests().await;
+        assert_eq!(requests.len(), 2);
+        assert!(requests[0].query.contains("IssueTeamStates"));
+        assert_eq!(requests[0].variables["id"], json!("issue-777"));
+        assert!(requests[1].query.contains("UpdateIssueState"));
+        assert_eq!(requests[1].variables["id"], json!("issue-777"));
+        assert_eq!(requests[1].variables["stateId"], json!("state-done"));
+    }
+
+    #[tokio::test]
+    async fn update_ticket_state_rejects_unknown_target_state_name() {
+        let sync_query = TicketQuery::default();
+        let config = config_with(Duration::from_secs(60), sync_query);
+        let transport = Arc::new(StubTransport::default());
+        transport
+            .push_response(issue_team_states_payload(&[("state-todo", "Todo")]))
+            .await;
+        let provider = LinearTicketingProvider::with_transport(config, transport);
+
+        let error = provider
+            .update_ticket_state(UpdateTicketStateRequest {
+                ticket_id: TicketId::from("linear:issue-778"),
+                state: "Done".to_owned(),
+            })
+            .await
+            .expect_err("unknown state should fail");
+        assert!(error.to_string().contains("no state named"));
+    }
+
+    #[tokio::test]
+    async fn update_ticket_state_rejects_empty_target_state_before_network_call() {
+        let sync_query = TicketQuery::default();
+        let config = config_with(Duration::from_secs(60), sync_query);
+        let transport = Arc::new(StubTransport::default());
+        let provider = LinearTicketingProvider::with_transport(config, transport.clone());
+
+        let error = provider
+            .update_ticket_state(UpdateTicketStateRequest {
+                ticket_id: TicketId::from("linear:issue-778"),
+                state: "   ".to_owned(),
+            })
+            .await
+            .expect_err("empty state should fail");
+
+        assert!(error.to_string().contains("non-empty target state"));
+        assert_eq!(transport.request_count().await, 0);
+    }
+
+    #[tokio::test]
+    async fn update_ticket_state_updates_cache_with_linear_state_casing() {
+        let sync_query = TicketQuery::default();
+        let config = config_with(Duration::from_secs(60), sync_query);
+        let transport = Arc::new(StubTransport::default());
+        transport
+            .push_response(list_payload(
+                "viewer-1",
+                vec![issue_json(
+                    "issue-779",
+                    "AP-779",
+                    "Cache state casing",
+                    "Todo",
+                    "2026-02-16T12:28:00.000Z",
+                    Some("viewer-1"),
+                )],
+            ))
+            .await;
+        transport
+            .push_response(issue_team_states_payload(&[
+                ("state-todo", "Todo"),
+                ("state-done", "Done"),
+            ]))
+            .await;
+        transport
+            .push_response(json!({ "issueUpdate": { "success": true } }))
+            .await;
+        let provider = LinearTicketingProvider::with_transport(config, transport);
+        provider.sync_once().await.expect("seed cache");
+
+        provider
+            .update_ticket_state(UpdateTicketStateRequest {
+                ticket_id: TicketId::from("linear:issue-779"),
+                state: "  done ".to_owned(),
+            })
+            .await
+            .expect("update succeeds");
+
+        let snapshot = provider.cache_snapshot();
+        let updated = snapshot
+            .tickets
+            .iter()
+            .find(|ticket| ticket.ticket_id == TicketId::from("linear:issue-779"))
+            .expect("ticket should remain in cache");
+        assert_eq!(updated.state, "Done");
+    }
+
+    #[tokio::test]
+    async fn add_comment_posts_comment_with_attachment_markdown() {
+        let sync_query = TicketQuery::default();
+        let config = config_with(Duration::from_secs(60), sync_query);
+        let transport = Arc::new(StubTransport::default());
+        transport
+            .push_response(json!({ "commentCreate": { "success": true } }))
+            .await;
+        let provider = LinearTicketingProvider::with_transport(config, transport.clone());
+
+        provider
             .add_comment(AddTicketCommentRequest {
-                ticket_id: TicketId::from("linear:x"),
-                comment: "hello".to_owned(),
+                ticket_id: TicketId::from("linear:issue-901"),
+                comment: "Ready for review.".to_owned(),
+                attachments: vec![TicketAttachment {
+                    label: "Draft PR".to_owned(),
+                    url: "https://github.com/example/repo/pull/901".to_owned(),
+                }],
+            })
+            .await
+            .expect("add comment succeeds");
+
+        let requests = transport.requests().await;
+        assert_eq!(requests.len(), 1);
+        assert!(requests[0].query.contains("CommentCreate"));
+        assert_eq!(requests[0].variables["issueId"], json!("issue-901"));
+        let body = requests[0].variables["body"].as_str().expect("string body");
+        assert!(body.contains("Ready for review."));
+        assert!(body.contains("[Draft PR](https://github.com/example/repo/pull/901)"));
+    }
+
+    #[tokio::test]
+    async fn add_comment_rejects_empty_content_and_attachments() {
+        let sync_query = TicketQuery::default();
+        let config = config_with(Duration::from_secs(60), sync_query);
+        let transport = Arc::new(StubTransport::default());
+        let provider = LinearTicketingProvider::with_transport(config, transport);
+
+        let error = provider
+            .add_comment(AddTicketCommentRequest {
+                ticket_id: TicketId::from("linear:issue-902"),
+                comment: "   ".to_owned(),
                 attachments: Vec::new(),
             })
             .await
-            .expect_err("comment is out of scope");
-        assert!(comment_error.to_string().contains("out of scope"));
+            .expect_err("empty comment should fail");
+        assert!(error.to_string().contains("non-empty"));
+    }
+
+    #[tokio::test]
+    async fn sync_workflow_transition_updates_state_and_posts_summary_with_pr_link() {
+        let sync_query = TicketQuery::default();
+        let mut config = config_with(Duration::from_secs(60), sync_query);
+        config.workflow_sync.comment_summaries = true;
+        config.workflow_sync.attach_pr_links = true;
+
+        let transport = Arc::new(StubTransport::default());
+        transport
+            .push_response(issue_team_states_payload(&[
+                ("state-progress", "In Progress"),
+                ("state-review", "In Review"),
+            ]))
+            .await;
+        transport
+            .push_response(json!({ "issueUpdate": { "success": true } }))
+            .await;
+        transport
+            .push_response(json!({ "commentCreate": { "success": true } }))
+            .await;
+        let provider = LinearTicketingProvider::with_transport(config, transport.clone());
+
+        provider
+            .sync_workflow_transition(LinearWorkflowTransitionSyncRequest {
+                ticket_id: TicketId::from("linear:issue-903"),
+                from: WorkflowState::Testing,
+                to: WorkflowState::ReadyForReview,
+                summary: Some("All tests are green; ready for reviewer handoff.".to_owned()),
+                pull_request_url: Some("https://github.com/example/repo/pull/903".to_owned()),
+            })
+            .await
+            .expect("transition sync succeeds");
+
+        let requests = transport.requests().await;
+        assert_eq!(requests.len(), 3);
+        assert!(requests[0].query.contains("IssueTeamStates"));
+        assert!(requests[1].query.contains("UpdateIssueState"));
+        assert!(requests[2].query.contains("CommentCreate"));
+        let comment = requests[2].variables["body"]
+            .as_str()
+            .expect("comment body");
+        assert!(comment.contains("All tests are green"));
+        assert!(comment.contains("[Pull Request](https://github.com/example/repo/pull/903)"));
+    }
+
+    #[tokio::test]
+    async fn sync_workflow_transition_can_skip_comment_when_disabled() {
+        let sync_query = TicketQuery::default();
+        let mut config = config_with(Duration::from_secs(60), sync_query);
+        config.workflow_sync.comment_summaries = false;
+        config.workflow_sync.attach_pr_links = false;
+
+        let transport = Arc::new(StubTransport::default());
+        transport
+            .push_response(issue_team_states_payload(&[("state-done", "Done")]))
+            .await;
+        transport
+            .push_response(json!({ "issueUpdate": { "success": true } }))
+            .await;
+        let provider = LinearTicketingProvider::with_transport(config, transport.clone());
+
+        provider
+            .sync_workflow_transition(LinearWorkflowTransitionSyncRequest {
+                ticket_id: TicketId::from("linear:issue-904"),
+                from: WorkflowState::InReview,
+                to: WorkflowState::Done,
+                summary: Some("Merged.".to_owned()),
+                pull_request_url: Some("https://github.com/example/repo/pull/904".to_owned()),
+            })
+            .await
+            .expect("transition sync succeeds");
+
+        assert_eq!(transport.request_count().await, 2);
+    }
+
+    #[test]
+    fn parse_workflow_state_map_parses_case_and_separator_variants() {
+        let mappings = parse_workflow_state_map_env(
+            "implementing=In Progress, ready_for_review=In Review, DONE=Done",
+        )
+        .expect("workflow state mapping should parse");
+        assert_eq!(mappings.len(), 3);
+        assert_eq!(mappings[0].workflow_state, WorkflowState::Implementing);
+        assert_eq!(mappings[0].linear_state, "In Progress");
+        assert_eq!(mappings[1].workflow_state, WorkflowState::ReadyForReview);
+        assert_eq!(mappings[2].workflow_state, WorkflowState::Done);
+    }
+
+    #[test]
+    fn parse_workflow_state_map_rejects_duplicate_workflow_states() {
+        let error = parse_workflow_state_map_env("Done=Done, done=Canceled")
+            .expect_err("duplicate workflow states should fail");
+        assert!(error.to_string().contains("duplicate mapping"));
     }
 
     #[test]
