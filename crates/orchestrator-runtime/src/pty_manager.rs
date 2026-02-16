@@ -1,0 +1,576 @@
+use std::collections::{hash_map::Entry, HashMap};
+use std::io::{ErrorKind, Read, Write};
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex, RwLock};
+
+use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
+use serde::{Deserialize, Serialize};
+use tokio::sync::{broadcast, mpsc};
+use tokio::task;
+
+use crate::{RuntimeError, RuntimeResult, RuntimeSessionId};
+
+const DEFAULT_OUTPUT_BUFFER: usize = 256;
+const READ_CHUNK_SIZE: usize = 8 * 1024;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TerminalSize {
+    pub cols: u16,
+    pub rows: u16,
+}
+
+impl Default for TerminalSize {
+    fn default() -> Self {
+        Self { cols: 80, rows: 24 }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PtySpawnSpec {
+    pub session_id: RuntimeSessionId,
+    pub program: String,
+    pub args: Vec<String>,
+    pub workdir: PathBuf,
+    pub environment: Vec<(String, String)>,
+    pub size: TerminalSize,
+}
+
+struct PtySession {
+    master: Mutex<Box<dyn MasterPty + Send>>,
+    stdin_tx: mpsc::UnboundedSender<Vec<u8>>,
+    output_tx: broadcast::Sender<Vec<u8>>,
+}
+
+enum SessionState {
+    Starting,
+    Running(Arc<PtySession>),
+}
+
+struct SpawnedPty {
+    master: Box<dyn MasterPty + Send>,
+    reader: Box<dyn Read + Send>,
+    writer: Box<dyn Write + Send>,
+    child: Box<dyn Child + Send + Sync>,
+}
+
+#[derive(Clone)]
+pub struct PtyManager {
+    sessions: Arc<RwLock<HashMap<RuntimeSessionId, SessionState>>>,
+    output_buffer: usize,
+}
+
+pub struct PtyOutputSubscription {
+    receiver: broadcast::Receiver<Vec<u8>>,
+}
+
+impl Default for PtyManager {
+    fn default() -> Self {
+        Self::new(DEFAULT_OUTPUT_BUFFER)
+    }
+}
+
+impl PtyManager {
+    pub fn new(output_buffer: usize) -> Self {
+        Self {
+            sessions: Arc::new(RwLock::new(HashMap::new())),
+            output_buffer: output_buffer.max(1),
+        }
+    }
+
+    pub async fn spawn(&self, spec: PtySpawnSpec) -> RuntimeResult<()> {
+        if spec.program.trim().is_empty() {
+            return Err(RuntimeError::Configuration(
+                "PTY spawn program must not be empty".to_owned(),
+            ));
+        }
+        if spec.size.cols == 0 || spec.size.rows == 0 {
+            return Err(RuntimeError::Configuration(
+                "PTY size must have non-zero rows and columns".to_owned(),
+            ));
+        }
+
+        let session_id = spec.session_id.clone();
+        self.reserve_session(&session_id)?;
+
+        let spawned = match task::spawn_blocking(move || spawn_pty_process(spec)).await {
+            Ok(Ok(spawned)) => spawned,
+            Ok(Err(error)) => {
+                let _ = self.remove_session_entry(&session_id);
+                return Err(error);
+            }
+            Err(error) => {
+                let _ = self.remove_session_entry(&session_id);
+                return Err(RuntimeError::Internal(format!(
+                    "PTY spawn task failed: {error}",
+                )));
+            }
+        };
+
+        let (stdin_tx, stdin_rx) = mpsc::unbounded_channel();
+        let (output_tx, _) = broadcast::channel(self.output_buffer);
+        let session = Arc::new(PtySession {
+            master: Mutex::new(spawned.master),
+            stdin_tx,
+            output_tx: output_tx.clone(),
+        });
+
+        if let Err(error) = self.install_session(session_id.clone(), session) {
+            let _ = self.remove_session_entry(&session_id);
+            terminate_child(spawned.child);
+            return Err(error);
+        }
+
+        spawn_read_loop(spawned.reader, output_tx);
+        spawn_write_loop(spawned.writer, stdin_rx);
+        spawn_child_wait_loop(Arc::clone(&self.sessions), session_id, spawned.child);
+        Ok(())
+    }
+
+    pub async fn subscribe_output(
+        &self,
+        session_id: &RuntimeSessionId,
+    ) -> RuntimeResult<PtyOutputSubscription> {
+        let session = self.session(session_id)?;
+        Ok(PtyOutputSubscription {
+            receiver: session.output_tx.subscribe(),
+        })
+    }
+
+    pub async fn write(&self, session_id: &RuntimeSessionId, input: &[u8]) -> RuntimeResult<()> {
+        let session = self.session(session_id)?;
+        session.stdin_tx.send(input.to_vec()).map_err(|_| {
+            RuntimeError::Process("PTY stdin writer is no longer available".to_owned())
+        })
+    }
+
+    pub async fn resize(
+        &self,
+        session_id: &RuntimeSessionId,
+        cols: u16,
+        rows: u16,
+    ) -> RuntimeResult<()> {
+        if cols == 0 || rows == 0 {
+            return Err(RuntimeError::Configuration(
+                "PTY resize requires non-zero rows and columns".to_owned(),
+            ));
+        }
+
+        let session = self.session(session_id)?;
+        let master = session
+            .master
+            .lock()
+            .map_err(|_| RuntimeError::Internal("PTY master lock poisoned".to_owned()))?;
+        master
+            .resize(PtySize {
+                cols,
+                rows,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .map_err(process_error)
+    }
+
+    fn session(&self, session_id: &RuntimeSessionId) -> RuntimeResult<Arc<PtySession>> {
+        let sessions = self
+            .sessions
+            .read()
+            .map_err(|_| RuntimeError::Internal("PTY session map lock poisoned".to_owned()))?;
+        match sessions.get(session_id) {
+            Some(SessionState::Running(session)) => Ok(Arc::clone(session)),
+            Some(SessionState::Starting) => Err(RuntimeError::Process(format!(
+                "PTY session is still starting: {}",
+                session_id.as_str()
+            ))),
+            None => Err(RuntimeError::SessionNotFound(
+                session_id.as_str().to_owned(),
+            )),
+        }
+    }
+
+    fn reserve_session(&self, session_id: &RuntimeSessionId) -> RuntimeResult<()> {
+        let mut sessions = self
+            .sessions
+            .write()
+            .map_err(|_| RuntimeError::Internal("PTY session map lock poisoned".to_owned()))?;
+
+        match sessions.entry(session_id.clone()) {
+            Entry::Occupied(_) => Err(RuntimeError::Configuration(format!(
+                "PTY session already exists: {}",
+                session_id.as_str()
+            ))),
+            Entry::Vacant(entry) => {
+                entry.insert(SessionState::Starting);
+                Ok(())
+            }
+        }
+    }
+
+    fn install_session(
+        &self,
+        session_id: RuntimeSessionId,
+        session: Arc<PtySession>,
+    ) -> RuntimeResult<()> {
+        let mut sessions = self
+            .sessions
+            .write()
+            .map_err(|_| RuntimeError::Internal("PTY session map lock poisoned".to_owned()))?;
+
+        match sessions.entry(session_id) {
+            Entry::Occupied(mut entry) => {
+                if matches!(entry.get(), SessionState::Starting) {
+                    entry.insert(SessionState::Running(session));
+                    Ok(())
+                } else {
+                    Err(RuntimeError::Configuration(
+                        "PTY session unexpectedly replaced while starting".to_owned(),
+                    ))
+                }
+            }
+            Entry::Vacant(_) => Err(RuntimeError::Internal(
+                "PTY session reservation missing after spawn".to_owned(),
+            )),
+        }
+    }
+
+    fn remove_session_entry(&self, session_id: &RuntimeSessionId) -> RuntimeResult<()> {
+        let mut sessions = self
+            .sessions
+            .write()
+            .map_err(|_| RuntimeError::Internal("PTY session map lock poisoned".to_owned()))?;
+        sessions.remove(session_id);
+        Ok(())
+    }
+}
+
+impl PtyOutputSubscription {
+    pub async fn next_chunk(&mut self) -> RuntimeResult<Option<Vec<u8>>> {
+        match self.receiver.recv().await {
+            Ok(bytes) => Ok(Some(bytes)),
+            Err(broadcast::error::RecvError::Closed) => Ok(None),
+            Err(broadcast::error::RecvError::Lagged(skipped)) => Err(RuntimeError::Process(
+                format!("PTY output subscriber lagged; dropped {skipped} chunks"),
+            )),
+        }
+    }
+}
+
+fn to_pty_size(size: TerminalSize) -> PtySize {
+    PtySize {
+        cols: size.cols,
+        rows: size.rows,
+        pixel_width: 0,
+        pixel_height: 0,
+    }
+}
+
+fn process_error(error: impl std::fmt::Display) -> RuntimeError {
+    RuntimeError::Process(error.to_string())
+}
+
+fn spawn_pty_process(spec: PtySpawnSpec) -> RuntimeResult<SpawnedPty> {
+    let pty_system = native_pty_system();
+    let pair = pty_system
+        .openpty(to_pty_size(spec.size))
+        .map_err(process_error)?;
+
+    let mut command = CommandBuilder::new(spec.program);
+    command.cwd(spec.workdir);
+    for arg in spec.args {
+        command.arg(arg);
+    }
+    for (key, value) in spec.environment {
+        command.env(key, value);
+    }
+
+    let child = pair.slave.spawn_command(command).map_err(process_error)?;
+    drop(pair.slave);
+
+    let reader = match pair.master.try_clone_reader() {
+        Ok(reader) => reader,
+        Err(error) => {
+            terminate_child(child);
+            return Err(process_error(error));
+        }
+    };
+
+    let writer = match pair.master.take_writer() {
+        Ok(writer) => writer,
+        Err(error) => {
+            terminate_child(child);
+            return Err(process_error(error));
+        }
+    };
+
+    Ok(SpawnedPty {
+        master: pair.master,
+        reader,
+        writer,
+        child,
+    })
+}
+
+fn terminate_child(mut child: Box<dyn Child + Send + Sync>) {
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+fn spawn_read_loop(mut reader: Box<dyn Read + Send>, output_tx: broadcast::Sender<Vec<u8>>) {
+    std::thread::spawn(move || {
+        let mut buffer = [0_u8; READ_CHUNK_SIZE];
+        loop {
+            match reader.read(&mut buffer) {
+                Ok(0) => break,
+                Ok(read) => {
+                    let _ = output_tx.send(buffer[..read].to_vec());
+                }
+                Err(error) if error.kind() == ErrorKind::Interrupted => continue,
+                Err(_) => break,
+            }
+        }
+    });
+}
+
+fn spawn_write_loop(
+    mut writer: Box<dyn Write + Send>,
+    mut stdin_rx: mpsc::UnboundedReceiver<Vec<u8>>,
+) {
+    std::thread::spawn(move || {
+        while let Some(input) = stdin_rx.blocking_recv() {
+            if input.is_empty() {
+                continue;
+            }
+            if writer.write_all(&input).is_err() {
+                break;
+            }
+            if writer.flush().is_err() {
+                break;
+            }
+        }
+    });
+}
+
+fn spawn_child_wait_loop(
+    sessions: Arc<RwLock<HashMap<RuntimeSessionId, SessionState>>>,
+    session_id: RuntimeSessionId,
+    mut child: Box<dyn Child + Send + Sync>,
+) {
+    std::thread::spawn(move || {
+        let _ = child.wait();
+        if let Ok(mut guard) = sessions.write() {
+            guard.remove(&session_id);
+        }
+    });
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use tokio::time::timeout;
+
+    use super::*;
+
+    #[cfg(unix)]
+    fn shell_program() -> &'static str {
+        "sh"
+    }
+
+    #[cfg(windows)]
+    fn shell_program() -> &'static str {
+        "cmd"
+    }
+
+    #[cfg(unix)]
+    fn shell_args(script: &str) -> Vec<String> {
+        vec!["-lc".to_owned(), script.to_owned()]
+    }
+
+    #[cfg(windows)]
+    fn shell_args(script: &str) -> Vec<String> {
+        vec!["/C".to_owned(), script.to_owned()]
+    }
+
+    #[cfg(unix)]
+    fn interactive_echo_script() -> &'static str {
+        "printf 'ready\\n'; read line; printf 'echo:%s\\n' \"$line\""
+    }
+
+    #[cfg(windows)]
+    fn interactive_echo_script() -> &'static str {
+        "echo ready && set /p line= && echo echo:%line%"
+    }
+
+    #[cfg(unix)]
+    fn hold_script() -> &'static str {
+        "sleep 1"
+    }
+
+    #[cfg(windows)]
+    fn hold_script() -> &'static str {
+        "ping -n 2 127.0.0.1 >nul"
+    }
+
+    fn shell_spec(session_id: &str, script: &str) -> PtySpawnSpec {
+        PtySpawnSpec {
+            session_id: RuntimeSessionId::new(session_id),
+            program: shell_program().to_owned(),
+            args: shell_args(script),
+            workdir: std::env::current_dir().expect("resolve current dir"),
+            environment: Vec::new(),
+            size: TerminalSize::default(),
+        }
+    }
+
+    async fn collect_until(
+        subscription: &mut PtyOutputSubscription,
+        needle: &str,
+    ) -> RuntimeResult<String> {
+        let output = timeout(Duration::from_secs(5), async {
+            let mut collected = Vec::new();
+            loop {
+                match subscription.next_chunk().await? {
+                    Some(chunk) => {
+                        collected.extend_from_slice(&chunk);
+                        if String::from_utf8_lossy(&collected).contains(needle) {
+                            return Ok::<Vec<u8>, RuntimeError>(collected);
+                        }
+                    }
+                    None => return Ok::<Vec<u8>, RuntimeError>(collected),
+                }
+            }
+        })
+        .await
+        .map_err(|_| RuntimeError::Internal("timed out waiting for PTY output".to_owned()))??;
+
+        Ok(String::from_utf8_lossy(&output).to_string())
+    }
+
+    #[tokio::test]
+    async fn pty_manager_supports_spawn_resize_and_stdio() {
+        let manager = PtyManager::default();
+        let spec = shell_spec("session-pty-1", interactive_echo_script());
+        let session_id = spec.session_id.clone();
+
+        manager.spawn(spec).await.expect("spawn PTY process");
+        let mut stream = manager
+            .subscribe_output(&session_id)
+            .await
+            .expect("subscribe to PTY output");
+
+        let first = collect_until(&mut stream, "ready")
+            .await
+            .expect("collect initial output");
+        assert!(first.contains("ready"));
+
+        manager
+            .resize(&session_id, 120, 40)
+            .await
+            .expect("resize PTY");
+
+        manager
+            .write(&session_id, b"hello\n")
+            .await
+            .expect("send stdin");
+
+        let echoed = collect_until(&mut stream, "echo:hello")
+            .await
+            .expect("collect echoed output");
+        assert!(echoed.contains("echo:hello"));
+    }
+
+    #[tokio::test]
+    async fn spawn_rejects_duplicate_session_ids() {
+        let manager = PtyManager::default();
+        let spec = shell_spec("session-pty-dup", hold_script());
+        let duplicate = shell_spec("session-pty-dup", "printf 'second\\n'");
+
+        manager.spawn(spec).await.expect("spawn first session");
+        let error = manager
+            .spawn(duplicate)
+            .await
+            .expect_err("duplicate session id should fail");
+
+        assert!(matches!(error, RuntimeError::Configuration(_)));
+    }
+
+    #[tokio::test]
+    async fn resize_rejects_zero_dimensions() {
+        let manager = PtyManager::default();
+        let spec = shell_spec("session-pty-resize", hold_script());
+        let session_id = spec.session_id.clone();
+
+        manager.spawn(spec).await.expect("spawn session");
+        let error = manager
+            .resize(&session_id, 0, 24)
+            .await
+            .expect_err("zero column resize should fail");
+
+        assert!(matches!(error, RuntimeError::Configuration(_)));
+    }
+
+    #[tokio::test]
+    async fn spawn_rejects_empty_program() {
+        let manager = PtyManager::default();
+        let mut spec = shell_spec("session-pty-empty-program", hold_script());
+        spec.program = "  ".to_owned();
+
+        let error = manager
+            .spawn(spec)
+            .await
+            .expect_err("empty spawn program should fail");
+
+        assert!(matches!(error, RuntimeError::Configuration(_)));
+    }
+
+    #[tokio::test]
+    async fn spawn_rejects_zero_size() {
+        let manager = PtyManager::default();
+        let mut spec = shell_spec("session-pty-zero-size", hold_script());
+        spec.size = TerminalSize { cols: 0, rows: 24 };
+
+        let error = manager
+            .spawn(spec)
+            .await
+            .expect_err("zero-size spawn should fail");
+
+        assert!(matches!(error, RuntimeError::Configuration(_)));
+    }
+
+    #[tokio::test]
+    async fn write_rejects_unknown_session() {
+        let manager = PtyManager::default();
+
+        let error = manager
+            .write(&RuntimeSessionId::new("missing-session"), b"noop")
+            .await
+            .expect_err("write to missing session should fail");
+
+        assert!(matches!(error, RuntimeError::SessionNotFound(_)));
+    }
+
+    #[tokio::test]
+    async fn failed_spawn_clears_session_reservation() {
+        let manager = PtyManager::default();
+        let session_id = RuntimeSessionId::new("session-pty-retry");
+        let bad_spec = PtySpawnSpec {
+            session_id: session_id.clone(),
+            program: "orchestrator-definitely-missing-command".to_owned(),
+            args: Vec::new(),
+            workdir: std::env::current_dir().expect("resolve current dir"),
+            environment: Vec::new(),
+            size: TerminalSize::default(),
+        };
+
+        let error = manager
+            .spawn(bad_spec)
+            .await
+            .expect_err("spawn with missing command should fail");
+        assert!(matches!(error, RuntimeError::Process(_)));
+
+        let retry = shell_spec(session_id.as_str(), hold_script());
+        manager
+            .spawn(retry)
+            .await
+            .expect("session id should be reusable after spawn failure");
+    }
+}
