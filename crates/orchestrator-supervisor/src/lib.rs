@@ -40,23 +40,22 @@ impl Supervisor for OpenRouterSupervisor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use orchestrator_core::test_support::with_env_var;
 
     #[test]
     fn missing_openrouter_api_key_is_actionable() {
-        unsafe {
-            std::env::remove_var("OPENROUTER_API_KEY");
-        }
-        let result = OpenRouterSupervisor::from_env();
-        let err = result.expect_err("expected missing env var to fail");
-        assert!(err.to_string().contains("OPENROUTER_API_KEY"));
+        with_env_var("OPENROUTER_API_KEY", None, || {
+            let result = OpenRouterSupervisor::from_env();
+            let err = result.expect_err("expected missing env var to fail");
+            assert!(err.to_string().contains("OPENROUTER_API_KEY"));
+        });
     }
 
     #[test]
     fn empty_openrouter_api_key_is_rejected() {
-        unsafe {
-            std::env::set_var("OPENROUTER_API_KEY", "   ");
-        }
-        let result = OpenRouterSupervisor::from_env();
-        assert!(result.is_err());
+        with_env_var("OPENROUTER_API_KEY", Some("   "), || {
+            let result = OpenRouterSupervisor::from_env();
+            assert!(result.is_err());
+        });
     }
 }

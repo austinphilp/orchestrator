@@ -8,3 +8,6 @@ license.workspace = true
 orchestrator-core = { path = "../orchestrator-core" }
 async-trait.workspace = true
 thiserror.workspace = true
+
+[dev-dependencies]
+orchestrator-core = { path = "../orchestrator-core", features = ["test-support"] }

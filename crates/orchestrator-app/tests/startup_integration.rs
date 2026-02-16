@@ -1,4 +1,5 @@
 use orchestrator_app::{App, AppConfig};
+use orchestrator_core::test_support::TestDbPath;
 use orchestrator_core::{CoreError, GithubClient, Supervisor};
 
 struct MockAdapter {
@@ -33,13 +34,12 @@ impl GithubClient for MockAdapter {
 
 #[tokio::test]
 async fn startup_path_cleanly_initializes() {
-    let temp_path = std::env::temp_dir().join("orchestrator-startup-integration.db");
-    let _ = std::fs::remove_file(&temp_path);
+    let temp_db = TestDbPath::new("startup-integration");
 
     let app = App {
         config: AppConfig {
             workspace: "./".to_owned(),
-            event_store_path: temp_path.to_string_lossy().to_string(),
+            event_store_path: temp_db.path().to_string_lossy().to_string(),
         },
         supervisor: MockAdapter { pass: true },
         github: MockAdapter { pass: true },
@@ -48,6 +48,4 @@ async fn startup_path_cleanly_initializes() {
     let state = app.startup_state().await.expect("startup should succeed");
     assert!(state.status.starts_with("ready"));
     assert_eq!(state.projection.events.len(), 0);
-
-    let _ = std::fs::remove_file(temp_path);
 }

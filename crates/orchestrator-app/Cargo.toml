@@ -18,3 +18,4 @@ tracing-subscriber.workspace = true
 
 [dev-dependencies]
 async-trait.workspace = true
+orchestrator-core = { path = "../orchestrator-core", features = ["test-support"] }
