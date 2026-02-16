@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
-use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
+use portable_pty::{native_pty_system, Child, ChildKiller, CommandBuilder, MasterPty, PtySize};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{broadcast, mpsc};
 use tokio::task;
@@ -81,6 +81,7 @@ impl PtyRenderPolicy {
 struct PtySession {
     master: Mutex<Box<dyn MasterPty + Send>>,
     emulator: Mutex<TerminalEmulator>,
+    child_killer: Mutex<Box<dyn ChildKiller + Send>>,
     stdin_tx: mpsc::UnboundedSender<Vec<u8>>,
     output_tx: broadcast::Sender<Vec<u8>>,
 }
@@ -94,6 +95,7 @@ struct SpawnedPty {
     master: Box<dyn MasterPty + Send>,
     reader: Box<dyn Read + Send>,
     writer: Box<dyn Write + Send>,
+    child_killer: Box<dyn ChildKiller + Send>,
     child: Box<dyn Child + Send + Sync>,
 }
 
@@ -184,6 +186,7 @@ impl PtyManager {
         let session = Arc::new(PtySession {
             master: Mutex::new(spawned.master),
             emulator: Mutex::new(emulator),
+            child_killer: Mutex::new(spawned.child_killer),
             stdin_tx,
             output_tx: output_tx.clone(),
         });
@@ -215,6 +218,18 @@ impl PtyManager {
         session.stdin_tx.send(input.to_vec()).map_err(|_| {
             RuntimeError::Process("PTY stdin writer is no longer available".to_owned())
         })
+    }
+
+    pub async fn kill(&self, session_id: &RuntimeSessionId) -> RuntimeResult<()> {
+        let session = self.session(session_id)?;
+        {
+            let mut killer = session
+                .child_killer
+                .lock()
+                .map_err(|_| RuntimeError::Internal("PTY child killer lock poisoned".to_owned()))?;
+            killer.kill().map_err(process_error)?;
+        }
+        self.remove_session_entry(session_id)
     }
 
     pub async fn resize(
@@ -371,6 +386,7 @@ fn spawn_pty_process(spec: PtySpawnSpec) -> RuntimeResult<SpawnedPty> {
     }
 
     let child = pair.slave.spawn_command(command).map_err(process_error)?;
+    let child_killer = child.clone_killer();
     drop(pair.slave);
 
     let reader = match pair.master.try_clone_reader() {
@@ -393,6 +409,7 @@ fn spawn_pty_process(spec: PtySpawnSpec) -> RuntimeResult<SpawnedPty> {
         master: pair.master,
         reader,
         writer,
+        child_killer,
         child,
     })
 }
@@ -913,6 +930,18 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn kill_rejects_unknown_session() {
+        let manager = PtyManager::default();
+
+        let error = manager
+            .kill(&RuntimeSessionId::new("missing-session"))
+            .await
+            .expect_err("kill for missing session should fail");
+
+        assert!(matches!(error, RuntimeError::SessionNotFound(_)));
+    }
+
+    #[tokio::test]
     async fn resize_rejects_unknown_session() {
         let manager = PtyManager::default();
 
@@ -921,6 +950,33 @@ mod tests {
             .await
             .expect_err("resize for missing session should fail");
 
+        assert!(matches!(error, RuntimeError::SessionNotFound(_)));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn kill_stops_process_and_removes_session() {
+        let manager = PtyManager::default();
+        let session_id = RuntimeSessionId::new("session-pty-kill");
+        let spec = PtySpawnSpec {
+            session_id: session_id.clone(),
+            program: shell_program().to_owned(),
+            args: shell_args("sleep 30"),
+            workdir: std::env::current_dir().expect("resolve current dir"),
+            environment: Vec::new(),
+            size: TerminalSize::default(),
+        };
+
+        manager
+            .spawn(spec)
+            .await
+            .expect("spawn long-running session");
+        manager.kill(&session_id).await.expect("kill session");
+
+        let error = manager
+            .snapshot(&session_id)
+            .await
+            .expect_err("killed session should no longer exist");
         assert!(matches!(error, RuntimeError::SessionNotFound(_)));
     }
 
