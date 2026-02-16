@@ -21,3 +21,4 @@ toml = "0.8"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 portable-pty = "0.9"
+vt100 = "0.16"
