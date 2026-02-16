@@ -1,9 +1,9 @@
 use std::path::Path;
 
+use orchestrator_runtime::BackendKind;
 use rusqlite::{params, Connection, OptionalExtension, Transaction};
 use serde_json::Value;
 
-use crate::adapters::BackendKind;
 use crate::error::CoreError;
 use crate::events::{NewEventEnvelope, OrchestrationEventPayload, StoredEventEnvelope};
 use crate::identifiers::{ArtifactId, TicketId, TicketProvider, WorkItemId, WorkerSessionId};

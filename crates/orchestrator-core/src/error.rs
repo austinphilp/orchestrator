@@ -1,3 +1,4 @@
+use orchestrator_runtime::RuntimeError;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -8,6 +9,8 @@ pub enum CoreError {
     Configuration(String),
     #[error("persistence error: {0}")]
     Persistence(String),
+    #[error(transparent)]
+    Runtime(#[from] RuntimeError),
     #[error(
         "unsupported database schema version {found}; this binary supports up to {supported}. Please upgrade orchestrator-core."
     )]

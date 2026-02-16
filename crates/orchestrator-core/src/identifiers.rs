@@ -1,3 +1,4 @@
+use orchestrator_runtime::RuntimeSessionId;
 use serde::{Deserialize, Serialize};
 
 macro_rules! string_id {
@@ -67,5 +68,17 @@ impl From<String> for TicketId {
 impl From<&str> for TicketId {
     fn from(value: &str) -> Self {
         Self(value.to_owned())
+    }
+}
+
+impl From<WorkerSessionId> for RuntimeSessionId {
+    fn from(value: WorkerSessionId) -> Self {
+        Self::from(value.as_str())
+    }
+}
+
+impl From<RuntimeSessionId> for WorkerSessionId {
+    fn from(value: RuntimeSessionId) -> Self {
+        Self::from(value.as_str())
     }
 }

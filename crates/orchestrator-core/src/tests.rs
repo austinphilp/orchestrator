@@ -1206,11 +1206,32 @@ fn adapter_defaults_are_stable() {
     assert!(reviewers.teams.is_empty());
 }
 
+#[test]
+fn worker_session_id_converts_to_runtime_session_id_and_back() {
+    let core_id = WorkerSessionId::new("sess-runtime-bridge");
+    let runtime_id = RuntimeSessionId::from(core_id.clone());
+    let round_trip = WorkerSessionId::from(runtime_id);
+
+    assert_eq!(round_trip, core_id);
+}
+
+#[test]
+fn runtime_error_converts_into_core_error_without_losing_variant() {
+    let error: CoreError = RuntimeError::Protocol("tag parse failed".to_owned()).into();
+
+    match error {
+        CoreError::Runtime(RuntimeError::Protocol(reason)) => {
+            assert_eq!(reason, "tag parse failed");
+        }
+        other => panic!("unexpected core error variant: {other:?}"),
+    }
+}
+
 struct EmptyWorkerStream;
 
 #[async_trait]
 impl WorkerEventSubscription for EmptyWorkerStream {
-    async fn next_event(&mut self) -> Result<Option<BackendEvent>, CoreError> {
+    async fn next_event(&mut self) -> Result<Option<BackendEvent>, RuntimeError> {
         Ok(None)
     }
 }
