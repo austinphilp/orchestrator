@@ -1,4 +1,5 @@
 mod adapters;
+mod commands;
 mod error;
 mod events;
 mod identifiers;
@@ -7,6 +8,10 @@ mod status;
 mod store;
 
 pub use adapters::{GithubClient, Supervisor};
+pub use commands::{
+    ids as command_ids, Command, CommandArgSummary, CommandDefinition, CommandMetadata,
+    CommandRegistry, SupervisorQueryArgs, UntypedCommandInvocation,
+};
 pub use error::CoreError;
 pub use events::{
     ArtifactCreatedPayload, InboxItemCreatedPayload, InboxItemResolvedPayload, NewEventEnvelope,
