@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 use std::io::{self, Stdout};
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
@@ -9,7 +9,8 @@ use crossterm::terminal::{
 };
 use crossterm::ExecutableCommand;
 use orchestrator_core::{
-    command_ids, ArtifactKind, ArtifactProjection, InboxItemId, InboxItemKind,
+    command_ids, ArtifactKind, ArtifactProjection, InboxItemId, InboxItemKind, LlmChatRequest,
+    LlmFinishReason, LlmMessage, LlmProvider, LlmRateLimitState, LlmRole, LlmTokenUsage,
     OrchestrationEventPayload, ProjectionState, WorkItemId, WorkerSessionId, WorkerSessionStatus,
     WorkflowState,
 };
@@ -17,6 +18,9 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 use ratatui::Terminal;
+use tokio::runtime::Handle as TokioHandle;
+use tokio::sync::mpsc;
+use tokio::sync::mpsc::error::TryRecvError;
 
 mod keymap;
 
@@ -526,6 +530,201 @@ fn project_center_pane(
 const INSPECTOR_ARTIFACT_LIMIT: usize = 5;
 const INSPECTOR_CHAT_EVENT_LIMIT: usize = 8;
 const INSPECTOR_EVENT_SCAN_LIMIT: usize = 512;
+const SUPERVISOR_STREAM_CHANNEL_CAPACITY: usize = 128;
+const SUPERVISOR_STREAM_MAX_TRANSCRIPT_CHARS: usize = 24_000;
+const SUPERVISOR_STREAM_RENDER_LINE_LIMIT: usize = 80;
+const DEFAULT_SUPERVISOR_MODEL: &str = "openai/gpt-4o-mini";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SupervisorStreamLifecycle {
+    Connecting,
+    Streaming,
+    Cancelling,
+    Completed,
+    Cancelled,
+    Error,
+}
+
+impl SupervisorStreamLifecycle {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Connecting => "connecting",
+            Self::Streaming => "streaming",
+            Self::Cancelling => "cancelling",
+            Self::Completed => "completed",
+            Self::Cancelled => "cancelled",
+            Self::Error => "error",
+        }
+    }
+
+    fn is_active(self) -> bool {
+        matches!(self, Self::Connecting | Self::Streaming | Self::Cancelling)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum SupervisorStreamEvent {
+    Started {
+        stream_id: String,
+    },
+    Delta {
+        text: String,
+    },
+    RateLimit {
+        state: LlmRateLimitState,
+    },
+    Usage {
+        usage: LlmTokenUsage,
+    },
+    Finished {
+        reason: LlmFinishReason,
+        usage: Option<LlmTokenUsage>,
+    },
+    Failed {
+        message: String,
+    },
+}
+
+#[derive(Debug)]
+struct ActiveSupervisorChatStream {
+    work_item_id: WorkItemId,
+    receiver: mpsc::Receiver<SupervisorStreamEvent>,
+    stream_id: Option<String>,
+    lifecycle: SupervisorStreamLifecycle,
+    transcript: String,
+    pending_delta: String,
+    pending_chunk_count: usize,
+    last_flush_coalesced_chunks: usize,
+    last_rate_limit: Option<LlmRateLimitState>,
+    usage: Option<LlmTokenUsage>,
+    error_message: Option<String>,
+    pending_cancel: bool,
+}
+
+impl ActiveSupervisorChatStream {
+    fn new(work_item_id: WorkItemId, receiver: mpsc::Receiver<SupervisorStreamEvent>) -> Self {
+        Self {
+            work_item_id,
+            receiver,
+            stream_id: None,
+            lifecycle: SupervisorStreamLifecycle::Connecting,
+            transcript: String::new(),
+            pending_delta: String::new(),
+            pending_chunk_count: 0,
+            last_flush_coalesced_chunks: 0,
+            last_rate_limit: None,
+            usage: None,
+            error_message: None,
+            pending_cancel: false,
+        }
+    }
+
+    fn flush_pending_delta(&mut self) {
+        if self.pending_delta.is_empty() {
+            self.last_flush_coalesced_chunks = 0;
+            return;
+        }
+
+        self.last_flush_coalesced_chunks = self.pending_chunk_count.max(1);
+        self.transcript.push_str(&self.pending_delta);
+        self.pending_delta.clear();
+        self.pending_chunk_count = 0;
+        trim_to_trailing_chars(&mut self.transcript, SUPERVISOR_STREAM_MAX_TRANSCRIPT_CHARS);
+    }
+
+    fn render_lines(&self) -> Vec<String> {
+        let mut lines = vec![
+            String::new(),
+            "Live supervisor stream:".to_owned(),
+            format!("- State: {}", self.lifecycle.label()),
+        ];
+
+        if self.last_flush_coalesced_chunks > 1 {
+            lines.push(format!(
+                "- Backpressure: coalesced {} chunks in last draw tick.",
+                self.last_flush_coalesced_chunks
+            ));
+        }
+        if !self.pending_delta.is_empty() {
+            lines.push(format!(
+                "- Buffering: {} chars across {} chunks awaiting next draw tick.",
+                self.pending_delta.chars().count(),
+                self.pending_chunk_count.max(1)
+            ));
+        }
+        if let Some(rate_limit) = self.last_rate_limit.as_ref() {
+            lines.push(format!(
+                "- Rate limit: requests={} tokens={}",
+                rate_limit
+                    .requests_remaining
+                    .map(|value| value.to_string())
+                    .unwrap_or_else(|| "unknown".to_owned()),
+                rate_limit
+                    .tokens_remaining
+                    .map(|value| value.to_string())
+                    .unwrap_or_else(|| "unknown".to_owned())
+            ));
+            if let Some(reset_at) = rate_limit.reset_at.as_deref() {
+                lines.push(format!("- Rate limit reset: {reset_at}"));
+            }
+        }
+        if let Some(usage) = self.usage.as_ref() {
+            lines.push(format!(
+                "- Token usage: input={} output={} total={}",
+                usage.input_tokens, usage.output_tokens, usage.total_tokens
+            ));
+        }
+        if let Some(error_message) = self.error_message.as_deref() {
+            lines.push(format!(
+                "- Error: {}",
+                compact_focus_card_text(error_message)
+            ));
+        }
+
+        lines.push(String::new());
+        lines.push("Streaming response:".to_owned());
+
+        if self.transcript.trim().is_empty() {
+            lines.push("- Waiting for streamed output...".to_owned());
+            return lines;
+        }
+
+        let transcript_lines = self
+            .transcript
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .collect::<Vec<_>>();
+        let total_lines = transcript_lines.len();
+        let start = total_lines.saturating_sub(SUPERVISOR_STREAM_RENDER_LINE_LIMIT);
+        for line in transcript_lines.iter().skip(start) {
+            lines.push(format!("  {line}"));
+        }
+        if total_lines > SUPERVISOR_STREAM_RENDER_LINE_LIMIT {
+            lines.push(format!(
+                "  ... {} older lines omitted",
+                total_lines - SUPERVISOR_STREAM_RENDER_LINE_LIMIT
+            ));
+        }
+
+        lines
+    }
+}
+
+fn trim_to_trailing_chars(text: &mut String, max_chars: usize) {
+    if text.chars().count() <= max_chars {
+        return;
+    }
+
+    let trimmed = text
+        .chars()
+        .rev()
+        .take(max_chars)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect::<String>();
+    *text = trimmed;
+}
 
 fn project_artifact_inspector_pane(
     inspector: ArtifactInspectorKind,
@@ -901,6 +1100,97 @@ fn collect_chat_event_lines(work_item_id: &WorkItemId, domain: &ProjectionState)
     lines
 }
 
+fn build_supervisor_chat_request(
+    selected_row: &UiInboxRow,
+    domain: &ProjectionState,
+) -> LlmChatRequest {
+    let workflow = selected_row
+        .workflow_state
+        .as_ref()
+        .map(|state| format!("{state:?}"))
+        .unwrap_or_else(|| "Unknown".to_owned());
+    let session = match (&selected_row.session_id, &selected_row.session_status) {
+        (Some(session_id), Some(status)) => format!("{} ({status:?})", session_id.as_str()),
+        (Some(session_id), None) => format!("{} (Unknown)", session_id.as_str()),
+        (None, _) => "None".to_owned(),
+    };
+    let chat_event_lines = collect_chat_event_lines(&selected_row.work_item_id, domain);
+    let mut prompt_lines = vec![
+        "You are answering for the orchestrator supervisor chat pane.".to_owned(),
+        "Use only the supplied context. If uncertain, say Unknown.".to_owned(),
+        String::new(),
+        format!("Work item: {}", selected_row.work_item_id.as_str()),
+        format!("Inbox title: {}", selected_row.title),
+        format!("Inbox kind: {:?}", selected_row.kind),
+        format!("Workflow: {workflow}"),
+        format!("Session: {session}"),
+        String::new(),
+        "Recent transcript events:".to_owned(),
+    ];
+    if chat_event_lines.is_empty() {
+        prompt_lines.push("- none".to_owned());
+    } else {
+        prompt_lines.extend(chat_event_lines.into_iter().map(|line| format!("- {line}")));
+    }
+    prompt_lines.push(String::new());
+    prompt_lines.push("Respond with:".to_owned());
+    prompt_lines.push("- Current activity (1-2 bullets)".to_owned());
+    prompt_lines.push("- What needs me now (ordered bullets)".to_owned());
+    prompt_lines.push("- Recommended response to send to worker (single message)".to_owned());
+
+    LlmChatRequest {
+        model: supervisor_model_from_env(),
+        messages: vec![
+            LlmMessage {
+                role: LlmRole::System,
+                content: "You are the orchestrator supervisor. Keep responses terse, operational, and grounded in provided context."
+                    .to_owned(),
+                name: None,
+            },
+            LlmMessage {
+                role: LlmRole::User,
+                content: prompt_lines.join("\n"),
+                name: None,
+            },
+        ],
+        temperature: Some(0.2),
+        max_output_tokens: Some(700),
+    }
+}
+
+fn supervisor_model_from_env() -> String {
+    std::env::var("ORCHESTRATOR_SUPERVISOR_MODEL")
+        .ok()
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| DEFAULT_SUPERVISOR_MODEL.to_owned())
+}
+
+fn classify_supervisor_stream_error(message: &str) -> &'static str {
+    let lower = message.to_ascii_lowercase();
+    if lower.contains("429") || lower.contains("rate limit") {
+        "rate-limit"
+    } else if lower.contains("401")
+        || lower.contains("403")
+        || lower.contains("unauthorized")
+        || lower.contains("forbidden")
+        || lower.contains("auth")
+        || lower.contains("api key")
+    {
+        "auth"
+    } else if lower.contains("network")
+        || lower.contains("timeout")
+        || lower.contains("connect")
+        || lower.contains("transport")
+        || lower.contains("dns")
+        || lower.contains("tls")
+    {
+        "network"
+    } else {
+        "stream"
+    }
+}
+
 fn latest_checkpoint_summary_for_work_item(
     work_item_id: &WorkItemId,
     domain: &ProjectionState,
@@ -1207,9 +1497,9 @@ struct WhichKeyOverlayState {
     hints: Vec<WhichKeyHint>,
 }
 
-#[derive(Debug, Clone)]
 struct UiShellState {
-    status: String,
+    base_status: String,
+    status_warning: Option<String>,
     domain: ProjectionState,
     selected_inbox_index: Option<usize>,
     selected_inbox_item_id: Option<InboxItemId>,
@@ -1219,12 +1509,23 @@ struct UiShellState {
     which_key_overlay: Option<WhichKeyOverlayState>,
     mode: UiMode,
     terminal_escape_pending: bool,
+    supervisor_provider: Option<Arc<dyn LlmProvider>>,
+    supervisor_chat_stream: Option<ActiveSupervisorChatStream>,
 }
 
 impl UiShellState {
     fn new(status: String, domain: ProjectionState) -> Self {
+        Self::new_with_supervisor(status, domain, None)
+    }
+
+    fn new_with_supervisor(
+        status: String,
+        domain: ProjectionState,
+        supervisor_provider: Option<Arc<dyn LlmProvider>>,
+    ) -> Self {
         Self {
-            status,
+            base_status: status,
+            status_warning: None,
             domain,
             selected_inbox_index: None,
             selected_inbox_item_id: None,
@@ -1234,17 +1535,29 @@ impl UiShellState {
             which_key_overlay: None,
             mode: UiMode::Normal,
             terminal_escape_pending: false,
+            supervisor_provider,
+            supervisor_chat_stream: None,
         }
     }
 
     fn ui_state(&self) -> UiState {
-        project_ui_state(
-            &self.status,
+        let status = self.status_text();
+        let mut ui_state = project_ui_state(
+            status.as_str(),
             &self.domain,
             &self.view_stack,
             self.selected_inbox_index,
             self.selected_inbox_item_id.as_ref(),
-        )
+        );
+        self.append_live_supervisor_chat(&mut ui_state);
+        ui_state
+    }
+
+    fn status_text(&self) -> String {
+        match self.status_warning.as_deref() {
+            Some(warning) => format!("{} | warning: {warning}", self.base_status),
+            None => self.base_status.clone(),
+        }
     }
 
     fn move_selection(&mut self, delta: isize) {
@@ -1353,6 +1666,11 @@ impl UiShellState {
         }
     }
 
+    fn open_chat_inspector_for_selected(&mut self) {
+        self.open_inspector_for_selected(ArtifactInspectorKind::Chat);
+        self.start_supervisor_stream_for_selected();
+    }
+
     fn open_focus_and_push_center(&mut self, inbox_item_id: InboxItemId, top_view: CenterView) {
         self.selected_inbox_item_id = Some(inbox_item_id.clone());
         let focus_view = CenterView::FocusCardView { inbox_item_id };
@@ -1365,6 +1683,227 @@ impl UiShellState {
         if !self.is_terminal_view_active() {
             self.enter_normal_mode();
         }
+    }
+
+    fn start_supervisor_stream_for_selected(&mut self) {
+        let Some(provider) = self.supervisor_provider.clone() else {
+            self.status_warning =
+                Some("supervisor stream unavailable: no LLM provider configured".to_owned());
+            return;
+        };
+
+        let ui_state = project_ui_state(
+            self.base_status.as_str(),
+            &self.domain,
+            &self.view_stack,
+            self.selected_inbox_index,
+            self.selected_inbox_item_id.as_ref(),
+        );
+        let Some(selected_row) = ui_state
+            .selected_inbox_index
+            .and_then(|index| ui_state.inbox_rows.get(index))
+            .cloned()
+        else {
+            return;
+        };
+
+        let request = build_supervisor_chat_request(&selected_row, &self.domain);
+        let work_item_id = selected_row.work_item_id.clone();
+        let (sender, receiver) = mpsc::channel(SUPERVISOR_STREAM_CHANNEL_CAPACITY);
+        self.replace_supervisor_stream(work_item_id, receiver);
+        self.status_warning = None;
+
+        match TokioHandle::try_current() {
+            Ok(handle) => {
+                handle.spawn(async move {
+                    run_supervisor_stream_task(provider, request, sender).await;
+                });
+            }
+            Err(_) => {
+                self.status_warning =
+                    Some("supervisor stream unavailable: tokio runtime is not active".to_owned());
+                if let Some(stream) = self.supervisor_chat_stream.as_mut() {
+                    stream.lifecycle = SupervisorStreamLifecycle::Error;
+                    stream.error_message =
+                        Some("tokio runtime unavailable; cannot spawn stream task".to_owned());
+                }
+            }
+        }
+    }
+
+    fn replace_supervisor_stream(
+        &mut self,
+        work_item_id: WorkItemId,
+        receiver: mpsc::Receiver<SupervisorStreamEvent>,
+    ) {
+        if let Some(previous_stream) = self.supervisor_chat_stream.take() {
+            if previous_stream.lifecycle.is_active() {
+                if let Some(stream_id) = previous_stream.stream_id {
+                    self.spawn_supervisor_cancel(stream_id);
+                }
+            }
+        }
+        self.supervisor_chat_stream = Some(ActiveSupervisorChatStream::new(work_item_id, receiver));
+    }
+
+    fn cancel_supervisor_stream(&mut self) {
+        let Some(stream) = self.supervisor_chat_stream.as_mut() else {
+            return;
+        };
+        if !stream.lifecycle.is_active() {
+            return;
+        }
+
+        stream.lifecycle = SupervisorStreamLifecycle::Cancelling;
+        stream.pending_cancel = true;
+        let stream_id = stream.stream_id.clone();
+
+        if let Some(stream_id) = stream_id {
+            stream.pending_cancel = false;
+            self.spawn_supervisor_cancel(stream_id);
+        }
+    }
+
+    fn spawn_supervisor_cancel(&mut self, stream_id: String) {
+        let Some(provider) = self.supervisor_provider.clone() else {
+            self.status_warning =
+                Some("supervisor cancel unavailable: no LLM provider configured".to_owned());
+            return;
+        };
+
+        match TokioHandle::try_current() {
+            Ok(handle) => {
+                handle.spawn(async move {
+                    let _ = provider.cancel_stream(stream_id.as_str()).await;
+                });
+            }
+            Err(_) => {
+                self.status_warning =
+                    Some("supervisor cancel unavailable: tokio runtime is not active".to_owned());
+            }
+        }
+    }
+
+    fn is_active_supervisor_stream_visible(&self) -> bool {
+        let Some(stream) = self.supervisor_chat_stream.as_ref() else {
+            return false;
+        };
+        if !stream.lifecycle.is_active() {
+            return false;
+        }
+
+        matches!(
+            self.view_stack.active_center(),
+            Some(CenterView::InspectorView {
+                work_item_id,
+                inspector: ArtifactInspectorKind::Chat,
+            }) if work_item_id == &stream.work_item_id
+        )
+    }
+
+    fn tick_supervisor_stream(&mut self) {
+        self.poll_supervisor_stream_events();
+        if let Some(stream) = self.supervisor_chat_stream.as_mut() {
+            stream.flush_pending_delta();
+        }
+    }
+
+    fn poll_supervisor_stream_events(&mut self) {
+        let mut cancel_stream_id: Option<String> = None;
+        let mut warning_message: Option<String> = None;
+
+        {
+            let Some(stream) = self.supervisor_chat_stream.as_mut() else {
+                return;
+            };
+
+            loop {
+                match stream.receiver.try_recv() {
+                    Ok(SupervisorStreamEvent::Started { stream_id }) => {
+                        stream.stream_id = Some(stream_id.clone());
+                        if stream.lifecycle != SupervisorStreamLifecycle::Cancelling {
+                            stream.lifecycle = SupervisorStreamLifecycle::Streaming;
+                        }
+                        if stream.pending_cancel {
+                            stream.pending_cancel = false;
+                            cancel_stream_id = Some(stream_id);
+                        }
+                    }
+                    Ok(SupervisorStreamEvent::Delta { text }) => {
+                        if !text.is_empty() {
+                            stream.pending_delta.push_str(text.as_str());
+                            stream.pending_chunk_count += 1;
+                        }
+                    }
+                    Ok(SupervisorStreamEvent::RateLimit { state }) => {
+                        stream.last_rate_limit = Some(state);
+                    }
+                    Ok(SupervisorStreamEvent::Usage { usage }) => {
+                        stream.usage = Some(usage);
+                    }
+                    Ok(SupervisorStreamEvent::Finished { reason, usage }) => {
+                        if let Some(usage) = usage {
+                            stream.usage = Some(usage);
+                        }
+                        stream.lifecycle = match reason {
+                            LlmFinishReason::Cancelled => SupervisorStreamLifecycle::Cancelled,
+                            LlmFinishReason::Error => SupervisorStreamLifecycle::Error,
+                            _ => SupervisorStreamLifecycle::Completed,
+                        };
+                        if reason == LlmFinishReason::Error {
+                            warning_message =
+                                Some("supervisor stream ended with error finish reason".to_owned());
+                        }
+                    }
+                    Ok(SupervisorStreamEvent::Failed { message }) => {
+                        stream.error_message = Some(message.clone());
+                        stream.lifecycle = SupervisorStreamLifecycle::Error;
+                        warning_message = Some(message);
+                    }
+                    Err(TryRecvError::Empty) => break,
+                    Err(TryRecvError::Disconnected) => {
+                        if stream.lifecycle == SupervisorStreamLifecycle::Connecting
+                            || stream.lifecycle == SupervisorStreamLifecycle::Streaming
+                            || stream.lifecycle == SupervisorStreamLifecycle::Cancelling
+                        {
+                            stream.lifecycle = SupervisorStreamLifecycle::Error;
+                            warning_message =
+                                Some("supervisor stream channel closed unexpectedly".to_owned());
+                        }
+                        break;
+                    }
+                }
+            }
+        }
+
+        if let Some(stream_id) = cancel_stream_id {
+            self.spawn_supervisor_cancel(stream_id);
+        }
+        if let Some(message) = warning_message {
+            self.status_warning = Some(format!(
+                "supervisor {} warning: {}",
+                classify_supervisor_stream_error(message.as_str()),
+                compact_focus_card_text(message.as_str())
+            ));
+        }
+    }
+
+    fn append_live_supervisor_chat(&self, ui_state: &mut UiState) {
+        let Some(stream) = self.supervisor_chat_stream.as_ref() else {
+            return;
+        };
+        let Some(CenterView::InspectorView {
+            work_item_id,
+            inspector: ArtifactInspectorKind::Chat,
+        }) = self.view_stack.active_center()
+        else {
+            return;
+        };
+        if &stream.work_item_id != work_item_id {
+            return;
+        }
+
+        ui_state.center_pane.lines.extend(stream.render_lines());
     }
 
     fn set_selection(&mut self, selected_index: Option<usize>, rows: &[UiInboxRow]) {
@@ -1452,8 +1991,101 @@ impl UiShellState {
     }
 }
 
+async fn run_supervisor_stream_task(
+    provider: Arc<dyn LlmProvider>,
+    request: LlmChatRequest,
+    sender: mpsc::Sender<SupervisorStreamEvent>,
+) {
+    let (stream_id, mut stream) = match provider.stream_chat(request).await {
+        Ok(response) => response,
+        Err(error) => {
+            let _ = sender
+                .send(SupervisorStreamEvent::Failed {
+                    message: error.to_string(),
+                })
+                .await;
+            return;
+        }
+    };
+
+    if sender
+        .send(SupervisorStreamEvent::Started { stream_id })
+        .await
+        .is_err()
+    {
+        return;
+    }
+
+    loop {
+        match stream.next_chunk().await {
+            Ok(Some(chunk)) => {
+                let delta = chunk.delta;
+                let finish_reason = chunk.finish_reason;
+                let usage = chunk.usage;
+                let rate_limit = chunk.rate_limit;
+
+                if !delta.is_empty()
+                    && sender
+                        .send(SupervisorStreamEvent::Delta { text: delta })
+                        .await
+                        .is_err()
+                {
+                    return;
+                }
+
+                if let Some(rate_limit) = rate_limit {
+                    if sender
+                        .send(SupervisorStreamEvent::RateLimit { state: rate_limit })
+                        .await
+                        .is_err()
+                    {
+                        return;
+                    }
+                }
+
+                if finish_reason.is_none() {
+                    if let Some(usage) = usage.clone() {
+                        if sender
+                            .send(SupervisorStreamEvent::Usage { usage })
+                            .await
+                            .is_err()
+                        {
+                            return;
+                        }
+                    }
+                }
+
+                if let Some(reason) = finish_reason {
+                    let _ = sender
+                        .send(SupervisorStreamEvent::Finished { reason, usage })
+                        .await;
+                    return;
+                }
+            }
+            Ok(None) => {
+                let _ = sender
+                    .send(SupervisorStreamEvent::Finished {
+                        reason: LlmFinishReason::Stop,
+                        usage: None,
+                    })
+                    .await;
+                return;
+            }
+            Err(error) => {
+                let _ = sender
+                    .send(SupervisorStreamEvent::Failed {
+                        message: error.to_string(),
+                    })
+                    .await;
+                return;
+            }
+        }
+    }
+}
+
 pub struct Ui {
     terminal: Terminal<CrosstermBackend<Stdout>>,
+    supervisor_provider: Option<Arc<dyn LlmProvider>>,
 }
 
 impl Ui {
@@ -1463,12 +2095,28 @@ impl Ui {
         stdout.execute(EnterAlternateScreen)?;
         let backend = CrosstermBackend::new(stdout);
         let terminal = Terminal::new(backend)?;
-        Ok(Self { terminal })
+        Ok(Self {
+            terminal,
+            supervisor_provider: None,
+        })
+    }
+
+    pub fn with_supervisor_provider(mut self, provider: Arc<dyn LlmProvider>) -> Self {
+        self.supervisor_provider = Some(provider);
+        self
     }
 
     pub fn run(&mut self, status: &str, projection: &ProjectionState) -> io::Result<()> {
-        let mut shell_state = UiShellState::new(status.to_owned(), projection.clone());
+        let mut shell_state = match self.supervisor_provider.clone() {
+            Some(provider) => UiShellState::new_with_supervisor(
+                status.to_owned(),
+                projection.clone(),
+                Some(provider),
+            ),
+            None => UiShellState::new(status.to_owned(), projection.clone()),
+        };
         loop {
+            shell_state.tick_supervisor_stream();
             let ui_state = shell_state.ui_state();
             self.terminal.draw(|frame| {
                 let area = frame.area();
@@ -1899,7 +2547,14 @@ fn handle_key_press(shell_state: &mut UiShellState, key: KeyEvent) -> bool {
 
 fn route_key_press(shell_state: &mut UiShellState, key: KeyEvent) -> RoutedInput {
     if is_escape_to_normal(key) {
+        if shell_state.is_active_supervisor_stream_visible() {
+            shell_state.cancel_supervisor_stream();
+        }
         return RoutedInput::Command(UiCommand::EnterNormalMode);
+    }
+    if is_ctrl_char(key, 'c') && shell_state.is_active_supervisor_stream_visible() {
+        shell_state.cancel_supervisor_stream();
+        return RoutedInput::Ignore;
     }
 
     match shell_state.mode {
@@ -1986,7 +2641,7 @@ fn dispatch_command(shell_state: &mut UiShellState, command: UiCommand) -> bool 
             false
         }
         UiCommand::OpenChatInspectorForSelected => {
-            shell_state.open_inspector_for_selected(ArtifactInspectorKind::Chat);
+            shell_state.open_chat_inspector_for_selected();
             false
         }
         UiCommand::StartTerminalEscapeChord => {
@@ -2070,12 +2725,90 @@ fn routed_command(route: RoutedInput) -> Option<UiCommand> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use async_trait::async_trait;
     use orchestrator_core::{
-        ArtifactId, ArtifactKind, ArtifactProjection, InboxItemProjection,
+        ArtifactId, ArtifactKind, ArtifactProjection, CoreError, InboxItemProjection,
+        LlmProviderKind, LlmResponseStream, LlmResponseSubscription, LlmStreamChunk,
         OrchestrationEventPayload, OrchestrationEventType, SessionBlockedPayload,
         SessionCheckpointPayload, SessionNeedsInputPayload, SessionProjection, StoredEventEnvelope,
         UserRespondedPayload, WorkItemProjection, WorkflowState,
     };
+    use std::collections::VecDeque;
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
+
+    #[derive(Debug)]
+    struct TestLlmStream {
+        chunks: VecDeque<Result<LlmStreamChunk, CoreError>>,
+    }
+
+    #[async_trait]
+    impl LlmResponseSubscription for TestLlmStream {
+        async fn next_chunk(&mut self) -> Result<Option<LlmStreamChunk>, CoreError> {
+            match self.chunks.pop_front() {
+                Some(Ok(chunk)) => Ok(Some(chunk)),
+                Some(Err(error)) => Err(error),
+                None => Ok(None),
+            }
+        }
+    }
+
+    #[derive(Debug)]
+    struct TestLlmProvider {
+        chunks: Mutex<Option<Vec<Result<LlmStreamChunk, CoreError>>>>,
+        cancelled_streams: Mutex<Vec<String>>,
+    }
+
+    impl TestLlmProvider {
+        fn new(chunks: Vec<Result<LlmStreamChunk, CoreError>>) -> Self {
+            Self {
+                chunks: Mutex::new(Some(chunks)),
+                cancelled_streams: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn cancelled_streams(&self) -> Vec<String> {
+            self.cancelled_streams
+                .lock()
+                .expect("cancelled stream lock")
+                .clone()
+        }
+    }
+
+    #[async_trait]
+    impl LlmProvider for TestLlmProvider {
+        fn kind(&self) -> LlmProviderKind {
+            LlmProviderKind::Other("test".to_owned())
+        }
+
+        async fn health_check(&self) -> Result<(), CoreError> {
+            Ok(())
+        }
+
+        async fn stream_chat(
+            &self,
+            _request: LlmChatRequest,
+        ) -> Result<(String, LlmResponseStream), CoreError> {
+            let chunks = self
+                .chunks
+                .lock()
+                .expect("stream chunk lock")
+                .take()
+                .unwrap_or_default();
+            let stream = TestLlmStream {
+                chunks: chunks.into(),
+            };
+            Ok(("test-stream".to_owned(), Box::new(stream)))
+        }
+
+        async fn cancel_stream(&self, stream_id: &str) -> Result<(), CoreError> {
+            self.cancelled_streams
+                .lock()
+                .expect("cancelled stream lock")
+                .push(stream_id.to_owned());
+            Ok(())
+        }
+    }
 
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
@@ -2549,6 +3282,18 @@ mod tests {
         projection
     }
 
+    fn attach_supervisor_stream(
+        shell_state: &mut UiShellState,
+        work_item_id: &str,
+    ) -> mpsc::Sender<SupervisorStreamEvent> {
+        let (sender, receiver) = mpsc::channel(SUPERVISOR_STREAM_CHANNEL_CAPACITY);
+        shell_state.supervisor_chat_stream = Some(ActiveSupervisorChatStream::new(
+            WorkItemId::new(work_item_id),
+            receiver,
+        ));
+        sender
+    }
+
     #[test]
     fn center_stack_replace_push_and_pop_behavior() {
         let mut stack = ViewStack::default();
@@ -2819,6 +3564,218 @@ mod tests {
         assert!(chat_rendered.contains("Supervisor output:"));
         assert!(chat_rendered.contains("you: Please summarize the supervisor output."));
         assert!(chat_rendered.contains("artifact://chat/wi-inspector"));
+    }
+
+    #[test]
+    fn chat_stream_coalesces_chunks_and_renders_incrementally() {
+        let mut shell_state = UiShellState::new("ready".to_owned(), inspector_projection());
+        shell_state.open_inspector_for_selected(ArtifactInspectorKind::Chat);
+        let sender = attach_supervisor_stream(&mut shell_state, "wi-inspector");
+
+        sender
+            .try_send(SupervisorStreamEvent::Started {
+                stream_id: "stream-1".to_owned(),
+            })
+            .expect("send stream started");
+        sender
+            .try_send(SupervisorStreamEvent::Delta {
+                text: "Recommended response:\n".to_owned(),
+            })
+            .expect("send chunk one");
+        sender
+            .try_send(SupervisorStreamEvent::Delta {
+                text: "Please rerun tests with --nocapture and post the failing assertion."
+                    .to_owned(),
+            })
+            .expect("send chunk two");
+
+        shell_state.poll_supervisor_stream_events();
+        let buffered_view = shell_state.ui_state().center_pane.lines.join("\n");
+        assert!(buffered_view.contains("Buffering:"));
+        assert!(buffered_view.contains("State: streaming"));
+
+        shell_state.tick_supervisor_stream();
+        let flushed_view = shell_state.ui_state().center_pane.lines.join("\n");
+        assert!(flushed_view.contains("Live supervisor stream:"));
+        assert!(flushed_view.contains("Backpressure: coalesced 2 chunks"));
+        assert!(flushed_view.contains("Recommended response:"));
+        assert!(flushed_view.contains("Please rerun tests with --nocapture"));
+    }
+
+    #[test]
+    fn esc_cancels_active_chat_stream() {
+        let mut shell_state = UiShellState::new("ready".to_owned(), inspector_projection());
+        shell_state.open_inspector_for_selected(ArtifactInspectorKind::Chat);
+        let _sender = attach_supervisor_stream(&mut shell_state, "wi-inspector");
+        if let Some(stream) = shell_state.supervisor_chat_stream.as_mut() {
+            stream.lifecycle = SupervisorStreamLifecycle::Streaming;
+        }
+
+        let should_quit = handle_key_press(&mut shell_state, key(KeyCode::Esc));
+        assert!(!should_quit);
+        assert_eq!(shell_state.mode, UiMode::Normal);
+
+        let stream = shell_state
+            .supervisor_chat_stream
+            .as_ref()
+            .expect("stream state present");
+        assert_eq!(stream.lifecycle, SupervisorStreamLifecycle::Cancelling);
+        assert!(stream.pending_cancel);
+    }
+
+    #[test]
+    fn ctrl_c_cancels_active_chat_stream_without_mode_change() {
+        let mut shell_state = UiShellState::new("ready".to_owned(), inspector_projection());
+        shell_state.open_inspector_for_selected(ArtifactInspectorKind::Chat);
+        shell_state.enter_insert_mode();
+        let _sender = attach_supervisor_stream(&mut shell_state, "wi-inspector");
+        if let Some(stream) = shell_state.supervisor_chat_stream.as_mut() {
+            stream.lifecycle = SupervisorStreamLifecycle::Streaming;
+        }
+
+        let should_quit = handle_key_press(&mut shell_state, ctrl_key(KeyCode::Char('c')));
+        assert!(!should_quit);
+        assert_eq!(shell_state.mode, UiMode::Insert);
+
+        let stream = shell_state
+            .supervisor_chat_stream
+            .as_ref()
+            .expect("stream state present");
+        assert_eq!(stream.lifecycle, SupervisorStreamLifecycle::Cancelling);
+    }
+
+    #[test]
+    fn chat_stream_rate_limit_errors_surface_in_status_warning() {
+        let mut shell_state = UiShellState::new("ready".to_owned(), inspector_projection());
+        shell_state.open_inspector_for_selected(ArtifactInspectorKind::Chat);
+        let sender = attach_supervisor_stream(&mut shell_state, "wi-inspector");
+
+        sender
+            .try_send(SupervisorStreamEvent::Failed {
+                message: "OpenRouter request failed: HTTP 429 rate limit exceeded".to_owned(),
+            })
+            .expect("send failure");
+        shell_state.poll_supervisor_stream_events();
+
+        let ui_state = shell_state.ui_state();
+        assert!(ui_state.status.contains("rate-limit"));
+        assert!(ui_state.status.contains("warning"));
+        let rendered = ui_state.center_pane.lines.join("\n");
+        assert!(rendered.contains("Error: OpenRouter request failed"));
+    }
+
+    #[test]
+    fn chat_stream_usage_updates_surface_in_chat_inspector() {
+        let mut shell_state = UiShellState::new("ready".to_owned(), inspector_projection());
+        shell_state.open_inspector_for_selected(ArtifactInspectorKind::Chat);
+        let sender = attach_supervisor_stream(&mut shell_state, "wi-inspector");
+
+        sender
+            .try_send(SupervisorStreamEvent::Usage {
+                usage: LlmTokenUsage {
+                    input_tokens: 120,
+                    output_tokens: 45,
+                    total_tokens: 165,
+                },
+            })
+            .expect("send usage");
+        sender
+            .try_send(SupervisorStreamEvent::Finished {
+                reason: LlmFinishReason::Stop,
+                usage: None,
+            })
+            .expect("send finished");
+        shell_state.tick_supervisor_stream();
+
+        let rendered = shell_state.ui_state().center_pane.lines.join("\n");
+        assert!(rendered.contains("Token usage: input=120 output=45 total=165"));
+    }
+
+    #[tokio::test]
+    async fn opening_new_chat_stream_cancels_active_stream_with_known_id() {
+        let provider = Arc::new(TestLlmProvider::new(Vec::new()));
+        let provider_dyn: Arc<dyn LlmProvider> = provider.clone();
+        let mut shell_state = UiShellState::new_with_supervisor(
+            "ready".to_owned(),
+            inspector_projection(),
+            Some(provider_dyn),
+        );
+        shell_state.open_inspector_for_selected(ArtifactInspectorKind::Chat);
+        let _sender = attach_supervisor_stream(&mut shell_state, "wi-inspector");
+        if let Some(stream) = shell_state.supervisor_chat_stream.as_mut() {
+            stream.lifecycle = SupervisorStreamLifecycle::Streaming;
+            stream.stream_id = Some("stream-old".to_owned());
+        }
+
+        shell_state.start_supervisor_stream_for_selected();
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if provider
+                    .cancelled_streams()
+                    .iter()
+                    .any(|id| id == "stream-old")
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("stream cancellation should be forwarded");
+    }
+
+    #[tokio::test]
+    async fn run_supervisor_stream_task_emits_usage_events_for_usage_only_chunks() {
+        let provider = Arc::new(TestLlmProvider::new(vec![
+            Ok(LlmStreamChunk {
+                delta: String::new(),
+                finish_reason: None,
+                usage: Some(LlmTokenUsage {
+                    input_tokens: 20,
+                    output_tokens: 5,
+                    total_tokens: 25,
+                }),
+                rate_limit: None,
+            }),
+            Ok(LlmStreamChunk {
+                delta: "done".to_owned(),
+                finish_reason: Some(LlmFinishReason::Stop),
+                usage: None,
+                rate_limit: None,
+            }),
+        ]));
+        let provider_dyn: Arc<dyn LlmProvider> = provider;
+        let request = LlmChatRequest {
+            model: "test-model".to_owned(),
+            messages: vec![LlmMessage {
+                role: LlmRole::User,
+                content: "status".to_owned(),
+                name: None,
+            }],
+            temperature: None,
+            max_output_tokens: None,
+        };
+
+        let (sender, mut receiver) = mpsc::channel(8);
+        run_supervisor_stream_task(provider_dyn, request, sender).await;
+
+        let mut saw_usage = false;
+        let mut saw_finished = false;
+        while let Some(event) = receiver.recv().await {
+            match event {
+                SupervisorStreamEvent::Usage { usage } => {
+                    saw_usage |= usage.total_tokens == 25;
+                }
+                SupervisorStreamEvent::Finished { reason, usage } => {
+                    saw_finished |= reason == LlmFinishReason::Stop && usage.is_none();
+                }
+                _ => {}
+            }
+        }
+
+        assert!(saw_usage);
+        assert!(saw_finished);
     }
 
     #[test]

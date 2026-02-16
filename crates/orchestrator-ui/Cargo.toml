@@ -9,3 +9,6 @@ orchestrator-core = { path = "../orchestrator-core" }
 crossterm.workspace = true
 ratatui.workspace = true
 tokio.workspace = true
+
+[dev-dependencies]
+async-trait.workspace = true
