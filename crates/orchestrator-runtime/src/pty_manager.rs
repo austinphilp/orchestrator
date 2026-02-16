@@ -2,6 +2,7 @@ use std::collections::{hash_map::Entry, HashMap};
 use std::io::{ErrorKind, Read, Write};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, RwLock};
+use std::time::{Duration, Instant};
 
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
 use serde::{Deserialize, Serialize};
@@ -15,6 +16,9 @@ use crate::{
 
 const DEFAULT_OUTPUT_BUFFER: usize = 256;
 const DEFAULT_SCROLLBACK_LIMIT: usize = 4_000;
+const MAX_SCROLLBACK_LIMIT: usize = 128_000;
+const DEFAULT_OUTPUT_COALESCE_WINDOW_MS: u64 = 16;
+const DEFAULT_OUTPUT_COALESCE_MAX_BYTES: usize = 64 * 1024;
 const READ_CHUNK_SIZE: usize = 8 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -37,6 +41,41 @@ pub struct PtySpawnSpec {
     pub workdir: PathBuf,
     pub environment: Vec<(String, String)>,
     pub size: TerminalSize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PtyRenderPolicy {
+    pub scrollback_limit: usize,
+    pub output_coalesce_window_ms: u64,
+    pub output_coalesce_max_bytes: usize,
+}
+
+impl Default for PtyRenderPolicy {
+    fn default() -> Self {
+        Self {
+            scrollback_limit: DEFAULT_SCROLLBACK_LIMIT,
+            output_coalesce_window_ms: DEFAULT_OUTPUT_COALESCE_WINDOW_MS,
+            output_coalesce_max_bytes: DEFAULT_OUTPUT_COALESCE_MAX_BYTES,
+        }
+    }
+}
+
+impl PtyRenderPolicy {
+    fn normalized(self) -> Self {
+        Self {
+            scrollback_limit: self.scrollback_limit.clamp(1, MAX_SCROLLBACK_LIMIT),
+            output_coalesce_window_ms: self.output_coalesce_window_ms,
+            output_coalesce_max_bytes: self.output_coalesce_max_bytes.max(1),
+        }
+    }
+
+    fn output_coalesce_window(self) -> Option<Duration> {
+        if self.output_coalesce_window_ms == 0 {
+            None
+        } else {
+            Some(Duration::from_millis(self.output_coalesce_window_ms))
+        }
+    }
 }
 
 struct PtySession {
@@ -62,7 +101,7 @@ struct SpawnedPty {
 pub struct PtyManager {
     sessions: Arc<RwLock<HashMap<RuntimeSessionId, SessionState>>>,
     output_buffer: usize,
-    scrollback_limit: usize,
+    render_policy: PtyRenderPolicy,
 }
 
 pub struct PtyOutputSubscription {
@@ -77,14 +116,24 @@ impl Default for PtyManager {
 
 impl PtyManager {
     pub fn new(output_buffer: usize) -> Self {
-        Self::with_scrollback(output_buffer, DEFAULT_SCROLLBACK_LIMIT)
+        Self::with_render_policy(output_buffer, PtyRenderPolicy::default())
     }
 
     pub fn with_scrollback(output_buffer: usize, scrollback_limit: usize) -> Self {
+        Self::with_render_policy(
+            output_buffer,
+            PtyRenderPolicy {
+                scrollback_limit,
+                ..PtyRenderPolicy::default()
+            },
+        )
+    }
+
+    pub fn with_render_policy(output_buffer: usize, render_policy: PtyRenderPolicy) -> Self {
         Self {
             sessions: Arc::new(RwLock::new(HashMap::new())),
             output_buffer: output_buffer.max(1),
-            scrollback_limit,
+            render_policy: render_policy.normalized(),
         }
     }
 
@@ -121,7 +170,7 @@ impl PtyManager {
         let emulator = match TerminalEmulator::new(
             initial_size.cols,
             initial_size.rows,
-            self.scrollback_limit,
+            self.render_policy.scrollback_limit,
         ) {
             Ok(emulator) => emulator,
             Err(error) => {
@@ -145,7 +194,7 @@ impl PtyManager {
             return Err(error);
         }
 
-        spawn_read_loop(spawned.reader, output_tx, session);
+        spawn_read_loop(spawned.reader, output_tx, session, self.render_policy);
         spawn_write_loop(spawned.writer, stdin_rx);
         spawn_child_wait_loop(Arc::clone(&self.sessions), session_id, spawned.child);
         Ok(())
@@ -357,7 +406,11 @@ fn spawn_read_loop(
     mut reader: Box<dyn Read + Send>,
     output_tx: broadcast::Sender<Vec<u8>>,
     session: Arc<PtySession>,
+    policy: PtyRenderPolicy,
 ) {
+    let (coalesce_tx, coalesce_rx) = std::sync::mpsc::channel::<Vec<u8>>();
+    std::thread::spawn(move || run_output_coalescer(coalesce_rx, output_tx, policy));
+
     std::thread::spawn(move || {
         let mut buffer = [0_u8; READ_CHUNK_SIZE];
         loop {
@@ -367,13 +420,88 @@ fn spawn_read_loop(
                     if let Ok(mut emulator) = session.emulator.lock() {
                         emulator.process(&buffer[..read]);
                     }
-                    let _ = output_tx.send(buffer[..read].to_vec());
+                    if coalesce_tx.send(buffer[..read].to_vec()).is_err() {
+                        break;
+                    }
                 }
                 Err(error) if error.kind() == ErrorKind::Interrupted => continue,
                 Err(_) => break,
             }
         }
     });
+}
+
+fn run_output_coalescer(
+    output_rx: std::sync::mpsc::Receiver<Vec<u8>>,
+    output_tx: broadcast::Sender<Vec<u8>>,
+    policy: PtyRenderPolicy,
+) {
+    let policy = policy.normalized();
+    let Some(window) = policy.output_coalesce_window() else {
+        while let Ok(chunk) = output_rx.recv() {
+            if !chunk.is_empty() {
+                let _ = output_tx.send(chunk);
+            }
+        }
+        return;
+    };
+
+    let mut pending = Vec::new();
+    loop {
+        if pending.is_empty() {
+            match output_rx.recv() {
+                Ok(chunk) => {
+                    if chunk.is_empty() {
+                        continue;
+                    }
+                    pending.extend_from_slice(&chunk);
+                    if pending.len() >= policy.output_coalesce_max_bytes {
+                        let _ = output_tx.send(std::mem::take(&mut pending));
+                        continue;
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+
+        let now = Instant::now();
+        let Some(window_deadline) = now.checked_add(window) else {
+            let _ = output_tx.send(std::mem::take(&mut pending));
+            continue;
+        };
+        loop {
+            if pending.len() >= policy.output_coalesce_max_bytes {
+                let _ = output_tx.send(std::mem::take(&mut pending));
+                break;
+            }
+
+            let now = Instant::now();
+            if now >= window_deadline {
+                let _ = output_tx.send(std::mem::take(&mut pending));
+                break;
+            }
+
+            let remaining = window_deadline.saturating_duration_since(now);
+            match output_rx.recv_timeout(remaining) {
+                Ok(chunk) => {
+                    if chunk.is_empty() {
+                        continue;
+                    }
+                    pending.extend_from_slice(&chunk);
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                    let _ = output_tx.send(std::mem::take(&mut pending));
+                    break;
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                    if !pending.is_empty() {
+                        let _ = output_tx.send(pending);
+                    }
+                    return;
+                }
+            }
+        }
+    }
 }
 
 fn spawn_write_loop(
@@ -507,6 +635,150 @@ mod tests {
         })
         .await
         .map_err(|_| RuntimeError::Internal("timed out waiting for terminal snapshot".to_owned()))?
+    }
+
+    fn coalescer_subscription(
+        policy: PtyRenderPolicy,
+    ) -> (
+        std::sync::mpsc::Sender<Vec<u8>>,
+        PtyOutputSubscription,
+        std::thread::JoinHandle<()>,
+    ) {
+        let (raw_tx, raw_rx) = std::sync::mpsc::channel::<Vec<u8>>();
+        let (output_tx, output_rx) = broadcast::channel(16);
+        let handle = std::thread::spawn(move || run_output_coalescer(raw_rx, output_tx, policy));
+
+        (
+            raw_tx,
+            PtyOutputSubscription {
+                receiver: output_rx,
+            },
+            handle,
+        )
+    }
+
+    async fn collect_coalesced_chunks(
+        subscription: &mut PtyOutputSubscription,
+    ) -> RuntimeResult<Vec<Vec<u8>>> {
+        let mut chunks = Vec::new();
+        loop {
+            match subscription.next_chunk().await? {
+                Some(chunk) => chunks.push(chunk),
+                None => return Ok(chunks),
+            }
+        }
+    }
+
+    #[test]
+    fn render_policy_normalizes_bounds() {
+        let manager = PtyManager::with_render_policy(
+            0,
+            PtyRenderPolicy {
+                scrollback_limit: 0,
+                output_coalesce_window_ms: 32,
+                output_coalesce_max_bytes: 0,
+            },
+        );
+
+        assert_eq!(manager.output_buffer, 1);
+        assert_eq!(manager.render_policy.scrollback_limit, 1);
+        assert_eq!(manager.render_policy.output_coalesce_max_bytes, 1);
+
+        let manager = PtyManager::with_render_policy(
+            8,
+            PtyRenderPolicy {
+                scrollback_limit: usize::MAX,
+                output_coalesce_window_ms: 32,
+                output_coalesce_max_bytes: 8,
+            },
+        );
+        assert_eq!(manager.render_policy.scrollback_limit, MAX_SCROLLBACK_LIMIT);
+    }
+
+    #[tokio::test]
+    async fn output_coalescing_merges_burst_chunks() {
+        let (raw_tx, mut subscription, join_handle) = coalescer_subscription(PtyRenderPolicy {
+            scrollback_limit: 16,
+            output_coalesce_window_ms: 40,
+            output_coalesce_max_bytes: 512,
+        });
+
+        raw_tx.send(b"hello".to_vec()).expect("send first chunk");
+        raw_tx.send(b"-".to_vec()).expect("send second chunk");
+        raw_tx.send(b"world".to_vec()).expect("send third chunk");
+        drop(raw_tx);
+
+        join_handle.join().expect("join coalescer");
+
+        let combined = subscription
+            .next_chunk()
+            .await
+            .expect("receive combined chunk")
+            .expect("combined output should exist");
+        assert_eq!(combined, b"hello-world");
+
+        let stream_end = subscription
+            .next_chunk()
+            .await
+            .expect("stream should close after combined chunk");
+        assert!(stream_end.is_none());
+    }
+
+    #[tokio::test]
+    async fn output_coalescing_can_be_disabled() {
+        let (raw_tx, mut subscription, join_handle) = coalescer_subscription(PtyRenderPolicy {
+            scrollback_limit: 16,
+            output_coalesce_window_ms: 0,
+            output_coalesce_max_bytes: 512,
+        });
+
+        raw_tx.send(b"one".to_vec()).expect("send first chunk");
+        raw_tx.send(b"two".to_vec()).expect("send second chunk");
+        drop(raw_tx);
+
+        join_handle.join().expect("join coalescer");
+
+        let first = subscription
+            .next_chunk()
+            .await
+            .expect("read first chunk")
+            .expect("first chunk should exist");
+        let second = subscription
+            .next_chunk()
+            .await
+            .expect("read second chunk")
+            .expect("second chunk should exist");
+        assert_eq!(first, b"one");
+        assert_eq!(second, b"two");
+    }
+
+    #[tokio::test]
+    async fn output_coalescing_flushes_continuous_stream_by_time_window() {
+        let (raw_tx, mut subscription, join_handle) = coalescer_subscription(PtyRenderPolicy {
+            scrollback_limit: 16,
+            output_coalesce_window_ms: 20,
+            output_coalesce_max_bytes: 1_024,
+        });
+
+        let sender = std::thread::spawn(move || {
+            for _ in 0..25 {
+                raw_tx.send(vec![b'x']).expect("send chunk");
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        });
+        sender.join().expect("join sender");
+
+        join_handle.join().expect("join coalescer");
+        let chunks = collect_coalesced_chunks(&mut subscription)
+            .await
+            .expect("collect coalesced chunks");
+
+        assert!(
+            chunks.len() > 1,
+            "continuous stream should be flushed by time window"
+        );
+        let total_bytes = chunks.iter().map(Vec::len).sum::<usize>();
+        assert_eq!(total_bytes, 25);
     }
 
     #[tokio::test]

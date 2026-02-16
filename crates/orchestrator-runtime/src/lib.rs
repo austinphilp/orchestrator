@@ -8,7 +8,9 @@ mod pty_manager;
 mod terminal_emulator;
 mod worker_manager;
 
-pub use pty_manager::{PtyManager, PtyOutputSubscription, PtySpawnSpec, TerminalSize};
+pub use pty_manager::{
+    PtyManager, PtyOutputSubscription, PtyRenderPolicy, PtySpawnSpec, TerminalSize,
+};
 pub use worker_manager::{
     ManagedSessionStatus, ManagedSessionSummary, SessionEventSubscription, SessionVisibility,
     WorkerManager, WorkerManagerConfig, WorkerManagerEvent, WorkerManagerEventSubscription,
