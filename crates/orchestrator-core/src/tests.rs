@@ -180,6 +180,56 @@ fn durable_restart_replay_matches_pre_restart_state() {
 }
 
 #[test]
+fn sqlite_count_events_honors_scope() {
+    let mut store = SqliteEventStore::in_memory().expect("in-memory store");
+
+    store
+        .append(sample_event(
+            "evt-1",
+            OrchestrationEventPayload::UserResponded(UserRespondedPayload {
+                session_id: Some(WorkerSessionId::new("sess-1")),
+                work_item_id: Some(WorkItemId::new("wi-1")),
+                message: "first".to_owned(),
+            }),
+        ))
+        .expect("append first");
+
+    store
+        .append(NewEventEnvelope {
+            event_id: "evt-2".to_owned(),
+            occurred_at: "2026-02-15T14:01:00Z".to_owned(),
+            work_item_id: Some(WorkItemId::new("wi-2")),
+            session_id: Some(WorkerSessionId::new("sess-2")),
+            payload: OrchestrationEventPayload::UserResponded(UserRespondedPayload {
+                session_id: Some(WorkerSessionId::new("sess-2")),
+                work_item_id: Some(WorkItemId::new("wi-2")),
+                message: "second".to_owned(),
+            }),
+            schema_version: 1,
+        })
+        .expect("append second");
+
+    assert_eq!(
+        store
+            .count_events(RetrievalScope::Global)
+            .expect("count global"),
+        2
+    );
+    assert_eq!(
+        store
+            .count_events(RetrievalScope::WorkItem(WorkItemId::new("wi-1")))
+            .expect("count work item"),
+        1
+    );
+    assert_eq!(
+        store
+            .count_events(RetrievalScope::Session(WorkerSessionId::new("sess-2")))
+            .expect("count session"),
+        1
+    );
+}
+
+#[test]
 fn scoped_retrieval_filters_by_work_item_and_session() {
     let events = vec![
         StoredEventEnvelope {
@@ -1510,28 +1560,28 @@ fn event_artifact_references_persist_and_resolve_after_restart() {
         })
         .expect("map work item");
 
-    let artifact_a = ArtifactRecord {
-        artifact_id: ArtifactId::new("artifact-a"),
+    let artifact_z = ArtifactRecord {
+        artifact_id: ArtifactId::new("artifact-z"),
         work_item_id: WorkItemId::new("wi-art-1"),
         kind: ArtifactKind::Diff,
         metadata: serde_json::json!({"name": "patch.diff"}),
-        storage_ref: "artifact://patches/a".to_owned(),
+        storage_ref: "artifact://patches/z".to_owned(),
         created_at: "2026-02-16T01:01:00Z".to_owned(),
     };
-    let artifact_b = ArtifactRecord {
-        artifact_id: ArtifactId::new("artifact-b"),
+    let artifact_a = ArtifactRecord {
+        artifact_id: ArtifactId::new("artifact-a"),
         work_item_id: WorkItemId::new("wi-art-1"),
         kind: ArtifactKind::LogSnippet,
         metadata: serde_json::json!({"lines": 20}),
-        storage_ref: "artifact://logs/b".to_owned(),
+        storage_ref: "artifact://logs/a".to_owned(),
         created_at: "2026-02-16T01:01:30Z".to_owned(),
     };
     store
+        .create_artifact(&artifact_z)
+        .expect("create artifact z");
+    store
         .create_artifact(&artifact_a)
         .expect("create artifact a");
-    store
-        .create_artifact(&artifact_b)
-        .expect("create artifact b");
 
     store
         .append_event(
@@ -1541,15 +1591,15 @@ fn event_artifact_references_persist_and_resolve_after_restart() {
                 work_item_id: Some(WorkItemId::new("wi-art-1")),
                 session_id: Some(WorkerSessionId::new("sess-art-1")),
                 payload: OrchestrationEventPayload::ArtifactCreated(ArtifactCreatedPayload {
-                    artifact_id: ArtifactId::new("artifact-a"),
+                    artifact_id: ArtifactId::new("artifact-z"),
                     work_item_id: WorkItemId::new("wi-art-1"),
                     kind: ArtifactKind::Diff,
-                    label: "patch a".to_owned(),
-                    uri: "artifact://patches/a".to_owned(),
+                    label: "patch z".to_owned(),
+                    uri: "artifact://patches/z".to_owned(),
                 }),
                 schema_version: 1,
             },
-            &[ArtifactId::new("artifact-a"), ArtifactId::new("artifact-b")],
+            &[ArtifactId::new("artifact-z"), ArtifactId::new("artifact-a")],
         )
         .expect("append event with refs");
 
@@ -1560,19 +1610,16 @@ fn event_artifact_references_persist_and_resolve_after_restart() {
         .read_event_with_artifacts(&WorkItemId::new("wi-art-1"))
         .expect("read event with refs");
     assert_eq!(events.len(), 1);
-    assert_eq!(events[0].artifact_ids.len(), 2);
-    assert!(events[0]
-        .artifact_ids
-        .contains(&ArtifactId::new("artifact-a")));
-    assert!(events[0]
-        .artifact_ids
-        .contains(&ArtifactId::new("artifact-b")));
+    assert_eq!(
+        events[0].artifact_ids,
+        vec![ArtifactId::new("artifact-z"), ArtifactId::new("artifact-a")]
+    );
 
-    let restored_a = reopened
-        .get_artifact(&ArtifactId::new("artifact-a"))
+    let restored_z = reopened
+        .get_artifact(&ArtifactId::new("artifact-z"))
         .expect("get artifact")
         .expect("artifact exists");
-    assert_eq!(restored_a.storage_ref, "artifact://patches/a");
+    assert_eq!(restored_z.storage_ref, "artifact://patches/z");
 
     let _ = std::fs::remove_file(path);
 }
