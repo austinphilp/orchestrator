@@ -19,6 +19,8 @@ use tokio::time::timeout;
 const DEFAULT_OPENCODE_BINARY: &str = "opencode";
 const DEFAULT_OUTPUT_BUFFER: usize = 256;
 const DEFAULT_HEALTH_CHECK_TIMEOUT: Duration = Duration::from_secs(3);
+const DEFAULT_PROTOCOL_GUIDANCE: &str =
+    "Emit @@checkpoint/@@needs_input/@@blocked/@@artifact/@@done lines whenever relevant.";
 const TAG_CHECKPOINT: &str = "@@checkpoint";
 const TAG_NEEDS_INPUT: &str = "@@needs_input";
 const TAG_BLOCKED: &str = "@@blocked";
@@ -34,6 +36,7 @@ pub struct OpenCodeBackendConfig {
     pub terminal_size: TerminalSize,
     pub render_policy: PtyRenderPolicy,
     pub health_check_timeout: Duration,
+    pub protocol_guidance: Option<String>,
 }
 
 impl Default for OpenCodeBackendConfig {
@@ -48,6 +51,7 @@ impl Default for OpenCodeBackendConfig {
             terminal_size: TerminalSize::default(),
             render_policy: PtyRenderPolicy::default(),
             health_check_timeout: DEFAULT_HEALTH_CHECK_TIMEOUT,
+            protocol_guidance: Some(DEFAULT_PROTOCOL_GUIDANCE.to_owned()),
         }
     }
 }
@@ -81,17 +85,26 @@ impl OpenCodeBackend {
         args
     }
 
-    fn spawn_environment(&self, spec: &SpawnSpec) -> Vec<(String, String)> {
+    fn spawn_environment(
+        &self,
+        spec: &SpawnSpec,
+        instruction_prelude: Option<&str>,
+    ) -> Vec<(String, String)> {
         let mut environment = spec.environment.clone();
-        if let Some(instruction_prelude) = &spec.instruction_prelude {
-            if !instruction_prelude.trim().is_empty() {
-                environment.push((
-                    "ORCHESTRATOR_INSTRUCTION_PRELUDE".to_owned(),
-                    instruction_prelude.clone(),
-                ));
-            }
+        if let Some(instruction_prelude) = instruction_prelude {
+            environment.push((
+                "ORCHESTRATOR_INSTRUCTION_PRELUDE".to_owned(),
+                instruction_prelude.to_owned(),
+            ));
         }
         environment
+    }
+
+    fn composed_instruction_prelude(&self, spec: &SpawnSpec) -> Option<String> {
+        compose_instruction_prelude(
+            self.config.protocol_guidance.as_deref(),
+            spec.instruction_prelude.as_deref(),
+        )
     }
 
     async fn health_check_command(&self, args: &[OsString]) -> RuntimeResult<()> {
@@ -148,25 +161,24 @@ impl OpenCodeBackend {
 impl orchestrator_runtime::SessionLifecycle for OpenCodeBackend {
     async fn spawn(&self, spec: SpawnSpec) -> RuntimeResult<SessionHandle> {
         let session_id = spec.session_id.clone();
+        let instruction_prelude = self.composed_instruction_prelude(&spec);
         let pty_spec = PtySpawnSpec {
             session_id: session_id.clone(),
             program: self.spawn_program(),
             args: self.spawn_args(&spec),
             workdir: spec.workdir.clone(),
-            environment: self.spawn_environment(&spec),
+            environment: self.spawn_environment(&spec, instruction_prelude.as_deref()),
             size: self.config.terminal_size,
         };
 
         self.pty_manager.spawn(pty_spec).await?;
 
-        if let Some(instruction_prelude) = spec.instruction_prelude {
-            if !instruction_prelude.trim().is_empty() {
-                let mut bytes = instruction_prelude.into_bytes();
-                bytes.push(b'\n');
-                if let Err(error) = self.pty_manager.write(&session_id, &bytes).await {
-                    let _ = self.pty_manager.kill(&session_id).await;
-                    return Err(error);
-                }
+        if let Some(instruction_prelude) = instruction_prelude {
+            let mut bytes = instruction_prelude.into_bytes();
+            bytes.push(b'\n');
+            if let Err(error) = self.pty_manager.write(&session_id, &bytes).await {
+                let _ = self.pty_manager.kill(&session_id).await;
+                return Err(error);
             }
         }
 
@@ -188,6 +200,29 @@ impl orchestrator_runtime::SessionLifecycle for OpenCodeBackend {
         self.pty_manager
             .resize(&session.session_id, cols, rows)
             .await
+    }
+}
+
+fn compose_instruction_prelude(
+    protocol_guidance: Option<&str>,
+    instruction_prelude: Option<&str>,
+) -> Option<String> {
+    let mut lines = Vec::new();
+    if let Some(guidance) = protocol_guidance {
+        if !guidance.trim().is_empty() {
+            lines.push(guidance.to_owned());
+        }
+    }
+    if let Some(prelude) = instruction_prelude {
+        if !prelude.trim().is_empty() {
+            lines.push(prelude.to_owned());
+        }
+    }
+
+    if lines.is_empty() {
+        None
+    } else {
+        Some(lines.join("\n"))
     }
 }
 
@@ -594,6 +629,26 @@ sleep 1"#
     }
 
     #[cfg(unix)]
+    fn prelude_capture_script() -> &'static str {
+        "read line; printf 'prelude:%s\\n' \"$line\"; sleep 1"
+    }
+
+    #[cfg(windows)]
+    fn prelude_capture_script() -> &'static str {
+        "set /p line= && echo prelude:%line% && ping -n 2 127.0.0.1 >nul"
+    }
+
+    #[cfg(unix)]
+    fn multi_line_prelude_capture_script() -> &'static str {
+        "read first; read second; printf 'prelude1:%s\\nprelude2:%s\\n' \"$first\" \"$second\"; sleep 1"
+    }
+
+    #[cfg(windows)]
+    fn multi_line_prelude_capture_script() -> &'static str {
+        "set /p first= && set /p second= && echo prelude1:%first% && echo prelude2:%second% && ping -n 2 127.0.0.1 >nul"
+    }
+
+    #[cfg(unix)]
     fn long_running_script() -> &'static str {
         "sleep 5"
     }
@@ -616,6 +671,7 @@ sleep 1"#
             terminal_size: TerminalSize::default(),
             render_policy: PtyRenderPolicy::default(),
             health_check_timeout: Duration::from_secs(1),
+            protocol_guidance: None,
         };
         OpenCodeBackend::new(config)
     }
@@ -669,6 +725,42 @@ sleep 1"#
         assert_eq!(events_two.len(), 1);
         assert!(matches!(events_two[0], BackendEvent::NeedsInput(_)));
         assert!(events_three.is_empty());
+    }
+
+    #[test]
+    fn compose_instruction_prelude_prepends_protocol_guidance() {
+        let composed = compose_instruction_prelude(
+            Some("Emit @@checkpoint lines."),
+            Some("Implement AP-115 and run tests."),
+        )
+        .expect("combined prelude");
+        assert_eq!(
+            composed,
+            "Emit @@checkpoint lines.\nImplement AP-115 and run tests."
+        );
+    }
+
+    #[test]
+    fn compose_instruction_prelude_omits_empty_inputs() {
+        assert_eq!(
+            compose_instruction_prelude(Some("  "), Some("")),
+            None,
+            "all-empty inputs should not produce a prelude"
+        );
+        assert_eq!(
+            compose_instruction_prelude(Some("Emit tags."), None).as_deref(),
+            Some("Emit tags.")
+        );
+    }
+
+    #[test]
+    fn compose_instruction_prelude_preserves_non_empty_whitespace() {
+        let composed = compose_instruction_prelude(Some("  Emit tags.  "), Some("  Keep format"));
+        assert_eq!(
+            composed.as_deref(),
+            Some("  Emit tags.  \n  Keep format"),
+            "non-empty lines should keep original formatting"
+        );
     }
 
     #[tokio::test]
@@ -838,6 +930,7 @@ sleep 1"#
             terminal_size: TerminalSize::default(),
             render_policy: PtyRenderPolicy::default(),
             health_check_timeout: Duration::from_millis(50),
+            protocol_guidance: None,
         };
         let backend = OpenCodeBackend::new(config);
         let args = os_args(shell_args(long_running_script()));
@@ -944,5 +1037,65 @@ sleep 1"#
             event,
             BackendEvent::Done(BackendDoneEvent { summary: Some(value) }) if value == "complete"
         )));
+    }
+
+    #[tokio::test]
+    async fn spawn_injects_protocol_guidance_into_session_input() {
+        let backend = OpenCodeBackend::new(OpenCodeBackendConfig {
+            binary: PathBuf::from(shell_program()),
+            base_args: shell_args(prelude_capture_script()),
+            model_flag: None,
+            output_buffer: 128,
+            terminal_size: TerminalSize::default(),
+            render_policy: PtyRenderPolicy::default(),
+            health_check_timeout: Duration::from_secs(1),
+            protocol_guidance: Some("Emit @@checkpoint lines when relevant.".to_owned()),
+        });
+
+        let handle = backend
+            .spawn(spawn_spec("session-opencode-protocol-guidance"))
+            .await
+            .expect("spawn backend session");
+        let mut stream = backend
+            .subscribe(&handle)
+            .await
+            .expect("subscribe to session");
+        let output = collect_output_until(&mut stream, "prelude:")
+            .await
+            .expect("read prelude");
+        assert!(output.contains("prelude:Emit @@checkpoint lines when relevant."));
+
+        backend.kill(&handle).await.expect("kill session");
+    }
+
+    #[tokio::test]
+    async fn spawn_injects_protocol_guidance_before_user_prelude() {
+        let backend = OpenCodeBackend::new(OpenCodeBackendConfig {
+            binary: PathBuf::from(shell_program()),
+            base_args: shell_args(multi_line_prelude_capture_script()),
+            model_flag: None,
+            output_buffer: 128,
+            terminal_size: TerminalSize::default(),
+            render_policy: PtyRenderPolicy::default(),
+            health_check_timeout: Duration::from_secs(1),
+            protocol_guidance: Some("Emit @@checkpoint lines when relevant.".to_owned()),
+        });
+
+        let mut spec = spawn_spec("session-opencode-protocol-guidance-combined");
+        spec.instruction_prelude = Some("Implement AP-115 and run tests.".to_owned());
+
+        let handle = backend.spawn(spec).await.expect("spawn backend session");
+        let mut stream = backend
+            .subscribe(&handle)
+            .await
+            .expect("subscribe to session");
+        let output = collect_output_until(&mut stream, "prelude2:")
+            .await
+            .expect("read combined prelude");
+
+        assert!(output.contains("prelude1:Emit @@checkpoint lines when relevant."));
+        assert!(output.contains("prelude2:Implement AP-115 and run tests."));
+
+        backend.kill(&handle).await.expect("kill session");
     }
 }
