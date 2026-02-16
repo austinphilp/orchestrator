@@ -10,6 +10,7 @@ mod store;
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support;
 mod ticket_selection;
+mod workflow;
 
 pub use adapters::{
     AddTicketCommentRequest, CodeHostKind, CodeHostProvider, CreatePullRequestRequest,
@@ -61,6 +62,10 @@ pub use store::{
 pub use ticket_selection::{
     start_or_resume_selected_ticket, SelectedTicketFlowAction, SelectedTicketFlowConfig,
     SelectedTicketFlowResult,
+};
+pub use workflow::{
+    apply_workflow_transition, initial_workflow_state, validate_workflow_transition, WorkflowGuard,
+    WorkflowGuardContext, WorkflowTransitionError, WorkflowTransitionReason,
 };
 
 #[cfg(test)]

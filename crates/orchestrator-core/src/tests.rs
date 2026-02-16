@@ -66,6 +66,23 @@ fn session_needs_input_and_blocked_payloads_remain_backward_compatible() {
 }
 
 #[test]
+fn workflow_transition_reason_field_remains_backward_compatible() {
+    let workflow_json = r#"{"type":"WorkflowTransition","data":{"work_item_id":"wi-legacy","from":"Planning","to":"Implementing"}}"#;
+    let workflow_payload: OrchestrationEventPayload =
+        serde_json::from_str(workflow_json).expect("deserialize legacy workflow transition");
+
+    match workflow_payload {
+        OrchestrationEventPayload::WorkflowTransition(payload) => {
+            assert_eq!(payload.work_item_id, WorkItemId::new("wi-legacy"));
+            assert_eq!(payload.from, WorkflowState::Planning);
+            assert_eq!(payload.to, WorkflowState::Implementing);
+            assert!(payload.reason.is_none());
+        }
+        other => panic!("expected WorkflowTransition payload, got {other:?}"),
+    }
+}
+
+#[test]
 fn append_assigns_monotonic_sequence_and_ordered_reads() {
     let mut store = SqliteEventStore::in_memory().expect("in-memory store");
 
@@ -86,6 +103,7 @@ fn append_assigns_monotonic_sequence_and_ordered_reads() {
                 work_item_id: WorkItemId::new("wi-1"),
                 from: WorkflowState::Planning,
                 to: WorkflowState::Implementing,
+                reason: None,
             }),
         ))
         .expect("append second");
@@ -131,6 +149,7 @@ fn deterministic_replay_produces_identical_projection_state() {
                     work_item_id: WorkItemId::new("wi-1"),
                     from: WorkflowState::Planning,
                     to: WorkflowState::Implementing,
+                    reason: None,
                 }),
             ),
         )),
@@ -1653,6 +1672,7 @@ fn multi_table_event_write_is_transactional() {
                 work_item_id: WorkItemId::new("wi-txn-1"),
                 from: WorkflowState::Planning,
                 to: WorkflowState::Implementing,
+                reason: None,
             }),
         ),
         &[ArtifactId::new("missing-artifact")],
