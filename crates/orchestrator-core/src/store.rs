@@ -9,7 +9,7 @@ use crate::events::{NewEventEnvelope, OrchestrationEventPayload, StoredEventEnve
 use crate::identifiers::{ArtifactId, TicketId, TicketProvider, WorkItemId, WorkerSessionId};
 use crate::status::{ArtifactKind, WorkerSessionStatus};
 
-const CURRENT_SCHEMA_VERSION: u32 = 2;
+const CURRENT_SCHEMA_VERSION: u32 = 3;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RetrievalScope {
@@ -227,6 +227,19 @@ impl SqliteEventStore {
     }
 
     pub fn upsert_worktree(&self, worktree: &WorktreeRecord) -> Result<(), CoreError> {
+        self.ensure_worktree_binding_consistency(worktree)?;
+
+        if let Some(session) = self.find_session_by_work_item(&worktree.work_item_id)? {
+            if session.workdir != worktree.path {
+                return Err(CoreError::Persistence(format!(
+                    "worktree path '{}' does not match existing session workdir '{}' for work_item_id '{}'",
+                    worktree.path,
+                    session.workdir,
+                    worktree.work_item_id.as_str()
+                )));
+            }
+        }
+
         self.conn
             .execute(
                 "
@@ -283,6 +296,19 @@ impl SqliteEventStore {
     }
 
     pub fn upsert_session(&self, session: &SessionRecord) -> Result<(), CoreError> {
+        self.ensure_session_binding_consistency(session)?;
+
+        if let Some(worktree) = self.find_worktree_by_work_item(&session.work_item_id)? {
+            if worktree.path != session.workdir {
+                return Err(CoreError::Persistence(format!(
+                    "session workdir '{}' does not match existing worktree path '{}' for work_item_id '{}'",
+                    session.workdir,
+                    worktree.path,
+                    session.work_item_id.as_str()
+                )));
+            }
+        }
+
         self.conn
             .execute(
                 "
@@ -367,6 +393,9 @@ impl SqliteEventStore {
         }
 
         self.ensure_ticket_work_item_pairing(&mapping.ticket.ticket_id, &mapping.work_item_id)?;
+        self.ensure_worktree_binding_consistency(&mapping.worktree)?;
+        self.ensure_session_binding_consistency(&mapping.session)?;
+        self.ensure_runtime_mapping_identity_stable(mapping)?;
 
         let tx = self
             .conn
@@ -424,6 +453,8 @@ impl SqliteEventStore {
                 JOIN worktrees wt ON wt.work_item_id = wi.work_item_id
                 JOIN sessions s ON s.work_item_id = wi.work_item_id
                 WHERE t.provider = ?1 AND t.provider_ticket_id = ?2
+                ORDER BY s.updated_at DESC, wi.work_item_id ASC
+                LIMIT 1
                 ",
                 params![provider_to_str(provider), provider_ticket_id],
                 |row| Self::map_runtime_mapping_row(row),
@@ -472,6 +503,8 @@ impl SqliteEventStore {
                 WHERE t.provider = ?1
                   AND t.provider_ticket_id = ?2
                   AND s.status IN (?3, ?4, ?5)
+                ORDER BY s.updated_at DESC, wi.work_item_id ASC
+                LIMIT 1
                 ",
                 params![
                     provider_to_str(provider),
@@ -516,7 +549,7 @@ impl SqliteEventStore {
                 JOIN tickets t ON t.ticket_id = wi.ticket_id
                 JOIN worktrees wt ON wt.work_item_id = wi.work_item_id
                 JOIN sessions s ON s.work_item_id = wi.work_item_id
-                ORDER BY t.identifier ASC
+                ORDER BY t.identifier ASC, wi.work_item_id ASC
                 ",
             )
             .map_err(|err| CoreError::Persistence(err.to_string()))?;
@@ -564,7 +597,7 @@ impl SqliteEventStore {
                 JOIN worktrees wt ON wt.work_item_id = wi.work_item_id
                 JOIN sessions s ON s.work_item_id = wi.work_item_id
                 WHERE s.status IN (?1, ?2, ?3)
-                ORDER BY t.identifier ASC
+                ORDER BY t.identifier ASC, wi.work_item_id ASC
                 ",
             )
             .map_err(|err| CoreError::Persistence(err.to_string()))?;
@@ -803,7 +836,9 @@ impl SqliteEventStore {
                 CREATE INDEX IF NOT EXISTS idx_tickets_provider_lookup ON tickets(provider, provider_ticket_id);
                 CREATE INDEX IF NOT EXISTS idx_event_artifact_refs_event ON event_artifact_refs(event_id);
                 CREATE INDEX IF NOT EXISTS idx_worktrees_work_item_lookup ON worktrees(work_item_id);
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_worktrees_path_unique ON worktrees(path);
                 CREATE INDEX IF NOT EXISTS idx_sessions_work_item_lookup ON sessions(work_item_id);
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_sessions_workdir_unique ON sessions(workdir);
                 CREATE INDEX IF NOT EXISTS idx_sessions_status_lookup ON sessions(status);
                 ",
             )
@@ -933,6 +968,14 @@ impl SqliteEventStore {
                     ",
                 )
                 .map_err(|err| CoreError::Persistence(err.to_string())),
+            3 => tx
+                .execute_batch(
+                    "
+                    CREATE UNIQUE INDEX IF NOT EXISTS idx_worktrees_path_unique ON worktrees(path);
+                    CREATE UNIQUE INDEX IF NOT EXISTS idx_sessions_workdir_unique ON sessions(workdir);
+                    ",
+                )
+                .map_err(|err| CoreError::Persistence(err.to_string())),
             _ => Err(CoreError::Persistence(format!(
                 "no migration implementation for version {version}"
             ))),
@@ -960,6 +1003,131 @@ impl SqliteEventStore {
                     "work_item_id '{}' is already mapped to ticket_id '{}'",
                     work_item_id.as_str(),
                     existing_ticket_id.as_str()
+                )));
+            }
+        }
+
+        Ok(())
+    }
+
+    fn ensure_worktree_binding_consistency(
+        &self,
+        worktree: &WorktreeRecord,
+    ) -> Result<(), CoreError> {
+        if let Some(existing) = self.find_worktree_by_work_item(&worktree.work_item_id)? {
+            if existing.worktree_id != worktree.worktree_id
+                || existing.path != worktree.path
+                || existing.branch != worktree.branch
+                || existing.base_branch != worktree.base_branch
+            {
+                return Err(CoreError::Persistence(format!(
+                    "work_item_id '{}' is already bound to worktree_id '{}' at path '{}'; refusing reassignment to worktree_id '{}' at path '{}'",
+                    worktree.work_item_id.as_str(),
+                    existing.worktree_id.as_str(),
+                    existing.path,
+                    worktree.worktree_id.as_str(),
+                    worktree.path
+                )));
+            }
+        }
+
+        if let Some(existing_work_item) =
+            self.find_work_item_id_by_worktree_id(&worktree.worktree_id)?
+        {
+            if existing_work_item != worktree.work_item_id {
+                return Err(CoreError::Persistence(format!(
+                    "worktree_id '{}' is already mapped to work_item_id '{}'",
+                    worktree.worktree_id.as_str(),
+                    existing_work_item.as_str()
+                )));
+            }
+        }
+
+        if let Some(existing_work_item) = self.find_work_item_id_by_worktree_path(&worktree.path)? {
+            if existing_work_item != worktree.work_item_id {
+                return Err(CoreError::Persistence(format!(
+                    "worktree path '{}' is already mapped to work_item_id '{}'",
+                    worktree.path,
+                    existing_work_item.as_str()
+                )));
+            }
+        }
+
+        Ok(())
+    }
+
+    fn ensure_session_binding_consistency(&self, session: &SessionRecord) -> Result<(), CoreError> {
+        if let Some(existing) = self.find_session_by_work_item(&session.work_item_id)? {
+            if existing.session_id != session.session_id
+                || existing.backend_kind != session.backend_kind
+                || existing.workdir != session.workdir
+            {
+                return Err(CoreError::Persistence(format!(
+                    "work_item_id '{}' is already bound to session_id '{}' at workdir '{}'; refusing reassignment to session_id '{}' at workdir '{}'",
+                    session.work_item_id.as_str(),
+                    existing.session_id.as_str(),
+                    existing.workdir,
+                    session.session_id.as_str(),
+                    session.workdir
+                )));
+            }
+        }
+
+        if let Some(existing_work_item) =
+            self.find_work_item_id_by_session_workdir(&session.workdir)?
+        {
+            if existing_work_item != session.work_item_id {
+                return Err(CoreError::Persistence(format!(
+                    "session workdir '{}' is already mapped to work_item_id '{}'",
+                    session.workdir,
+                    existing_work_item.as_str()
+                )));
+            }
+        }
+
+        if let Some(existing_work_item) =
+            self.find_work_item_id_by_session_id(&session.session_id)?
+        {
+            if existing_work_item != session.work_item_id {
+                return Err(CoreError::Persistence(format!(
+                    "session_id '{}' is already mapped to work_item_id '{}'",
+                    session.session_id.as_str(),
+                    existing_work_item.as_str()
+                )));
+            }
+        }
+
+        Ok(())
+    }
+
+    fn ensure_runtime_mapping_identity_stable(
+        &self,
+        mapping: &RuntimeMappingRecord,
+    ) -> Result<(), CoreError> {
+        if let Some(existing) = self.find_runtime_mapping_by_work_item(&mapping.work_item_id)? {
+            if existing.ticket.ticket_id != mapping.ticket.ticket_id {
+                return Err(CoreError::Persistence(format!(
+                    "work_item_id '{}' is already mapped to ticket_id '{}'",
+                    mapping.work_item_id.as_str(),
+                    existing.ticket.ticket_id.as_str()
+                )));
+            }
+
+            if existing.worktree.worktree_id != mapping.worktree.worktree_id
+                || existing.worktree.path != mapping.worktree.path
+                || existing.worktree.branch != mapping.worktree.branch
+                || existing.worktree.base_branch != mapping.worktree.base_branch
+                || existing.session.session_id != mapping.session.session_id
+                || existing.session.backend_kind != mapping.session.backend_kind
+                || existing.session.workdir != mapping.session.workdir
+            {
+                return Err(CoreError::Persistence(format!(
+                    "runtime mapping for work_item_id '{}' is already bound to worktree '{}' and session '{}'; refusing reassignment to worktree '{}' and session '{}' to preserve deterministic resume",
+                    mapping.work_item_id.as_str(),
+                    existing.worktree.path,
+                    existing.session.session_id.as_str(),
+                    mapping.worktree.path,
+                    mapping.session.session_id.as_str()
                 )));
             }
         }
@@ -998,6 +1166,120 @@ impl SqliteEventStore {
                 ",
                 params![work_item_id.as_str()],
                 |row| row.get::<_, String>(0).map(TicketId::from),
+            )
+            .optional()
+            .map_err(|err| CoreError::Persistence(err.to_string()))
+    }
+
+    fn find_work_item_id_by_worktree_path(
+        &self,
+        worktree_path: &str,
+    ) -> Result<Option<WorkItemId>, CoreError> {
+        self.conn
+            .query_row(
+                "
+                SELECT work_item_id
+                FROM worktrees
+                WHERE path = ?1
+                ",
+                params![worktree_path],
+                |row| row.get::<_, String>(0).map(WorkItemId::from),
+            )
+            .optional()
+            .map_err(|err| CoreError::Persistence(err.to_string()))
+    }
+
+    fn find_work_item_id_by_worktree_id(
+        &self,
+        worktree_id: &crate::identifiers::WorktreeId,
+    ) -> Result<Option<WorkItemId>, CoreError> {
+        self.conn
+            .query_row(
+                "
+                SELECT work_item_id
+                FROM worktrees
+                WHERE worktree_id = ?1
+                ",
+                params![worktree_id.as_str()],
+                |row| row.get::<_, String>(0).map(WorkItemId::from),
+            )
+            .optional()
+            .map_err(|err| CoreError::Persistence(err.to_string()))
+    }
+
+    fn find_work_item_id_by_session_workdir(
+        &self,
+        workdir: &str,
+    ) -> Result<Option<WorkItemId>, CoreError> {
+        self.conn
+            .query_row(
+                "
+                SELECT work_item_id
+                FROM sessions
+                WHERE workdir = ?1
+                ",
+                params![workdir],
+                |row| row.get::<_, String>(0).map(WorkItemId::from),
+            )
+            .optional()
+            .map_err(|err| CoreError::Persistence(err.to_string()))
+    }
+
+    fn find_work_item_id_by_session_id(
+        &self,
+        session_id: &WorkerSessionId,
+    ) -> Result<Option<WorkItemId>, CoreError> {
+        self.conn
+            .query_row(
+                "
+                SELECT work_item_id
+                FROM sessions
+                WHERE session_id = ?1
+                ",
+                params![session_id.as_str()],
+                |row| row.get::<_, String>(0).map(WorkItemId::from),
+            )
+            .optional()
+            .map_err(|err| CoreError::Persistence(err.to_string()))
+    }
+
+    fn find_runtime_mapping_by_work_item(
+        &self,
+        work_item_id: &WorkItemId,
+    ) -> Result<Option<RuntimeMappingRecord>, CoreError> {
+        self.conn
+            .query_row(
+                "
+                SELECT
+                    t.ticket_id,
+                    t.provider,
+                    t.provider_ticket_id,
+                    t.identifier,
+                    t.title,
+                    t.state,
+                    t.updated_at,
+                    wi.work_item_id,
+                    wt.worktree_id,
+                    wt.path,
+                    wt.branch,
+                    wt.base_branch,
+                    wt.created_at,
+                    s.session_id,
+                    s.backend_kind,
+                    s.workdir,
+                    s.model,
+                    s.status,
+                    s.created_at,
+                    s.updated_at
+                FROM work_items wi
+                JOIN tickets t ON t.ticket_id = wi.ticket_id
+                JOIN worktrees wt ON wt.work_item_id = wi.work_item_id
+                JOIN sessions s ON s.work_item_id = wi.work_item_id
+                WHERE wi.work_item_id = ?1
+                LIMIT 1
+                ",
+                params![work_item_id.as_str()],
+                |row| Self::map_runtime_mapping_row(row),
             )
             .optional()
             .map_err(|err| CoreError::Persistence(err.to_string()))

@@ -329,7 +329,7 @@ fn initialization_creates_required_schema_and_version() {
     let _ = std::fs::remove_file(&path);
 
     let store = SqliteEventStore::open(&path).expect("open store");
-    assert_eq!(store.schema_version().expect("schema version"), 2);
+    assert_eq!(store.schema_version().expect("schema version"), 3);
 
     let conn = rusqlite::Connection::open(&path).expect("open sqlite for inspection");
     let tables = [
@@ -360,7 +360,9 @@ fn initialization_creates_required_schema_and_version() {
         "idx_tickets_provider_lookup",
         "idx_event_artifact_refs_event",
         "idx_worktrees_work_item_lookup",
+        "idx_worktrees_path_unique",
         "idx_sessions_work_item_lookup",
+        "idx_sessions_workdir_unique",
         "idx_sessions_status_lookup",
     ];
     for index in indexes {
@@ -380,7 +382,7 @@ fn initialization_creates_required_schema_and_version() {
             row.get(0)
         })
         .expect("count migrations");
-    assert_eq!(applied_migrations, 2);
+    assert_eq!(applied_migrations, 3);
 
     drop(store);
     let _ = std::fs::remove_file(path);
@@ -392,11 +394,11 @@ fn startup_is_idempotent_and_does_not_duplicate_migrations() {
     let _ = std::fs::remove_file(&path);
 
     let first = SqliteEventStore::open(&path).expect("first open");
-    assert_eq!(first.schema_version().expect("schema version"), 2);
+    assert_eq!(first.schema_version().expect("schema version"), 3);
     drop(first);
 
     let second = SqliteEventStore::open(&path).expect("second open");
-    assert_eq!(second.schema_version().expect("schema version"), 2);
+    assert_eq!(second.schema_version().expect("schema version"), 3);
     drop(second);
 
     let conn = rusqlite::Connection::open(&path).expect("open sqlite for inspection");
@@ -405,7 +407,7 @@ fn startup_is_idempotent_and_does_not_duplicate_migrations() {
             row.get(0)
         })
         .expect("count migrations");
-    assert_eq!(migration_count, 2);
+    assert_eq!(migration_count, 3);
 
     let _ = std::fs::remove_file(path);
 }
@@ -449,7 +451,7 @@ fn startup_adopts_legacy_events_schema_without_recreating_events_table() {
     drop(conn);
 
     let store = SqliteEventStore::open(&path).expect("open store");
-    assert_eq!(store.schema_version().expect("schema version"), 2);
+    assert_eq!(store.schema_version().expect("schema version"), 3);
 
     let events = store.read_ordered().expect("read ordered");
     assert_eq!(events.len(), 1);
@@ -579,6 +581,322 @@ fn map_ticket_to_work_item_rejects_rebinding_existing_ticket_or_work_item() {
             assert!(message.contains("work_item_id 'wi-a' is already mapped"))
         }
         Err(other) => panic!("unexpected error variant: {other:?}"),
+    }
+}
+
+#[test]
+fn upsert_worktree_rejects_reusing_a_worktree_path_for_another_work_item() {
+    let store = SqliteEventStore::in_memory().expect("in-memory store");
+
+    let ticket_a = TicketRecord {
+        ticket_id: TicketId::from_provider_uuid(TicketProvider::Linear, "910"),
+        provider: TicketProvider::Linear,
+        provider_ticket_id: "910".to_owned(),
+        identifier: "AP-910".to_owned(),
+        title: "Ticket A".to_owned(),
+        state: "in_progress".to_owned(),
+        updated_at: "2026-02-16T12:10:00Z".to_owned(),
+    };
+    let ticket_b = TicketRecord {
+        ticket_id: TicketId::from_provider_uuid(TicketProvider::Linear, "911"),
+        provider: TicketProvider::Linear,
+        provider_ticket_id: "911".to_owned(),
+        identifier: "AP-911".to_owned(),
+        title: "Ticket B".to_owned(),
+        state: "in_progress".to_owned(),
+        updated_at: "2026-02-16T12:11:00Z".to_owned(),
+    };
+    store.upsert_ticket(&ticket_a).expect("upsert ticket a");
+    store.upsert_ticket(&ticket_b).expect("upsert ticket b");
+    store
+        .map_ticket_to_work_item(&TicketWorkItemMapping {
+            ticket_id: ticket_a.ticket_id.clone(),
+            work_item_id: WorkItemId::new("wi-910"),
+        })
+        .expect("map ticket a");
+    store
+        .map_ticket_to_work_item(&TicketWorkItemMapping {
+            ticket_id: ticket_b.ticket_id.clone(),
+            work_item_id: WorkItemId::new("wi-911"),
+        })
+        .expect("map ticket b");
+
+    store
+        .upsert_worktree(&WorktreeRecord {
+            worktree_id: WorktreeId::new("wt-910"),
+            work_item_id: WorkItemId::new("wi-910"),
+            path: "/tmp/orchestrator/shared-worktree".to_owned(),
+            branch: "ap/AP-910".to_owned(),
+            base_branch: "main".to_owned(),
+            created_at: "2026-02-16T12:12:00Z".to_owned(),
+        })
+        .expect("insert first worktree");
+
+    let err = match store.upsert_worktree(&WorktreeRecord {
+        worktree_id: WorktreeId::new("wt-911"),
+        work_item_id: WorkItemId::new("wi-911"),
+        path: "/tmp/orchestrator/shared-worktree".to_owned(),
+        branch: "ap/AP-911".to_owned(),
+        base_branch: "main".to_owned(),
+        created_at: "2026-02-16T12:13:00Z".to_owned(),
+    }) {
+        Ok(_) => panic!("expected duplicate worktree path to fail"),
+        Err(err) => err,
+    };
+
+    match err {
+        CoreError::Persistence(message) => {
+            assert!(message.contains("worktree path '/tmp/orchestrator/shared-worktree'"));
+        }
+        other => panic!("unexpected error variant: {other:?}"),
+    }
+}
+
+#[test]
+fn upsert_worktree_rejects_reusing_a_worktree_id_for_another_work_item() {
+    let store = SqliteEventStore::in_memory().expect("in-memory store");
+
+    let ticket_a = TicketRecord {
+        ticket_id: TicketId::from_provider_uuid(TicketProvider::Linear, "914"),
+        provider: TicketProvider::Linear,
+        provider_ticket_id: "914".to_owned(),
+        identifier: "AP-914".to_owned(),
+        title: "Ticket A".to_owned(),
+        state: "in_progress".to_owned(),
+        updated_at: "2026-02-16T12:20:00Z".to_owned(),
+    };
+    let ticket_b = TicketRecord {
+        ticket_id: TicketId::from_provider_uuid(TicketProvider::Linear, "915"),
+        provider: TicketProvider::Linear,
+        provider_ticket_id: "915".to_owned(),
+        identifier: "AP-915".to_owned(),
+        title: "Ticket B".to_owned(),
+        state: "in_progress".to_owned(),
+        updated_at: "2026-02-16T12:21:00Z".to_owned(),
+    };
+    store.upsert_ticket(&ticket_a).expect("upsert ticket a");
+    store.upsert_ticket(&ticket_b).expect("upsert ticket b");
+    store
+        .map_ticket_to_work_item(&TicketWorkItemMapping {
+            ticket_id: ticket_a.ticket_id.clone(),
+            work_item_id: WorkItemId::new("wi-914"),
+        })
+        .expect("map ticket a");
+    store
+        .map_ticket_to_work_item(&TicketWorkItemMapping {
+            ticket_id: ticket_b.ticket_id.clone(),
+            work_item_id: WorkItemId::new("wi-915"),
+        })
+        .expect("map ticket b");
+
+    store
+        .upsert_worktree(&WorktreeRecord {
+            worktree_id: WorktreeId::new("wt-shared"),
+            work_item_id: WorkItemId::new("wi-914"),
+            path: "/tmp/orchestrator/worktree-914".to_owned(),
+            branch: "ap/AP-914".to_owned(),
+            base_branch: "main".to_owned(),
+            created_at: "2026-02-16T12:22:00Z".to_owned(),
+        })
+        .expect("insert first worktree");
+
+    let err = match store.upsert_worktree(&WorktreeRecord {
+        worktree_id: WorktreeId::new("wt-shared"),
+        work_item_id: WorkItemId::new("wi-915"),
+        path: "/tmp/orchestrator/worktree-915".to_owned(),
+        branch: "ap/AP-915".to_owned(),
+        base_branch: "main".to_owned(),
+        created_at: "2026-02-16T12:23:00Z".to_owned(),
+    }) {
+        Ok(_) => panic!("expected duplicate worktree id to fail"),
+        Err(err) => err,
+    };
+
+    match err {
+        CoreError::Persistence(message) => {
+            assert!(message.contains("worktree_id 'wt-shared'"));
+        }
+        other => panic!("unexpected error variant: {other:?}"),
+    }
+}
+
+#[test]
+fn upsert_session_rejects_reusing_a_workdir_for_another_work_item() {
+    let store = SqliteEventStore::in_memory().expect("in-memory store");
+
+    let ticket_a = TicketRecord {
+        ticket_id: TicketId::from_provider_uuid(TicketProvider::Linear, "912"),
+        provider: TicketProvider::Linear,
+        provider_ticket_id: "912".to_owned(),
+        identifier: "AP-912".to_owned(),
+        title: "Ticket A".to_owned(),
+        state: "in_progress".to_owned(),
+        updated_at: "2026-02-16T12:14:00Z".to_owned(),
+    };
+    let ticket_b = TicketRecord {
+        ticket_id: TicketId::from_provider_uuid(TicketProvider::Linear, "913"),
+        provider: TicketProvider::Linear,
+        provider_ticket_id: "913".to_owned(),
+        identifier: "AP-913".to_owned(),
+        title: "Ticket B".to_owned(),
+        state: "in_progress".to_owned(),
+        updated_at: "2026-02-16T12:15:00Z".to_owned(),
+    };
+    store.upsert_ticket(&ticket_a).expect("upsert ticket a");
+    store.upsert_ticket(&ticket_b).expect("upsert ticket b");
+    store
+        .map_ticket_to_work_item(&TicketWorkItemMapping {
+            ticket_id: ticket_a.ticket_id.clone(),
+            work_item_id: WorkItemId::new("wi-912"),
+        })
+        .expect("map ticket a");
+    store
+        .map_ticket_to_work_item(&TicketWorkItemMapping {
+            ticket_id: ticket_b.ticket_id.clone(),
+            work_item_id: WorkItemId::new("wi-913"),
+        })
+        .expect("map ticket b");
+
+    store
+        .upsert_session(&SessionRecord {
+            session_id: WorkerSessionId::new("sess-912"),
+            work_item_id: WorkItemId::new("wi-912"),
+            backend_kind: BackendKind::OpenCode,
+            workdir: "/tmp/orchestrator/shared-workdir".to_owned(),
+            model: Some("gpt-5-codex".to_owned()),
+            status: WorkerSessionStatus::Running,
+            created_at: "2026-02-16T12:16:00Z".to_owned(),
+            updated_at: "2026-02-16T12:16:30Z".to_owned(),
+        })
+        .expect("insert first session");
+
+    let err = match store.upsert_session(&SessionRecord {
+        session_id: WorkerSessionId::new("sess-913"),
+        work_item_id: WorkItemId::new("wi-913"),
+        backend_kind: BackendKind::OpenCode,
+        workdir: "/tmp/orchestrator/shared-workdir".to_owned(),
+        model: Some("gpt-5-codex".to_owned()),
+        status: WorkerSessionStatus::Running,
+        created_at: "2026-02-16T12:17:00Z".to_owned(),
+        updated_at: "2026-02-16T12:17:30Z".to_owned(),
+    }) {
+        Ok(_) => panic!("expected duplicate workdir to fail"),
+        Err(err) => err,
+    };
+
+    match err {
+        CoreError::Persistence(message) => {
+            assert!(message.contains("session workdir '/tmp/orchestrator/shared-workdir'"));
+        }
+        other => panic!("unexpected error variant: {other:?}"),
+    }
+}
+
+#[test]
+fn upsert_worktree_rejects_path_that_disagrees_with_existing_session_workdir() {
+    let store = SqliteEventStore::in_memory().expect("in-memory store");
+
+    let ticket = TicketRecord {
+        ticket_id: TicketId::from_provider_uuid(TicketProvider::Linear, "916"),
+        provider: TicketProvider::Linear,
+        provider_ticket_id: "916".to_owned(),
+        identifier: "AP-916".to_owned(),
+        title: "Ticket mismatch".to_owned(),
+        state: "in_progress".to_owned(),
+        updated_at: "2026-02-16T12:24:00Z".to_owned(),
+    };
+    store.upsert_ticket(&ticket).expect("upsert ticket");
+    store
+        .map_ticket_to_work_item(&TicketWorkItemMapping {
+            ticket_id: ticket.ticket_id.clone(),
+            work_item_id: WorkItemId::new("wi-916"),
+        })
+        .expect("map ticket");
+
+    store
+        .upsert_session(&SessionRecord {
+            session_id: WorkerSessionId::new("sess-916"),
+            work_item_id: WorkItemId::new("wi-916"),
+            backend_kind: BackendKind::OpenCode,
+            workdir: "/tmp/orchestrator/wt-916-session".to_owned(),
+            model: None,
+            status: WorkerSessionStatus::Running,
+            created_at: "2026-02-16T12:24:10Z".to_owned(),
+            updated_at: "2026-02-16T12:24:20Z".to_owned(),
+        })
+        .expect("insert session");
+
+    let err = match store.upsert_worktree(&WorktreeRecord {
+        worktree_id: WorktreeId::new("wt-916"),
+        work_item_id: WorkItemId::new("wi-916"),
+        path: "/tmp/orchestrator/wt-916-worktree".to_owned(),
+        branch: "ap/AP-916".to_owned(),
+        base_branch: "main".to_owned(),
+        created_at: "2026-02-16T12:24:30Z".to_owned(),
+    }) {
+        Ok(_) => panic!("expected worktree/session path mismatch to fail"),
+        Err(err) => err,
+    };
+
+    match err {
+        CoreError::Persistence(message) => {
+            assert!(message.contains("does not match existing session workdir"));
+        }
+        other => panic!("unexpected error variant: {other:?}"),
+    }
+}
+
+#[test]
+fn upsert_session_rejects_workdir_that_disagrees_with_existing_worktree_path() {
+    let store = SqliteEventStore::in_memory().expect("in-memory store");
+
+    let ticket = TicketRecord {
+        ticket_id: TicketId::from_provider_uuid(TicketProvider::Linear, "917"),
+        provider: TicketProvider::Linear,
+        provider_ticket_id: "917".to_owned(),
+        identifier: "AP-917".to_owned(),
+        title: "Ticket mismatch".to_owned(),
+        state: "in_progress".to_owned(),
+        updated_at: "2026-02-16T12:25:00Z".to_owned(),
+    };
+    store.upsert_ticket(&ticket).expect("upsert ticket");
+    store
+        .map_ticket_to_work_item(&TicketWorkItemMapping {
+            ticket_id: ticket.ticket_id.clone(),
+            work_item_id: WorkItemId::new("wi-917"),
+        })
+        .expect("map ticket");
+
+    store
+        .upsert_worktree(&WorktreeRecord {
+            worktree_id: WorktreeId::new("wt-917"),
+            work_item_id: WorkItemId::new("wi-917"),
+            path: "/tmp/orchestrator/wt-917-worktree".to_owned(),
+            branch: "ap/AP-917".to_owned(),
+            base_branch: "main".to_owned(),
+            created_at: "2026-02-16T12:25:10Z".to_owned(),
+        })
+        .expect("insert worktree");
+
+    let err = match store.upsert_session(&SessionRecord {
+        session_id: WorkerSessionId::new("sess-917"),
+        work_item_id: WorkItemId::new("wi-917"),
+        backend_kind: BackendKind::OpenCode,
+        workdir: "/tmp/orchestrator/wt-917-session".to_owned(),
+        model: None,
+        status: WorkerSessionStatus::Running,
+        created_at: "2026-02-16T12:25:20Z".to_owned(),
+        updated_at: "2026-02-16T12:25:30Z".to_owned(),
+    }) {
+        Ok(_) => panic!("expected session/worktree path mismatch to fail"),
+        Err(err) => err,
+    };
+
+    match err {
+        CoreError::Persistence(message) => {
+            assert!(message.contains("does not match existing worktree path"));
+        }
+        other => panic!("unexpected error variant: {other:?}"),
     }
 }
 
@@ -812,7 +1130,7 @@ fn migration_from_schema_v1_adds_runtime_mapping_tables() {
     drop(conn);
 
     let store = SqliteEventStore::open(&path).expect("open and migrate");
-    assert_eq!(store.schema_version().expect("schema version"), 2);
+    assert_eq!(store.schema_version().expect("schema version"), 3);
     drop(store);
 
     let conn = rusqlite::Connection::open(&path).expect("open sqlite for inspection");
@@ -834,7 +1152,20 @@ fn migration_from_schema_v1_adds_runtime_mapping_tables() {
             row.get(0)
         })
         .expect("count migrations");
-    assert_eq!(migration_count, 2);
+    assert_eq!(migration_count, 3);
+
+    let indexes = ["idx_worktrees_path_unique", "idx_sessions_workdir_unique"];
+    for index in indexes {
+        let exists: Option<i64> = conn
+            .query_row(
+                "SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = ?1",
+                rusqlite::params![index],
+                |row| row.get(0),
+            )
+            .optional()
+            .expect("query index existence");
+        assert_eq!(exists, Some(1), "missing index {index}");
+    }
 
     let _ = std::fs::remove_file(path);
 }
@@ -926,7 +1257,7 @@ fn inflight_runtime_mapping_queries_exclude_terminal_sessions() {
 }
 
 #[test]
-fn runtime_mapping_upsert_replaces_session_and_worktree_for_existing_work_item() {
+fn runtime_mapping_upsert_rejects_reassigning_session_or_worktree_for_existing_work_item() {
     let mut store = SqliteEventStore::in_memory().expect("in-memory store");
 
     let original = RuntimeMappingRecord {
@@ -989,20 +1320,92 @@ fn runtime_mapping_upsert_replaces_session_and_worktree_for_existing_work_item()
             updated_at: "2026-02-16T11:05:00Z".to_owned(),
         },
     };
-    store
-        .upsert_runtime_mapping(&replacement)
-        .expect("upsert replacement mapping");
+
+    let err = match store.upsert_runtime_mapping(&replacement) {
+        Ok(_) => panic!("expected reassignment for existing mapping to fail"),
+        Err(err) => err,
+    };
+    match err {
+        CoreError::Persistence(message) => {
+            assert!(message.contains("refusing reassignment"));
+        }
+        other => panic!("unexpected error variant: {other:?}"),
+    }
 
     let found = store
         .find_runtime_mapping_by_ticket(&TicketProvider::Linear, "903")
         .expect("lookup mapping")
         .expect("mapping exists");
-    assert_eq!(found, replacement);
+    assert_eq!(found, original);
 
     let all = store
         .list_runtime_mappings()
         .expect("list runtime mappings");
-    assert_eq!(all.len(), 1, "replacement should update in place");
+    assert_eq!(all.len(), 1, "reassignment should not create duplicates");
+}
+
+#[test]
+fn runtime_mapping_upsert_allows_status_and_ticket_metadata_updates_without_rebinding() {
+    let mut store = SqliteEventStore::in_memory().expect("in-memory store");
+
+    let original = RuntimeMappingRecord {
+        ticket: TicketRecord {
+            ticket_id: TicketId::from_provider_uuid(TicketProvider::Linear, "903a"),
+            provider: TicketProvider::Linear,
+            provider_ticket_id: "903a".to_owned(),
+            identifier: "AP-903A".to_owned(),
+            title: "Original mapping".to_owned(),
+            state: "in_progress".to_owned(),
+            updated_at: "2026-02-16T11:00:00Z".to_owned(),
+        },
+        work_item_id: WorkItemId::new("wi-stable-updates"),
+        worktree: WorktreeRecord {
+            worktree_id: WorktreeId::new("wt-stable-updates"),
+            work_item_id: WorkItemId::new("wi-stable-updates"),
+            path: "/tmp/orchestrator/wt-stable-updates".to_owned(),
+            branch: "ap/AP-903A-stable-updates".to_owned(),
+            base_branch: "main".to_owned(),
+            created_at: "2026-02-16T11:00:10Z".to_owned(),
+        },
+        session: SessionRecord {
+            session_id: WorkerSessionId::new("sess-stable-updates"),
+            work_item_id: WorkItemId::new("wi-stable-updates"),
+            backend_kind: BackendKind::OpenCode,
+            workdir: "/tmp/orchestrator/wt-stable-updates".to_owned(),
+            model: Some("gpt-5-codex".to_owned()),
+            status: WorkerSessionStatus::Running,
+            created_at: "2026-02-16T11:00:20Z".to_owned(),
+            updated_at: "2026-02-16T11:01:00Z".to_owned(),
+        },
+    };
+    store
+        .upsert_runtime_mapping(&original)
+        .expect("upsert original mapping");
+
+    let updated = RuntimeMappingRecord {
+        ticket: TicketRecord {
+            title: "Original mapping (renamed)".to_owned(),
+            state: "blocked".to_owned(),
+            updated_at: "2026-02-16T11:10:00Z".to_owned(),
+            ..original.ticket.clone()
+        },
+        work_item_id: original.work_item_id.clone(),
+        worktree: original.worktree.clone(),
+        session: SessionRecord {
+            status: WorkerSessionStatus::WaitingForUser,
+            updated_at: "2026-02-16T11:10:10Z".to_owned(),
+            ..original.session.clone()
+        },
+    };
+    store
+        .upsert_runtime_mapping(&updated)
+        .expect("status/metadata-only update should succeed");
+
+    let found = store
+        .find_runtime_mapping_by_ticket(&TicketProvider::Linear, "903a")
+        .expect("lookup mapping")
+        .expect("mapping exists");
+    assert_eq!(found, updated);
 }
 
 #[test]
@@ -1228,7 +1631,7 @@ fn forward_compat_schema_guard_returns_typed_error() {
             version INTEGER PRIMARY KEY,
             applied_at TEXT NOT NULL
         );
-        INSERT INTO schema_migrations (version, applied_at) VALUES (3, '2026-02-16T00:00:00Z');
+        INSERT INTO schema_migrations (version, applied_at) VALUES (4, '2026-02-16T00:00:00Z');
         ",
     )
     .expect("seed future migration");
@@ -1240,8 +1643,8 @@ fn forward_compat_schema_guard_returns_typed_error() {
     };
     match err {
         CoreError::UnsupportedSchemaVersion { supported, found } => {
-            assert_eq!(supported, 2);
-            assert_eq!(found, 3);
+            assert_eq!(supported, 3);
+            assert_eq!(found, 4);
         }
         other => panic!("unexpected error variant: {other:?}"),
     }
