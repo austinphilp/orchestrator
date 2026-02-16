@@ -15,12 +15,16 @@ use crate::{
 const DEFAULT_SESSION_EVENT_BUFFER: usize = 256;
 const DEFAULT_GLOBAL_EVENT_BUFFER: usize = 1_024;
 const DEFAULT_BACKGROUND_SNAPSHOT_INTERVAL_MS: u64 = 250;
+const DEFAULT_CHECKPOINT_PROMPT_INTERVAL_SECS: u64 = 120;
+const DEFAULT_CHECKPOINT_PROMPT_MESSAGE: &str = "Emit a checkpoint now.";
 
 #[derive(Debug, Clone)]
 pub struct WorkerManagerConfig {
     pub session_event_buffer: usize,
     pub global_event_buffer: usize,
     pub background_snapshot_interval: Duration,
+    pub checkpoint_prompt_interval: Option<Duration>,
+    pub checkpoint_prompt_message: String,
 }
 
 impl Default for WorkerManagerConfig {
@@ -31,6 +35,10 @@ impl Default for WorkerManagerConfig {
             background_snapshot_interval: Duration::from_millis(
                 DEFAULT_BACKGROUND_SNAPSHOT_INTERVAL_MS,
             ),
+            checkpoint_prompt_interval: Some(Duration::from_secs(
+                DEFAULT_CHECKPOINT_PROMPT_INTERVAL_SECS,
+            )),
+            checkpoint_prompt_message: DEFAULT_CHECKPOINT_PROMPT_MESSAGE.to_owned(),
         }
     }
 }
@@ -83,6 +91,7 @@ struct ManagedSession {
     visibility: SessionVisibility,
     event_tx: Option<broadcast::Sender<BackendEvent>>,
     event_task: Option<JoinHandle<()>>,
+    checkpoint_task: Option<JoinHandle<()>>,
     last_snapshot: Option<CachedSnapshot>,
 }
 
@@ -170,6 +179,7 @@ impl WorkerManager {
                     visibility: SessionVisibility::Background,
                     event_tx: Some(event_tx.clone()),
                     event_task: None,
+                    checkpoint_task: None,
                     last_snapshot: None,
                 },
             )
@@ -187,14 +197,27 @@ impl WorkerManager {
             event_tx,
             self.global_event_tx.clone(),
         );
+        let checkpoint_task = self.periodic_checkpoint_prompt().map(|(interval, prompt)| {
+            Self::spawn_periodic_checkpoint_task(
+                Arc::clone(&self.backend),
+                Arc::clone(&self.sessions),
+                handle.clone(),
+                interval,
+                prompt,
+            )
+        });
 
         let mut sessions = self.sessions.write().await;
         match sessions.get_mut(&session_id) {
             Some(SessionEntry::Managed(session)) => {
                 session.event_task = Some(event_task);
+                session.checkpoint_task = checkpoint_task;
             }
             _ => {
                 event_task.abort();
+                if let Some(task) = checkpoint_task {
+                    task.abort();
+                }
                 return Err(RuntimeError::Internal(format!(
                     "session {} vanished while attaching event task",
                     session_id.as_str()
@@ -219,6 +242,9 @@ impl WorkerManager {
         if let Some(task) = session.event_task.take() {
             task.abort();
         }
+        if let Some(task) = session.checkpoint_task.take() {
+            task.abort();
+        }
         session.event_tx = None;
         session.status = ManagedSessionStatus::Killed;
         Ok(())
@@ -231,6 +257,15 @@ impl WorkerManager {
     ) -> RuntimeResult<()> {
         let handle = self.running_session_handle(session_id).await?;
         self.backend.send_input(&handle, input).await
+    }
+
+    pub async fn prompt_checkpoint(&self, session_id: &RuntimeSessionId) -> RuntimeResult<()> {
+        let prompt = self.checkpoint_prompt_bytes().ok_or_else(|| {
+            RuntimeError::Configuration(
+                "checkpoint prompt message is empty; cannot prompt session".to_owned(),
+            )
+        })?;
+        self.send_input(session_id, &prompt).await
     }
 
     pub async fn resize(
@@ -485,6 +520,68 @@ impl WorkerManager {
         })
     }
 
+    fn checkpoint_prompt_bytes(&self) -> Option<Vec<u8>> {
+        let prompt = self.config.checkpoint_prompt_message.trim();
+        if prompt.is_empty() {
+            return None;
+        }
+
+        let mut bytes = prompt.as_bytes().to_vec();
+        if !bytes.ends_with(b"\n") {
+            bytes.push(b'\n');
+        }
+        Some(bytes)
+    }
+
+    fn periodic_checkpoint_prompt(&self) -> Option<(Duration, Vec<u8>)> {
+        let interval = self.config.checkpoint_prompt_interval?;
+        if interval.is_zero() {
+            return None;
+        }
+        let prompt = self.checkpoint_prompt_bytes()?;
+        Some((interval, prompt))
+    }
+
+    fn spawn_periodic_checkpoint_task(
+        backend: Arc<dyn WorkerBackend>,
+        sessions: Arc<RwLock<HashMap<RuntimeSessionId, SessionEntry>>>,
+        handle: SessionHandle,
+        interval: Duration,
+        prompt: Vec<u8>,
+    ) -> JoinHandle<()> {
+        tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(interval);
+            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            ticker.tick().await;
+
+            loop {
+                ticker.tick().await;
+
+                let visibility = {
+                    let sessions = sessions.read().await;
+                    match sessions.get(&handle.session_id) {
+                        Some(SessionEntry::Managed(session))
+                            if session.status == ManagedSessionStatus::Running =>
+                        {
+                            Some(session.visibility)
+                        }
+                        _ => None,
+                    }
+                };
+                let Some(visibility) = visibility else {
+                    break;
+                };
+                if visibility == SessionVisibility::Focused {
+                    continue;
+                }
+
+                if backend.send_input(&handle, &prompt).await.is_err() {
+                    break;
+                }
+            }
+        })
+    }
+
     async fn mark_session_finished(
         sessions: &Arc<RwLock<HashMap<RuntimeSessionId, SessionEntry>>>,
         session_id: &RuntimeSessionId,
@@ -496,6 +593,9 @@ impl WorkerManager {
                 session.status = terminal_status;
             }
             session.event_tx = None;
+            if let Some(task) = session.checkpoint_task.take() {
+                task.abort();
+            }
             session.event_task = None;
         }
     }
@@ -889,6 +989,23 @@ mod tests {
         .expect("status transition timeout");
     }
 
+    async fn wait_for_sent_input_count(
+        backend: &MockBackend,
+        session_id: &RuntimeSessionId,
+        minimum: usize,
+    ) {
+        timeout(TEST_TIMEOUT, async {
+            loop {
+                if backend.sent_input(session_id).len() >= minimum {
+                    break;
+                }
+                sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("input count timeout");
+    }
+
     fn make_manager(backend: Arc<MockBackend>, config: WorkerManagerConfig) -> WorkerManager {
         let backend_dyn: Arc<dyn WorkerBackend> = backend;
         WorkerManager::with_config(backend_dyn, config)
@@ -937,6 +1054,145 @@ mod tests {
 
         let send_after_kill = manager.send_input(&session_id, b"late input").await;
         assert!(matches!(send_after_kill, Err(RuntimeError::Process(_))));
+    }
+
+    #[tokio::test]
+    async fn worker_manager_prompt_checkpoint_sends_configured_message() {
+        let backend = Arc::new(MockBackend::default());
+        let manager = make_manager(
+            Arc::clone(&backend),
+            WorkerManagerConfig {
+                checkpoint_prompt_interval: None,
+                checkpoint_prompt_message: "Emit a checkpoint now.".to_owned(),
+                ..WorkerManagerConfig::default()
+            },
+        );
+        let spec = spawn_spec("wm-prompt-checkpoint");
+        let session_id = spec.session_id.clone();
+
+        manager.spawn(spec).await.expect("spawn session");
+        manager
+            .prompt_checkpoint(&session_id)
+            .await
+            .expect("prompt checkpoint");
+
+        assert_eq!(
+            backend.sent_input(&session_id),
+            vec![b"Emit a checkpoint now.\n".to_vec()]
+        );
+    }
+
+    #[tokio::test]
+    async fn worker_manager_prompt_checkpoint_rejects_empty_message() {
+        let backend = Arc::new(MockBackend::default());
+        let manager = make_manager(
+            Arc::clone(&backend),
+            WorkerManagerConfig {
+                checkpoint_prompt_interval: None,
+                checkpoint_prompt_message: "   ".to_owned(),
+                ..WorkerManagerConfig::default()
+            },
+        );
+        let spec = spawn_spec("wm-prompt-checkpoint-empty");
+        let session_id = spec.session_id.clone();
+
+        manager.spawn(spec).await.expect("spawn session");
+        let error = manager
+            .prompt_checkpoint(&session_id)
+            .await
+            .expect_err("empty prompt message should be rejected");
+        assert!(matches!(
+            error,
+            RuntimeError::Configuration(message)
+                if message.contains("checkpoint prompt message is empty")
+        ));
+        assert!(backend.sent_input(&session_id).is_empty());
+    }
+
+    #[tokio::test]
+    async fn worker_manager_periodically_prompts_for_checkpoints() {
+        let backend = Arc::new(MockBackend::default());
+        let manager = make_manager(
+            Arc::clone(&backend),
+            WorkerManagerConfig {
+                checkpoint_prompt_interval: Some(Duration::from_millis(40)),
+                checkpoint_prompt_message: "Emit a checkpoint now.".to_owned(),
+                ..WorkerManagerConfig::default()
+            },
+        );
+        let spec = spawn_spec("wm-periodic-checkpoint");
+        let session_id = spec.session_id.clone();
+
+        manager.spawn(spec).await.expect("spawn session");
+        wait_for_sent_input_count(&backend, &session_id, 1).await;
+
+        let sent = backend.sent_input(&session_id);
+        assert!(sent
+            .iter()
+            .all(|entry| entry == b"Emit a checkpoint now.\n"));
+    }
+
+    #[tokio::test]
+    async fn worker_manager_periodic_checkpoint_prompts_pause_while_focused() {
+        let backend = Arc::new(MockBackend::default());
+        let manager = make_manager(
+            Arc::clone(&backend),
+            WorkerManagerConfig {
+                checkpoint_prompt_interval: Some(Duration::from_millis(40)),
+                checkpoint_prompt_message: "Emit a checkpoint now.".to_owned(),
+                ..WorkerManagerConfig::default()
+            },
+        );
+        let spec = spawn_spec("wm-periodic-checkpoint-focused");
+        let session_id = spec.session_id.clone();
+
+        manager.spawn(spec).await.expect("spawn session");
+        manager
+            .focus_session(Some(&session_id))
+            .await
+            .expect("focus session");
+        sleep(Duration::from_millis(130)).await;
+        assert!(
+            backend.sent_input(&session_id).is_empty(),
+            "focused sessions should not receive periodic checkpoint prompts"
+        );
+
+        manager
+            .focus_session(None)
+            .await
+            .expect("clear focused session");
+        wait_for_sent_input_count(&backend, &session_id, 1).await;
+    }
+
+    #[tokio::test]
+    async fn worker_manager_stops_periodic_checkpoint_prompts_after_done() {
+        let backend = Arc::new(MockBackend::default());
+        let manager = make_manager(
+            Arc::clone(&backend),
+            WorkerManagerConfig {
+                checkpoint_prompt_interval: Some(Duration::from_millis(35)),
+                checkpoint_prompt_message: "Emit a checkpoint now.".to_owned(),
+                ..WorkerManagerConfig::default()
+            },
+        );
+        let spec = spawn_spec("wm-periodic-checkpoint-stop");
+        let session_id = spec.session_id.clone();
+
+        manager.spawn(spec).await.expect("spawn session");
+        wait_for_sent_input_count(&backend, &session_id, 1).await;
+
+        backend.emit_event(
+            &session_id,
+            BackendEvent::Done(BackendDoneEvent {
+                summary: Some("finished".to_owned()),
+            }),
+        );
+        wait_for_status(&manager, &session_id, ManagedSessionStatus::Done).await;
+
+        let sent_before = backend.sent_input(&session_id).len();
+        sleep(Duration::from_millis(120)).await;
+        let sent_after = backend.sent_input(&session_id).len();
+        assert_eq!(sent_after, sent_before);
     }
 
     #[tokio::test]
@@ -1003,6 +1259,8 @@ mod tests {
                 session_event_buffer: 32,
                 global_event_buffer: 64,
                 background_snapshot_interval: Duration::from_millis(150),
+                checkpoint_prompt_interval: Some(Duration::from_secs(120)),
+                checkpoint_prompt_message: DEFAULT_CHECKPOINT_PROMPT_MESSAGE.to_owned(),
             },
         );
         let spec = spawn_spec("wm-background-snapshots");
