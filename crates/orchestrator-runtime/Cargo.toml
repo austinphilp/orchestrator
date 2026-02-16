@@ -10,6 +10,7 @@ portable-pty.workspace = true
 serde.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
+vt100.workspace = true
 
 [dev-dependencies]
 serde_json.workspace = true

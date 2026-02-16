@@ -8,9 +8,13 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::{broadcast, mpsc};
 use tokio::task;
 
-use crate::{RuntimeError, RuntimeResult, RuntimeSessionId};
+use crate::{
+    terminal_emulator::TerminalEmulator, RuntimeError, RuntimeResult, RuntimeSessionId,
+    TerminalSnapshot,
+};
 
 const DEFAULT_OUTPUT_BUFFER: usize = 256;
+const DEFAULT_SCROLLBACK_LIMIT: usize = 4_000;
 const READ_CHUNK_SIZE: usize = 8 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -37,6 +41,7 @@ pub struct PtySpawnSpec {
 
 struct PtySession {
     master: Mutex<Box<dyn MasterPty + Send>>,
+    emulator: Mutex<TerminalEmulator>,
     stdin_tx: mpsc::UnboundedSender<Vec<u8>>,
     output_tx: broadcast::Sender<Vec<u8>>,
 }
@@ -57,6 +62,7 @@ struct SpawnedPty {
 pub struct PtyManager {
     sessions: Arc<RwLock<HashMap<RuntimeSessionId, SessionState>>>,
     output_buffer: usize,
+    scrollback_limit: usize,
 }
 
 pub struct PtyOutputSubscription {
@@ -71,9 +77,14 @@ impl Default for PtyManager {
 
 impl PtyManager {
     pub fn new(output_buffer: usize) -> Self {
+        Self::with_scrollback(output_buffer, DEFAULT_SCROLLBACK_LIMIT)
+    }
+
+    pub fn with_scrollback(output_buffer: usize, scrollback_limit: usize) -> Self {
         Self {
             sessions: Arc::new(RwLock::new(HashMap::new())),
             output_buffer: output_buffer.max(1),
+            scrollback_limit,
         }
     }
 
@@ -90,6 +101,7 @@ impl PtyManager {
         }
 
         let session_id = spec.session_id.clone();
+        let initial_size = spec.size;
         self.reserve_session(&session_id)?;
 
         let spawned = match task::spawn_blocking(move || spawn_pty_process(spec)).await {
@@ -106,21 +118,34 @@ impl PtyManager {
             }
         };
 
+        let emulator = match TerminalEmulator::new(
+            initial_size.cols,
+            initial_size.rows,
+            self.scrollback_limit,
+        ) {
+            Ok(emulator) => emulator,
+            Err(error) => {
+                let _ = self.remove_session_entry(&session_id);
+                terminate_child(spawned.child);
+                return Err(error);
+            }
+        };
         let (stdin_tx, stdin_rx) = mpsc::unbounded_channel();
         let (output_tx, _) = broadcast::channel(self.output_buffer);
         let session = Arc::new(PtySession {
             master: Mutex::new(spawned.master),
+            emulator: Mutex::new(emulator),
             stdin_tx,
             output_tx: output_tx.clone(),
         });
 
-        if let Err(error) = self.install_session(session_id.clone(), session) {
+        if let Err(error) = self.install_session(session_id.clone(), Arc::clone(&session)) {
             let _ = self.remove_session_entry(&session_id);
             terminate_child(spawned.child);
             return Err(error);
         }
 
-        spawn_read_loop(spawned.reader, output_tx);
+        spawn_read_loop(spawned.reader, output_tx, session);
         spawn_write_loop(spawned.writer, stdin_rx);
         spawn_child_wait_loop(Arc::clone(&self.sessions), session_id, spawned.child);
         Ok(())
@@ -167,7 +192,21 @@ impl PtyManager {
                 pixel_width: 0,
                 pixel_height: 0,
             })
-            .map_err(process_error)
+            .map_err(process_error)?;
+        let mut emulator = session
+            .emulator
+            .lock()
+            .map_err(|_| RuntimeError::Internal("terminal emulator lock poisoned".to_owned()))?;
+        emulator.resize(cols, rows)
+    }
+
+    pub async fn snapshot(&self, session_id: &RuntimeSessionId) -> RuntimeResult<TerminalSnapshot> {
+        let session = self.session(session_id)?;
+        let emulator = session
+            .emulator
+            .lock()
+            .map_err(|_| RuntimeError::Internal("terminal emulator lock poisoned".to_owned()))?;
+        Ok(emulator.snapshot())
     }
 
     fn session(&self, session_id: &RuntimeSessionId) -> RuntimeResult<Arc<PtySession>> {
@@ -314,13 +353,20 @@ fn terminate_child(mut child: Box<dyn Child + Send + Sync>) {
     let _ = child.wait();
 }
 
-fn spawn_read_loop(mut reader: Box<dyn Read + Send>, output_tx: broadcast::Sender<Vec<u8>>) {
+fn spawn_read_loop(
+    mut reader: Box<dyn Read + Send>,
+    output_tx: broadcast::Sender<Vec<u8>>,
+    session: Arc<PtySession>,
+) {
     std::thread::spawn(move || {
         let mut buffer = [0_u8; READ_CHUNK_SIZE];
         loop {
             match reader.read(&mut buffer) {
                 Ok(0) => break,
                 Ok(read) => {
+                    if let Ok(mut emulator) = session.emulator.lock() {
+                        emulator.process(&buffer[..read]);
+                    }
                     let _ = output_tx.send(buffer[..read].to_vec());
                 }
                 Err(error) if error.kind() == ErrorKind::Interrupted => continue,
@@ -366,7 +412,7 @@ fn spawn_child_wait_loop(
 mod tests {
     use std::time::Duration;
 
-    use tokio::time::timeout;
+    use tokio::time::{sleep, timeout};
 
     use super::*;
 
@@ -392,12 +438,12 @@ mod tests {
 
     #[cfg(unix)]
     fn interactive_echo_script() -> &'static str {
-        "printf 'ready\\n'; read line; printf 'echo:%s\\n' \"$line\""
+        "printf 'ready\\n'; read line; printf 'echo:%s\\n' \"$line\"; sleep 1"
     }
 
     #[cfg(windows)]
     fn interactive_echo_script() -> &'static str {
-        "echo ready && set /p line= && echo echo:%line%"
+        "echo ready && set /p line= && echo echo:%line% && ping -n 2 127.0.0.1 >nul"
     }
 
     #[cfg(unix)]
@@ -445,6 +491,24 @@ mod tests {
         Ok(String::from_utf8_lossy(&output).to_string())
     }
 
+    async fn snapshot_until(
+        manager: &PtyManager,
+        session_id: &RuntimeSessionId,
+        needle: &str,
+    ) -> RuntimeResult<TerminalSnapshot> {
+        timeout(Duration::from_secs(5), async {
+            loop {
+                let snapshot = manager.snapshot(session_id).await?;
+                if snapshot.lines.iter().any(|line| line.contains(needle)) {
+                    return Ok::<TerminalSnapshot, RuntimeError>(snapshot);
+                }
+                sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .map_err(|_| RuntimeError::Internal("timed out waiting for terminal snapshot".to_owned()))?
+    }
+
     #[tokio::test]
     async fn pty_manager_supports_spawn_resize_and_stdio() {
         let manager = PtyManager::default();
@@ -476,6 +540,14 @@ mod tests {
             .await
             .expect("collect echoed output");
         assert!(echoed.contains("echo:hello"));
+
+        let snapshot = snapshot_until(&manager, &session_id, "echo:hello")
+            .await
+            .expect("wait for snapshot");
+        assert!(snapshot
+            .lines
+            .iter()
+            .any(|line| line.contains("echo:hello")));
     }
 
     #[tokio::test]
@@ -506,6 +578,26 @@ mod tests {
             .expect_err("zero column resize should fail");
 
         assert!(matches!(error, RuntimeError::Configuration(_)));
+    }
+
+    #[tokio::test]
+    async fn snapshot_reflects_resize_dimensions() {
+        let manager = PtyManager::default();
+        let spec = shell_spec("session-pty-snapshot-resize", hold_script());
+        let session_id = spec.session_id.clone();
+
+        manager.spawn(spec).await.expect("spawn session");
+        manager
+            .resize(&session_id, 132, 48)
+            .await
+            .expect("resize session");
+
+        let snapshot = manager
+            .snapshot(&session_id)
+            .await
+            .expect("capture snapshot");
+        assert_eq!(snapshot.cols, 132);
+        assert_eq!(snapshot.rows, 48);
     }
 
     #[tokio::test]
@@ -546,6 +638,56 @@ mod tests {
             .expect_err("write to missing session should fail");
 
         assert!(matches!(error, RuntimeError::SessionNotFound(_)));
+    }
+
+    #[tokio::test]
+    async fn resize_rejects_unknown_session() {
+        let manager = PtyManager::default();
+
+        let error = manager
+            .resize(&RuntimeSessionId::new("missing-session"), 80, 24)
+            .await
+            .expect_err("resize for missing session should fail");
+
+        assert!(matches!(error, RuntimeError::SessionNotFound(_)));
+    }
+
+    #[tokio::test]
+    async fn subscribe_rejects_unknown_session() {
+        let manager = PtyManager::default();
+
+        let result = manager
+            .subscribe_output(&RuntimeSessionId::new("missing-session"))
+            .await;
+
+        assert!(matches!(result, Err(RuntimeError::SessionNotFound(_))));
+    }
+
+    #[tokio::test]
+    async fn snapshot_rejects_unknown_session() {
+        let manager = PtyManager::default();
+
+        let error = manager
+            .snapshot(&RuntimeSessionId::new("missing-session"))
+            .await
+            .expect_err("snapshot for missing session should fail");
+
+        assert!(matches!(error, RuntimeError::SessionNotFound(_)));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn snapshot_renders_ansi_sequences() {
+        let manager = PtyManager::default();
+        let spec = shell_spec("session-pty-ansi", "printf 'hello\\033[2DXY\\n'; sleep 1");
+        let session_id = spec.session_id.clone();
+
+        manager.spawn(spec).await.expect("spawn session");
+
+        let snapshot = snapshot_until(&manager, &session_id, "helXY")
+            .await
+            .expect("snapshot should contain ansi-rendered output");
+        assert!(snapshot.lines.iter().any(|line| line.contains("helXY")));
     }
 
     #[tokio::test]

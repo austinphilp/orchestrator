@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 mod pty_manager;
+mod terminal_emulator;
 
 pub use pty_manager::{PtyManager, PtyOutputSubscription, PtySpawnSpec, TerminalSize};
 
