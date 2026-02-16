@@ -4,11 +4,12 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::normalization::DOMAIN_EVENT_SCHEMA_VERSION;
 use crate::{
-    CoreError, CreateWorktreeRequest, DeleteWorktreeRequest, EventStore, NewEventEnvelope,
-    OrchestrationEventPayload, ProjectId, RepositoryRef, RuntimeError, RuntimeMappingRecord,
-    SessionHandle, SessionRecord, SessionSpawnedPayload, SpawnSpec, SqliteEventStore, TicketId,
-    TicketProvider, TicketRecord, TicketSummary, VcsProvider, WorkItemCreatedPayload, WorkItemId,
-    WorkerBackend, WorkerSessionId, WorkerSessionStatus, WorkflowState, WorkflowTransitionPayload,
+    apply_workflow_transition, CoreError, CreateWorktreeRequest, DeleteWorktreeRequest, EventStore,
+    NewEventEnvelope, OrchestrationEventPayload, ProjectId, RepositoryRef, RuntimeError,
+    RuntimeMappingRecord, SessionHandle, SessionRecord, SessionSpawnedPayload, SpawnSpec,
+    SqliteEventStore, TicketId, TicketProvider, TicketRecord, TicketSummary, VcsProvider,
+    WorkItemCreatedPayload, WorkItemId, WorkerBackend, WorkerSessionId, WorkerSessionStatus,
+    WorkflowGuardContext, WorkflowState, WorkflowTransitionPayload, WorkflowTransitionReason,
     WorktreeCreatedPayload, WorktreeId, WorktreeRecord,
 };
 
@@ -402,20 +403,93 @@ fn ensure_lifecycle_events(
         ))?;
     }
 
-    if latest_workflow_state != Some(WorkflowState::Implementing) {
-        store.append(new_event(
-            "workflow-transition-implementing",
-            Some(mapping.work_item_id.clone()),
-            Some(mapping.session.session_id.clone()),
-            OrchestrationEventPayload::WorkflowTransition(WorkflowTransitionPayload {
-                work_item_id: mapping.work_item_id.clone(),
-                from: latest_workflow_state.unwrap_or(WorkflowState::Planning),
-                to: WorkflowState::Implementing,
-            }),
-        ))?;
+    let guard_context = workflow_guard_context(mapping);
+    let mut current_state = latest_workflow_state.unwrap_or(WorkflowState::New);
+
+    if current_state == WorkflowState::New {
+        current_state = append_workflow_transition_event(
+            store,
+            mapping,
+            &current_state,
+            &WorkflowState::Planning,
+            WorkflowTransitionReason::TicketAccepted,
+            &guard_context,
+        )?;
+    }
+
+    if current_state != WorkflowState::Implementing {
+        let reason = resume_to_implementing_reason(&current_state).ok_or_else(|| {
+            CoreError::Configuration(format!(
+                "Cannot automatically transition work item '{}' from '{current_state:?}' to Implementing.",
+                mapping.work_item_id.as_str()
+            ))
+        })?;
+        append_workflow_transition_event(
+            store,
+            mapping,
+            &current_state,
+            &WorkflowState::Implementing,
+            reason,
+            &guard_context,
+        )?;
     }
 
     Ok(())
+}
+
+fn append_workflow_transition_event(
+    store: &mut SqliteEventStore,
+    mapping: &RuntimeMappingRecord,
+    from: &WorkflowState,
+    to: &WorkflowState,
+    reason: WorkflowTransitionReason,
+    guard_context: &WorkflowGuardContext,
+) -> Result<WorkflowState, CoreError> {
+    let next = apply_workflow_transition(from, to, &reason, guard_context).map_err(|error| {
+        CoreError::Configuration(format!(
+            "Workflow transition validation failed for work item '{}': {error}",
+            mapping.work_item_id.as_str()
+        ))
+    })?;
+
+    store.append(new_event(
+        "workflow-transition",
+        Some(mapping.work_item_id.clone()),
+        Some(mapping.session.session_id.clone()),
+        OrchestrationEventPayload::WorkflowTransition(WorkflowTransitionPayload {
+            work_item_id: mapping.work_item_id.clone(),
+            from: from.clone(),
+            to: to.clone(),
+            reason: Some(reason),
+        }),
+    ))?;
+
+    Ok(next)
+}
+
+fn resume_to_implementing_reason(from: &WorkflowState) -> Option<WorkflowTransitionReason> {
+    match from {
+        WorkflowState::Planning
+        | WorkflowState::Testing
+        | WorkflowState::PRDrafted
+        | WorkflowState::AwaitingYourReview
+        | WorkflowState::ReadyForReview
+        | WorkflowState::InReview => Some(WorkflowTransitionReason::ImplementationResumed),
+        WorkflowState::Implementing
+        | WorkflowState::New
+        | WorkflowState::Done
+        | WorkflowState::Abandoned => None,
+    }
+}
+
+fn workflow_guard_context(mapping: &RuntimeMappingRecord) -> WorkflowGuardContext {
+    WorkflowGuardContext {
+        has_active_session: !matches!(
+            mapping.session.status,
+            WorkerSessionStatus::Done | WorkerSessionStatus::Crashed
+        ),
+        ..WorkflowGuardContext::default()
+    }
 }
 
 fn new_event(
@@ -956,6 +1030,28 @@ mod tests {
                 })
             )
         }));
+        assert!(events.iter().any(|event| {
+            matches!(
+                event.payload,
+                OrchestrationEventPayload::WorkflowTransition(WorkflowTransitionPayload {
+                    from: WorkflowState::New,
+                    to: WorkflowState::Planning,
+                    reason: Some(WorkflowTransitionReason::TicketAccepted),
+                    ..
+                })
+            )
+        }));
+        assert!(events.iter().any(|event| {
+            matches!(
+                event.payload,
+                OrchestrationEventPayload::WorkflowTransition(WorkflowTransitionPayload {
+                    from: WorkflowState::Planning,
+                    to: WorkflowState::Implementing,
+                    reason: Some(WorkflowTransitionReason::ImplementationResumed),
+                    ..
+                })
+            )
+        }));
     }
 
     #[tokio::test]
@@ -1062,6 +1158,28 @@ mod tests {
             .upsert_runtime_mapping(&mapping)
             .expect("seed runtime mapping");
         mapping
+    }
+
+    fn seed_workflow_state_event(
+        store: &mut SqliteEventStore,
+        mapping: &RuntimeMappingRecord,
+        from: WorkflowState,
+        to: WorkflowState,
+        reason: WorkflowTransitionReason,
+    ) {
+        store
+            .append(new_event(
+                "workflow-transition-seed",
+                Some(mapping.work_item_id.clone()),
+                Some(mapping.session.session_id.clone()),
+                OrchestrationEventPayload::WorkflowTransition(WorkflowTransitionPayload {
+                    work_item_id: mapping.work_item_id.clone(),
+                    from,
+                    to,
+                    reason: Some(reason),
+                }),
+            ))
+            .expect("seed workflow transition");
     }
 
     #[tokio::test]
@@ -1195,5 +1313,98 @@ mod tests {
             }
             other => panic!("unexpected error: {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn resume_flow_from_testing_uses_implementation_resumed_reason() {
+        let mut store = SqliteEventStore::in_memory().expect("in-memory store");
+        let mapping = seeded_runtime_mapping(
+            &mut store,
+            WorkerSessionStatus::WaitingForUser,
+            Some("gpt-5-codex"),
+        );
+        seed_workflow_state_event(
+            &mut store,
+            &mapping,
+            WorkflowState::Implementing,
+            WorkflowState::Testing,
+            WorkflowTransitionReason::TestsStarted,
+        );
+        let vcs = StubVcsProvider::with_single_repository("/workspace/repo");
+        let backend = StubWorkerBackend::new(BackendKind::OpenCode);
+
+        start_or_resume_selected_ticket(&mut store, &selected_ticket(), &config(), &vcs, &backend)
+            .await
+            .expect("resume flow succeeds");
+
+        let events = store
+            .read_events_for_work_item(&mapping.work_item_id)
+            .expect("work-item events");
+        let transition_to_implementing = events
+            .iter()
+            .rev()
+            .find_map(|event| match &event.payload {
+                OrchestrationEventPayload::WorkflowTransition(payload)
+                    if payload.to == WorkflowState::Implementing =>
+                {
+                    Some(payload.clone())
+                }
+                _ => None,
+            })
+            .expect("transition back to implementing exists");
+
+        assert_eq!(transition_to_implementing.from, WorkflowState::Testing);
+        assert_eq!(
+            transition_to_implementing.reason,
+            Some(WorkflowTransitionReason::ImplementationResumed)
+        );
+    }
+
+    #[tokio::test]
+    async fn resume_flow_from_awaiting_review_uses_implementation_resumed_reason() {
+        let mut store = SqliteEventStore::in_memory().expect("in-memory store");
+        let mapping = seeded_runtime_mapping(
+            &mut store,
+            WorkerSessionStatus::WaitingForUser,
+            Some("gpt-5-codex"),
+        );
+        seed_workflow_state_event(
+            &mut store,
+            &mapping,
+            WorkflowState::PRDrafted,
+            WorkflowState::AwaitingYourReview,
+            WorkflowTransitionReason::AwaitingApproval,
+        );
+        let vcs = StubVcsProvider::with_single_repository("/workspace/repo");
+        let backend = StubWorkerBackend::new(BackendKind::OpenCode);
+
+        start_or_resume_selected_ticket(&mut store, &selected_ticket(), &config(), &vcs, &backend)
+            .await
+            .expect("resume flow succeeds");
+
+        let events = store
+            .read_events_for_work_item(&mapping.work_item_id)
+            .expect("work-item events");
+        let transition_to_implementing = events
+            .iter()
+            .rev()
+            .find_map(|event| match &event.payload {
+                OrchestrationEventPayload::WorkflowTransition(payload)
+                    if payload.to == WorkflowState::Implementing =>
+                {
+                    Some(payload.clone())
+                }
+                _ => None,
+            })
+            .expect("transition back to implementing exists");
+
+        assert_eq!(
+            transition_to_implementing.from,
+            WorkflowState::AwaitingYourReview
+        );
+        assert_eq!(
+            transition_to_implementing.reason,
+            Some(WorkflowTransitionReason::ImplementationResumed)
+        );
     }
 }

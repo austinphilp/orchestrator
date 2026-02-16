@@ -4,6 +4,7 @@ use crate::identifiers::{
     ArtifactId, InboxItemId, ProjectId, TicketId, WorkItemId, WorkerSessionId, WorktreeId,
 };
 use crate::status::{ArtifactKind, InboxItemKind, WorkflowState};
+use crate::workflow::WorkflowTransitionReason;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum OrchestrationEventType {
@@ -109,6 +110,8 @@ pub struct WorkflowTransitionPayload {
     pub work_item_id: WorkItemId,
     pub from: WorkflowState,
     pub to: WorkflowState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<WorkflowTransitionReason>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
