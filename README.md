@@ -11,6 +11,7 @@ Rust workspace for the Orchestrator bootstrap architecture.
 - `orchestrator-ui`: minimal ratatui-based interface loop.
 - `orchestrator-supervisor`: OpenRouter supervisor adapter.
 - `orchestrator-github`: `gh` CLI adapter with process abstraction.
+- `integration-git`: Git CLI adapter for repository discovery and worktree lifecycle.
 - `integration-linear`: Linear GraphQL adapter with polling-backed ticket cache.
 
 ## Quick start
