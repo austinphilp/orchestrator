@@ -5,6 +5,12 @@ use serde::{Deserialize, Serialize};
 
 use crate::{CoreError, TicketId, TicketProvider, WorktreeId};
 
+const DEFAULT_BASE_BRANCH: &str = "main";
+
+fn default_base_branch() -> String {
+    DEFAULT_BASE_BRANCH.to_owned()
+}
+
 #[async_trait]
 pub trait Supervisor: Send + Sync {
     async fn health_check(&self) -> Result<(), CoreError>;
@@ -88,6 +94,7 @@ pub struct CreateWorktreeRequest {
     pub repository: RepositoryRef,
     pub worktree_path: PathBuf,
     pub branch: String,
+    #[serde(default = "default_base_branch")]
     pub base_branch: String,
     pub ticket_identifier: Option<String>,
 }
@@ -104,8 +111,20 @@ pub struct WorktreeSummary {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeleteWorktreeRequest {
     pub worktree: WorktreeSummary,
+    #[serde(default)]
     pub delete_branch: bool,
+    #[serde(default)]
     pub delete_directory: bool,
+}
+
+impl DeleteWorktreeRequest {
+    pub fn non_destructive(worktree: WorktreeSummary) -> Self {
+        Self {
+            worktree,
+            delete_branch: false,
+            delete_directory: false,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -133,6 +152,64 @@ pub trait VcsProvider: Send + Sync {
 pub trait WorktreeManager: VcsProvider {}
 
 impl<T: VcsProvider + ?Sized> WorktreeManager for T {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn create_worktree_request_defaults_base_branch_to_main() {
+        let request: CreateWorktreeRequest = serde_json::from_str(
+            r#"{
+                "worktree_id":"wt-1",
+                "repository":{"id":"repo-1","name":"repo","root":"/tmp/repo"},
+                "worktree_path":"/tmp/worktree",
+                "branch":"ap/AP-123-ticket-setup"
+            }"#,
+        )
+        .expect("deserialize create worktree request");
+
+        assert_eq!(request.base_branch, "main");
+    }
+
+    #[test]
+    fn delete_worktree_request_defaults_to_non_destructive_cleanup() {
+        let request: DeleteWorktreeRequest = serde_json::from_str(
+            r#"{
+                "worktree":{
+                    "worktree_id":"wt-1",
+                    "repository":{"id":"repo-1","name":"repo","root":"/tmp/repo"},
+                    "path":"/tmp/worktree",
+                    "branch":"ap/AP-123-ticket-setup",
+                    "base_branch":"main"
+                }
+            }"#,
+        )
+        .expect("deserialize delete worktree request");
+
+        assert!(!request.delete_branch);
+        assert!(!request.delete_directory);
+    }
+
+    #[test]
+    fn delete_worktree_request_non_destructive_constructor_disables_deletion_flags() {
+        let worktree = WorktreeSummary {
+            worktree_id: WorktreeId::new("wt-1"),
+            repository: RepositoryRef {
+                id: "repo-1".to_owned(),
+                name: "repo".to_owned(),
+                root: PathBuf::from("/tmp/repo"),
+            },
+            path: PathBuf::from("/tmp/worktree"),
+            branch: "ap/AP-123-ticket-setup".to_owned(),
+            base_branch: "main".to_owned(),
+        };
+
+        let request = DeleteWorktreeRequest::non_destructive(worktree);
+        assert!(!request.delete_branch);
+        assert!(!request.delete_directory);
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CodeHostKind {
