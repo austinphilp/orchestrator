@@ -278,6 +278,7 @@ fn initialization_creates_required_schema_and_version() {
 
     let indexes = [
         "idx_events_work_item_sequence",
+        "idx_events_session",
         "idx_tickets_provider_lookup",
         "idx_event_artifact_refs_event",
     ];
@@ -318,6 +319,82 @@ fn startup_is_idempotent_and_does_not_duplicate_migrations() {
     drop(second);
 
     let conn = rusqlite::Connection::open(&path).expect("open sqlite for inspection");
+    let migration_count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM schema_migrations", [], |row| {
+            row.get(0)
+        })
+        .expect("count migrations");
+    assert_eq!(migration_count, 1);
+
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn startup_adopts_legacy_events_schema_without_recreating_events_table() {
+    let path = unique_db_path("legacy-schema");
+    let _ = std::fs::remove_file(&path);
+
+    let conn = rusqlite::Connection::open(&path).expect("open sqlite");
+    conn.execute_batch(
+        "
+        CREATE TABLE events (
+            event_id TEXT PRIMARY KEY,
+            sequence INTEGER NOT NULL UNIQUE,
+            occurred_at TEXT NOT NULL,
+            work_item_id TEXT NULL,
+            session_id TEXT NULL,
+            event_type TEXT NOT NULL,
+            payload TEXT NOT NULL,
+            schema_version INTEGER NOT NULL
+        );
+        CREATE INDEX idx_events_sequence ON events(sequence);
+        CREATE INDEX idx_events_work_item ON events(work_item_id, sequence DESC);
+        CREATE INDEX idx_events_session ON events(session_id, sequence DESC);
+        INSERT INTO events (
+            event_id, sequence, occurred_at, work_item_id, session_id, event_type, payload, schema_version
+        ) VALUES (
+            'evt-legacy-1',
+            1,
+            '2026-02-16T03:00:00Z',
+            'wi-legacy-1',
+            'sess-legacy-1',
+            '\"WorkItemCreated\"',
+            '{\"type\":\"WorkItemCreated\",\"data\":{\"work_item_id\":\"wi-legacy-1\",\"ticket_id\":\"linear:legacy\",\"project_id\":\"proj-legacy\"}}',
+            1
+        );
+        ",
+    )
+    .expect("seed legacy schema");
+    drop(conn);
+
+    let store = SqliteEventStore::open(&path).expect("open store");
+    assert_eq!(store.schema_version().expect("schema version"), 1);
+
+    let events = store.read_ordered().expect("read ordered");
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].event_id, "evt-legacy-1");
+    drop(store);
+
+    let conn = rusqlite::Connection::open(&path).expect("open sqlite for inspection");
+    let tables = [
+        "schema_migrations",
+        "tickets",
+        "work_items",
+        "artifacts",
+        "event_artifact_refs",
+    ];
+    for table in tables {
+        let exists: Option<i64> = conn
+            .query_row(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1",
+                rusqlite::params![table],
+                |row| row.get(0),
+            )
+            .optional()
+            .expect("query table existence");
+        assert_eq!(exists, Some(1), "missing table {table}");
+    }
+
     let migration_count: i64 = conn
         .query_row("SELECT COUNT(*) FROM schema_migrations", [], |row| {
             row.get(0)

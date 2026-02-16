@@ -300,6 +300,8 @@ impl SqliteEventStore {
             .execute_batch("PRAGMA foreign_keys = ON;")
             .map_err(|err| CoreError::Persistence(err.to_string()))?;
 
+        self.adopt_legacy_schema_v1_if_needed()?;
+
         let current = self.current_schema_version()?;
         if current > CURRENT_SCHEMA_VERSION {
             return Err(CoreError::UnsupportedSchemaVersion {
@@ -335,6 +337,73 @@ impl SqliteEventStore {
                 |row| row.get(0),
             )
             .map_err(|err| CoreError::Persistence(err.to_string()))
+    }
+
+    fn adopt_legacy_schema_v1_if_needed(&self) -> Result<(), CoreError> {
+        if self.table_exists("schema_migrations")? || !self.table_exists("events")? {
+            return Ok(());
+        }
+
+        self.conn
+            .execute_batch(
+                "
+                CREATE TABLE IF NOT EXISTS schema_migrations (
+                    version INTEGER PRIMARY KEY,
+                    applied_at TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS tickets (
+                    ticket_id TEXT PRIMARY KEY,
+                    provider TEXT NOT NULL,
+                    provider_ticket_id TEXT NOT NULL,
+                    identifier TEXT NOT NULL,
+                    title TEXT NOT NULL,
+                    state TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    UNIQUE(provider, provider_ticket_id)
+                );
+
+                CREATE TABLE IF NOT EXISTS work_items (
+                    work_item_id TEXT PRIMARY KEY,
+                    ticket_id TEXT NOT NULL UNIQUE,
+                    created_at TEXT NOT NULL,
+                    FOREIGN KEY(ticket_id) REFERENCES tickets(ticket_id)
+                );
+
+                CREATE TABLE IF NOT EXISTS artifacts (
+                    artifact_id TEXT PRIMARY KEY,
+                    work_item_id TEXT NOT NULL,
+                    kind TEXT NOT NULL,
+                    metadata_json TEXT NOT NULL,
+                    storage_ref TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    FOREIGN KEY(work_item_id) REFERENCES work_items(work_item_id)
+                );
+
+                CREATE TABLE IF NOT EXISTS event_artifact_refs (
+                    event_id TEXT NOT NULL,
+                    artifact_id TEXT NOT NULL,
+                    PRIMARY KEY (event_id, artifact_id),
+                    FOREIGN KEY(event_id) REFERENCES events(event_id),
+                    FOREIGN KEY(artifact_id) REFERENCES artifacts(artifact_id)
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_events_work_item_sequence ON events(work_item_id, sequence ASC);
+                CREATE INDEX IF NOT EXISTS idx_events_session ON events(session_id, sequence DESC);
+                CREATE INDEX IF NOT EXISTS idx_tickets_provider_lookup ON tickets(provider, provider_ticket_id);
+                CREATE INDEX IF NOT EXISTS idx_event_artifact_refs_event ON event_artifact_refs(event_id);
+                ",
+            )
+            .map_err(|err| CoreError::Persistence(err.to_string()))?;
+
+        self.conn
+            .execute(
+                "INSERT INTO schema_migrations (version, applied_at) VALUES (?1, strftime('%Y-%m-%dT%H:%M:%fZ', 'now')) ON CONFLICT(version) DO NOTHING",
+                params![CURRENT_SCHEMA_VERSION],
+            )
+            .map_err(|err| CoreError::Persistence(err.to_string()))?;
+
+        Ok(())
     }
 
     fn apply_pending_migrations(&mut self, current: u32) -> Result<(), CoreError> {
@@ -414,6 +483,7 @@ impl SqliteEventStore {
                     );
 
                     CREATE INDEX idx_events_work_item_sequence ON events(work_item_id, sequence ASC);
+                    CREATE INDEX idx_events_session ON events(session_id, sequence DESC);
                     CREATE INDEX idx_tickets_provider_lookup ON tickets(provider, provider_ticket_id);
                     CREATE INDEX idx_event_artifact_refs_event ON event_artifact_refs(event_id);
                     ",
