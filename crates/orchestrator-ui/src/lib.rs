@@ -9,8 +9,9 @@ use crossterm::terminal::{
 };
 use crossterm::ExecutableCommand;
 use orchestrator_core::{
-    command_ids, ArtifactProjection, InboxItemId, InboxItemKind, OrchestrationEventPayload,
-    ProjectionState, WorkItemId, WorkerSessionId, WorkerSessionStatus, WorkflowState,
+    command_ids, ArtifactKind, ArtifactProjection, InboxItemId, InboxItemKind,
+    OrchestrationEventPayload, ProjectionState, WorkItemId, WorkerSessionId, WorkerSessionStatus,
+    WorkflowState,
 };
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Layout, Rect};
@@ -27,8 +28,44 @@ pub use keymap::{
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CenterView {
     InboxView,
-    FocusCardView { inbox_item_id: InboxItemId },
-    TerminalView { session_id: WorkerSessionId },
+    FocusCardView {
+        inbox_item_id: InboxItemId,
+    },
+    TerminalView {
+        session_id: WorkerSessionId,
+    },
+    InspectorView {
+        work_item_id: WorkItemId,
+        inspector: ArtifactInspectorKind,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ArtifactInspectorKind {
+    Diff,
+    Test,
+    PullRequest,
+    Chat,
+}
+
+impl ArtifactInspectorKind {
+    fn stack_label(self) -> &'static str {
+        match self {
+            Self::Diff => "diff",
+            Self::Test => "test",
+            Self::PullRequest => "pr",
+            Self::Chat => "chat",
+        }
+    }
+
+    fn pane_title(self) -> &'static str {
+        match self {
+            Self::Diff => "Diff Inspector",
+            Self::Test => "Test Inspector",
+            Self::PullRequest => "PR Inspector",
+            Self::Chat => "Chat Inspector",
+        }
+    }
 }
 
 impl CenterView {
@@ -39,6 +76,14 @@ impl CenterView {
                 format!("FocusCard({})", inbox_item_id.as_str())
             }
             Self::TerminalView { session_id } => format!("Terminal({})", session_id.as_str()),
+            Self::InspectorView {
+                work_item_id,
+                inspector,
+            } => format!(
+                "Inspector({}:{})",
+                inspector.stack_label(),
+                work_item_id.as_str()
+            ),
         }
     }
 }
@@ -431,6 +476,7 @@ fn project_center_pane(
             lines.push("g/G: jump first/last item".to_owned());
             lines.push("Enter: open focus card".to_owned());
             lines.push("t: open terminal for selected item".to_owned());
+            lines.push("v d/t/p/c: open diff/test/PR/chat inspector".to_owned());
             lines.push("Backspace: minimize top view".to_owned());
             CenterPaneState {
                 title: "Inbox View".to_owned(),
@@ -470,7 +516,419 @@ fn project_center_pane(
                 lines,
             }
         }
+        CenterView::InspectorView {
+            work_item_id,
+            inspector,
+        } => project_artifact_inspector_pane(*inspector, work_item_id, domain),
     }
+}
+
+const INSPECTOR_ARTIFACT_LIMIT: usize = 5;
+const INSPECTOR_CHAT_EVENT_LIMIT: usize = 8;
+const INSPECTOR_EVENT_SCAN_LIMIT: usize = 512;
+
+fn project_artifact_inspector_pane(
+    inspector: ArtifactInspectorKind,
+    work_item_id: &WorkItemId,
+    domain: &ProjectionState,
+) -> CenterPaneState {
+    let mut lines = vec![format!("Work item: {}", work_item_id.as_str())];
+    match inspector {
+        ArtifactInspectorKind::Diff => {
+            lines.extend(project_diff_inspector_lines(work_item_id, domain));
+        }
+        ArtifactInspectorKind::Test => {
+            lines.extend(project_test_inspector_lines(work_item_id, domain));
+        }
+        ArtifactInspectorKind::PullRequest => {
+            lines.extend(project_pr_inspector_lines(work_item_id, domain));
+        }
+        ArtifactInspectorKind::Chat => {
+            lines.extend(project_chat_inspector_lines(work_item_id, domain));
+        }
+    }
+    lines.push(String::new());
+    lines.push("Backspace: minimize to previous view".to_owned());
+
+    CenterPaneState {
+        title: format!("{} {}", inspector.pane_title(), work_item_id.as_str()),
+        lines,
+    }
+}
+
+fn project_diff_inspector_lines(
+    work_item_id: &WorkItemId,
+    domain: &ProjectionState,
+) -> Vec<String> {
+    let mut lines = vec!["Diff artifacts:".to_owned()];
+    let artifacts =
+        collect_work_item_artifacts(work_item_id, domain, INSPECTOR_ARTIFACT_LIMIT, |artifact| {
+            artifact.kind == ArtifactKind::Diff
+        });
+
+    if artifacts.is_empty() {
+        lines.push("- No diff artifacts available yet.".to_owned());
+        return lines;
+    }
+
+    for artifact in artifacts {
+        lines.push(format!("- {} -> {}", artifact.label, artifact.uri));
+        if let Some(diffstat) = diffstat_summary_line(artifact) {
+            lines.push(format!("  {diffstat}"));
+        }
+    }
+
+    lines
+}
+
+fn project_test_inspector_lines(
+    work_item_id: &WorkItemId,
+    domain: &ProjectionState,
+) -> Vec<String> {
+    let mut lines = vec!["Test artifacts:".to_owned()];
+    let artifacts = collect_work_item_artifacts(
+        work_item_id,
+        domain,
+        INSPECTOR_ARTIFACT_LIMIT,
+        is_test_artifact,
+    );
+
+    if artifacts.is_empty() {
+        lines.push("- No test artifacts available yet.".to_owned());
+    } else {
+        for artifact in artifacts {
+            lines.push(format!("- {} -> {}", artifact.label, artifact.uri));
+            if let Some(tail) = test_tail_summary_line(artifact) {
+                lines.push(format!("  {tail}"));
+            }
+        }
+    }
+
+    if let Some(summary) = latest_checkpoint_summary_for_work_item(work_item_id, domain) {
+        lines.push(format!("Latest checkpoint summary: {summary}"));
+    }
+    if let Some(reason) = latest_blocked_reason_for_work_item(work_item_id, domain) {
+        lines.push(format!("Latest blocker reason: {reason}"));
+    }
+
+    lines
+}
+
+fn project_pr_inspector_lines(work_item_id: &WorkItemId, domain: &ProjectionState) -> Vec<String> {
+    let mut lines = vec!["PR artifacts:".to_owned()];
+    let artifacts = collect_work_item_artifacts(
+        work_item_id,
+        domain,
+        INSPECTOR_ARTIFACT_LIMIT,
+        is_pr_artifact,
+    );
+
+    if artifacts.is_empty() {
+        lines.push("- No PR artifacts available yet.".to_owned());
+        return lines;
+    }
+
+    for artifact in artifacts {
+        lines.push(format!("- {} -> {}", artifact.label, artifact.uri));
+        if let Some(metadata) = pr_metadata_summary_line(artifact) {
+            lines.push(format!("  {metadata}"));
+        }
+    }
+
+    lines
+}
+
+fn project_chat_inspector_lines(
+    work_item_id: &WorkItemId,
+    domain: &ProjectionState,
+) -> Vec<String> {
+    let mut lines = vec!["Supervisor output:".to_owned()];
+    let event_lines = collect_chat_event_lines(work_item_id, domain);
+    if event_lines.is_empty() {
+        lines.push("- No supervisor transcript events captured yet.".to_owned());
+    } else {
+        lines.extend(event_lines.into_iter().map(|line| format!("- {line}")));
+    }
+
+    lines.push(String::new());
+    lines.push("Chat artifacts:".to_owned());
+    let artifacts = collect_work_item_artifacts(
+        work_item_id,
+        domain,
+        INSPECTOR_ARTIFACT_LIMIT,
+        is_chat_artifact,
+    );
+    if artifacts.is_empty() {
+        lines.push("- No chat artifacts available yet.".to_owned());
+    } else {
+        lines.extend(
+            artifacts
+                .iter()
+                .map(|artifact| format!("- {} -> {}", artifact.label, artifact.uri)),
+        );
+    }
+
+    lines
+}
+
+fn collect_work_item_artifacts<'a, F>(
+    work_item_id: &WorkItemId,
+    domain: &'a ProjectionState,
+    limit: usize,
+    predicate: F,
+) -> Vec<&'a ArtifactProjection>
+where
+    F: Fn(&ArtifactProjection) -> bool,
+{
+    let Some(work_item) = domain.work_items.get(work_item_id) else {
+        return Vec::new();
+    };
+
+    let mut seen = HashSet::new();
+    let mut artifacts = Vec::new();
+    for artifact_id in work_item.artifacts.iter().rev() {
+        if !seen.insert(artifact_id.clone()) {
+            continue;
+        }
+        let Some(artifact) = domain.artifacts.get(artifact_id) else {
+            continue;
+        };
+        if artifact.work_item_id == *work_item_id && predicate(artifact) {
+            artifacts.push(artifact);
+            if artifacts.len() >= limit {
+                break;
+            }
+        }
+    }
+
+    artifacts
+}
+
+fn diffstat_summary_line(artifact: &ArtifactProjection) -> Option<String> {
+    let files = first_uri_param(artifact.uri.as_str(), &["files", "changed"]);
+    let additions = first_uri_param(artifact.uri.as_str(), &["insertions", "added", "adds"]);
+    let deletions = first_uri_param(artifact.uri.as_str(), &["deletions", "removed", "dels"]);
+
+    if files.is_some() || additions.is_some() || deletions.is_some() {
+        return Some(format!(
+            "Diffstat: {} files changed, +{}/-{}",
+            files.as_deref().unwrap_or("unknown"),
+            additions.as_deref().unwrap_or("0"),
+            deletions.as_deref().unwrap_or("0")
+        ));
+    }
+
+    let label = compact_focus_card_text(artifact.label.as_str());
+    if looks_like_diffstat(label.as_str()) {
+        return Some(format!("Diffstat: {label}"));
+    }
+
+    None
+}
+
+fn test_tail_summary_line(artifact: &ArtifactProjection) -> Option<String> {
+    let tail = first_uri_param(artifact.uri.as_str(), &["tail", "snippet", "summary"])?;
+    Some(format!(
+        "Latest test tail: {}",
+        compact_focus_card_text(tail.as_str())
+    ))
+}
+
+fn pr_metadata_summary_line(artifact: &ArtifactProjection) -> Option<String> {
+    let uri = artifact.uri.as_str();
+    let pull_index = uri.find("/pull/")?;
+    let after_pull = &uri[pull_index + "/pull/".len()..];
+    let pr_number = after_pull
+        .chars()
+        .take_while(|ch| ch.is_ascii_digit())
+        .collect::<String>();
+    if pr_number.is_empty() {
+        return None;
+    }
+
+    let repo_segment = uri
+        .split_once("://")
+        .map(|(_, rest)| rest)
+        .unwrap_or(uri)
+        .split('?')
+        .next()
+        .unwrap_or(uri);
+    let draft = first_uri_param(uri, &["draft"]);
+    let draft_suffix = if draft.as_deref().is_some_and(is_truthy) {
+        " (draft)"
+    } else {
+        ""
+    };
+
+    Some(format!(
+        "PR metadata: #{pr_number}{draft_suffix} from {repo_segment}"
+    ))
+}
+
+fn first_uri_param(uri: &str, keys: &[&str]) -> Option<String> {
+    let (_, query) = uri.split_once('?')?;
+    for pair in query.split('&') {
+        let (raw_key, raw_value) = pair.split_once('=').unwrap_or((pair, ""));
+        if keys.iter().any(|key| raw_key.eq_ignore_ascii_case(key)) {
+            return Some(decode_query_component(raw_value));
+        }
+    }
+    None
+}
+
+fn decode_query_component(raw: &str) -> String {
+    let mut decoded = Vec::with_capacity(raw.len());
+    let bytes = raw.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'+' => decoded.push(b' '),
+            b'%' if index + 2 < bytes.len() => {
+                let hi = decode_hex_nibble(bytes[index + 1]);
+                let lo = decode_hex_nibble(bytes[index + 2]);
+                if let (Some(hi), Some(lo)) = (hi, lo) {
+                    decoded.push((hi << 4) | lo);
+                    index += 3;
+                    continue;
+                }
+                decoded.push(bytes[index]);
+            }
+            byte => decoded.push(byte),
+        }
+        index += 1;
+    }
+    String::from_utf8_lossy(decoded.as_slice()).into_owned()
+}
+
+fn decode_hex_nibble(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
+}
+
+fn is_truthy(value: &str) -> bool {
+    value == "1" || value.eq_ignore_ascii_case("true") || value.eq_ignore_ascii_case("yes")
+}
+
+fn looks_like_diffstat(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    lower.contains("files changed")
+        || (lower.contains("insertion") && lower.contains("deletion"))
+        || (lower.contains('+') && lower.contains('-') && lower.contains("file"))
+}
+
+fn is_test_artifact(artifact: &ArtifactProjection) -> bool {
+    if artifact.kind == ArtifactKind::TestRun {
+        return true;
+    }
+    if artifact.kind != ArtifactKind::LogSnippet && artifact.kind != ArtifactKind::Link {
+        return false;
+    }
+
+    contains_any_case_insensitive(
+        artifact.label.as_str(),
+        &["test", "pytest", "cargo test", "failing", "junit"],
+    ) || contains_any_case_insensitive(artifact.uri.as_str(), &["test", "junit", "report", "tail"])
+}
+
+fn is_pr_artifact(artifact: &ArtifactProjection) -> bool {
+    artifact.kind == ArtifactKind::PR
+        || (artifact.kind == ArtifactKind::Link
+            && contains_any_case_insensitive(
+                artifact.uri.as_str(),
+                &["/pull/", "pullrequest", "pull-request"],
+            ))
+}
+
+fn is_chat_artifact(artifact: &ArtifactProjection) -> bool {
+    if artifact.kind == ArtifactKind::Export {
+        return true;
+    }
+
+    contains_any_case_insensitive(artifact.label.as_str(), &["supervisor", "chat", "response"])
+        || contains_any_case_insensitive(
+            artifact.uri.as_str(),
+            &["supervisor", "chat", "conversation", "assistant"],
+        )
+}
+
+fn contains_any_case_insensitive(haystack: &str, needles: &[&str]) -> bool {
+    let haystack_lower = haystack.to_ascii_lowercase();
+    needles
+        .iter()
+        .any(|needle| haystack_lower.contains(&needle.to_ascii_lowercase()))
+}
+
+fn collect_chat_event_lines(work_item_id: &WorkItemId, domain: &ProjectionState) -> Vec<String> {
+    let mut lines = Vec::new();
+    for event in domain.events.iter().rev().take(INSPECTOR_EVENT_SCAN_LIMIT) {
+        if event.work_item_id.as_ref() != Some(work_item_id) {
+            continue;
+        }
+
+        let message = match &event.payload {
+            OrchestrationEventPayload::SessionNeedsInput(payload) => Some(format!(
+                "worker: {}",
+                compact_focus_card_text(payload.prompt.as_str())
+            )),
+            OrchestrationEventPayload::UserResponded(payload) => Some(format!(
+                "you: {}",
+                compact_focus_card_text(payload.message.as_str())
+            )),
+            OrchestrationEventPayload::SessionCheckpoint(payload) => Some(format!(
+                "worker checkpoint: {}",
+                compact_focus_card_text(payload.summary.as_str())
+            )),
+            OrchestrationEventPayload::SessionBlocked(payload) => Some(format!(
+                "worker blocked: {}",
+                compact_focus_card_text(payload.reason.as_str())
+            )),
+            _ => None,
+        };
+
+        if let Some(message) = message {
+            lines.push(format!("{} | {message}", event.occurred_at));
+        }
+        if lines.len() >= INSPECTOR_CHAT_EVENT_LIMIT {
+            break;
+        }
+    }
+
+    lines.reverse();
+    lines
+}
+
+fn latest_checkpoint_summary_for_work_item(
+    work_item_id: &WorkItemId,
+    domain: &ProjectionState,
+) -> Option<String> {
+    for event in domain.events.iter().rev().take(INSPECTOR_EVENT_SCAN_LIMIT) {
+        if event.work_item_id.as_ref() != Some(work_item_id) {
+            continue;
+        }
+        if let OrchestrationEventPayload::SessionCheckpoint(payload) = &event.payload {
+            return Some(compact_focus_card_text(payload.summary.as_str()));
+        }
+    }
+    None
+}
+
+fn latest_blocked_reason_for_work_item(
+    work_item_id: &WorkItemId,
+    domain: &ProjectionState,
+) -> Option<String> {
+    for event in domain.events.iter().rev().take(INSPECTOR_EVENT_SCAN_LIMIT) {
+        if event.work_item_id.as_ref() != Some(work_item_id) {
+            continue;
+        }
+        if let OrchestrationEventPayload::SessionBlocked(payload) = &event.payload {
+            return Some(compact_focus_card_text(payload.reason.as_str()));
+        }
+    }
+    None
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -544,6 +1002,9 @@ fn project_focus_card_pane(
                     .map(|line| format!("- {line}")),
             );
         }
+        lines.push(String::new());
+        lines.push("Shortcuts: t terminal | v d diff | v t tests | v p PR | v c chat".to_owned());
+        lines.push("Backspace: minimize top view".to_owned());
         CenterPaneState {
             title: format!("Focus Card {}", inbox_item_id.as_str()),
             lines,
@@ -872,12 +1333,31 @@ impl UiShellState {
             ui_state.selected_inbox_item_id,
             ui_state.selected_session_id,
         ) {
-            self.selected_inbox_item_id = Some(inbox_item_id.clone());
-            let focus_view = CenterView::FocusCardView { inbox_item_id };
-            self.view_stack.replace_center(focus_view);
-            self.view_stack
-                .push_center(CenterView::TerminalView { session_id });
+            self.open_focus_and_push_center(inbox_item_id, CenterView::TerminalView { session_id });
         }
+    }
+
+    fn open_inspector_for_selected(&mut self, inspector: ArtifactInspectorKind) {
+        let ui_state = self.ui_state();
+        if let (Some(inbox_item_id), Some(work_item_id)) = (
+            ui_state.selected_inbox_item_id,
+            ui_state.selected_work_item_id,
+        ) {
+            self.open_focus_and_push_center(
+                inbox_item_id,
+                CenterView::InspectorView {
+                    work_item_id,
+                    inspector,
+                },
+            );
+        }
+    }
+
+    fn open_focus_and_push_center(&mut self, inbox_item_id: InboxItemId, top_view: CenterView) {
+        self.selected_inbox_item_id = Some(inbox_item_id.clone());
+        let focus_view = CenterView::FocusCardView { inbox_item_id };
+        self.view_stack.replace_center(focus_view);
+        self.view_stack.push_center(top_view);
     }
 
     fn minimize_center_view(&mut self) {
@@ -1187,6 +1667,10 @@ enum UiCommand {
     EnterNormalMode,
     EnterInsertMode,
     OpenTerminalForSelected,
+    OpenDiffInspectorForSelected,
+    OpenTestInspectorForSelected,
+    OpenPrInspectorForSelected,
+    OpenChatInspectorForSelected,
     StartTerminalEscapeChord,
     QuitShell,
     FocusNextInbox,
@@ -1204,10 +1688,14 @@ enum UiCommand {
 }
 
 impl UiCommand {
-    const ALL: [Self; 17] = [
+    const ALL: [Self; 21] = [
         Self::EnterNormalMode,
         Self::EnterInsertMode,
         Self::OpenTerminalForSelected,
+        Self::OpenDiffInspectorForSelected,
+        Self::OpenTestInspectorForSelected,
+        Self::OpenPrInspectorForSelected,
+        Self::OpenChatInspectorForSelected,
         Self::StartTerminalEscapeChord,
         Self::QuitShell,
         Self::FocusNextInbox,
@@ -1229,6 +1717,10 @@ impl UiCommand {
             Self::EnterNormalMode => "ui.mode.normal",
             Self::EnterInsertMode => "ui.mode.insert",
             Self::OpenTerminalForSelected => command_ids::UI_OPEN_TERMINAL_FOR_SELECTED,
+            Self::OpenDiffInspectorForSelected => command_ids::UI_OPEN_DIFF_INSPECTOR_FOR_SELECTED,
+            Self::OpenTestInspectorForSelected => command_ids::UI_OPEN_TEST_INSPECTOR_FOR_SELECTED,
+            Self::OpenPrInspectorForSelected => command_ids::UI_OPEN_PR_INSPECTOR_FOR_SELECTED,
+            Self::OpenChatInspectorForSelected => command_ids::UI_OPEN_CHAT_INSPECTOR_FOR_SELECTED,
             Self::StartTerminalEscapeChord => "ui.mode.terminal_escape_prefix",
             Self::QuitShell => "ui.shell.quit",
             Self::FocusNextInbox => command_ids::UI_FOCUS_NEXT_INBOX,
@@ -1251,6 +1743,10 @@ impl UiCommand {
             Self::EnterNormalMode => "Return to Normal mode",
             Self::EnterInsertMode => "Enter Insert mode",
             Self::OpenTerminalForSelected => "Open terminal for selected item",
+            Self::OpenDiffInspectorForSelected => "Open diff inspector for selected item",
+            Self::OpenTestInspectorForSelected => "Open test inspector for selected item",
+            Self::OpenPrInspectorForSelected => "Open PR inspector for selected item",
+            Self::OpenChatInspectorForSelected => "Open chat inspector for selected item",
             Self::StartTerminalEscapeChord => "Terminal escape chord (Ctrl-\\ Ctrl-n)",
             Self::QuitShell => "Quit shell",
             Self::FocusNextInbox => "Focus next inbox item",
@@ -1322,11 +1818,21 @@ fn default_keymap_config() -> KeymapConfig {
                     binding(&["z", "2"], UiCommand::JumpBatchApprovals),
                     binding(&["z", "3"], UiCommand::JumpBatchReviewReady),
                     binding(&["z", "4"], UiCommand::JumpBatchFyiDigest),
+                    binding(&["v", "d"], UiCommand::OpenDiffInspectorForSelected),
+                    binding(&["v", "t"], UiCommand::OpenTestInspectorForSelected),
+                    binding(&["v", "p"], UiCommand::OpenPrInspectorForSelected),
+                    binding(&["v", "c"], UiCommand::OpenChatInspectorForSelected),
                 ],
-                prefixes: vec![KeyPrefixConfig {
-                    keys: vec!["z".to_owned()],
-                    label: "Batch jumps".to_owned(),
-                }],
+                prefixes: vec![
+                    KeyPrefixConfig {
+                        keys: vec!["z".to_owned()],
+                        label: "Batch jumps".to_owned(),
+                    },
+                    KeyPrefixConfig {
+                        keys: vec!["v".to_owned()],
+                        label: "Artifact inspectors".to_owned(),
+                    },
+                ],
             },
             ModeKeymapConfig {
                 mode: UiMode::Insert,
@@ -1366,7 +1872,7 @@ enum RoutedInput {
 fn mode_help(mode: UiMode) -> &'static str {
     match mode {
         UiMode::Normal => {
-            "j/k: select | Tab/S-Tab: batch cycle | 1-4 or z{1-4}: batch jump | g/G: first/last | Enter: focus | t: terminal | i: insert | q: quit"
+            "j/k: select | Tab/S-Tab: batch cycle | 1-4 or z{1-4}: batch jump | g/G: first/last | Enter: focus | t: terminal | v{d/t/p/c}: inspectors | i: insert | q: quit"
         }
         UiMode::Insert => "Insert input active | Esc/Ctrl-[: Normal",
         UiMode::Terminal => "Terminal pass-through active | Esc or Ctrl-\\ Ctrl-n: Normal",
@@ -1467,6 +1973,22 @@ fn dispatch_command(shell_state: &mut UiShellState, command: UiCommand) -> bool 
             shell_state.open_terminal_and_enter_mode();
             false
         }
+        UiCommand::OpenDiffInspectorForSelected => {
+            shell_state.open_inspector_for_selected(ArtifactInspectorKind::Diff);
+            false
+        }
+        UiCommand::OpenTestInspectorForSelected => {
+            shell_state.open_inspector_for_selected(ArtifactInspectorKind::Test);
+            false
+        }
+        UiCommand::OpenPrInspectorForSelected => {
+            shell_state.open_inspector_for_selected(ArtifactInspectorKind::PullRequest);
+            false
+        }
+        UiCommand::OpenChatInspectorForSelected => {
+            shell_state.open_inspector_for_selected(ArtifactInspectorKind::Chat);
+            false
+        }
         UiCommand::StartTerminalEscapeChord => {
             shell_state.begin_terminal_escape_chord();
             false
@@ -1550,9 +2072,9 @@ mod tests {
     use super::*;
     use orchestrator_core::{
         ArtifactId, ArtifactKind, ArtifactProjection, InboxItemProjection,
-        OrchestrationEventPayload, OrchestrationEventType, SessionCheckpointPayload,
-        SessionNeedsInputPayload, SessionProjection, StoredEventEnvelope, WorkItemProjection,
-        WorkflowState,
+        OrchestrationEventPayload, OrchestrationEventType, SessionBlockedPayload,
+        SessionCheckpointPayload, SessionNeedsInputPayload, SessionProjection, StoredEventEnvelope,
+        UserRespondedPayload, WorkItemProjection, WorkflowState,
     };
 
     fn key(code: KeyCode) -> KeyEvent {
@@ -1662,6 +2184,139 @@ mod tests {
                 },
             );
         }
+
+        projection
+    }
+
+    fn inspector_projection() -> ProjectionState {
+        let work_item_id = WorkItemId::new("wi-inspector");
+        let session_id = WorkerSessionId::new("sess-inspector");
+        let inbox_item_id = InboxItemId::new("inbox-inspector");
+        let diff_artifact_id = ArtifactId::new("artifact-diff");
+        let test_artifact_id = ArtifactId::new("artifact-test");
+        let pr_artifact_id = ArtifactId::new("artifact-pr");
+        let chat_artifact_id = ArtifactId::new("artifact-chat");
+
+        let mut projection = ProjectionState::default();
+        projection.work_items.insert(
+            work_item_id.clone(),
+            WorkItemProjection {
+                id: work_item_id.clone(),
+                ticket_id: None,
+                project_id: None,
+                workflow_state: Some(WorkflowState::Testing),
+                session_id: Some(session_id.clone()),
+                worktree_id: None,
+                inbox_items: vec![inbox_item_id.clone()],
+                artifacts: vec![
+                    diff_artifact_id.clone(),
+                    test_artifact_id.clone(),
+                    pr_artifact_id.clone(),
+                    chat_artifact_id.clone(),
+                ],
+            },
+        );
+        projection.sessions.insert(
+            session_id.clone(),
+            SessionProjection {
+                id: session_id.clone(),
+                work_item_id: Some(work_item_id.clone()),
+                status: Some(WorkerSessionStatus::WaitingForUser),
+                latest_checkpoint: Some(test_artifact_id.clone()),
+            },
+        );
+        projection.inbox_items.insert(
+            inbox_item_id.clone(),
+            InboxItemProjection {
+                id: inbox_item_id,
+                work_item_id: work_item_id.clone(),
+                kind: InboxItemKind::NeedsApproval,
+                title: "Inspect generated artifacts".to_owned(),
+                resolved: false,
+            },
+        );
+        projection.artifacts.insert(
+            diff_artifact_id.clone(),
+            ArtifactProjection {
+                id: diff_artifact_id,
+                work_item_id: work_item_id.clone(),
+                kind: ArtifactKind::Diff,
+                label: "Feature branch delta".to_owned(),
+                uri: "artifact://diff/wi-inspector?files=3&insertions=42&deletions=9".to_owned(),
+            },
+        );
+        projection.artifacts.insert(
+            test_artifact_id.clone(),
+            ArtifactProjection {
+                id: test_artifact_id.clone(),
+                work_item_id: work_item_id.clone(),
+                kind: ArtifactKind::TestRun,
+                label: "cargo test -p orchestrator-ui".to_owned(),
+                uri: "artifact://tests/wi-inspector?tail=thread_main_panicked%3A+line+42"
+                    .to_owned(),
+            },
+        );
+        projection.artifacts.insert(
+            pr_artifact_id.clone(),
+            ArtifactProjection {
+                id: pr_artifact_id,
+                work_item_id: work_item_id.clone(),
+                kind: ArtifactKind::PR,
+                label: "Draft PR #47".to_owned(),
+                uri: "https://github.com/acme/orchestrator/pull/47?draft=true".to_owned(),
+            },
+        );
+        projection.artifacts.insert(
+            chat_artifact_id.clone(),
+            ArtifactProjection {
+                id: chat_artifact_id,
+                work_item_id: work_item_id.clone(),
+                kind: ArtifactKind::Export,
+                label: "Supervisor output".to_owned(),
+                uri: "artifact://chat/wi-inspector".to_owned(),
+            },
+        );
+        projection.events.push(StoredEventEnvelope {
+            event_id: "evt-inspector-checkpoint".to_owned(),
+            sequence: 1,
+            occurred_at: "2026-02-16T09:00:00Z".to_owned(),
+            work_item_id: Some(work_item_id.clone()),
+            session_id: Some(session_id.clone()),
+            event_type: OrchestrationEventType::SessionCheckpoint,
+            payload: OrchestrationEventPayload::SessionCheckpoint(SessionCheckpointPayload {
+                session_id: session_id.clone(),
+                artifact_id: test_artifact_id,
+                summary: "Ran 112 tests and captured the failing tail".to_owned(),
+            }),
+            schema_version: 1,
+        });
+        projection.events.push(StoredEventEnvelope {
+            event_id: "evt-inspector-blocked".to_owned(),
+            sequence: 2,
+            occurred_at: "2026-02-16T09:01:00Z".to_owned(),
+            work_item_id: Some(work_item_id.clone()),
+            session_id: Some(session_id.clone()),
+            event_type: OrchestrationEventType::SessionBlocked,
+            payload: OrchestrationEventPayload::SessionBlocked(SessionBlockedPayload {
+                session_id: session_id.clone(),
+                reason: "cargo test fails in inspector pane tests".to_owned(),
+            }),
+            schema_version: 1,
+        });
+        projection.events.push(StoredEventEnvelope {
+            event_id: "evt-inspector-response".to_owned(),
+            sequence: 3,
+            occurred_at: "2026-02-16T09:02:00Z".to_owned(),
+            work_item_id: Some(work_item_id.clone()),
+            session_id: Some(session_id.clone()),
+            event_type: OrchestrationEventType::UserResponded,
+            payload: OrchestrationEventPayload::UserResponded(UserRespondedPayload {
+                session_id: Some(session_id),
+                work_item_id: Some(work_item_id),
+                message: "Please summarize the supervisor output.".to_owned(),
+            }),
+            schema_version: 1,
+        });
 
         projection
     }
@@ -2070,6 +2725,162 @@ mod tests {
         assert!(matches!(
             shell_state.view_stack.active_center(),
             Some(CenterView::TerminalView { session_id }) if session_id.as_str() == "sess-1"
+        ));
+    }
+
+    #[test]
+    fn open_inspector_pushes_focus_and_inspector_for_selected_item() {
+        let mut shell_state = UiShellState::new("ready".to_owned(), inspector_projection());
+        shell_state.open_inspector_for_selected(ArtifactInspectorKind::Diff);
+        assert_eq!(shell_state.view_stack.center_views().len(), 2);
+        assert!(matches!(
+            shell_state.view_stack.center_views().first(),
+            Some(CenterView::FocusCardView { inbox_item_id }) if inbox_item_id.as_str() == "inbox-inspector"
+        ));
+        assert!(matches!(
+            shell_state.view_stack.active_center(),
+            Some(CenterView::InspectorView {
+                work_item_id,
+                inspector: ArtifactInspectorKind::Diff
+            }) if work_item_id.as_str() == "wi-inspector"
+        ));
+
+        shell_state.open_inspector_for_selected(ArtifactInspectorKind::Diff);
+        assert_eq!(shell_state.view_stack.center_views().len(), 2);
+    }
+
+    #[test]
+    fn artifact_inspector_projects_diff_test_pr_and_chat_context() {
+        let projection = inspector_projection();
+        let work_item_id = WorkItemId::new("wi-inspector");
+        let stack = |inspector| {
+            let mut stack = ViewStack::default();
+            stack.replace_center(CenterView::InspectorView {
+                work_item_id: work_item_id.clone(),
+                inspector,
+            });
+            stack
+        };
+
+        let diff_state = project_ui_state(
+            "ready",
+            &projection,
+            &stack(ArtifactInspectorKind::Diff),
+            None,
+            None,
+        );
+        let diff_rendered = diff_state.center_pane.lines.join("\n");
+        assert!(diff_rendered.contains("Diff artifacts:"));
+        assert!(diff_rendered.contains("Diffstat: 3 files changed, +42/-9"));
+
+        let test_state = project_ui_state(
+            "ready",
+            &projection,
+            &stack(ArtifactInspectorKind::Test),
+            None,
+            None,
+        );
+        let test_rendered = test_state.center_pane.lines.join("\n");
+        assert!(test_rendered.contains("Test artifacts:"));
+        assert!(test_rendered.contains("Latest test tail: thread_main_panicked: line 42"));
+        assert!(test_rendered.contains("Latest blocker reason:"));
+
+        let pr_state = project_ui_state(
+            "ready",
+            &projection,
+            &stack(ArtifactInspectorKind::PullRequest),
+            None,
+            None,
+        );
+        let pr_rendered = pr_state.center_pane.lines.join("\n");
+        assert!(pr_rendered.contains("PR artifacts:"));
+        assert!(pr_rendered.contains("PR metadata: #47 (draft)"));
+        assert!(pr_rendered.contains("github.com/acme/orchestrator/pull/47"));
+
+        let chat_state = project_ui_state(
+            "ready",
+            &projection,
+            &stack(ArtifactInspectorKind::Chat),
+            None,
+            None,
+        );
+        let chat_rendered = chat_state.center_pane.lines.join("\n");
+        assert!(chat_rendered.contains("Supervisor output:"));
+        assert!(chat_rendered.contains("you: Please summarize the supervisor output."));
+        assert!(chat_rendered.contains("artifact://chat/wi-inspector"));
+    }
+
+    #[test]
+    fn inspector_ignores_mismatched_artifact_work_item_links() {
+        let mut projection = inspector_projection();
+        let selected_work_item = WorkItemId::new("wi-inspector");
+        let foreign_work_item = WorkItemId::new("wi-foreign");
+        let foreign_artifact_id = ArtifactId::new("artifact-foreign-diff");
+
+        projection
+            .work_items
+            .get_mut(&selected_work_item)
+            .expect("selected work item")
+            .artifacts
+            .push(foreign_artifact_id.clone());
+        projection.artifacts.insert(
+            foreign_artifact_id.clone(),
+            ArtifactProjection {
+                id: foreign_artifact_id,
+                work_item_id: foreign_work_item,
+                kind: ArtifactKind::Diff,
+                label: "Foreign diff artifact".to_owned(),
+                uri: "artifact://diff/wi-foreign?files=99&insertions=1&deletions=1".to_owned(),
+            },
+        );
+
+        let mut stack = ViewStack::default();
+        stack.replace_center(CenterView::InspectorView {
+            work_item_id: selected_work_item,
+            inspector: ArtifactInspectorKind::Diff,
+        });
+
+        let ui_state = project_ui_state("ready", &projection, &stack, None, None);
+        let rendered = ui_state.center_pane.lines.join("\n");
+        assert!(!rendered.contains("Foreign diff artifact"));
+        assert!(!rendered.contains("artifact://diff/wi-foreign"));
+    }
+
+    #[test]
+    fn keymap_prefix_binding_opens_artifact_inspectors() {
+        let mut shell_state = UiShellState::new("ready".to_owned(), inspector_projection());
+        let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
+
+        handle_key_press(&mut shell_state, key(KeyCode::Char('v')));
+        let overlay = shell_state
+            .which_key_overlay
+            .as_ref()
+            .expect("overlay is shown for inspector prefix");
+        let rendered = render_which_key_overlay_text(overlay);
+        assert!(rendered.contains("v  (Artifact inspectors)"));
+        assert!(rendered.contains("d  Open diff inspector for selected item"));
+        assert!(rendered.contains("t  Open test inspector for selected item"));
+        assert!(rendered.contains("p  Open PR inspector for selected item"));
+        assert!(rendered.contains("c  Open chat inspector for selected item"));
+
+        handle_key_press(&mut shell_state, key(KeyCode::Char('d')));
+        assert!(matches!(
+            shell_state.view_stack.active_center(),
+            Some(CenterView::InspectorView {
+                inspector: ArtifactInspectorKind::Diff,
+                ..
+            })
+        ));
+
+        shell_state.minimize_center_view();
+        handle_key_press(&mut shell_state, key(KeyCode::Char('v')));
+        handle_key_press(&mut shell_state, key(KeyCode::Char('c')));
+        assert!(matches!(
+            shell_state.view_stack.active_center(),
+            Some(CenterView::InspectorView {
+                inspector: ArtifactInspectorKind::Chat,
+                ..
+            })
         ));
     }
 
@@ -2494,6 +3305,22 @@ mod tests {
             command_ids::UI_OPEN_TERMINAL_FOR_SELECTED
         );
         assert_eq!(
+            command_id(UiCommand::OpenDiffInspectorForSelected),
+            command_ids::UI_OPEN_DIFF_INSPECTOR_FOR_SELECTED
+        );
+        assert_eq!(
+            command_id(UiCommand::OpenTestInspectorForSelected),
+            command_ids::UI_OPEN_TEST_INSPECTOR_FOR_SELECTED
+        );
+        assert_eq!(
+            command_id(UiCommand::OpenPrInspectorForSelected),
+            command_ids::UI_OPEN_PR_INSPECTOR_FOR_SELECTED
+        );
+        assert_eq!(
+            command_id(UiCommand::OpenChatInspectorForSelected),
+            command_ids::UI_OPEN_CHAT_INSPECTOR_FOR_SELECTED
+        );
+        assert_eq!(
             command_id(UiCommand::FocusNextInbox),
             command_ids::UI_FOCUS_NEXT_INBOX
         );
@@ -2505,6 +3332,10 @@ mod tests {
             UiCommand::EnterNormalMode,
             UiCommand::EnterInsertMode,
             UiCommand::OpenTerminalForSelected,
+            UiCommand::OpenDiffInspectorForSelected,
+            UiCommand::OpenTestInspectorForSelected,
+            UiCommand::OpenPrInspectorForSelected,
+            UiCommand::OpenChatInspectorForSelected,
             UiCommand::StartTerminalEscapeChord,
             UiCommand::QuitShell,
             UiCommand::FocusNextInbox,
@@ -2663,6 +3494,14 @@ mod tests {
         assert_eq!(
             routed_command(route_key_press(&mut shell_state, key(KeyCode::Char('q')))),
             Some(UiCommand::QuitShell)
+        );
+        assert_eq!(
+            routed_command(route_key_press(&mut shell_state, key(KeyCode::Char('v')))),
+            None
+        );
+        assert_eq!(
+            routed_command(route_key_press(&mut shell_state, key(KeyCode::Char('d')))),
+            Some(UiCommand::OpenDiffInspectorForSelected)
         );
         assert_eq!(
             routed_command(route_key_press(&mut shell_state, key(KeyCode::Esc))),
