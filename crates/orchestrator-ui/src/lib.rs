@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::io::{self, Stdout};
 use std::time::Duration;
 
@@ -7,8 +8,8 @@ use crossterm::terminal::{
 };
 use crossterm::ExecutableCommand;
 use orchestrator_core::{
-    InboxItemId, InboxItemKind, ProjectionState, WorkItemId, WorkerSessionId, WorkerSessionStatus,
-    WorkflowState,
+    ArtifactProjection, InboxItemId, InboxItemKind, OrchestrationEventPayload, ProjectionState,
+    WorkItemId, WorkerSessionId, WorkerSessionStatus, WorkflowState,
 };
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Layout};
@@ -411,38 +412,7 @@ fn project_center_pane(
             }
         }
         CenterView::FocusCardView { inbox_item_id } => {
-            if let Some(item) = inbox_rows
-                .iter()
-                .find(|row| &row.inbox_item_id == inbox_item_id)
-            {
-                let workflow = item
-                    .workflow_state
-                    .as_ref()
-                    .map(|state| format!("{state:?}"))
-                    .unwrap_or_else(|| "Unknown".to_owned());
-                let session = match (&item.session_id, &item.session_status) {
-                    (Some(session_id), Some(status)) => {
-                        format!("{} ({status:?})", session_id.as_str())
-                    }
-                    (Some(session_id), None) => format!("{} (Unknown)", session_id.as_str()),
-                    (None, _) => "None".to_owned(),
-                };
-                CenterPaneState {
-                    title: format!("Focus Card {}", inbox_item_id.as_str()),
-                    lines: vec![
-                        format!("Title: {}", item.title),
-                        format!("Kind: {:?}", item.kind),
-                        format!("Work item: {}", item.work_item_id.as_str()),
-                        format!("Workflow: {workflow}"),
-                        format!("Session: {session}"),
-                    ],
-                }
-            } else {
-                CenterPaneState {
-                    title: format!("Focus Card {}", inbox_item_id.as_str()),
-                    lines: vec!["Selected inbox item is not available.".to_owned()],
-                }
-            }
+            project_focus_card_pane(inbox_item_id, inbox_rows, domain)
         }
         CenterView::TerminalView { session_id } => {
             let lines = if let Some(session) = domain.sessions.get(session_id) {
@@ -475,6 +445,266 @@ fn project_center_pane(
             }
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+struct FocusCardEventContext {
+    latest_needs_input_prompt: Option<String>,
+    latest_blocked_reason: Option<String>,
+    latest_checkpoint_summary: Option<String>,
+}
+
+const FOCUS_CARD_EVENT_SCAN_LIMIT: usize = 512;
+const FOCUS_CARD_ARTIFACT_LIMIT: usize = 6;
+const FOCUS_CARD_TEXT_MAX_CHARS: usize = 220;
+
+impl FocusCardEventContext {
+    fn is_complete(&self) -> bool {
+        self.latest_needs_input_prompt.is_some()
+            && self.latest_blocked_reason.is_some()
+            && self.latest_checkpoint_summary.is_some()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FocusCardDetails {
+    why_attention: String,
+    recommended_response: String,
+    evidence_lines: Vec<String>,
+}
+
+fn project_focus_card_pane(
+    inbox_item_id: &InboxItemId,
+    inbox_rows: &[UiInboxRow],
+    domain: &ProjectionState,
+) -> CenterPaneState {
+    if let Some(item) = inbox_rows
+        .iter()
+        .find(|row| &row.inbox_item_id == inbox_item_id)
+    {
+        let workflow = item
+            .workflow_state
+            .as_ref()
+            .map(|state| format!("{state:?}"))
+            .unwrap_or_else(|| "Unknown".to_owned());
+        let session = match (&item.session_id, &item.session_status) {
+            (Some(session_id), Some(status)) => format!("{} ({status:?})", session_id.as_str()),
+            (Some(session_id), None) => format!("{} (Unknown)", session_id.as_str()),
+            (None, _) => "None".to_owned(),
+        };
+        let focus_details = build_focus_card_details(item, domain);
+        let mut lines = vec![
+            format!("Title: {}", item.title),
+            format!("Kind: {:?}", item.kind),
+            format!("Work item: {}", item.work_item_id.as_str()),
+            format!("Workflow: {workflow}"),
+            format!("Session: {session}"),
+            String::new(),
+            "Why attention is required:".to_owned(),
+            format!("- {}", focus_details.why_attention),
+            String::new(),
+            "Recommended response:".to_owned(),
+            format!("- {}", focus_details.recommended_response),
+            String::new(),
+            "Evidence:".to_owned(),
+        ];
+        if focus_details.evidence_lines.is_empty() {
+            lines.push("- No evidence links or artifacts yet.".to_owned());
+        } else {
+            lines.extend(
+                focus_details
+                    .evidence_lines
+                    .iter()
+                    .map(|line| format!("- {line}")),
+            );
+        }
+        CenterPaneState {
+            title: format!("Focus Card {}", inbox_item_id.as_str()),
+            lines,
+        }
+    } else {
+        CenterPaneState {
+            title: format!("Focus Card {}", inbox_item_id.as_str()),
+            lines: vec!["Selected inbox item is not available.".to_owned()],
+        }
+    }
+}
+
+fn build_focus_card_details(item: &UiInboxRow, domain: &ProjectionState) -> FocusCardDetails {
+    let event_context =
+        collect_focus_card_event_context(domain, &item.work_item_id, item.session_id.as_ref());
+    let evidence_lines = collect_focus_card_evidence_lines(domain, item, &event_context);
+
+    let mut why_attention = match item.kind {
+        InboxItemKind::NeedsDecision => {
+            "The worker needs a decision before it can continue implementation.".to_owned()
+        }
+        InboxItemKind::Blocked => {
+            "The worker reported a blocker and cannot self-progress.".to_owned()
+        }
+        InboxItemKind::NeedsApproval => {
+            "The workflow hit a human-approval gate before the next transition.".to_owned()
+        }
+        InboxItemKind::ReadyForReview => {
+            "The work item is prepared for review and final direction.".to_owned()
+        }
+        InboxItemKind::FYI => {
+            "This is a progress digest and does not require an immediate interrupt.".to_owned()
+        }
+    };
+
+    if matches!(
+        item.session_status,
+        Some(WorkerSessionStatus::WaitingForUser)
+    ) {
+        why_attention.push_str(" Session status is WaitingForUser.");
+    } else if matches!(item.session_status, Some(WorkerSessionStatus::Blocked)) {
+        why_attention.push_str(" Session status is Blocked.");
+    }
+
+    let recommended_response = match item.kind {
+        InboxItemKind::NeedsDecision => {
+            if let Some(prompt) = event_context.latest_needs_input_prompt.as_deref() {
+                format!("Answer the worker prompt to unblock progress: {prompt}")
+            } else {
+                "Provide a clear decision and continue the session.".to_owned()
+            }
+        }
+        InboxItemKind::Blocked => {
+            if let Some(reason) = event_context.latest_blocked_reason.as_deref() {
+                format!("Address the blocker and resume the session: {reason}")
+            } else {
+                "Review the latest logs/artifacts, resolve the blocker, then resume.".to_owned()
+            }
+        }
+        InboxItemKind::NeedsApproval => {
+            "Review the linked artifacts (PR/tests/diff) and approve the next workflow gate if ready."
+                .to_owned()
+        }
+        InboxItemKind::ReadyForReview => {
+            "Review the latest evidence and leave review feedback or advance the item.".to_owned()
+        }
+        InboxItemKind::FYI => "No immediate action required; review when you batch FYI updates.".to_owned(),
+    };
+
+    FocusCardDetails {
+        why_attention,
+        recommended_response,
+        evidence_lines,
+    }
+}
+
+fn collect_focus_card_event_context(
+    domain: &ProjectionState,
+    work_item_id: &WorkItemId,
+    session_id: Option<&WorkerSessionId>,
+) -> FocusCardEventContext {
+    let mut context = FocusCardEventContext::default();
+    let mut matched_event_count = 0usize;
+
+    for event in domain.events.iter().rev() {
+        let matches_focus_context = match session_id {
+            Some(session_id) => {
+                event.session_id.as_ref() == Some(session_id)
+                    || (event.work_item_id.as_ref() == Some(work_item_id)
+                        && event.session_id.is_none())
+            }
+            None => event.work_item_id.as_ref() == Some(work_item_id),
+        };
+        if !matches_focus_context {
+            continue;
+        }
+        matched_event_count += 1;
+
+        match &event.payload {
+            OrchestrationEventPayload::SessionNeedsInput(payload)
+                if context.latest_needs_input_prompt.is_none() =>
+            {
+                context.latest_needs_input_prompt = Some(compact_focus_card_text(&payload.prompt));
+            }
+            OrchestrationEventPayload::SessionBlocked(payload)
+                if context.latest_blocked_reason.is_none() =>
+            {
+                context.latest_blocked_reason = Some(compact_focus_card_text(&payload.reason));
+            }
+            OrchestrationEventPayload::SessionCheckpoint(payload)
+                if context.latest_checkpoint_summary.is_none() =>
+            {
+                context.latest_checkpoint_summary = Some(compact_focus_card_text(&payload.summary));
+            }
+            _ => {}
+        }
+
+        if context.is_complete() || matched_event_count >= FOCUS_CARD_EVENT_SCAN_LIMIT {
+            break;
+        }
+    }
+
+    context
+}
+
+fn compact_focus_card_text(raw: &str) -> String {
+    let compact = raw.split_whitespace().collect::<Vec<_>>().join(" ");
+    if compact.chars().count() <= FOCUS_CARD_TEXT_MAX_CHARS {
+        return compact;
+    }
+
+    let keep = FOCUS_CARD_TEXT_MAX_CHARS.saturating_sub(3);
+    let truncated = compact.chars().take(keep).collect::<String>();
+    format!("{truncated}...")
+}
+
+fn collect_focus_card_evidence_lines(
+    domain: &ProjectionState,
+    item: &UiInboxRow,
+    event_context: &FocusCardEventContext,
+) -> Vec<String> {
+    let mut lines = Vec::new();
+
+    if let Some(prompt) = event_context.latest_needs_input_prompt.as_deref() {
+        lines.push(format!("Latest input request: {prompt}"));
+    }
+    if let Some(reason) = event_context.latest_blocked_reason.as_deref() {
+        lines.push(format!("Latest blocker reason: {reason}"));
+    }
+    if let Some(summary) = event_context.latest_checkpoint_summary.as_deref() {
+        lines.push(format!("Latest checkpoint summary: {summary}"));
+    }
+
+    if let Some(work_item) = domain.work_items.get(&item.work_item_id) {
+        let mut seen_artifact_ids = HashSet::new();
+        let mut shown_artifacts = 0usize;
+        let mut omitted_artifacts = 0usize;
+
+        for artifact_id in work_item.artifacts.iter().rev() {
+            if !seen_artifact_ids.insert(artifact_id.clone()) {
+                continue;
+            }
+            let Some(artifact) = domain.artifacts.get(artifact_id) else {
+                continue;
+            };
+
+            if shown_artifacts < FOCUS_CARD_ARTIFACT_LIMIT {
+                lines.push(format_artifact_evidence_line(artifact));
+                shown_artifacts += 1;
+            } else {
+                omitted_artifacts += 1;
+            }
+        }
+
+        if omitted_artifacts > 0 {
+            lines.push(format!("{omitted_artifacts} older artifacts not shown."));
+        }
+    }
+
+    lines
+}
+
+fn format_artifact_evidence_line(artifact: &ArtifactProjection) -> String {
+    format!(
+        "{:?} artifact '{}' -> {}",
+        artifact.kind, artifact.label, artifact.uri
+    )
 }
 
 #[derive(Debug, Clone)]
@@ -819,7 +1049,10 @@ fn handle_key_press(shell_state: &mut UiShellState, key: KeyEvent) -> bool {
 mod tests {
     use super::*;
     use orchestrator_core::{
-        InboxItemProjection, SessionProjection, WorkItemProjection, WorkflowState,
+        ArtifactId, ArtifactKind, ArtifactProjection, InboxItemProjection,
+        OrchestrationEventPayload, OrchestrationEventType, SessionCheckpointPayload,
+        SessionNeedsInputPayload, SessionProjection, StoredEventEnvelope, WorkItemProjection,
+        WorkflowState,
     };
 
     fn sample_projection(with_session: bool) -> ProjectionState {
@@ -925,6 +1158,223 @@ mod tests {
         projection
     }
 
+    fn focus_card_projection_with_evidence() -> ProjectionState {
+        let work_item_id = WorkItemId::new("wi-focus");
+        let session_id = WorkerSessionId::new("sess-focus");
+        let inbox_item_id = InboxItemId::new("inbox-focus");
+        let pr_artifact_id = ArtifactId::new("artifact-pr");
+        let log_artifact_id = ArtifactId::new("artifact-log");
+
+        let mut projection = ProjectionState::default();
+        projection.work_items.insert(
+            work_item_id.clone(),
+            WorkItemProjection {
+                id: work_item_id.clone(),
+                ticket_id: None,
+                project_id: None,
+                workflow_state: Some(WorkflowState::Implementing),
+                session_id: Some(session_id.clone()),
+                worktree_id: None,
+                inbox_items: vec![inbox_item_id.clone()],
+                artifacts: vec![pr_artifact_id.clone(), log_artifact_id.clone()],
+            },
+        );
+        projection.sessions.insert(
+            session_id.clone(),
+            SessionProjection {
+                id: session_id.clone(),
+                work_item_id: Some(work_item_id.clone()),
+                status: Some(WorkerSessionStatus::WaitingForUser),
+                latest_checkpoint: Some(log_artifact_id.clone()),
+            },
+        );
+        projection.inbox_items.insert(
+            inbox_item_id.clone(),
+            InboxItemProjection {
+                id: inbox_item_id,
+                work_item_id: work_item_id.clone(),
+                kind: InboxItemKind::NeedsDecision,
+                title: "Choose API shape".to_owned(),
+                resolved: false,
+            },
+        );
+        projection.artifacts.insert(
+            pr_artifact_id.clone(),
+            ArtifactProjection {
+                id: pr_artifact_id,
+                work_item_id: work_item_id.clone(),
+                kind: ArtifactKind::PR,
+                label: "Draft PR".to_owned(),
+                uri: "https://github.com/example/repo/pull/7".to_owned(),
+            },
+        );
+        projection.artifacts.insert(
+            log_artifact_id.clone(),
+            ArtifactProjection {
+                id: log_artifact_id.clone(),
+                work_item_id: work_item_id.clone(),
+                kind: ArtifactKind::LogSnippet,
+                label: "Failing test tail".to_owned(),
+                uri: "artifact://logs/wi-focus".to_owned(),
+            },
+        );
+        projection.events.push(StoredEventEnvelope {
+            event_id: "evt-focus-checkpoint".to_owned(),
+            sequence: 1,
+            occurred_at: "2026-02-16T09:00:00Z".to_owned(),
+            work_item_id: Some(work_item_id.clone()),
+            session_id: Some(session_id.clone()),
+            event_type: OrchestrationEventType::SessionCheckpoint,
+            payload: OrchestrationEventPayload::SessionCheckpoint(SessionCheckpointPayload {
+                session_id: session_id.clone(),
+                artifact_id: log_artifact_id,
+                summary: "Refactored parser and ran targeted tests".to_owned(),
+            }),
+            schema_version: 1,
+        });
+        projection.events.push(StoredEventEnvelope {
+            event_id: "evt-focus-needs-input".to_owned(),
+            sequence: 2,
+            occurred_at: "2026-02-16T09:01:00Z".to_owned(),
+            work_item_id: Some(work_item_id),
+            session_id: Some(session_id.clone()),
+            event_type: OrchestrationEventType::SessionNeedsInput,
+            payload: OrchestrationEventPayload::SessionNeedsInput(SessionNeedsInputPayload {
+                session_id,
+                prompt: "Choose API shape: A or B".to_owned(),
+            }),
+            schema_version: 1,
+        });
+
+        projection
+    }
+
+    fn focus_card_projection_with_multiple_sessions() -> ProjectionState {
+        let work_item_id = WorkItemId::new("wi-focus-multi");
+        let active_session_id = WorkerSessionId::new("sess-active");
+        let prior_session_id = WorkerSessionId::new("sess-prior");
+        let inbox_item_id = InboxItemId::new("inbox-focus-multi");
+
+        let mut projection = ProjectionState::default();
+        projection.work_items.insert(
+            work_item_id.clone(),
+            WorkItemProjection {
+                id: work_item_id.clone(),
+                ticket_id: None,
+                project_id: None,
+                workflow_state: Some(WorkflowState::Implementing),
+                session_id: Some(active_session_id.clone()),
+                worktree_id: None,
+                inbox_items: vec![inbox_item_id.clone()],
+                artifacts: vec![],
+            },
+        );
+        projection.sessions.insert(
+            active_session_id.clone(),
+            SessionProjection {
+                id: active_session_id.clone(),
+                work_item_id: Some(work_item_id.clone()),
+                status: Some(WorkerSessionStatus::WaitingForUser),
+                latest_checkpoint: None,
+            },
+        );
+        projection.sessions.insert(
+            prior_session_id.clone(),
+            SessionProjection {
+                id: prior_session_id.clone(),
+                work_item_id: Some(work_item_id.clone()),
+                status: Some(WorkerSessionStatus::Done),
+                latest_checkpoint: None,
+            },
+        );
+        projection.inbox_items.insert(
+            inbox_item_id.clone(),
+            InboxItemProjection {
+                id: inbox_item_id,
+                work_item_id: work_item_id.clone(),
+                kind: InboxItemKind::NeedsDecision,
+                title: "Pick an implementation".to_owned(),
+                resolved: false,
+            },
+        );
+        projection.events.push(StoredEventEnvelope {
+            event_id: "evt-focus-active-needs-input".to_owned(),
+            sequence: 1,
+            occurred_at: "2026-02-16T09:00:00Z".to_owned(),
+            work_item_id: Some(work_item_id.clone()),
+            session_id: Some(active_session_id.clone()),
+            event_type: OrchestrationEventType::SessionNeedsInput,
+            payload: OrchestrationEventPayload::SessionNeedsInput(SessionNeedsInputPayload {
+                session_id: active_session_id,
+                prompt: "Active session question".to_owned(),
+            }),
+            schema_version: 1,
+        });
+        projection.events.push(StoredEventEnvelope {
+            event_id: "evt-focus-prior-needs-input".to_owned(),
+            sequence: 2,
+            occurred_at: "2026-02-16T09:01:00Z".to_owned(),
+            work_item_id: Some(work_item_id),
+            session_id: Some(prior_session_id.clone()),
+            event_type: OrchestrationEventType::SessionNeedsInput,
+            payload: OrchestrationEventPayload::SessionNeedsInput(SessionNeedsInputPayload {
+                session_id: prior_session_id,
+                prompt: "Prior session question".to_owned(),
+            }),
+            schema_version: 1,
+        });
+
+        projection
+    }
+
+    fn focus_card_projection_with_many_artifacts() -> ProjectionState {
+        let work_item_id = WorkItemId::new("wi-many-artifacts");
+        let inbox_item_id = InboxItemId::new("inbox-many-artifacts");
+
+        let mut projection = ProjectionState::default();
+        let mut artifact_ids = Vec::new();
+        for index in 0..8 {
+            let artifact_id = ArtifactId::new(format!("artifact-{index}"));
+            artifact_ids.push(artifact_id.clone());
+            projection.artifacts.insert(
+                artifact_id.clone(),
+                ArtifactProjection {
+                    id: artifact_id,
+                    work_item_id: work_item_id.clone(),
+                    kind: ArtifactKind::LogSnippet,
+                    label: format!("Log {index}"),
+                    uri: format!("artifact://logs/{index}"),
+                },
+            );
+        }
+
+        projection.work_items.insert(
+            work_item_id.clone(),
+            WorkItemProjection {
+                id: work_item_id.clone(),
+                ticket_id: None,
+                project_id: None,
+                workflow_state: Some(WorkflowState::Implementing),
+                session_id: None,
+                worktree_id: None,
+                inbox_items: vec![inbox_item_id.clone()],
+                artifacts: artifact_ids,
+            },
+        );
+        projection.inbox_items.insert(
+            inbox_item_id.clone(),
+            InboxItemProjection {
+                id: inbox_item_id,
+                work_item_id,
+                kind: InboxItemKind::NeedsApproval,
+                title: "Review artifact set".to_owned(),
+                resolved: false,
+            },
+        );
+
+        projection
+    }
+
     #[test]
     fn center_stack_replace_push_and_pop_behavior() {
         let mut stack = ViewStack::default();
@@ -984,6 +1434,66 @@ mod tests {
             .lines
             .iter()
             .any(|line| line.contains("Review PR readiness")));
+    }
+
+    #[test]
+    fn focus_card_projects_action_ready_context_and_evidence() {
+        let projection = focus_card_projection_with_evidence();
+        let mut stack = ViewStack::default();
+        stack.replace_center(CenterView::FocusCardView {
+            inbox_item_id: InboxItemId::new("inbox-focus"),
+        });
+
+        let ui_state = project_ui_state("ready", &projection, &stack, None, None);
+        let rendered = ui_state.center_pane.lines.join("\n");
+
+        assert!(rendered.contains("Why attention is required:"));
+        assert!(rendered.contains("Recommended response:"));
+        assert!(rendered.contains("Evidence:"));
+        assert!(rendered.contains("WaitingForUser"));
+        assert!(rendered.contains("Answer the worker prompt"));
+        assert!(rendered.contains("Choose API shape: A or B"));
+        assert!(rendered.contains("https://github.com/example/repo/pull/7"));
+        assert!(rendered.contains("artifact://logs/wi-focus"));
+        assert!(rendered.contains("Latest checkpoint summary"));
+    }
+
+    #[test]
+    fn focus_card_prefers_active_session_context_over_prior_session_events() {
+        let projection = focus_card_projection_with_multiple_sessions();
+        let mut stack = ViewStack::default();
+        stack.replace_center(CenterView::FocusCardView {
+            inbox_item_id: InboxItemId::new("inbox-focus-multi"),
+        });
+
+        let ui_state = project_ui_state("ready", &projection, &stack, None, None);
+        let rendered = ui_state.center_pane.lines.join("\n");
+
+        assert!(rendered.contains("Active session question"));
+        assert!(!rendered.contains("Prior session question"));
+    }
+
+    #[test]
+    fn focus_card_limits_artifact_evidence_to_recent_entries() {
+        let projection = focus_card_projection_with_many_artifacts();
+        let mut stack = ViewStack::default();
+        stack.replace_center(CenterView::FocusCardView {
+            inbox_item_id: InboxItemId::new("inbox-many-artifacts"),
+        });
+
+        let ui_state = project_ui_state("ready", &projection, &stack, None, None);
+        let rendered = ui_state.center_pane.lines.join("\n");
+        let artifact_evidence_count = ui_state
+            .center_pane
+            .lines
+            .iter()
+            .filter(|line| line.contains("artifact '"))
+            .count();
+
+        assert_eq!(artifact_evidence_count, FOCUS_CARD_ARTIFACT_LIMIT);
+        assert!(rendered.contains("artifact://logs/7"));
+        assert!(!rendered.contains("artifact://logs/0"));
+        assert!(rendered.contains("older artifacts not shown"));
     }
 
     #[test]
