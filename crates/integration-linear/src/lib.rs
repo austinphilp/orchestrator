@@ -48,6 +48,7 @@ query ListOpenIssues($first: Int!) {
       }
       assignee {
         id
+        name
       }
       state {
         name
@@ -890,6 +891,10 @@ fn issue_to_summary(issue: &LinearIssueNode) -> TicketSummary {
             .map(|state| state.name.clone())
             .unwrap_or_else(|| "Unknown".to_owned()),
         url: issue.url.clone(),
+        assignee: issue
+            .assignee
+            .as_ref()
+            .and_then(|assignee| assignee.name.clone().or_else(|| assignee.id.clone())),
         priority: issue.priority,
         labels: issue
             .labels
@@ -1320,6 +1325,7 @@ struct LinearProjectNode {
 #[derive(Debug, Deserialize)]
 struct LinearAssigneeNode {
     id: Option<String>,
+    name: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

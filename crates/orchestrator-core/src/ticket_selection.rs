@@ -355,6 +355,8 @@ fn ensure_lifecycle_events(
             identifier: selected_ticket.identifier.clone(),
             title: selected_ticket.title.clone(),
             state: selected_ticket.state.clone(),
+            assignee: selected_ticket.assignee.clone(),
+            priority: selected_ticket.priority,
         }),
     ))?;
 
@@ -958,6 +960,7 @@ mod tests {
             project: None,
             state: "In Progress".to_owned(),
             url: "https://linear.app/acme/issue/AP-126".to_owned(),
+            assignee: None,
             priority: Some(2),
             labels: vec!["orchestrator".to_owned()],
             updated_at: "2026-02-16T10:30:00Z".to_owned(),

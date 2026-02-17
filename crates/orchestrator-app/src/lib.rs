@@ -931,6 +931,7 @@ mod tests {
             project: None,
             state: "In Progress".to_owned(),
             url: "https://linear.app/acme/issue/AP-126".to_owned(),
+            assignee: None,
             priority: Some(2),
             labels: vec!["orchestrator".to_owned()],
             updated_at: "2026-02-16T11:00:00Z".to_owned(),
@@ -1007,6 +1008,12 @@ mod tests {
             .content
             .contains("Scope: session:sess-query"));
         assert!(requests[0].messages[1].content.contains("Context pack:"));
+        assert!(requests[0].messages[1]
+            .content
+            .contains("Ticket status context:"));
+        assert!(requests[0].messages[1]
+            .content
+            .contains("Ticket status fallback:"));
     }
 
     #[tokio::test]
@@ -1053,6 +1060,57 @@ mod tests {
             .messages
             .iter()
             .any(|message| message.content.contains("Scope: session:sess-from-command")));
+    }
+
+    #[tokio::test]
+    async fn supervisor_query_dispatch_partial_invocation_context_overlays_fallback() {
+        let temp_db = TestDbPath::new("app-supervisor-query-partial-context-overlay");
+        let supervisor = QueryingSupervisor::with_chunks(vec![LlmStreamChunk {
+            delta: String::new(),
+            finish_reason: Some(LlmFinishReason::Stop),
+            usage: None,
+            rate_limit: None,
+        }]);
+
+        let app = App {
+            config: AppConfig {
+                workspace: "/workspace".to_owned(),
+                event_store_path: temp_db.path().to_string_lossy().to_string(),
+            },
+            supervisor: supervisor.clone(),
+            github: Healthy,
+        };
+
+        let _ = app
+            .dispatch_supervisor_command(
+                freeform_query_invocation_with_context(
+                    "What should I do next?",
+                    Some(SupervisorQueryContextArgs {
+                        selected_work_item_id: None,
+                        selected_session_id: Some("sess-from-command".to_owned()),
+                        scope: None,
+                    }),
+                ),
+                SupervisorCommandContext {
+                    selected_work_item_id: Some("wi-fallback".to_owned()),
+                    selected_session_id: Some("sess-fallback".to_owned()),
+                    scope: Some("session:sess-fallback".to_owned()),
+                },
+            )
+            .await
+            .expect("dispatch should stream");
+
+        let requests = supervisor.requests();
+        assert_eq!(requests.len(), 1);
+        assert!(requests[0].messages[1]
+            .content
+            .contains("Scope: session:sess-from-command"));
+        assert!(requests[0].messages[1]
+            .content
+            .contains("- selected_work_item_id: wi-fallback"));
+        assert!(requests[0].messages[1]
+            .content
+            .contains("No local ticket metadata is mapped for work item 'wi-fallback'"));
     }
 
     #[tokio::test]
@@ -1161,6 +1219,9 @@ mod tests {
         assert!(requests[0].messages[1]
             .content
             .contains("Operator question:\nWhat changed for AP-180?"));
+        assert!(requests[0].messages[1]
+            .content
+            .contains("Ticket status context:"));
         assert!(requests[0].messages[1]
             .content
             .contains("Scope: work_item:wi-from-command"));

@@ -30,6 +30,10 @@ pub struct TicketSyncedPayload {
     pub identifier: String,
     pub title: String,
     pub state: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assignee: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub priority: Option<i32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

@@ -2,12 +2,13 @@ use std::collections::HashSet;
 
 use orchestrator_core::{
     ArtifactId, ArtifactKind, ArtifactRecord, CoreError, EventStore, OrchestrationEventPayload,
-    OrchestrationEventType, RetrievalScope, SqliteEventStore, StoredEventEnvelope, WorkItemId,
-    WorkerSessionId,
+    OrchestrationEventType, RetrievalScope, SqliteEventStore, StoredEventEnvelope,
+    SupervisorQueryContextArgs, TicketRecord, WorkItemId, WorkerSessionId,
 };
 use serde_json::Value;
 
 const TRUNCATION_SUFFIX: &str = "...";
+const MAX_STATUS_TRANSITIONS: usize = 6;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RetrievalPackLimits {
@@ -59,9 +60,39 @@ pub struct RetrievalPackEvidence {
     pub metadata_summary: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct RetrievalFocusFilters {
+    pub scope_hint: String,
+    pub selected_work_item_id: Option<WorkItemId>,
+    pub selected_session_id: Option<WorkerSessionId>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TicketStatusTransition {
+    pub occurred_at: String,
+    pub event_id: String,
+    pub source: String,
+    pub from_state: Option<String>,
+    pub to_state: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct TicketStatusContext {
+    pub ticket_ref: Option<String>,
+    pub ticket_id: Option<String>,
+    pub title: Option<String>,
+    pub assignee: Option<String>,
+    pub state: Option<String>,
+    pub priority: Option<i32>,
+    pub recent_transitions: Vec<TicketStatusTransition>,
+    pub fallback_message: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BoundedContextPack {
     pub scope: RetrievalScope,
+    pub focus_filters: RetrievalFocusFilters,
+    pub ticket_status: TicketStatusContext,
     pub events: Vec<RetrievalPackEvent>,
     pub evidence: Vec<RetrievalPackEvidence>,
     pub stats: RetrievalPackStats,
@@ -75,6 +106,13 @@ pub trait SupervisorRetrievalSource {
     ) -> Result<Vec<StoredEventEnvelope>, CoreError>;
     fn artifact_refs_for_event(&self, event_id: &str) -> Result<Vec<ArtifactId>, CoreError>;
     fn get_artifact(&self, artifact_id: &ArtifactId) -> Result<Option<ArtifactRecord>, CoreError>;
+    fn find_ticket_by_work_item(
+        &self,
+        work_item_id: &WorkItemId,
+    ) -> Result<Option<TicketRecord>, CoreError> {
+        let _ = work_item_id;
+        Ok(None)
+    }
     fn count_events(&self, scope: RetrievalScope) -> Result<Option<usize>, CoreError> {
         let _ = scope;
         Ok(None)
@@ -96,6 +134,13 @@ impl SupervisorRetrievalSource for SqliteEventStore {
 
     fn get_artifact(&self, artifact_id: &ArtifactId) -> Result<Option<ArtifactRecord>, CoreError> {
         SqliteEventStore::get_artifact(self, artifact_id)
+    }
+
+    fn find_ticket_by_work_item(
+        &self,
+        work_item_id: &WorkItemId,
+    ) -> Result<Option<TicketRecord>, CoreError> {
+        SqliteEventStore::find_ticket_by_work_item(self, work_item_id)
     }
 
     fn count_events(&self, scope: RetrievalScope) -> Result<Option<usize>, CoreError> {
@@ -122,6 +167,15 @@ impl SupervisorQueryEngine {
         source: &dyn SupervisorRetrievalSource,
         scope: RetrievalScope,
     ) -> Result<BoundedContextPack, CoreError> {
+        self.build_context_pack_with_filters(source, scope, &SupervisorQueryContextArgs::default())
+    }
+
+    pub fn build_context_pack_with_filters(
+        &self,
+        source: &dyn SupervisorRetrievalSource,
+        scope: RetrievalScope,
+        filters: &SupervisorQueryContextArgs,
+    ) -> Result<BoundedContextPack, CoreError> {
         let event_query_limit = self.limits.max_events.saturating_add(1);
         let mut matched_events = source.query_events(scope.clone(), event_query_limit)?;
         let total_matching_events = source
@@ -131,6 +185,9 @@ impl SupervisorQueryEngine {
             matched_events.truncate(self.limits.max_events);
         }
         let dropped_events = total_matching_events.saturating_sub(matched_events.len());
+        let focus_filters = build_focus_filters(scope.clone(), filters);
+        let ticket_status =
+            build_ticket_status_context(source, scope.clone(), &focus_filters, &matched_events)?;
 
         let mut events = Vec::with_capacity(matched_events.len());
         let mut candidate_artifact_ids = Vec::new();
@@ -202,10 +259,244 @@ impl SupervisorQueryEngine {
 
         Ok(BoundedContextPack {
             scope,
+            focus_filters,
+            ticket_status,
             events,
             evidence,
             stats,
         })
+    }
+}
+
+fn build_focus_filters(
+    scope: RetrievalScope,
+    filters: &SupervisorQueryContextArgs,
+) -> RetrievalFocusFilters {
+    let selected_work_item_id = filters
+        .selected_work_item_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(WorkItemId::new)
+        .or_else(|| match &scope {
+            RetrievalScope::WorkItem(work_item_id) => Some(work_item_id.clone()),
+            _ => None,
+        });
+
+    let selected_session_id = filters
+        .selected_session_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(WorkerSessionId::new)
+        .or_else(|| match &scope {
+            RetrievalScope::Session(session_id) => Some(session_id.clone()),
+            _ => None,
+        });
+
+    let scope_hint = filters
+        .scope
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| render_scope(scope));
+
+    RetrievalFocusFilters {
+        scope_hint,
+        selected_work_item_id,
+        selected_session_id,
+    }
+}
+
+fn build_ticket_status_context(
+    source: &dyn SupervisorRetrievalSource,
+    scope: RetrievalScope,
+    focus_filters: &RetrievalFocusFilters,
+    scoped_events: &[StoredEventEnvelope],
+) -> Result<TicketStatusContext, CoreError> {
+    let focus_work_item_id = focus_filters
+        .selected_work_item_id
+        .clone()
+        .or_else(|| scope_work_item(scope.clone()))
+        .or_else(|| latest_work_item_from_events(scoped_events));
+    let ticket_snapshot =
+        latest_ticket_sync_from_events(scoped_events, focus_work_item_id.as_ref());
+    let mut ticket_status = TicketStatusContext {
+        ticket_ref: ticket_snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.ticket_ref.clone()),
+        ticket_id: ticket_snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.ticket_id.clone()),
+        title: ticket_snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.title.clone()),
+        assignee: ticket_snapshot
+            .as_ref()
+            .and_then(|snapshot| snapshot.assignee.clone()),
+        state: ticket_snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.state.clone()),
+        priority: ticket_snapshot
+            .as_ref()
+            .and_then(|snapshot| snapshot.priority),
+        recent_transitions: recent_status_transitions(scoped_events, focus_work_item_id.as_ref()),
+        fallback_message: None,
+    };
+
+    if let Some(work_item_id) = focus_work_item_id.as_ref() {
+        if let Some(ticket) = source.find_ticket_by_work_item(work_item_id)? {
+            if ticket_status.ticket_ref.is_none() {
+                ticket_status.ticket_ref = Some(ticket.ticket_id.as_str().to_owned());
+            }
+            if ticket_status.ticket_id.is_none() {
+                ticket_status.ticket_id = Some(ticket.identifier);
+            }
+            if ticket_status.title.is_none() {
+                ticket_status.title = Some(ticket.title);
+            }
+            if ticket_status.state.is_none() {
+                ticket_status.state = Some(ticket.state);
+            }
+        }
+    }
+
+    if ticket_status.ticket_id.is_none() {
+        ticket_status.fallback_message = Some(match focus_work_item_id {
+            Some(work_item_id) => format!(
+                "No local ticket metadata is mapped for work item '{}'. Answer ticket status questions with Unknown.",
+                work_item_id.as_str()
+            ),
+            None => "No ticket is currently in focus for this query scope. Answer ticket status questions with Unknown and ask for a selected ticket.".to_owned(),
+        });
+    }
+
+    Ok(ticket_status)
+}
+
+fn scope_work_item(scope: RetrievalScope) -> Option<WorkItemId> {
+    match scope {
+        RetrievalScope::WorkItem(work_item_id) => Some(work_item_id),
+        _ => None,
+    }
+}
+
+fn latest_work_item_from_events(scoped_events: &[StoredEventEnvelope]) -> Option<WorkItemId> {
+    scoped_events
+        .iter()
+        .find_map(|event| event.work_item_id.clone())
+}
+
+#[derive(Debug, Clone)]
+struct TicketSyncSnapshot {
+    ticket_ref: String,
+    ticket_id: String,
+    title: String,
+    state: String,
+    assignee: Option<String>,
+    priority: Option<i32>,
+}
+
+fn latest_ticket_sync_from_events(
+    scoped_events: &[StoredEventEnvelope],
+    focus_work_item_id: Option<&WorkItemId>,
+) -> Option<TicketSyncSnapshot> {
+    scoped_events.iter().find_map(|event| {
+        if focus_work_item_id.is_some() && event.work_item_id.as_ref() != focus_work_item_id {
+            return None;
+        }
+        let OrchestrationEventPayload::TicketSynced(payload) = &event.payload else {
+            return None;
+        };
+        Some(TicketSyncSnapshot {
+            ticket_ref: payload.ticket_id.as_str().to_owned(),
+            ticket_id: payload.identifier.clone(),
+            title: payload.title.clone(),
+            state: payload.state.clone(),
+            assignee: payload.assignee.clone(),
+            priority: payload.priority,
+        })
+    })
+}
+
+fn recent_status_transitions(
+    scoped_events: &[StoredEventEnvelope],
+    focus_work_item_id: Option<&WorkItemId>,
+) -> Vec<TicketStatusTransition> {
+    #[derive(Debug)]
+    struct OrderedTransition {
+        sequence: u64,
+        transition: TicketStatusTransition,
+    }
+
+    let mut transitions = scoped_events
+        .iter()
+        .filter(|event| {
+            focus_work_item_id.is_none() || event.work_item_id.as_ref() == focus_work_item_id
+        })
+        .filter_map(|event| match &event.payload {
+            OrchestrationEventPayload::WorkflowTransition(payload) => Some(OrderedTransition {
+                sequence: event.sequence,
+                transition: TicketStatusTransition {
+                    occurred_at: event.occurred_at.clone(),
+                    event_id: event.event_id.clone(),
+                    source: "workflow".to_owned(),
+                    from_state: Some(format!("{:?}", payload.from)),
+                    to_state: format!("{:?}", payload.to),
+                },
+            }),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+
+    let mut ordered_ticket_syncs = scoped_events
+        .iter()
+        .filter(|event| {
+            focus_work_item_id.is_none() || event.work_item_id.as_ref() == focus_work_item_id
+        })
+        .filter_map(|event| match &event.payload {
+            OrchestrationEventPayload::TicketSynced(payload) => Some((
+                event.occurred_at.clone(),
+                event.event_id.clone(),
+                event.sequence,
+                payload.state.clone(),
+            )),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    ordered_ticket_syncs.sort_by_key(|(_, _, sequence, _)| *sequence);
+    let mut previous_state: Option<String> = None;
+    for (occurred_at, event_id, sequence, state) in ordered_ticket_syncs {
+        let from_state = previous_state.clone();
+        if from_state.as_deref() != Some(state.as_str()) {
+            transitions.push(OrderedTransition {
+                sequence,
+                transition: TicketStatusTransition {
+                    occurred_at,
+                    event_id,
+                    source: "ticket_sync".to_owned(),
+                    from_state,
+                    to_state: state.clone(),
+                },
+            });
+        }
+        previous_state = Some(state);
+    }
+
+    transitions.sort_by(|left, right| right.sequence.cmp(&left.sequence));
+    transitions.truncate(MAX_STATUS_TRANSITIONS);
+    transitions
+        .into_iter()
+        .map(|ordered| ordered.transition)
+        .collect()
+}
+
+fn render_scope(scope: RetrievalScope) -> String {
+    match scope {
+        RetrievalScope::Global => "global".to_owned(),
+        RetrievalScope::WorkItem(work_item_id) => format!("work_item:{}", work_item_id.as_str()),
+        RetrievalScope::Session(session_id) => format!("session:{}", session_id.as_str()),
     }
 }
 
@@ -217,10 +508,17 @@ fn dedupe_preserving_order(values: &mut Vec<ArtifactId>) {
 fn summarize_event_payload(payload: &OrchestrationEventPayload, max_chars: usize) -> String {
     let summary = match payload {
         OrchestrationEventPayload::TicketSynced(ticket) => {
-            format!(
+            let mut summary = format!(
                 "ticket {} synced as '{}' in state '{}'",
                 ticket.identifier, ticket.title, ticket.state
-            )
+            );
+            if let Some(priority) = ticket.priority {
+                summary.push_str(format!(" (priority: {priority})").as_str());
+            }
+            if let Some(assignee) = ticket.assignee.as_deref() {
+                summary.push_str(format!(" (assignee: {})", compact_text(assignee)).as_str());
+            }
+            summary
         }
         OrchestrationEventPayload::WorkItemCreated(work_item) => {
             format!(
@@ -437,8 +735,9 @@ mod tests {
     use orchestrator_core::{
         ArtifactCreatedPayload, InboxItemKind, NewEventEnvelope, OrchestrationEventPayload,
         OrchestrationEventType, SessionNeedsInputPayload, SessionSpawnedPayload, SqliteEventStore,
-        TicketId, TicketProvider, TicketRecord, TicketWorkItemMapping, UserRespondedPayload,
-        WorkItemCreatedPayload,
+        SupervisorQueryContextArgs, TicketId, TicketProvider, TicketRecord, TicketSyncedPayload,
+        TicketWorkItemMapping, UserRespondedPayload, WorkItemCreatedPayload, WorkflowState,
+        WorkflowTransitionPayload,
     };
 
     use super::*;
@@ -448,6 +747,7 @@ mod tests {
         events: Vec<StoredEventEnvelope>,
         artifact_refs: HashMap<String, Vec<ArtifactId>>,
         artifacts: HashMap<ArtifactId, ArtifactRecord>,
+        tickets_by_work_item: HashMap<WorkItemId, TicketRecord>,
     }
 
     impl SupervisorRetrievalSource for TestRetrievalSource {
@@ -492,6 +792,13 @@ mod tests {
             artifact_id: &ArtifactId,
         ) -> Result<Option<ArtifactRecord>, CoreError> {
             Ok(self.artifacts.get(artifact_id).cloned())
+        }
+
+        fn find_ticket_by_work_item(
+            &self,
+            work_item_id: &WorkItemId,
+        ) -> Result<Option<TicketRecord>, CoreError> {
+            Ok(self.tickets_by_work_item.get(work_item_id).cloned())
         }
 
         fn count_events(&self, scope: RetrievalScope) -> Result<Option<usize>, CoreError> {
@@ -587,6 +894,256 @@ mod tests {
         assert_eq!(pack.stats.total_matching_events, 3);
         assert_eq!(pack.stats.dropped_events, 1);
         assert_eq!(pack.evidence.len(), 0);
+    }
+
+    #[test]
+    fn build_context_pack_includes_ticket_status_and_focus_filters() {
+        let mut source = TestRetrievalSource {
+            events: vec![
+                stored_event(
+                    "evt-1",
+                    1,
+                    Some("wi-a"),
+                    Some("sess-a"),
+                    OrchestrationEventType::TicketSynced,
+                    OrchestrationEventPayload::TicketSynced(TicketSyncedPayload {
+                        ticket_id: TicketId::from("linear:issue-123"),
+                        identifier: "AP-123".to_owned(),
+                        title: "Ticket status payload".to_owned(),
+                        state: "Todo".to_owned(),
+                        assignee: Some("alice".to_owned()),
+                        priority: Some(2),
+                    }),
+                ),
+                stored_event(
+                    "evt-2",
+                    2,
+                    Some("wi-a"),
+                    Some("sess-a"),
+                    OrchestrationEventType::WorkflowTransition,
+                    OrchestrationEventPayload::WorkflowTransition(WorkflowTransitionPayload {
+                        work_item_id: WorkItemId::new("wi-a"),
+                        from: WorkflowState::Planning,
+                        to: WorkflowState::Implementing,
+                        reason: None,
+                    }),
+                ),
+                stored_event(
+                    "evt-3",
+                    3,
+                    Some("wi-a"),
+                    Some("sess-a"),
+                    OrchestrationEventType::TicketSynced,
+                    OrchestrationEventPayload::TicketSynced(TicketSyncedPayload {
+                        ticket_id: TicketId::from("linear:issue-123"),
+                        identifier: "AP-123".to_owned(),
+                        title: "Ticket status payload".to_owned(),
+                        state: "In Progress".to_owned(),
+                        assignee: Some("alice".to_owned()),
+                        priority: Some(2),
+                    }),
+                ),
+            ],
+            ..Default::default()
+        };
+        source.tickets_by_work_item.insert(
+            WorkItemId::new("wi-a"),
+            TicketRecord {
+                ticket_id: TicketId::from("linear:issue-123"),
+                provider: TicketProvider::Linear,
+                provider_ticket_id: "issue-123".to_owned(),
+                identifier: "AP-123".to_owned(),
+                title: "Ticket status payload".to_owned(),
+                state: "In Progress".to_owned(),
+                updated_at: "2026-02-16T00:00:00Z".to_owned(),
+            },
+        );
+
+        let engine = SupervisorQueryEngine::default();
+        let pack = engine
+            .build_context_pack_with_filters(
+                &source,
+                RetrievalScope::Session(WorkerSessionId::new("sess-a")),
+                &SupervisorQueryContextArgs {
+                    selected_work_item_id: Some("wi-a".to_owned()),
+                    selected_session_id: Some("sess-a".to_owned()),
+                    scope: Some("session:sess-a".to_owned()),
+                },
+            )
+            .expect("build context pack");
+
+        assert_eq!(pack.focus_filters.scope_hint, "session:sess-a");
+        assert_eq!(
+            pack.focus_filters.selected_work_item_id,
+            Some(WorkItemId::new("wi-a"))
+        );
+        assert_eq!(
+            pack.focus_filters.selected_session_id,
+            Some(WorkerSessionId::new("sess-a"))
+        );
+        assert_eq!(
+            pack.ticket_status.ticket_ref.as_deref(),
+            Some("linear:issue-123")
+        );
+        assert_eq!(pack.ticket_status.ticket_id.as_deref(), Some("AP-123"));
+        assert_eq!(
+            pack.ticket_status.title.as_deref(),
+            Some("Ticket status payload")
+        );
+        assert_eq!(pack.ticket_status.assignee.as_deref(), Some("alice"));
+        assert_eq!(pack.ticket_status.priority, Some(2));
+        assert_eq!(pack.ticket_status.state.as_deref(), Some("In Progress"));
+        assert!(pack
+            .ticket_status
+            .recent_transitions
+            .iter()
+            .any(|entry| entry.source == "workflow"));
+        assert!(pack
+            .ticket_status
+            .recent_transitions
+            .iter()
+            .any(|entry| entry.source == "ticket_sync"));
+        assert_eq!(pack.ticket_status.fallback_message, None);
+    }
+
+    #[test]
+    fn build_context_pack_prefers_scoped_ticket_sync_over_store_snapshot() {
+        let mut source = TestRetrievalSource {
+            events: vec![stored_event(
+                "evt-sync",
+                11,
+                Some("wi-a"),
+                Some("sess-a"),
+                OrchestrationEventType::TicketSynced,
+                OrchestrationEventPayload::TicketSynced(TicketSyncedPayload {
+                    ticket_id: TicketId::from("linear:issue-123"),
+                    identifier: "AP-123".to_owned(),
+                    title: "Scope snapshot title".to_owned(),
+                    state: "In Progress".to_owned(),
+                    assignee: Some("alice".to_owned()),
+                    priority: Some(2),
+                }),
+            )],
+            ..Default::default()
+        };
+        source.tickets_by_work_item.insert(
+            WorkItemId::new("wi-a"),
+            TicketRecord {
+                ticket_id: TicketId::from("linear:issue-123"),
+                provider: TicketProvider::Linear,
+                provider_ticket_id: "issue-123".to_owned(),
+                identifier: "AP-123".to_owned(),
+                title: "Store snapshot title".to_owned(),
+                state: "Done".to_owned(),
+                updated_at: "2026-02-16T00:00:00Z".to_owned(),
+            },
+        );
+
+        let engine = SupervisorQueryEngine::default();
+        let pack = engine
+            .build_context_pack_with_filters(
+                &source,
+                RetrievalScope::WorkItem(WorkItemId::new("wi-a")),
+                &SupervisorQueryContextArgs {
+                    selected_work_item_id: Some("wi-a".to_owned()),
+                    selected_session_id: Some("sess-a".to_owned()),
+                    scope: Some("work_item:wi-a".to_owned()),
+                },
+            )
+            .expect("build context pack");
+
+        assert_eq!(pack.ticket_status.state.as_deref(), Some("In Progress"));
+        assert_eq!(
+            pack.ticket_status.title.as_deref(),
+            Some("Scope snapshot title")
+        );
+    }
+
+    #[test]
+    fn build_context_pack_orders_recent_transitions_by_sequence_desc() {
+        let source = TestRetrievalSource {
+            events: vec![
+                stored_event(
+                    "evt-1",
+                    1,
+                    Some("wi-a"),
+                    Some("sess-a"),
+                    OrchestrationEventType::WorkflowTransition,
+                    OrchestrationEventPayload::WorkflowTransition(WorkflowTransitionPayload {
+                        work_item_id: WorkItemId::new("wi-a"),
+                        from: WorkflowState::Planning,
+                        to: WorkflowState::Implementing,
+                        reason: None,
+                    }),
+                ),
+                stored_event(
+                    "evt-2",
+                    2,
+                    Some("wi-a"),
+                    Some("sess-a"),
+                    OrchestrationEventType::TicketSynced,
+                    OrchestrationEventPayload::TicketSynced(TicketSyncedPayload {
+                        ticket_id: TicketId::from("linear:issue-123"),
+                        identifier: "AP-123".to_owned(),
+                        title: "Ticket status payload".to_owned(),
+                        state: "Todo".to_owned(),
+                        assignee: None,
+                        priority: None,
+                    }),
+                ),
+                stored_event(
+                    "evt-3",
+                    3,
+                    Some("wi-a"),
+                    Some("sess-a"),
+                    OrchestrationEventType::TicketSynced,
+                    OrchestrationEventPayload::TicketSynced(TicketSyncedPayload {
+                        ticket_id: TicketId::from("linear:issue-123"),
+                        identifier: "AP-123".to_owned(),
+                        title: "Ticket status payload".to_owned(),
+                        state: "In Progress".to_owned(),
+                        assignee: None,
+                        priority: None,
+                    }),
+                ),
+            ],
+            ..Default::default()
+        };
+
+        let engine = SupervisorQueryEngine::default();
+        let pack = engine
+            .build_context_pack_with_filters(
+                &source,
+                RetrievalScope::Session(WorkerSessionId::new("sess-a")),
+                &SupervisorQueryContextArgs {
+                    selected_work_item_id: Some("wi-a".to_owned()),
+                    selected_session_id: Some("sess-a".to_owned()),
+                    scope: Some("session:sess-a".to_owned()),
+                },
+            )
+            .expect("build context pack");
+
+        assert_eq!(pack.ticket_status.recent_transitions.len(), 3);
+        assert_eq!(pack.ticket_status.recent_transitions[0].event_id, "evt-3");
+        assert_eq!(pack.ticket_status.recent_transitions[1].event_id, "evt-2");
+        assert_eq!(pack.ticket_status.recent_transitions[2].event_id, "evt-1");
+    }
+
+    #[test]
+    fn build_context_pack_sets_fallback_when_ticket_context_is_missing() {
+        let source = TestRetrievalSource::default();
+        let engine = SupervisorQueryEngine::default();
+        let pack = engine
+            .build_context_pack_with_filters(
+                &source,
+                RetrievalScope::Global,
+                &SupervisorQueryContextArgs::default(),
+            )
+            .expect("build context pack");
+
+        assert!(pack.ticket_status.ticket_id.is_none());
+        assert!(pack.ticket_status.recent_transitions.is_empty());
+        assert!(pack.ticket_status.fallback_message.is_some());
     }
 
     #[test]

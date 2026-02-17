@@ -15,8 +15,9 @@ mod query_engine;
 mod template_library;
 
 pub use query_engine::{
-    BoundedContextPack, RetrievalPackEvent, RetrievalPackEvidence, RetrievalPackLimits,
-    RetrievalPackStats, SupervisorQueryEngine, SupervisorRetrievalSource,
+    BoundedContextPack, RetrievalFocusFilters, RetrievalPackEvent, RetrievalPackEvidence,
+    RetrievalPackLimits, RetrievalPackStats, SupervisorQueryEngine, SupervisorRetrievalSource,
+    TicketStatusContext, TicketStatusTransition,
 };
 pub use template_library::{
     build_freeform_messages, build_template_messages, build_template_messages_with_variables,

@@ -243,6 +243,101 @@ fn render_template_variables(variables: &BTreeMap<String, String>) -> String {
 fn render_context_pack(context: &BoundedContextPack) -> String {
     let mut lines = vec![
         format!("Scope: {}", render_scope(&context.scope)),
+        "Focus filters:".to_owned(),
+        format!("- scope_hint: {}", context.focus_filters.scope_hint),
+        format!(
+            "- selected_work_item_id: {}",
+            context
+                .focus_filters
+                .selected_work_item_id
+                .as_ref()
+                .map(|id| id.as_str().to_owned())
+                .unwrap_or_else(|| "none".to_owned())
+        ),
+        format!(
+            "- selected_session_id: {}",
+            context
+                .focus_filters
+                .selected_session_id
+                .as_ref()
+                .map(|id| id.as_str().to_owned())
+                .unwrap_or_else(|| "none".to_owned())
+        ),
+        "Ticket status context:".to_owned(),
+        format!(
+            "- ticket_ref: {}",
+            context
+                .ticket_status
+                .ticket_ref
+                .as_deref()
+                .unwrap_or("Unknown")
+        ),
+        format!(
+            "- ticket_id: {}",
+            context
+                .ticket_status
+                .ticket_id
+                .as_deref()
+                .unwrap_or("Unknown")
+        ),
+        format!(
+            "- title: {}",
+            context.ticket_status.title.as_deref().unwrap_or("Unknown")
+        ),
+        format!(
+            "- assignee: {}",
+            context
+                .ticket_status
+                .assignee
+                .as_deref()
+                .unwrap_or("Unknown")
+        ),
+        format!(
+            "- state: {}",
+            context.ticket_status.state.as_deref().unwrap_or("Unknown")
+        ),
+        format!(
+            "- priority: {}",
+            context
+                .ticket_status
+                .priority
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "Unknown".to_owned())
+        ),
+        "Recent status transitions:".to_owned(),
+    ];
+
+    if context.ticket_status.recent_transitions.is_empty() {
+        lines.push("- none".to_owned());
+    } else {
+        lines.extend(
+            context
+                .ticket_status
+                .recent_transitions
+                .iter()
+                .map(|transition| {
+                    let from_state = transition
+                        .from_state
+                        .as_deref()
+                        .unwrap_or("Unknown")
+                        .to_owned();
+                    format!(
+                        "- {} {} {} -> {} ({})",
+                        transition.occurred_at,
+                        transition.source,
+                        from_state,
+                        transition.to_state,
+                        transition.event_id
+                    )
+                }),
+        );
+    }
+
+    if let Some(fallback) = context.ticket_status.fallback_message.as_deref() {
+        lines.push(format!("Ticket status fallback: {fallback}"));
+    }
+
+    lines.extend([
         format!(
             "Stats: total_matching_events={} dropped_events={} evidence_candidates={} dropped_evidence={} missing_evidence={}",
             context.stats.total_matching_events,
@@ -252,7 +347,7 @@ fn render_context_pack(context: &BoundedContextPack) -> String {
             context.stats.missing_evidence
         ),
         "Events (newest first):".to_owned(),
-    ];
+    ]);
 
     if context.events.is_empty() {
         lines.push("- none".to_owned());
@@ -344,7 +439,10 @@ mod tests {
 
     use orchestrator_core::{ArtifactId, ArtifactKind, WorkItemId, WorkerSessionId};
 
-    use crate::{RetrievalPackEvent, RetrievalPackEvidence, RetrievalPackStats};
+    use crate::{
+        RetrievalFocusFilters, RetrievalPackEvent, RetrievalPackEvidence, RetrievalPackStats,
+        TicketStatusContext, TicketStatusTransition,
+    };
 
     use super::*;
 
@@ -418,6 +516,8 @@ mod tests {
         assert!(messages[1].content.contains("evt-1"));
         assert!(messages[1].content.contains("art-2"));
         assert!(messages[1].content.contains("Scope: session:sess-7"));
+        assert!(messages[1].content.contains("Ticket status context:"));
+        assert!(messages[1].content.contains("ticket_id: AP-129"));
     }
 
     #[test]
@@ -450,6 +550,7 @@ mod tests {
         assert!(messages[1].content.contains("What changed today?"));
         assert!(messages[1].content.contains("Context pack:"));
         assert!(messages[1].content.contains("evt-1"));
+        assert!(messages[1].content.contains("Focus filters:"));
     }
 
     #[test]
@@ -464,6 +565,27 @@ mod tests {
     fn sample_context_pack() -> BoundedContextPack {
         BoundedContextPack {
             scope: RetrievalScope::Session(WorkerSessionId::new("sess-7")),
+            focus_filters: RetrievalFocusFilters {
+                scope_hint: "session:sess-7".to_owned(),
+                selected_work_item_id: Some(WorkItemId::new("wi-3")),
+                selected_session_id: Some(WorkerSessionId::new("sess-7")),
+            },
+            ticket_status: TicketStatusContext {
+                ticket_ref: Some("linear:issue-129".to_owned()),
+                ticket_id: Some("AP-129".to_owned()),
+                title: Some("Refine status context payload".to_owned()),
+                assignee: Some("alice".to_owned()),
+                state: Some("In Progress".to_owned()),
+                priority: Some(1),
+                recent_transitions: vec![TicketStatusTransition {
+                    occurred_at: "2026-02-16T10:29:00Z".to_owned(),
+                    event_id: "evt-ticket-sync".to_owned(),
+                    source: "ticket_sync".to_owned(),
+                    from_state: Some("Todo".to_owned()),
+                    to_state: "In Progress".to_owned(),
+                }],
+                fallback_message: None,
+            },
             events: vec![RetrievalPackEvent {
                 event_id: "evt-1".to_owned(),
                 sequence: 42,

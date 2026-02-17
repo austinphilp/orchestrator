@@ -38,6 +38,8 @@ pub struct TicketSummary {
     pub project: Option<String>,
     pub state: String,
     pub url: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assignee: Option<String>,
     pub priority: Option<i32>,
     pub labels: Vec<String>,
     pub updated_at: String,
