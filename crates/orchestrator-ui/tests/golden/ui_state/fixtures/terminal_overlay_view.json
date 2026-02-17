@@ -1,0 +1,106 @@
+{
+  "status": "ready",
+  "selected_inbox_item_id": "inbox-terminal",
+  "center_view_stack": [
+    {
+      "type": "focus_card",
+      "inbox_item_id": "inbox-terminal"
+    },
+    {
+      "type": "terminal",
+      "session_id": "sess-terminal"
+    }
+  ],
+  "key_sequence": ["v"],
+  "events": [
+    {
+      "sequence": 1,
+      "event_id": "evt-term-1",
+      "occurred_at": "2026-02-16T11:00:00Z",
+      "work_item_id": "wi-terminal",
+      "payload": {
+        "type": "WorkItemCreated",
+        "data": {
+          "work_item_id": "wi-terminal",
+          "ticket_id": "linear:AP-139",
+          "project_id": "orchestrator"
+        }
+      }
+    },
+    {
+      "sequence": 2,
+      "event_id": "evt-term-2",
+      "occurred_at": "2026-02-16T11:00:10Z",
+      "work_item_id": "wi-terminal",
+      "session_id": "sess-terminal",
+      "payload": {
+        "type": "SessionSpawned",
+        "data": {
+          "session_id": "sess-terminal",
+          "work_item_id": "wi-terminal",
+          "model": "openai/gpt-4o-mini"
+        }
+      }
+    },
+    {
+      "sequence": 3,
+      "event_id": "evt-term-3",
+      "occurred_at": "2026-02-16T11:00:20Z",
+      "work_item_id": "wi-terminal",
+      "payload": {
+        "type": "WorkflowTransition",
+        "data": {
+          "work_item_id": "wi-terminal",
+          "from": "Planning",
+          "to": "Implementing"
+        }
+      }
+    },
+    {
+      "sequence": 4,
+      "event_id": "evt-term-4",
+      "occurred_at": "2026-02-16T11:00:30Z",
+      "work_item_id": "wi-terminal",
+      "payload": {
+        "type": "ArtifactCreated",
+        "data": {
+          "artifact_id": "artifact-terminal-checkpoint",
+          "work_item_id": "wi-terminal",
+          "kind": "LogSnippet",
+          "label": "Terminal checkpoint",
+          "uri": "artifact://logs/wi-terminal?tail=terminal+snapshot+captured"
+        }
+      }
+    },
+    {
+      "sequence": 5,
+      "event_id": "evt-term-5",
+      "occurred_at": "2026-02-16T11:00:40Z",
+      "work_item_id": "wi-terminal",
+      "session_id": "sess-terminal",
+      "payload": {
+        "type": "SessionCheckpoint",
+        "data": {
+          "session_id": "sess-terminal",
+          "artifact_id": "artifact-terminal-checkpoint",
+          "summary": "Background terminal output captured after snapshot projection"
+        }
+      }
+    },
+    {
+      "sequence": 6,
+      "event_id": "evt-term-6",
+      "occurred_at": "2026-02-16T11:00:50Z",
+      "work_item_id": "wi-terminal",
+      "payload": {
+        "type": "InboxItemCreated",
+        "data": {
+          "inbox_item_id": "inbox-terminal",
+          "work_item_id": "wi-terminal",
+          "kind": "NeedsApproval",
+          "title": "Review terminal overlay behavior"
+        }
+      }
+    }
+  ]
+}

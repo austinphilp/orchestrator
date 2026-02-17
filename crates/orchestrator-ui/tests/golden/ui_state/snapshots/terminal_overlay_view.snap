@@ -1,0 +1,27 @@
+status: ready
+mode: Normal
+selected_inbox_index: 0
+selected_inbox_item_id: inbox-terminal
+center_stack: FocusCard(inbox-terminal) > Terminal(sess-terminal)
+center_title: Terminal sess-terminal
+
+[inbox]
+Batch lanes: [2] Approvals 1
+
+Attention:
+> [ ] NeedsApproval: Review terminal overlay behavior
+
+[center]
+Stack: FocusCard(inbox-terminal) > Terminal(sess-terminal)
+
+Session: sess-terminal
+Status: Running
+Latest checkpoint: artifact-terminal-checkpoint
+PTY embedding lands in a later ticket.
+
+[which-key]
+v  (Artifact inspectors)
+c  Open chat inspector for selected item
+d  Open diff inspector for selected item
+p  Open PR inspector for selected item
+t  Open test inspector for selected item

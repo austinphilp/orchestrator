@@ -12,3 +12,5 @@ tokio.workspace = true
 
 [dev-dependencies]
 async-trait.workspace = true
+serde.workspace = true
+serde_json.workspace = true

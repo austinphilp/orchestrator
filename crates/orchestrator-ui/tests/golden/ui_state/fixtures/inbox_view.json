@@ -1,0 +1,177 @@
+{
+  "status": "ready",
+  "events": [
+    {
+      "sequence": 1,
+      "event_id": "evt-inbox-1",
+      "occurred_at": "2026-02-16T09:00:00Z",
+      "work_item_id": "wi-decision",
+      "payload": {
+        "type": "WorkItemCreated",
+        "data": {
+          "work_item_id": "wi-decision",
+          "ticket_id": "linear:AP-201",
+          "project_id": "orchestrator"
+        }
+      }
+    },
+    {
+      "sequence": 2,
+      "event_id": "evt-inbox-2",
+      "occurred_at": "2026-02-16T09:00:10Z",
+      "work_item_id": "wi-approval",
+      "payload": {
+        "type": "WorkItemCreated",
+        "data": {
+          "work_item_id": "wi-approval",
+          "ticket_id": "linear:AP-202",
+          "project_id": "orchestrator"
+        }
+      }
+    },
+    {
+      "sequence": 3,
+      "event_id": "evt-inbox-3",
+      "occurred_at": "2026-02-16T09:00:20Z",
+      "work_item_id": "wi-review",
+      "payload": {
+        "type": "WorkItemCreated",
+        "data": {
+          "work_item_id": "wi-review",
+          "ticket_id": "linear:AP-203",
+          "project_id": "orchestrator"
+        }
+      }
+    },
+    {
+      "sequence": 4,
+      "event_id": "evt-inbox-4",
+      "occurred_at": "2026-02-16T09:00:30Z",
+      "work_item_id": "wi-fyi",
+      "payload": {
+        "type": "WorkItemCreated",
+        "data": {
+          "work_item_id": "wi-fyi",
+          "ticket_id": "linear:AP-204",
+          "project_id": "orchestrator"
+        }
+      }
+    },
+    {
+      "sequence": 5,
+      "event_id": "evt-inbox-5",
+      "occurred_at": "2026-02-16T09:00:40Z",
+      "work_item_id": "wi-decision",
+      "payload": {
+        "type": "WorkflowTransition",
+        "data": {
+          "work_item_id": "wi-decision",
+          "from": "Planning",
+          "to": "Implementing"
+        }
+      }
+    },
+    {
+      "sequence": 6,
+      "event_id": "evt-inbox-6",
+      "occurred_at": "2026-02-16T09:00:50Z",
+      "work_item_id": "wi-approval",
+      "payload": {
+        "type": "WorkflowTransition",
+        "data": {
+          "work_item_id": "wi-approval",
+          "from": "Testing",
+          "to": "AwaitingYourReview"
+        }
+      }
+    },
+    {
+      "sequence": 7,
+      "event_id": "evt-inbox-7",
+      "occurred_at": "2026-02-16T09:01:00Z",
+      "work_item_id": "wi-review",
+      "payload": {
+        "type": "WorkflowTransition",
+        "data": {
+          "work_item_id": "wi-review",
+          "from": "Testing",
+          "to": "ReadyForReview"
+        }
+      }
+    },
+    {
+      "sequence": 8,
+      "event_id": "evt-inbox-8",
+      "occurred_at": "2026-02-16T09:01:10Z",
+      "work_item_id": "wi-fyi",
+      "payload": {
+        "type": "WorkflowTransition",
+        "data": {
+          "work_item_id": "wi-fyi",
+          "from": "Implementing",
+          "to": "Testing"
+        }
+      }
+    },
+    {
+      "sequence": 9,
+      "event_id": "evt-inbox-9",
+      "occurred_at": "2026-02-16T09:01:20Z",
+      "work_item_id": "wi-decision",
+      "payload": {
+        "type": "InboxItemCreated",
+        "data": {
+          "inbox_item_id": "inbox-decision",
+          "work_item_id": "wi-decision",
+          "kind": "NeedsDecision",
+          "title": "Choose parser migration strategy"
+        }
+      }
+    },
+    {
+      "sequence": 10,
+      "event_id": "evt-inbox-10",
+      "occurred_at": "2026-02-16T09:01:30Z",
+      "work_item_id": "wi-approval",
+      "payload": {
+        "type": "InboxItemCreated",
+        "data": {
+          "inbox_item_id": "inbox-approval",
+          "work_item_id": "wi-approval",
+          "kind": "NeedsApproval",
+          "title": "Approve PR-ready transition"
+        }
+      }
+    },
+    {
+      "sequence": 11,
+      "event_id": "evt-inbox-11",
+      "occurred_at": "2026-02-16T09:01:40Z",
+      "work_item_id": "wi-review",
+      "payload": {
+        "type": "InboxItemCreated",
+        "data": {
+          "inbox_item_id": "inbox-review",
+          "work_item_id": "wi-review",
+          "kind": "ReadyForReview",
+          "title": "Review implementation evidence"
+        }
+      }
+    },
+    {
+      "sequence": 12,
+      "event_id": "evt-inbox-12",
+      "occurred_at": "2026-02-16T09:01:50Z",
+      "work_item_id": "wi-fyi",
+      "payload": {
+        "type": "InboxItemCreated",
+        "data": {
+          "inbox_item_id": "inbox-fyi",
+          "work_item_id": "wi-fyi",
+          "kind": "FYI",
+          "title": "FYI: background agent progress"
+        }
+      }
+    }
+  ]
+}

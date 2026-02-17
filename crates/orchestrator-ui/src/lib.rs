@@ -2579,6 +2579,9 @@ fn routed_command(route: RoutedInput) -> Option<UiCommand> {
 }
 
 #[cfg(test)]
+mod golden_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use async_trait::async_trait;
