@@ -9,7 +9,8 @@ use crossterm::terminal::{
 };
 use crossterm::ExecutableCommand;
 use orchestrator_core::{
-    command_ids, ArtifactKind, ArtifactProjection, InboxItemId, InboxItemKind, LlmChatRequest,
+    attention_inbox_snapshot, command_ids, ArtifactKind, ArtifactProjection, AttentionBatchKind,
+    AttentionEngineConfig, AttentionPriorityBand, InboxItemId, InboxItemKind, LlmChatRequest,
     LlmFinishReason, LlmMessage, LlmProvider, LlmRateLimitState, LlmRole, LlmTokenUsage,
     OrchestrationEventPayload, ProjectionState, WorkItemId, WorkerSessionId, WorkerSessionStatus,
     WorkflowState,
@@ -175,65 +176,8 @@ pub struct CenterPaneState {
     pub lines: Vec<String>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub enum InboxPriorityBand {
-    Urgent,
-    Attention,
-    Background,
-}
-
-impl InboxPriorityBand {
-    fn label(self) -> &'static str {
-        match self {
-            Self::Urgent => "Urgent",
-            Self::Attention => "Attention",
-            Self::Background => "Background",
-        }
-    }
-
-    fn rank(self) -> u8 {
-        match self {
-            Self::Urgent => 0,
-            Self::Attention => 1,
-            Self::Background => 2,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum InboxBatchKind {
-    DecideOrUnblock,
-    Approvals,
-    ReviewReady,
-    FyiDigest,
-}
-
-impl InboxBatchKind {
-    const ORDERED: [InboxBatchKind; 4] = [
-        InboxBatchKind::DecideOrUnblock,
-        InboxBatchKind::Approvals,
-        InboxBatchKind::ReviewReady,
-        InboxBatchKind::FyiDigest,
-    ];
-
-    fn label(self) -> &'static str {
-        match self {
-            Self::DecideOrUnblock => "Decide / Unblock",
-            Self::Approvals => "Approvals",
-            Self::ReviewReady => "PR Reviews",
-            Self::FyiDigest => "FYI Digest",
-        }
-    }
-
-    fn hotkey(self) -> char {
-        match self {
-            Self::DecideOrUnblock => '1',
-            Self::Approvals => '2',
-            Self::ReviewReady => '3',
-            Self::FyiDigest => '4',
-        }
-    }
-}
+type InboxPriorityBand = AttentionPriorityBand;
+type InboxBatchKind = AttentionBatchKind;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UiBatchSurface {
@@ -280,48 +224,36 @@ pub fn project_ui_state(
     preferred_selected_inbox: Option<usize>,
     preferred_selected_inbox_item_id: Option<&InboxItemId>,
 ) -> UiState {
-    let mut inbox_rows = domain
-        .inbox_items
-        .values()
-        .map(|item| {
-            let work_item = domain.work_items.get(&item.work_item_id);
-            let session_id = work_item.and_then(|entry| entry.session_id.clone());
-            let session_status = session_id
-                .as_ref()
-                .and_then(|id| domain.sessions.get(id))
-                .and_then(|session| session.status.clone());
-            let workflow_state = work_item.and_then(|entry| entry.workflow_state.clone());
-            let priority_score = inbox_priority_score(
-                &item.kind,
-                item.resolved,
-                workflow_state.as_ref(),
-                session_status.as_ref(),
-            );
-            let priority_band = inbox_priority_band(priority_score, item.resolved);
-            UiInboxRow {
-                inbox_item_id: item.id.clone(),
-                work_item_id: item.work_item_id.clone(),
-                kind: item.kind.clone(),
-                priority_score,
-                priority_band,
-                batch_kind: inbox_batch_kind(&item.kind),
-                title: item.title.clone(),
-                resolved: item.resolved,
-                workflow_state,
-                session_id,
-                session_status,
-            }
+    let attention_snapshot =
+        attention_inbox_snapshot(domain, &AttentionEngineConfig::default(), &[]);
+    let inbox_rows = attention_snapshot
+        .items
+        .into_iter()
+        .map(|item| UiInboxRow {
+            inbox_item_id: item.inbox_item_id,
+            work_item_id: item.work_item_id,
+            kind: item.kind,
+            priority_score: item.priority_score,
+            priority_band: item.priority_band,
+            batch_kind: item.batch_kind,
+            title: item.title,
+            resolved: item.resolved,
+            workflow_state: item.workflow_state,
+            session_id: item.session_id,
+            session_status: item.session_status,
         })
         .collect::<Vec<_>>();
-    inbox_rows.sort_by(|a, b| {
-        a.priority_band
-            .rank()
-            .cmp(&b.priority_band.rank())
-            .then_with(|| b.priority_score.cmp(&a.priority_score))
-            .then_with(|| a.resolved.cmp(&b.resolved))
-            .then_with(|| a.inbox_item_id.as_str().cmp(b.inbox_item_id.as_str()))
-    });
-    let inbox_batch_surfaces = build_batch_surfaces(&inbox_rows);
+    let inbox_batch_surfaces = attention_snapshot
+        .batch_surfaces
+        .into_iter()
+        .map(|surface| UiBatchSurface {
+            kind: surface.kind,
+            unresolved_count: surface.unresolved_count,
+            total_count: surface.total_count,
+            first_unresolved_index: surface.first_unresolved_index,
+            first_any_index: surface.first_any_index,
+        })
+        .collect::<Vec<_>>();
 
     let selected_inbox_index = resolve_selected_inbox(
         preferred_selected_inbox,
@@ -373,82 +305,6 @@ fn resolve_selected_inbox(
     }
 
     Some(preferred_index.unwrap_or(0).min(inbox_rows.len() - 1))
-}
-
-fn inbox_priority_score(
-    kind: &InboxItemKind,
-    resolved: bool,
-    workflow_state: Option<&WorkflowState>,
-    session_status: Option<&WorkerSessionStatus>,
-) -> i32 {
-    let mut score = match kind {
-        InboxItemKind::NeedsDecision => 100,
-        InboxItemKind::Blocked => 95,
-        InboxItemKind::NeedsApproval => 75,
-        InboxItemKind::ReadyForReview => 70,
-        InboxItemKind::FYI => 30,
-    };
-
-    if resolved {
-        score -= 500;
-    }
-
-    if matches!(session_status, Some(WorkerSessionStatus::WaitingForUser)) {
-        score += 20;
-    }
-    if matches!(session_status, Some(WorkerSessionStatus::Blocked)) {
-        score += 15;
-    }
-
-    if matches!(
-        workflow_state,
-        Some(WorkflowState::AwaitingYourReview | WorkflowState::ReadyForReview)
-    ) {
-        score += 10;
-    }
-
-    score
-}
-
-fn inbox_priority_band(score: i32, resolved: bool) -> InboxPriorityBand {
-    if resolved {
-        return InboxPriorityBand::Background;
-    }
-
-    if score >= 95 {
-        InboxPriorityBand::Urgent
-    } else if score >= 60 {
-        InboxPriorityBand::Attention
-    } else {
-        InboxPriorityBand::Background
-    }
-}
-
-fn inbox_batch_kind(kind: &InboxItemKind) -> InboxBatchKind {
-    match kind {
-        InboxItemKind::NeedsDecision | InboxItemKind::Blocked => InboxBatchKind::DecideOrUnblock,
-        InboxItemKind::NeedsApproval => InboxBatchKind::Approvals,
-        InboxItemKind::ReadyForReview => InboxBatchKind::ReviewReady,
-        InboxItemKind::FYI => InboxBatchKind::FyiDigest,
-    }
-}
-
-fn build_batch_surfaces(rows: &[UiInboxRow]) -> Vec<UiBatchSurface> {
-    InboxBatchKind::ORDERED
-        .iter()
-        .map(|kind| UiBatchSurface {
-            kind: *kind,
-            unresolved_count: rows
-                .iter()
-                .filter(|row| row.batch_kind == *kind && !row.resolved)
-                .count(),
-            total_count: rows.iter().filter(|row| row.batch_kind == *kind).count(),
-            first_unresolved_index: rows
-                .iter()
-                .position(|row| row.batch_kind == *kind && !row.resolved),
-            first_any_index: rows.iter().position(|row| row.batch_kind == *kind),
-        })
-        .collect()
 }
 
 fn project_center_pane(
