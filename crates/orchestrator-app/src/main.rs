@@ -38,7 +38,7 @@ async fn main() -> Result<()> {
 
     let supervisor = OpenRouterSupervisor::from_env()?;
     let github = GhCliClient::new(GhProcessCommandRunner)?;
-    let ticketing = build_ticketing_provider(&config.ticketing_provider)?;
+    let (ticketing, linear_ticketing) = build_ticketing_provider(&config.ticketing_provider)?;
     let worker_backend = build_harness_provider(&config.harness_provider)?;
     let vcs = Arc::new(GitCliVcsProvider::new(GitProcessCommandRunner)?);
 
@@ -62,7 +62,21 @@ async fn main() -> Result<()> {
     let mut ui = Ui::init()?
         .with_supervisor_command_dispatcher(supervisor_dispatcher)
         .with_ticket_picker_provider(ticket_picker_provider);
-    ui.run(&state.status, &state.projection)?;
+    app.start_linear_polling(linear_ticketing.as_deref()).await?;
+    match ui.run(&state.status, &state.projection) {
+        Ok(()) => {
+            app.stop_linear_polling(linear_ticketing.as_deref()).await?;
+        }
+        Err(ui_error) => {
+            if let Err(stop_error) = app.stop_linear_polling(linear_ticketing.as_deref()).await {
+                tracing::warn!(error = %stop_error, "failed to stop linear polling during UI shutdown");
+                return Err(anyhow::anyhow!(
+                    "UI shutdown failed: {ui_error}; additionally, linear polling stop failed: {stop_error}"
+                ));
+            }
+            return Err(ui_error.into());
+        }
+    }
 
     Ok(())
 }
@@ -162,10 +176,24 @@ fn resolve_provider_name(
 
 fn build_ticketing_provider(
     provider: &str,
-) -> Result<Arc<dyn TicketingProvider + Send + Sync>, CoreError> {
+) -> Result<
+    (
+        Arc<dyn TicketingProvider + Send + Sync>,
+        Option<Arc<LinearTicketingProvider>>,
+    ),
+    CoreError,
+> {
     match provider {
-        "linear" => Ok(Arc::new(LinearTicketingProvider::from_env()?)),
-        "shortcut" => Ok(Arc::new(ShortcutTicketingProvider::from_env()?)),
+        "linear" => {
+            let provider = Arc::new(LinearTicketingProvider::from_env()?);
+            let linear_ticketing = Arc::clone(&provider);
+            let ticketing: Arc<dyn TicketingProvider + Send + Sync> = provider;
+            Ok((ticketing, Some(linear_ticketing)))
+        }
+        "shortcut" => Ok((
+            Arc::new(ShortcutTicketingProvider::from_env()?),
+            None,
+        )),
         other => Err(CoreError::Configuration(format!(
             "Unknown ticketing provider '{other}'. Expected 'linear' or 'shortcut'."
         ))),
