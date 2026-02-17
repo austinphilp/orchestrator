@@ -1,4 +1,5 @@
 mod adapters;
+mod attention_engine;
 mod commands;
 mod error;
 mod events;
@@ -21,6 +22,10 @@ pub use adapters::{
     PullRequestRef, PullRequestSummary, RepositoryRef, ReviewerRequest, Supervisor,
     TicketAttachment, TicketQuery, TicketSummary, TicketingProvider, UpdateTicketStateRequest,
     UrlOpener, VcsProvider, WorktreeManager, WorktreeStatus, WorktreeSummary,
+};
+pub use attention_engine::{
+    attention_inbox_snapshot, AttentionBatchKind, AttentionBatchSurface, AttentionEngineConfig,
+    AttentionInboxItem, AttentionInboxSnapshot, AttentionPriorityBand, AttentionScoreBreakdown,
 };
 pub use commands::{
     ids as command_ids, Command, CommandArgSummary, CommandDefinition, CommandMetadata,
