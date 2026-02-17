@@ -448,4 +448,199 @@ mod tests {
         .expect_err("done is terminal");
         assert!(matches!(err, WorkflowTransitionError::TerminalState { .. }));
     }
+
+    #[test]
+    fn workflow_transition_matrix_covers_reason_and_guard_edges() {
+        struct Case {
+            name: &'static str,
+            from: WorkflowState,
+            to: WorkflowState,
+            reason: WorkflowTransitionReason,
+            guards: WorkflowGuardContext,
+            expected_guard: Option<WorkflowGuard>,
+            expect_invalid: bool,
+        }
+
+        let cases = vec![
+            Case {
+                name: "plan committed path requires active session and plan",
+                from: WorkflowState::Planning,
+                to: WorkflowState::Implementing,
+                reason: WorkflowTransitionReason::PlanCommitted,
+                guards: WorkflowGuardContext {
+                    has_active_session: true,
+                    plan_ready: true,
+                    ..WorkflowGuardContext::default()
+                },
+                expected_guard: None,
+                expect_invalid: false,
+            },
+            Case {
+                name: "plan committed missing active session fails first guard",
+                from: WorkflowState::Planning,
+                to: WorkflowState::Implementing,
+                reason: WorkflowTransitionReason::PlanCommitted,
+                guards: WorkflowGuardContext {
+                    plan_ready: true,
+                    ..WorkflowGuardContext::default()
+                },
+                expected_guard: Some(WorkflowGuard::ActiveSession),
+                expect_invalid: false,
+            },
+            Case {
+                name: "plan committed missing plan fails second guard",
+                from: WorkflowState::Planning,
+                to: WorkflowState::Implementing,
+                reason: WorkflowTransitionReason::PlanCommitted,
+                guards: WorkflowGuardContext {
+                    has_active_session: true,
+                    ..WorkflowGuardContext::default()
+                },
+                expected_guard: Some(WorkflowGuard::PlanReady),
+                expect_invalid: false,
+            },
+            Case {
+                name: "testing to pr drafted requires passing tests and draft pr",
+                from: WorkflowState::Testing,
+                to: WorkflowState::PRDrafted,
+                reason: WorkflowTransitionReason::DraftPullRequestCreated,
+                guards: WorkflowGuardContext {
+                    tests_passed: true,
+                    has_draft_pr: true,
+                    ..WorkflowGuardContext::default()
+                },
+                expected_guard: None,
+                expect_invalid: false,
+            },
+            Case {
+                name: "testing to pr drafted without tests fails first guard",
+                from: WorkflowState::Testing,
+                to: WorkflowState::PRDrafted,
+                reason: WorkflowTransitionReason::DraftPullRequestCreated,
+                guards: WorkflowGuardContext {
+                    has_draft_pr: true,
+                    ..WorkflowGuardContext::default()
+                },
+                expected_guard: Some(WorkflowGuard::PassingTests),
+                expect_invalid: false,
+            },
+            Case {
+                name: "testing to pr drafted without draft pr fails second guard",
+                from: WorkflowState::Testing,
+                to: WorkflowState::PRDrafted,
+                reason: WorkflowTransitionReason::DraftPullRequestCreated,
+                guards: WorkflowGuardContext {
+                    tests_passed: true,
+                    ..WorkflowGuardContext::default()
+                },
+                expected_guard: Some(WorkflowGuard::DraftPullRequestExists),
+                expect_invalid: false,
+            },
+            Case {
+                name: "review start requires draft pr",
+                from: WorkflowState::ReadyForReview,
+                to: WorkflowState::InReview,
+                reason: WorkflowTransitionReason::ReviewStarted,
+                guards: WorkflowGuardContext {
+                    has_draft_pr: true,
+                    ..WorkflowGuardContext::default()
+                },
+                expected_guard: None,
+                expect_invalid: false,
+            },
+            Case {
+                name: "review start without draft pr fails guard",
+                from: WorkflowState::ReadyForReview,
+                to: WorkflowState::InReview,
+                reason: WorkflowTransitionReason::ReviewStarted,
+                guards: WorkflowGuardContext::default(),
+                expected_guard: Some(WorkflowGuard::DraftPullRequestExists),
+                expect_invalid: false,
+            },
+            Case {
+                name: "valid state pair with wrong reason is rejected",
+                from: WorkflowState::Testing,
+                to: WorkflowState::Implementing,
+                reason: WorkflowTransitionReason::PlanCommitted,
+                guards: WorkflowGuardContext {
+                    has_active_session: true,
+                    plan_ready: true,
+                    ..WorkflowGuardContext::default()
+                },
+                expected_guard: None,
+                expect_invalid: true,
+            },
+        ];
+
+        for case in cases {
+            let result =
+                validate_workflow_transition(&case.from, &case.to, &case.reason, &case.guards);
+            match (case.expected_guard, case.expect_invalid) {
+                (None, false) => assert!(
+                    result.is_ok(),
+                    "case '{}' expected success but failed: {result:?}",
+                    case.name
+                ),
+                (Some(expected_guard), false) => {
+                    let error = result.expect_err("case should fail with missing guard");
+                    assert!(
+                        matches!(
+                            error,
+                            WorkflowTransitionError::GuardFailed { guard, .. } if guard == expected_guard
+                        ),
+                        "case '{}' expected guard failure '{expected_guard:?}', got '{error:?}'",
+                        case.name
+                    );
+                }
+                (None, true) => {
+                    let error = result.expect_err("case should fail with invalid transition");
+                    assert!(
+                        matches!(error, WorkflowTransitionError::InvalidTransition { .. }),
+                        "case '{}' expected invalid transition, got '{error:?}'",
+                        case.name
+                    );
+                }
+                (Some(_), true) => panic!("invalid test matrix: conflicting expectations"),
+            }
+        }
+    }
+
+    #[test]
+    fn cancellation_transition_is_allowed_from_all_non_terminal_states() {
+        let cancellable_states = [
+            WorkflowState::New,
+            WorkflowState::Planning,
+            WorkflowState::Implementing,
+            WorkflowState::Testing,
+            WorkflowState::PRDrafted,
+            WorkflowState::AwaitingYourReview,
+            WorkflowState::ReadyForReview,
+            WorkflowState::InReview,
+        ];
+
+        for state in cancellable_states {
+            let result = validate_workflow_transition(
+                &state,
+                &WorkflowState::Abandoned,
+                &WorkflowTransitionReason::Cancelled,
+                &WorkflowGuardContext::default(),
+            );
+            assert!(
+                result.is_ok(),
+                "state '{state:?}' should allow cancellation"
+            );
+        }
+    }
+
+    #[test]
+    fn abandoned_is_terminal_state() {
+        let err = validate_workflow_transition(
+            &WorkflowState::Abandoned,
+            &WorkflowState::Planning,
+            &WorkflowTransitionReason::TicketAccepted,
+            &WorkflowGuardContext::default(),
+        )
+        .expect_err("abandoned is terminal");
+        assert!(matches!(err, WorkflowTransitionError::TerminalState { .. }));
+    }
 }

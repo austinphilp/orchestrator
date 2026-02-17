@@ -934,4 +934,182 @@ mod tests {
         let from_backtab = parse_key_token("backtab").expect("backtab token");
         assert_eq!(from_shift_tab, from_backtab);
     }
+
+    #[test]
+    fn compile_reports_expected_conflict_and_validation_errors() {
+        enum ExpectedError {
+            DuplicateMode(UiMode),
+            EmptyBindingSequence(UiMode),
+            EmptyPrefixSequence(UiMode),
+            InvalidToken(UiMode, &'static str),
+            BindingShadowsPrefix(UiMode),
+            DuplicatePrefixLabel(UiMode),
+            PrefixHasNoChildren(UiMode),
+        }
+
+        struct Case {
+            name: &'static str,
+            config: KeymapConfig,
+            expected: ExpectedError,
+        }
+
+        let cases = vec![
+            Case {
+                name: "duplicate mode config",
+                config: KeymapConfig {
+                    modes: vec![
+                        ModeKeymapConfig {
+                            mode: UiMode::Normal,
+                            bindings: vec![KeyBindingConfig {
+                                keys: vec!["j".to_owned()],
+                                command_id: "ui.focus_next_inbox".to_owned(),
+                            }],
+                            prefixes: vec![],
+                        },
+                        ModeKeymapConfig {
+                            mode: UiMode::Normal,
+                            bindings: vec![KeyBindingConfig {
+                                keys: vec!["k".to_owned()],
+                                command_id: "ui.focus_previous_inbox".to_owned(),
+                            }],
+                            prefixes: vec![],
+                        },
+                    ],
+                },
+                expected: ExpectedError::DuplicateMode(UiMode::Normal),
+            },
+            Case {
+                name: "empty binding sequence",
+                config: config_with_mode(ModeKeymapConfig {
+                    mode: UiMode::Normal,
+                    bindings: vec![KeyBindingConfig {
+                        keys: vec![],
+                        command_id: "ui.focus_next_inbox".to_owned(),
+                    }],
+                    prefixes: vec![],
+                }),
+                expected: ExpectedError::EmptyBindingSequence(UiMode::Normal),
+            },
+            Case {
+                name: "invalid key token modifier",
+                config: config_with_mode(ModeKeymapConfig {
+                    mode: UiMode::Normal,
+                    bindings: vec![KeyBindingConfig {
+                        keys: vec!["meta+j".to_owned()],
+                        command_id: "ui.focus_next_inbox".to_owned(),
+                    }],
+                    prefixes: vec![],
+                }),
+                expected: ExpectedError::InvalidToken(UiMode::Normal, "meta+j"),
+            },
+            Case {
+                name: "empty prefix sequence",
+                config: config_with_mode(ModeKeymapConfig {
+                    mode: UiMode::Normal,
+                    bindings: vec![KeyBindingConfig {
+                        keys: vec!["j".to_owned()],
+                        command_id: "ui.focus_next_inbox".to_owned(),
+                    }],
+                    prefixes: vec![KeyPrefixConfig {
+                        keys: vec![],
+                        label: "jump".to_owned(),
+                    }],
+                }),
+                expected: ExpectedError::EmptyPrefixSequence(UiMode::Normal),
+            },
+            Case {
+                name: "binding shadows existing prefix path",
+                config: config_with_mode(ModeKeymapConfig {
+                    mode: UiMode::Normal,
+                    bindings: vec![
+                        KeyBindingConfig {
+                            keys: vec!["g".to_owned(), "k".to_owned()],
+                            command_id: "ui.focus_previous_inbox".to_owned(),
+                        },
+                        KeyBindingConfig {
+                            keys: vec!["g".to_owned()],
+                            command_id: "ui.focus_next_inbox".to_owned(),
+                        },
+                    ],
+                    prefixes: vec![],
+                }),
+                expected: ExpectedError::BindingShadowsPrefix(UiMode::Normal),
+            },
+            Case {
+                name: "duplicate prefix label for same sequence",
+                config: config_with_mode(ModeKeymapConfig {
+                    mode: UiMode::Normal,
+                    bindings: vec![KeyBindingConfig {
+                        keys: vec!["z".to_owned(), "k".to_owned()],
+                        command_id: "ui.focus_previous_inbox".to_owned(),
+                    }],
+                    prefixes: vec![
+                        KeyPrefixConfig {
+                            keys: vec!["z".to_owned()],
+                            label: "jump".to_owned(),
+                        },
+                        KeyPrefixConfig {
+                            keys: vec!["z".to_owned()],
+                            label: "jump-duplicate".to_owned(),
+                        },
+                    ],
+                }),
+                expected: ExpectedError::DuplicatePrefixLabel(UiMode::Normal),
+            },
+            Case {
+                name: "prefix with no child bindings",
+                config: config_with_mode(ModeKeymapConfig {
+                    mode: UiMode::Normal,
+                    bindings: vec![KeyBindingConfig {
+                        keys: vec!["j".to_owned()],
+                        command_id: "ui.focus_next_inbox".to_owned(),
+                    }],
+                    prefixes: vec![KeyPrefixConfig {
+                        keys: vec!["z".to_owned()],
+                        label: "jump".to_owned(),
+                    }],
+                }),
+                expected: ExpectedError::PrefixHasNoChildren(UiMode::Normal),
+            },
+        ];
+
+        for case in cases {
+            let err = match KeymapTrie::compile(&case.config, known_command) {
+                Ok(_) => panic!("case '{}' should fail to compile", case.name),
+                Err(err) => err,
+            };
+
+            match case.expected {
+                ExpectedError::DuplicateMode(mode) => assert!(matches!(
+                    err,
+                    KeymapCompileError::DuplicateModeConfig { mode: actual_mode } if actual_mode == mode
+                )),
+                ExpectedError::EmptyBindingSequence(mode) => assert!(matches!(
+                    err,
+                    KeymapCompileError::EmptyKeySequence { mode: actual_mode, context: "binding" } if actual_mode == mode
+                )),
+                ExpectedError::EmptyPrefixSequence(mode) => assert!(matches!(
+                    err,
+                    KeymapCompileError::EmptyKeySequence { mode: actual_mode, context: "prefix" } if actual_mode == mode
+                )),
+                ExpectedError::InvalidToken(mode, token) => assert!(matches!(
+                    err,
+                    KeymapCompileError::InvalidKeyToken { mode: actual_mode, token: actual_token, .. }
+                        if actual_mode == mode && actual_token == token
+                )),
+                ExpectedError::BindingShadowsPrefix(mode) => assert!(matches!(
+                    err,
+                    KeymapCompileError::BindingShadowsExistingPrefix { mode: actual_mode, .. } if actual_mode == mode
+                )),
+                ExpectedError::DuplicatePrefixLabel(mode) => assert!(matches!(
+                    err,
+                    KeymapCompileError::DuplicatePrefixLabel { mode: actual_mode, .. } if actual_mode == mode
+                )),
+                ExpectedError::PrefixHasNoChildren(mode) => assert!(matches!(
+                    err,
+                    KeymapCompileError::PrefixHasNoChildren { mode: actual_mode, .. } if actual_mode == mode
+                )),
+            }
+        }
+    }
 }
