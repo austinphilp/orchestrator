@@ -1,15 +1,11 @@
 use orchestrator_core::{
-    command_ids, rebuild_projection, Command, CommandRegistry, CoreError, EventStore, GithubClient,
-    LlmChatRequest, LlmProvider, LlmResponseStream, ProjectionState, RetrievalScope,
+    rebuild_projection, CoreError, EventStore, GithubClient, LlmProvider, ProjectionState,
     SelectedTicketFlowConfig, SelectedTicketFlowResult, SqliteEventStore, Supervisor,
-    SupervisorQueryArgs, TicketSummary, UntypedCommandInvocation, VcsProvider, WorkItemId,
-    WorkerBackend, WorkerSessionId,
-};
-use orchestrator_supervisor::{
-    build_freeform_messages, build_template_messages_with_variables, SupervisorQueryEngine,
+    TicketSummary, UntypedCommandInvocation, VcsProvider, WorkerBackend,
 };
 use orchestrator_ui::{SupervisorCommandContext, SupervisorCommandDispatcher};
 use serde::{Deserialize, Serialize};
+mod command_dispatch;
 mod ticket_picker;
 pub use ticket_picker::AppTicketPickerProvider;
 
@@ -310,113 +306,6 @@ fn supervisor_model_from_env() -> String {
         .unwrap_or_else(|| DEFAULT_SUPERVISOR_MODEL.to_owned())
 }
 
-fn invalid_supervisor_query_usage(reason: impl Into<String>) -> CoreError {
-    CoreError::InvalidCommandArgs {
-        command_id: command_ids::SUPERVISOR_QUERY.to_owned(),
-        reason: reason.into(),
-    }
-}
-
-fn parse_context_identifier(raw: &str, field: &str) -> Result<String, CoreError> {
-    let normalized = raw.trim();
-    if normalized.is_empty() {
-        return Err(invalid_supervisor_query_usage(format!(
-            "malformed context: `{field}` must be a non-empty identifier"
-        )));
-    }
-
-    Ok(normalized.to_owned())
-}
-
-fn parse_scope_hint(raw_scope: &str) -> Result<RetrievalScope, CoreError> {
-    let normalized = raw_scope.trim();
-    if normalized.is_empty() {
-        return Err(invalid_supervisor_query_usage(
-            "malformed context: `scope` is empty; expected `global`, `work_item:<id>`, or `session:<id>`",
-        ));
-    }
-
-    if normalized.eq_ignore_ascii_case("global") {
-        return Ok(RetrievalScope::Global);
-    }
-
-    let Some((raw_kind, raw_value)) = normalized.split_once(':') else {
-        return Err(invalid_supervisor_query_usage(format!(
-            "malformed context: unsupported scope '{normalized}'; expected `global`, `work_item:<id>`, or `session:<id>`"
-        )));
-    };
-
-    let value = parse_context_identifier(raw_value, "scope identifier")?;
-    match raw_kind.trim().to_ascii_lowercase().as_str() {
-        "work_item" | "workitem" => Ok(RetrievalScope::WorkItem(WorkItemId::new(value))),
-        "session" => Ok(RetrievalScope::Session(WorkerSessionId::new(value))),
-        _ => Err(invalid_supervisor_query_usage(format!(
-            "malformed context: unsupported scope kind '{raw_kind}'; expected `work_item` or `session`"
-        ))),
-    }
-}
-
-fn resolve_supervisor_query_scope(
-    context: &SupervisorCommandContext,
-) -> Result<RetrievalScope, CoreError> {
-    if let Some(scope) = context.scope.as_deref() {
-        return parse_scope_hint(scope);
-    }
-
-    if let Some(session_id) = context.selected_session_id.as_deref() {
-        let session_id = parse_context_identifier(session_id, "selected_session_id")?;
-        return Ok(RetrievalScope::Session(WorkerSessionId::new(session_id)));
-    }
-
-    if let Some(work_item_id) = context.selected_work_item_id.as_deref() {
-        let work_item_id = parse_context_identifier(work_item_id, "selected_work_item_id")?;
-        return Ok(RetrievalScope::WorkItem(WorkItemId::new(work_item_id)));
-    }
-
-    Err(invalid_supervisor_query_usage(
-        "malformed context: missing selected item; select an inbox item before running supervisor.query",
-    ))
-}
-
-impl<S, G> App<S, G>
-where
-    S: Supervisor + LlmProvider + Send + Sync,
-    G: GithubClient + Send + Sync,
-{
-    async fn execute_supervisor_query(
-        &self,
-        args: SupervisorQueryArgs,
-        context: SupervisorCommandContext,
-    ) -> Result<(String, LlmResponseStream), CoreError> {
-        let scope = resolve_supervisor_query_scope(&context)?;
-        let store = open_event_store(&self.config.event_store_path)?;
-        let query_engine = SupervisorQueryEngine::default();
-        let context_pack = query_engine.build_context_pack(&store, scope)?;
-        let messages = match args {
-            SupervisorQueryArgs::Template {
-                template,
-                variables,
-            } => build_template_messages_with_variables(
-                template.as_str(),
-                &variables,
-                &context_pack,
-            )?,
-            SupervisorQueryArgs::Freeform { query } => {
-                build_freeform_messages(query.as_str(), &context_pack)?
-            }
-        };
-
-        self.supervisor
-            .stream_chat(LlmChatRequest {
-                model: supervisor_model_from_env(),
-                messages,
-                temperature: Some(0.2),
-                max_output_tokens: Some(700),
-            })
-            .await
-    }
-}
-
 #[async_trait::async_trait]
 impl<S, G> SupervisorCommandDispatcher for App<S, G>
 where
@@ -427,16 +316,14 @@ where
         &self,
         invocation: UntypedCommandInvocation,
         context: SupervisorCommandContext,
-    ) -> Result<(String, LlmResponseStream), CoreError> {
-        let command = CommandRegistry::default().parse_invocation(&invocation)?;
-        match command {
-            Command::SupervisorQuery(args) => self.execute_supervisor_query(args, context).await,
-            command => Err(invalid_supervisor_query_usage(format!(
-                "unsupported command '{}' for supervisor runtime dispatch; expected '{}'",
-                command.id(),
-                command_ids::SUPERVISOR_QUERY
-            ))),
-        }
+    ) -> Result<(String, orchestrator_core::LlmResponseStream), CoreError> {
+        command_dispatch::dispatch_supervisor_runtime_command(
+            &self.supervisor,
+            &self.config.event_store_path,
+            invocation,
+            context,
+        )
+        .await
     }
 
     async fn cancel_supervisor_command(&self, stream_id: &str) -> Result<(), CoreError> {
@@ -449,9 +336,11 @@ mod tests {
     use super::*;
     use orchestrator_core::test_support::{with_env_var, with_env_vars, TestDbPath};
     use orchestrator_core::{
-        BackendCapabilities, BackendKind, LlmFinishReason, LlmProviderKind,
-        LlmResponseSubscription, LlmStreamChunk, RuntimeResult, SessionHandle, SpawnSpec,
-        TerminalSnapshot, TicketId, TicketProvider, TicketSummary, WorktreeStatus,
+        BackendCapabilities, BackendKind, Command, CommandRegistry, LlmChatRequest,
+        LlmFinishReason, LlmProviderKind, LlmResponseStream, LlmResponseSubscription,
+        LlmStreamChunk, RuntimeResult, SessionHandle, SpawnSpec, SupervisorQueryArgs,
+        SupervisorQueryContextArgs, TerminalSnapshot, TicketId, TicketProvider, TicketSummary,
+        WorktreeStatus,
     };
     use std::collections::{BTreeMap, VecDeque};
     use std::path::{Path, PathBuf};
@@ -610,8 +499,34 @@ mod tests {
             .to_untyped_invocation(&Command::SupervisorQuery(SupervisorQueryArgs::Template {
                 template: template.to_owned(),
                 variables: BTreeMap::new(),
+                context: None,
             }))
             .expect("serialize supervisor.query")
+    }
+
+    fn template_query_invocation_with_context(
+        template: &str,
+        context: SupervisorQueryContextArgs,
+    ) -> UntypedCommandInvocation {
+        CommandRegistry::default()
+            .to_untyped_invocation(&Command::SupervisorQuery(SupervisorQueryArgs::Template {
+                template: template.to_owned(),
+                variables: BTreeMap::new(),
+                context: Some(context),
+            }))
+            .expect("serialize supervisor.query with context")
+    }
+
+    fn freeform_query_invocation_with_context(
+        query: &str,
+        context: Option<SupervisorQueryContextArgs>,
+    ) -> UntypedCommandInvocation {
+        CommandRegistry::default()
+            .to_untyped_invocation(&Command::SupervisorQuery(SupervisorQueryArgs::Freeform {
+                query: query.to_owned(),
+                context,
+            }))
+            .expect("serialize freeform supervisor.query")
     }
 
     #[test]
@@ -1095,6 +1010,52 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn supervisor_query_dispatch_uses_invocation_context_when_present() {
+        let temp_db = TestDbPath::new("app-supervisor-query-command-context");
+        let supervisor = QueryingSupervisor::with_chunks(vec![LlmStreamChunk {
+            delta: String::new(),
+            finish_reason: Some(LlmFinishReason::Stop),
+            usage: None,
+            rate_limit: None,
+        }]);
+
+        let app = App {
+            config: AppConfig {
+                workspace: "/workspace".to_owned(),
+                event_store_path: temp_db.path().to_string_lossy().to_string(),
+            },
+            supervisor: supervisor.clone(),
+            github: Healthy,
+        };
+
+        let _ = app
+            .dispatch_supervisor_command(
+                template_query_invocation_with_context(
+                    "status",
+                    SupervisorQueryContextArgs {
+                        selected_work_item_id: Some("wi-from-command".to_owned()),
+                        selected_session_id: Some("sess-from-command".to_owned()),
+                        scope: Some("session:sess-from-command".to_owned()),
+                    },
+                ),
+                SupervisorCommandContext {
+                    selected_work_item_id: Some("wi-fallback".to_owned()),
+                    selected_session_id: None,
+                    scope: Some("work_item:wi-fallback".to_owned()),
+                },
+            )
+            .await
+            .expect("dispatch should stream");
+
+        let requests = supervisor.requests();
+        assert_eq!(requests.len(), 1);
+        assert!(requests[0]
+            .messages
+            .iter()
+            .any(|message| message.content.contains("Scope: session:sess-from-command")));
+    }
+
+    #[tokio::test]
     async fn supervisor_query_dispatch_rejects_unknown_template_with_guidance() {
         let temp_db = TestDbPath::new("app-supervisor-query-template-error");
         let app = App {
@@ -1156,6 +1117,87 @@ mod tests {
 
         assert!(err.to_string().contains("malformed context"));
         assert!(err.to_string().contains("scope identifier"));
+    }
+
+    #[tokio::test]
+    async fn supervisor_query_dispatch_context_from_invocation_replaces_fallback_context() {
+        let temp_db = TestDbPath::new("app-supervisor-query-command-context-precedence");
+        let supervisor = QueryingSupervisor::with_chunks(vec![LlmStreamChunk {
+            delta: String::new(),
+            finish_reason: Some(LlmFinishReason::Stop),
+            usage: None,
+            rate_limit: None,
+        }]);
+        let app = App {
+            config: AppConfig {
+                workspace: "/workspace".to_owned(),
+                event_store_path: temp_db.path().to_string_lossy().to_string(),
+            },
+            supervisor: supervisor.clone(),
+            github: Healthy,
+        };
+
+        let _ = app
+            .dispatch_supervisor_command(
+                freeform_query_invocation_with_context(
+                    "What changed for AP-180?",
+                    Some(SupervisorQueryContextArgs {
+                        selected_work_item_id: Some("wi-from-command".to_owned()),
+                        selected_session_id: None,
+                        scope: None,
+                    }),
+                ),
+                SupervisorCommandContext {
+                    selected_work_item_id: Some("wi-fallback".to_owned()),
+                    selected_session_id: Some("sess-fallback".to_owned()),
+                    scope: Some("session:sess-fallback".to_owned()),
+                },
+            )
+            .await
+            .expect("dispatch should stream");
+
+        let requests = supervisor.requests();
+        assert_eq!(requests.len(), 1);
+        assert!(requests[0].messages[1]
+            .content
+            .contains("Operator question:\nWhat changed for AP-180?"));
+        assert!(requests[0].messages[1]
+            .content
+            .contains("Scope: work_item:wi-from-command"));
+        assert!(
+            !requests[0].messages[1]
+                .content
+                .contains("Scope: session:sess-fallback"),
+            "fallback scope should not leak when invocation context is present"
+        );
+    }
+
+    #[tokio::test]
+    async fn supervisor_query_dispatch_rejects_non_supervisor_commands() {
+        let temp_db = TestDbPath::new("app-supervisor-query-unsupported-command");
+        let app = App {
+            config: AppConfig {
+                workspace: "/workspace".to_owned(),
+                event_store_path: temp_db.path().to_string_lossy().to_string(),
+            },
+            supervisor: QueryingSupervisor::default(),
+            github: Healthy,
+        };
+        let invocation = CommandRegistry::default()
+            .to_untyped_invocation(&Command::UiFocusNextInbox)
+            .expect("serialize zero-arg command");
+
+        let err = match app
+            .dispatch_supervisor_command(invocation, SupervisorCommandContext::default())
+            .await
+        {
+            Ok(_) => panic!("unsupported command should fail"),
+            Err(err) => err,
+        };
+        let message = err.to_string();
+        assert!(message.contains("unsupported command"));
+        assert!(message.contains("ui.focus_next_inbox"));
+        assert!(message.contains("supervisor.query"));
     }
 
     #[tokio::test]
