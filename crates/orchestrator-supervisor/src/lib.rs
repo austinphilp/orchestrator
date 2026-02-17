@@ -410,10 +410,11 @@ async fn run_openrouter_stream(
 
     if !response.status().is_success() {
         let status = response.status();
+        let headers = response.headers().clone();
         let body = response.text().await.unwrap_or_default();
         let _ = sender
             .send(Err(CoreError::DependencyUnavailable(format_http_error(
-                status, &body,
+                status, &body, &headers,
             ))))
             .await;
         return;
@@ -637,7 +638,7 @@ fn to_finish_reason(reason: &str) -> LlmFinishReason {
     }
 }
 
-fn format_http_error(status: reqwest::StatusCode, body: &str) -> String {
+fn format_http_error(status: reqwest::StatusCode, body: &str, headers: &HeaderMap) -> String {
     let detail = serde_json::from_str::<Value>(body)
         .ok()
         .and_then(|json| {
@@ -653,11 +654,39 @@ fn format_http_error(status: reqwest::StatusCode, body: &str) -> String {
         })
         .unwrap_or_else(|| body.trim().to_owned());
 
-    if detail.is_empty() {
+    let mut message = if detail.is_empty() {
         format!("OpenRouter request failed with status {status}")
     } else {
         format!("OpenRouter request failed with status {status}: {detail}")
+    };
+
+    if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+        if let Some(retry_after) = retry_after_hint(headers) {
+            message.push_str(format!(" Retry after {retry_after}.").as_str());
+        } else if let Some(rate_limit) = rate_limit_from_headers(headers) {
+            if let Some(reset_at) = rate_limit.reset_at {
+                message.push_str(format!(" Retry after rate limit reset at {reset_at}.").as_str());
+            }
+        }
+        message
+            .push_str(" This is recoverable; retry with a smaller context or wait for cooldown.");
     }
+
+    message
+}
+
+fn retry_after_hint(headers: &HeaderMap) -> Option<String> {
+    let retry_after_raw = header_string(headers, &["retry-after"])?;
+    let trimmed = retry_after_raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    if trimmed.chars().all(|ch| ch.is_ascii_digit()) {
+        return Some(format!("{trimmed}s"));
+    }
+
+    Some(trimmed.to_owned())
 }
 
 fn rate_limit_from_headers(headers: &HeaderMap) -> Option<LlmRateLimitState> {
@@ -922,6 +951,72 @@ mod tests {
             .expect_err("expected stream error from HTTP failure");
         assert!(error.to_string().contains("429"));
         assert!(error.to_string().contains("rate limit exceeded"));
+    }
+
+    #[tokio::test]
+    async fn stream_chat_http_rate_limit_error_includes_retry_hint() {
+        let base_url = spawn_test_server(|mut stream| {
+            let response = "HTTP/1.1 429 Too Many Requests\r\nContent-Type: application/json\r\nRetry-After: 17\r\nConnection: close\r\n\r\n{\"error\":{\"message\":\"quota exhausted\"}}";
+            stream
+                .write_all(response.as_bytes())
+                .expect("write error response");
+            stream.flush().expect("flush error response");
+        });
+
+        let provider = OpenRouterSupervisor::with_base_url("test-key", base_url).expect("provider");
+        let request = LlmChatRequest {
+            model: "openrouter/mock-model".to_owned(),
+            messages: vec![LlmMessage {
+                role: LlmRole::User,
+                content: "Trigger retry guidance".to_owned(),
+                name: None,
+            }],
+            temperature: None,
+            max_output_tokens: None,
+        };
+
+        let (_stream_id, mut stream) = provider.stream_chat(request).await.expect("stream chat");
+        let error = stream
+            .next_chunk()
+            .await
+            .expect_err("expected stream error from HTTP failure");
+        let message = error.to_string();
+        assert!(message.contains("429"));
+        assert!(message.contains("Retry after 17s"));
+        assert!(message.contains("recoverable"));
+    }
+
+    #[tokio::test]
+    async fn stream_chat_http_rate_limit_error_includes_http_date_retry_hint() {
+        let base_url = spawn_test_server(|mut stream| {
+            let response = "HTTP/1.1 429 Too Many Requests\r\nContent-Type: application/json\r\nRetry-After: Wed, 18 Feb 2026 02:00:00 GMT\r\nConnection: close\r\n\r\n{\"error\":{\"message\":\"quota exhausted\"}}";
+            stream
+                .write_all(response.as_bytes())
+                .expect("write error response");
+            stream.flush().expect("flush error response");
+        });
+
+        let provider = OpenRouterSupervisor::with_base_url("test-key", base_url).expect("provider");
+        let request = LlmChatRequest {
+            model: "openrouter/mock-model".to_owned(),
+            messages: vec![LlmMessage {
+                role: LlmRole::User,
+                content: "Trigger retry guidance".to_owned(),
+                name: None,
+            }],
+            temperature: None,
+            max_output_tokens: None,
+        };
+
+        let (_stream_id, mut stream) = provider.stream_chat(request).await.expect("stream chat");
+        let error = stream
+            .next_chunk()
+            .await
+            .expect_err("expected stream error from HTTP failure");
+        let message = error.to_string();
+        assert!(message.contains("429"));
+        assert!(message.contains("Retry after Wed, 18 Feb 2026 02:00:00 GMT"));
+        assert!(message.contains("recoverable"));
     }
 
     #[tokio::test]
