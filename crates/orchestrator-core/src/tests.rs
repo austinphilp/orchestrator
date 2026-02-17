@@ -1,6 +1,7 @@
 use async_trait::async_trait;
 use rusqlite::OptionalExtension;
 
+use crate::test_support::TestDbPath;
 use crate::*;
 
 fn sample_event(event_id: &str, payload: OrchestrationEventPayload) -> NewEventEnvelope {
@@ -163,10 +164,9 @@ fn deterministic_replay_produces_identical_projection_state() {
 
 #[test]
 fn durable_restart_replay_matches_pre_restart_state() {
-    let path = std::env::temp_dir().join(format!("orchestrator-events-{}.db", std::process::id()));
-    let _ = std::fs::remove_file(&path);
+    let db = unique_db("durable-restart");
 
-    let mut writer = SqliteEventStore::open(&path).expect("open writer store");
+    let mut writer = SqliteEventStore::open(db.path()).expect("open writer store");
     writer
         .append(sample_event(
             "evt-1",
@@ -191,11 +191,10 @@ fn durable_restart_replay_matches_pre_restart_state() {
 
     let pre_restart = rebuild_projection(&writer.read_ordered().expect("read writer events"));
 
-    let reader = SqliteEventStore::open(&path).expect("open reader store");
+    let reader = SqliteEventStore::open(db.path()).expect("open reader store");
     let post_restart = rebuild_projection(&reader.read_ordered().expect("read reader events"));
 
     assert_eq!(pre_restart, post_restart);
-    let _ = std::fs::remove_file(path);
 }
 
 #[test]
@@ -384,23 +383,18 @@ fn artifact_payload_uses_reference_metadata_not_embedded_blob() {
     assert!(!serialized.contains("BEGIN RAW LOG CONTENT"));
 }
 
-fn unique_db_path(tag: &str) -> std::path::PathBuf {
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .expect("duration")
-        .as_nanos();
-    std::env::temp_dir().join(format!("orchestrator-{tag}-{nanos}.db"))
+fn unique_db(tag: &str) -> TestDbPath {
+    TestDbPath::new(&format!("core-tests-{tag}"))
 }
 
 #[test]
 fn initialization_creates_required_schema_and_version() {
-    let path = unique_db_path("init");
-    let _ = std::fs::remove_file(&path);
+    let db = unique_db("init");
 
-    let store = SqliteEventStore::open(&path).expect("open store");
+    let store = SqliteEventStore::open(db.path()).expect("open store");
     assert_eq!(store.schema_version().expect("schema version"), 3);
 
-    let conn = rusqlite::Connection::open(&path).expect("open sqlite for inspection");
+    let conn = rusqlite::Connection::open(db.path()).expect("open sqlite for inspection");
     let tables = [
         "schema_migrations",
         "tickets",
@@ -454,39 +448,34 @@ fn initialization_creates_required_schema_and_version() {
     assert_eq!(applied_migrations, 3);
 
     drop(store);
-    let _ = std::fs::remove_file(path);
 }
 
 #[test]
 fn startup_is_idempotent_and_does_not_duplicate_migrations() {
-    let path = unique_db_path("idempotent");
-    let _ = std::fs::remove_file(&path);
+    let db = unique_db("idempotent");
 
-    let first = SqliteEventStore::open(&path).expect("first open");
+    let first = SqliteEventStore::open(db.path()).expect("first open");
     assert_eq!(first.schema_version().expect("schema version"), 3);
     drop(first);
 
-    let second = SqliteEventStore::open(&path).expect("second open");
+    let second = SqliteEventStore::open(db.path()).expect("second open");
     assert_eq!(second.schema_version().expect("schema version"), 3);
     drop(second);
 
-    let conn = rusqlite::Connection::open(&path).expect("open sqlite for inspection");
+    let conn = rusqlite::Connection::open(db.path()).expect("open sqlite for inspection");
     let migration_count: i64 = conn
         .query_row("SELECT COUNT(*) FROM schema_migrations", [], |row| {
             row.get(0)
         })
         .expect("count migrations");
     assert_eq!(migration_count, 3);
-
-    let _ = std::fs::remove_file(path);
 }
 
 #[test]
 fn startup_adopts_legacy_events_schema_without_recreating_events_table() {
-    let path = unique_db_path("legacy-schema");
-    let _ = std::fs::remove_file(&path);
+    let db = unique_db("legacy-schema");
 
-    let conn = rusqlite::Connection::open(&path).expect("open sqlite");
+    let conn = rusqlite::Connection::open(db.path()).expect("open sqlite");
     conn.execute_batch(
         "
         CREATE TABLE events (
@@ -519,7 +508,7 @@ fn startup_adopts_legacy_events_schema_without_recreating_events_table() {
     .expect("seed legacy schema");
     drop(conn);
 
-    let store = SqliteEventStore::open(&path).expect("open store");
+    let store = SqliteEventStore::open(db.path()).expect("open store");
     assert_eq!(store.schema_version().expect("schema version"), 3);
 
     let events = store.read_ordered().expect("read ordered");
@@ -527,7 +516,7 @@ fn startup_adopts_legacy_events_schema_without_recreating_events_table() {
     assert_eq!(events[0].event_id, "evt-legacy-1");
     drop(store);
 
-    let conn = rusqlite::Connection::open(&path).expect("open sqlite for inspection");
+    let conn = rusqlite::Connection::open(db.path()).expect("open sqlite for inspection");
     let tables = [
         "schema_migrations",
         "tickets",
@@ -555,8 +544,6 @@ fn startup_adopts_legacy_events_schema_without_recreating_events_table() {
         })
         .expect("count migrations");
     assert_eq!(migration_count, 1);
-
-    let _ = std::fs::remove_file(path);
 }
 
 #[test]
@@ -1052,8 +1039,7 @@ fn runtime_mapping_upsert_rejects_mismatched_session_workdir_without_partial_wri
 
 #[test]
 fn runtime_mapping_round_trip_survives_restart_and_prevents_duplicate_resume_entries() {
-    let path = unique_db_path("runtime-resume");
-    let _ = std::fs::remove_file(&path);
+    let db = unique_db("runtime-resume");
 
     let ticket = TicketRecord {
         ticket_id: TicketId::from_provider_uuid(TicketProvider::Linear, "900"),
@@ -1087,7 +1073,7 @@ fn runtime_mapping_round_trip_survives_restart_and_prevents_duplicate_resume_ent
         },
     };
 
-    let mut writer = SqliteEventStore::open(&path).expect("open store");
+    let mut writer = SqliteEventStore::open(db.path()).expect("open store");
     writer
         .upsert_runtime_mapping(&mapping)
         .expect("insert runtime mapping");
@@ -1096,7 +1082,7 @@ fn runtime_mapping_round_trip_survives_restart_and_prevents_duplicate_resume_ent
         .expect("idempotent re-upsert should not duplicate");
     drop(writer);
 
-    let reopened = SqliteEventStore::open(&path).expect("reopen store");
+    let reopened = SqliteEventStore::open(db.path()).expect("reopen store");
     let resolved = reopened
         .find_runtime_mapping_by_ticket(&TicketProvider::Linear, "900")
         .expect("lookup runtime mapping")
@@ -1128,16 +1114,13 @@ fn runtime_mapping_round_trip_survives_restart_and_prevents_duplicate_resume_ent
         .expect("lookup session")
         .expect("session exists");
     assert_eq!(session.status, WorkerSessionStatus::Running);
-
-    let _ = std::fs::remove_file(path);
 }
 
 #[test]
 fn migration_from_schema_v1_adds_runtime_mapping_tables() {
-    let path = unique_db_path("schema-v1-upgrade");
-    let _ = std::fs::remove_file(&path);
+    let db = unique_db("schema-v1-upgrade");
 
-    let conn = rusqlite::Connection::open(&path).expect("open sqlite");
+    let conn = rusqlite::Connection::open(db.path()).expect("open sqlite");
     conn.execute_batch(
         "
         CREATE TABLE schema_migrations (
@@ -1198,11 +1181,11 @@ fn migration_from_schema_v1_adds_runtime_mapping_tables() {
     .expect("seed schema v1");
     drop(conn);
 
-    let store = SqliteEventStore::open(&path).expect("open and migrate");
+    let store = SqliteEventStore::open(db.path()).expect("open and migrate");
     assert_eq!(store.schema_version().expect("schema version"), 3);
     drop(store);
 
-    let conn = rusqlite::Connection::open(&path).expect("open sqlite for inspection");
+    let conn = rusqlite::Connection::open(db.path()).expect("open sqlite for inspection");
     let tables = ["worktrees", "sessions"];
     for table in tables {
         let exists: Option<i64> = conn
@@ -1235,8 +1218,6 @@ fn migration_from_schema_v1_adds_runtime_mapping_tables() {
             .expect("query index existence");
         assert_eq!(exists, Some(1), "missing index {index}");
     }
-
-    let _ = std::fs::remove_file(path);
 }
 
 #[test]
@@ -1558,10 +1539,9 @@ fn runtime_mapping_upsert_rejects_rebinding_ticket_to_new_work_item() {
 
 #[test]
 fn event_artifact_references_persist_and_resolve_after_restart() {
-    let path = unique_db_path("artifact-refs");
-    let _ = std::fs::remove_file(&path);
+    let db = unique_db("artifact-refs");
 
-    let mut store = SqliteEventStore::open(&path).expect("open store");
+    let mut store = SqliteEventStore::open(db.path()).expect("open store");
     let ticket = TicketRecord {
         ticket_id: TicketId::from_provider_uuid(TicketProvider::Linear, "456"),
         provider: TicketProvider::Linear,
@@ -1624,7 +1604,7 @@ fn event_artifact_references_persist_and_resolve_after_restart() {
 
     drop(store);
 
-    let reopened = SqliteEventStore::open(&path).expect("reopen store");
+    let reopened = SqliteEventStore::open(db.path()).expect("reopen store");
     let events = reopened
         .read_event_with_artifacts(&WorkItemId::new("wi-art-1"))
         .expect("read event with refs");
@@ -1639,8 +1619,6 @@ fn event_artifact_references_persist_and_resolve_after_restart() {
         .expect("get artifact")
         .expect("artifact exists");
     assert_eq!(restored_z.storage_ref, "artifact://patches/z");
-
-    let _ = std::fs::remove_file(path);
 }
 
 #[test]
@@ -1688,10 +1666,9 @@ fn multi_table_event_write_is_transactional() {
 
 #[test]
 fn forward_compat_schema_guard_returns_typed_error() {
-    let path = unique_db_path("forward-compat");
-    let _ = std::fs::remove_file(&path);
+    let db = unique_db("forward-compat");
 
-    let conn = rusqlite::Connection::open(&path).expect("open sqlite");
+    let conn = rusqlite::Connection::open(db.path()).expect("open sqlite");
     conn.execute_batch(
         "
         CREATE TABLE schema_migrations (
@@ -1704,7 +1681,7 @@ fn forward_compat_schema_guard_returns_typed_error() {
     .expect("seed future migration");
     drop(conn);
 
-    let err = match SqliteEventStore::open(&path) {
+    let err = match SqliteEventStore::open(db.path()) {
         Ok(_) => panic!("expected forward compat failure"),
         Err(err) => err,
     };
@@ -1715,8 +1692,6 @@ fn forward_compat_schema_guard_returns_typed_error() {
         }
         other => panic!("unexpected error variant: {other:?}"),
     }
-
-    let _ = std::fs::remove_file(path);
 }
 
 #[test]

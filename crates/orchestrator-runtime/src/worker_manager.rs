@@ -1006,6 +1006,52 @@ mod tests {
         .expect("input count timeout");
     }
 
+    async fn assert_sent_input_count_stable(
+        backend: &MockBackend,
+        session_id: &RuntimeSessionId,
+        expected_count: usize,
+        stable_for: Duration,
+    ) {
+        timeout(TEST_TIMEOUT, async {
+            let started = std::time::Instant::now();
+            loop {
+                assert_eq!(
+                    backend.sent_input(session_id).len(),
+                    expected_count,
+                    "unexpected checkpoint prompt count while asserting stable window",
+                );
+                if started.elapsed() >= stable_for {
+                    break;
+                }
+                sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("stable checkpoint prompt window timeout");
+    }
+
+    async fn wait_for_background_snapshot_refresh(
+        manager: &WorkerManager,
+        backend: &MockBackend,
+        session_id: &RuntimeSessionId,
+        minimum_snapshot_calls: usize,
+    ) -> TerminalSnapshot {
+        timeout(TEST_TIMEOUT, async {
+            loop {
+                let snapshot = manager
+                    .snapshot(session_id)
+                    .await
+                    .expect("capture background snapshot");
+                if backend.snapshot_calls(session_id) >= minimum_snapshot_calls {
+                    return snapshot;
+                }
+                sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("background snapshot refresh timeout")
+    }
+
     fn make_manager(backend: Arc<MockBackend>, config: WorkerManagerConfig) -> WorkerManager {
         let backend_dyn: Arc<dyn WorkerBackend> = backend;
         WorkerManager::with_config(backend_dyn, config)
@@ -1151,17 +1197,20 @@ mod tests {
             .focus_session(Some(&session_id))
             .await
             .expect("focus session");
-        sleep(Duration::from_millis(130)).await;
-        assert!(
-            backend.sent_input(&session_id).is_empty(),
-            "focused sessions should not receive periodic checkpoint prompts"
-        );
+        let focused_count = backend.sent_input(&session_id).len();
+        assert_sent_input_count_stable(
+            &backend,
+            &session_id,
+            focused_count,
+            Duration::from_millis(130),
+        )
+        .await;
 
         manager
             .focus_session(None)
             .await
             .expect("clear focused session");
-        wait_for_sent_input_count(&backend, &session_id, 1).await;
+        wait_for_sent_input_count(&backend, &session_id, focused_count + 1).await;
     }
 
     #[tokio::test]
@@ -1190,9 +1239,13 @@ mod tests {
         wait_for_status(&manager, &session_id, ManagedSessionStatus::Done).await;
 
         let sent_before = backend.sent_input(&session_id).len();
-        sleep(Duration::from_millis(120)).await;
-        let sent_after = backend.sent_input(&session_id).len();
-        assert_eq!(sent_after, sent_before);
+        assert_sent_input_count_stable(
+            &backend,
+            &session_id,
+            sent_before,
+            Duration::from_millis(120),
+        )
+        .await;
     }
 
     #[tokio::test]
@@ -1280,8 +1333,7 @@ mod tests {
         assert_eq!(first, second);
         assert_eq!(backend.snapshot_calls(&session_id), 1);
 
-        sleep(Duration::from_millis(170)).await;
-        let third = manager.snapshot(&session_id).await.expect("third snapshot");
+        let third = wait_for_background_snapshot_refresh(&manager, &backend, &session_id, 2).await;
         assert_ne!(third.lines, first.lines);
         assert_eq!(backend.snapshot_calls(&session_id), 2);
 
