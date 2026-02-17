@@ -1026,6 +1026,86 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn supervisor_query_dispatch_global_scope_streams_and_persists_global_events() {
+        let temp_db = TestDbPath::new("app-supervisor-query-global");
+        let supervisor = QueryingSupervisor::with_chunks(vec![
+            LlmStreamChunk {
+                delta: "Global summary: inbox has two approvals pending.".to_owned(),
+                finish_reason: None,
+                usage: None,
+                rate_limit: None,
+            },
+            LlmStreamChunk {
+                delta: String::new(),
+                finish_reason: Some(LlmFinishReason::Stop),
+                usage: Some(orchestrator_core::LlmTokenUsage {
+                    input_tokens: 18,
+                    output_tokens: 11,
+                    total_tokens: 29,
+                }),
+                rate_limit: None,
+            },
+        ]);
+
+        let app = App {
+            config: AppConfig {
+                workspace: "/workspace".to_owned(),
+                event_store_path: temp_db.path().to_string_lossy().to_string(),
+            },
+            supervisor: supervisor.clone(),
+            github: Healthy,
+        };
+
+        let (_stream_id, mut stream) = app
+            .dispatch_supervisor_command(
+                freeform_query_invocation_with_context(
+                    "What needs my attention globally?",
+                    Some(SupervisorQueryContextArgs {
+                        selected_work_item_id: None,
+                        selected_session_id: None,
+                        scope: Some("global".to_owned()),
+                    }),
+                ),
+                SupervisorCommandContext::default(),
+            )
+            .await
+            .expect("dispatch should stream");
+
+        while stream
+            .next_chunk()
+            .await
+            .expect("poll global stream")
+            .is_some()
+        {}
+
+        let requests = supervisor.requests();
+        assert_eq!(requests.len(), 1);
+        assert!(requests[0].messages[1].content.contains("Scope: global"));
+
+        let events = read_events(temp_db.path());
+        let started = events.iter().find_map(|event| match &event.payload {
+            OrchestrationEventPayload::SupervisorQueryStarted(payload) => Some(payload),
+            _ => None,
+        });
+        let finished = events.iter().find_map(|event| match &event.payload {
+            OrchestrationEventPayload::SupervisorQueryFinished(payload) => Some(payload),
+            _ => None,
+        });
+
+        let started = started.expect("expected started event");
+        assert_eq!(started.scope, "global");
+        assert!(events.iter().all(|event| event.work_item_id.is_none()));
+        assert!(events.iter().all(|event| event.session_id.is_none()));
+
+        let finished = finished.expect("expected finished event");
+        assert_eq!(finished.finish_reason, LlmFinishReason::Stop);
+        assert_eq!(
+            finished.usage.as_ref().map(|usage| usage.total_tokens),
+            Some(29)
+        );
+    }
+
+    #[tokio::test]
     async fn supervisor_query_dispatch_persists_lifecycle_events() {
         let temp_db = TestDbPath::new("app-supervisor-query-lifecycle");
         let supervisor = QueryingSupervisor::with_chunks(vec![

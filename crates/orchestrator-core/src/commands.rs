@@ -695,6 +695,39 @@ mod tests {
     }
 
     #[test]
+    fn supervisor_query_accepts_global_context_scope() {
+        let registry = CommandRegistry::new().expect("registry");
+        let invocation = UntypedCommandInvocation {
+            command_id: ids::SUPERVISOR_QUERY.to_owned(),
+            args: Some(json!({
+                "kind": "freeform",
+                "query": "What needs me next?",
+                "context": {
+                    "scope": " GLOBAL "
+                }
+            })),
+        };
+
+        let parsed = registry
+            .parse_invocation(&invocation)
+            .expect("global scope should parse");
+
+        let context = match parsed {
+            Command::SupervisorQuery(SupervisorQueryArgs::Freeform {
+                context: Some(context),
+                ..
+            }) => context,
+            _ => panic!("expected freeform supervisor query with context"),
+        };
+
+        assert_eq!(context.scope.as_deref(), Some("global"));
+        assert_eq!(
+            resolve_supervisor_query_scope(&context).expect("global scope should resolve"),
+            RetrievalScope::Global
+        );
+    }
+
+    #[test]
     fn resolve_supervisor_query_scope_rejects_missing_selected_item() {
         let err = resolve_supervisor_query_scope(&SupervisorQueryContextArgs::default())
             .expect_err("missing selectors should fail");
