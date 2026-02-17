@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -23,6 +24,18 @@ use crate::{open_event_store, supervisor_model_from_env};
 
 static SUPERVISOR_QUERY_EVENT_COUNTER: AtomicU64 = AtomicU64::new(1);
 static SUPERVISOR_QUERY_ID_COUNTER: AtomicU64 = AtomicU64::new(1);
+static RUNTIME_COMMAND_STREAM_COUNTER: AtomicU64 = AtomicU64::new(1);
+
+const SUPPORTED_RUNTIME_COMMAND_IDS: [&str; 3] = [
+    command_ids::SUPERVISOR_QUERY,
+    command_ids::WORKFLOW_APPROVE_PR_READY,
+    command_ids::GITHUB_OPEN_REVIEW_TABS,
+];
+
+const WORKFLOW_APPROVE_PR_READY_ACK: &str =
+    "workflow.approve_pr_ready command accepted. This action is not yet wired to a workflow executor.";
+const GITHUB_OPEN_REVIEW_TABS_ACK: &str =
+    "github.open_review_tabs command accepted. This action is not yet wired to a tab launcher.";
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct ActiveSupervisorQueryKey {
@@ -126,10 +139,27 @@ fn next_supervisor_query_id() -> String {
     format!("supq-{now}-{count}")
 }
 
-fn invalid_supervisor_query_usage(reason: impl Into<String>) -> CoreError {
+fn next_runtime_stream_id() -> String {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let count = RUNTIME_COMMAND_STREAM_COUNTER.fetch_add(1, Ordering::Relaxed);
+    format!("runtime-{now}-{count}")
+}
+
+fn invalid_supervisor_runtime_usage(command_id: &str) -> CoreError {
+    let supported = SUPPORTED_RUNTIME_COMMAND_IDS
+        .iter()
+        .map(|id| format!("'{}'", id))
+        .collect::<Vec<_>>()
+        .join(", ");
+
     CoreError::InvalidCommandArgs {
-        command_id: command_ids::SUPERVISOR_QUERY.to_owned(),
-        reason: reason.into(),
+        command_id: command_id.to_owned(),
+        reason: format!(
+            "unsupported command '{command_id}' for supervisor runtime dispatch; expected one of {supported}"
+        ),
     }
 }
 
@@ -224,6 +254,39 @@ fn query_template(args: &SupervisorQueryArgs) -> Option<String> {
             infer_template_from_query(query.as_str()).map(|template| template.key().to_owned())
         }
     }
+}
+
+struct RuntimeCommandResultStream {
+    chunks: VecDeque<LlmStreamChunk>,
+}
+
+impl RuntimeCommandResultStream {
+    fn new(message: String) -> Self {
+        Self {
+            chunks: VecDeque::from([LlmStreamChunk {
+                delta: message,
+                finish_reason: Some(LlmFinishReason::Stop),
+                usage: None,
+                rate_limit: None,
+            }]),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl LlmResponseSubscription for RuntimeCommandResultStream {
+    async fn next_chunk(&mut self) -> Result<Option<LlmStreamChunk>, CoreError> {
+        Ok(self.chunks.pop_front())
+    }
+}
+
+fn runtime_command_response(
+    message: &str,
+) -> Result<(String, LlmResponseStream), CoreError> {
+    Ok((
+        next_runtime_stream_id(),
+        Box::new(RuntimeCommandResultStream::new(message.to_owned())),
+    ))
 }
 
 fn query_text(args: &SupervisorQueryArgs) -> Option<String> {
@@ -592,10 +655,12 @@ where
         Command::SupervisorQuery(args) => {
             execute_supervisor_query(supervisor, event_store_path, args, context).await
         }
-        command => Err(invalid_supervisor_query_usage(format!(
-            "unsupported command '{}' for supervisor runtime dispatch; expected '{}'",
-            command.id(),
-            command_ids::SUPERVISOR_QUERY
-        ))),
+        Command::WorkflowApprovePrReady => runtime_command_response(
+            WORKFLOW_APPROVE_PR_READY_ACK,
+        ),
+        Command::GithubOpenReviewTabs => runtime_command_response(
+            GITHUB_OPEN_REVIEW_TABS_ACK,
+        ),
+        command => Err(invalid_supervisor_runtime_usage(command.id())),
     }
 }

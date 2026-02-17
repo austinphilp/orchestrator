@@ -1648,6 +1648,140 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn supervisor_runtime_dispatch_supports_workflow_approve_pr_ready() {
+        let temp_db = TestDbPath::new("app-runtime-command-approve-pr-ready");
+        let app = App {
+            config: AppConfig {
+                workspace: "/workspace".to_owned(),
+                event_store_path: temp_db.path().to_string_lossy().to_string(),
+            ticketing_provider: "linear".to_owned(),
+            harness_provider: "codex".to_owned(),
+            },
+            supervisor: QueryingSupervisor::default(),
+            github: Healthy,
+        };
+        let invocation = CommandRegistry::default()
+            .to_untyped_invocation(&Command::WorkflowApprovePrReady)
+            .expect("serialize workflow.approve_pr_ready");
+
+        let (stream_id, mut stream) = app
+            .dispatch_supervisor_command(invocation, SupervisorCommandContext::default())
+            .await
+            .expect("approve_pr_ready should be supported at runtime");
+        assert!(stream_id.starts_with("runtime-"));
+
+        let first_chunk = stream
+            .next_chunk()
+            .await
+            .expect("read runtime chunk")
+            .expect("expected one chunk");
+        assert_eq!(first_chunk.finish_reason, Some(LlmFinishReason::Stop));
+        assert!(
+            first_chunk
+                .delta
+                .contains("workflow.approve_pr_ready command accepted"),
+            "runtime command should return a non-empty acknowledgement"
+        );
+        assert!(
+            stream
+                .next_chunk()
+                .await
+                .expect("stream close")
+                .is_none(),
+            "runtime command stream should terminate after acknowledgement"
+        );
+    }
+
+    #[tokio::test]
+    async fn supervisor_runtime_dispatch_supports_open_review_tabs() {
+        let temp_db = TestDbPath::new("app-runtime-command-open-review-tabs");
+        let app = App {
+            config: AppConfig {
+                workspace: "/workspace".to_owned(),
+                event_store_path: temp_db.path().to_string_lossy().to_string(),
+            ticketing_provider: "linear".to_owned(),
+            harness_provider: "codex".to_owned(),
+            },
+            supervisor: QueryingSupervisor::default(),
+            github: Healthy,
+        };
+        let invocation = CommandRegistry::default()
+            .to_untyped_invocation(&Command::GithubOpenReviewTabs)
+            .expect("serialize github.open_review_tabs");
+
+        let (stream_id, mut stream) = app
+            .dispatch_supervisor_command(invocation, SupervisorCommandContext::default())
+            .await
+            .expect("open_review_tabs should be supported at runtime");
+        assert!(stream_id.starts_with("runtime-"));
+
+        let first_chunk = stream
+            .next_chunk()
+            .await
+            .expect("read runtime chunk")
+            .expect("expected one chunk");
+        assert_eq!(first_chunk.finish_reason, Some(LlmFinishReason::Stop));
+        assert!(
+            first_chunk
+                .delta
+                .contains("github.open_review_tabs command accepted"),
+            "runtime command should return a non-empty acknowledgement"
+        );
+        assert!(
+            stream
+                .next_chunk()
+                .await
+                .expect("stream close")
+                .is_none(),
+            "runtime command stream should terminate after acknowledgement"
+        );
+    }
+
+    #[tokio::test]
+    async fn supervisor_runtime_dispatch_rejects_non_runtime_command_variants() {
+        let temp_db = TestDbPath::new("app-runtime-command-unsupported-variants");
+        let app = App {
+            config: AppConfig {
+                workspace: "/workspace".to_owned(),
+                event_store_path: temp_db.path().to_string_lossy().to_string(),
+            ticketing_provider: "linear".to_owned(),
+            harness_provider: "codex".to_owned(),
+            },
+            supervisor: QueryingSupervisor::default(),
+            github: Healthy,
+        };
+
+        let non_runtime = [
+            Command::UiFocusNextInbox,
+            Command::UiOpenTerminalForSelected,
+            Command::UiOpenDiffInspectorForSelected,
+            Command::UiOpenTestInspectorForSelected,
+            Command::UiOpenPrInspectorForSelected,
+            Command::UiOpenChatInspectorForSelected,
+        ];
+
+        for command in non_runtime {
+            let invocation = CommandRegistry::default()
+                .to_untyped_invocation(&command)
+                .expect("serialize ui command");
+            let err = match app
+                .dispatch_supervisor_command(invocation, SupervisorCommandContext::default())
+                .await
+            {
+                Ok(_) => panic!("ui command should remain unsupported"),
+                Err(err) => err,
+            };
+            let message = err.to_string();
+            assert!(message.contains("unsupported"));
+            assert!(message.contains("expected"));
+            assert!(message.contains(command.id()));
+            assert!(message.contains("supervisor.query"));
+            assert!(message.contains("workflow.approve_pr_ready"));
+            assert!(message.contains("github.open_review_tabs"));
+        }
+    }
+
+    #[tokio::test]
     async fn supervisor_query_dispatch_forwards_cancel_to_provider() {
         let temp_db = TestDbPath::new("app-supervisor-query-cancel");
         let supervisor = QueryingSupervisor::default();
