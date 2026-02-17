@@ -6,7 +6,9 @@ license.workspace = true
 
 [dependencies]
 integration-linear = { path = "../integration-linear" }
+integration-shortcut = { path = "../integration-shortcut" }
 integration-git = { path = "../integration-git" }
+backend-codex = { path = "../backend-codex" }
 backend-opencode = { path = "../backend-opencode" }
 async-trait.workspace = true
 anyhow.workspace = true

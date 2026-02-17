@@ -40,6 +40,7 @@ string_id!(ArtifactId);
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TicketProvider {
     Linear,
+    Shortcut,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -49,6 +50,7 @@ impl TicketId {
     pub fn from_provider_uuid(provider: TicketProvider, provider_uuid: impl AsRef<str>) -> Self {
         let provider_name = match provider {
             TicketProvider::Linear => "linear",
+            TicketProvider::Shortcut => "shortcut",
         };
 
         Self(format!("{provider_name}:{}", provider_uuid.as_ref()))

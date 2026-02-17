@@ -14,10 +14,16 @@ pub struct AppConfig {
     pub workspace: String,
     #[serde(default = "default_event_store_path")]
     pub event_store_path: String,
+    #[serde(default = "default_ticketing_provider")]
+    pub ticketing_provider: String,
+    #[serde(default = "default_harness_provider")]
+    pub harness_provider: String,
 }
 
 const LEGACY_DEFAULT_WORKSPACE_PATH: &str = "./";
 const LEGACY_DEFAULT_EVENT_STORE_PATH: &str = "./orchestrator-events.db";
+const DEFAULT_TICKETING_PROVIDER: &str = "linear";
+const DEFAULT_HARNESS_PROVIDER: &str = "codex";
 
 fn default_workspace_path() -> String {
     default_orchestrator_data_dir()
@@ -31,6 +37,12 @@ fn default_event_store_path() -> String {
         .join("orchestrator-events.db")
         .to_string_lossy()
         .to_string()
+}
+fn default_ticketing_provider() -> String {
+    DEFAULT_TICKETING_PROVIDER.to_owned()
+}
+fn default_harness_provider() -> String {
+    DEFAULT_HARNESS_PROVIDER.to_owned()
 }
 
 const DEFAULT_SUPERVISOR_MODEL: &str = "openai/gpt-4o-mini";
@@ -46,6 +58,8 @@ impl Default for AppConfig {
         Self {
             workspace: default_workspace_path(),
             event_store_path: default_event_store_path(),
+            ticketing_provider: default_ticketing_provider(),
+            harness_provider: default_harness_provider(),
         }
     }
 }
@@ -223,6 +237,14 @@ fn load_or_create_config(path: &std::path::Path) -> Result<AppConfig, CoreError>
     }
     if config.event_store_path.trim() == LEGACY_DEFAULT_EVENT_STORE_PATH {
         config.event_store_path = default_event_store_path();
+        changed = true;
+    }
+    if config.ticketing_provider.trim().is_empty() {
+        config.ticketing_provider = default_ticketing_provider();
+        changed = true;
+    }
+    if config.harness_provider.trim().is_empty() {
+        config.harness_provider = default_harness_provider();
         changed = true;
     }
 
@@ -774,6 +796,8 @@ mod tests {
             config: AppConfig {
                 workspace: "./".to_owned(),
                 event_store_path: temp_db.path().to_string_lossy().to_string(),
+            ticketing_provider: "linear".to_owned(),
+            harness_provider: "codex".to_owned(),
             },
             supervisor: Healthy,
             github: Healthy,
@@ -918,6 +942,8 @@ mod tests {
             config: AppConfig {
                 workspace: "/workspace".to_owned(),
                 event_store_path: temp_db.path().to_string_lossy().to_string(),
+            ticketing_provider: "linear".to_owned(),
+            harness_provider: "codex".to_owned(),
             },
             supervisor: Healthy,
             github: Healthy,
@@ -981,6 +1007,8 @@ mod tests {
             config: AppConfig {
                 workspace: "/workspace".to_owned(),
                 event_store_path: temp_db.path().to_string_lossy().to_string(),
+            ticketing_provider: "linear".to_owned(),
+            harness_provider: "codex".to_owned(),
             },
             supervisor: supervisor.clone(),
             github: Healthy,
@@ -1051,6 +1079,8 @@ mod tests {
             config: AppConfig {
                 workspace: "/workspace".to_owned(),
                 event_store_path: temp_db.path().to_string_lossy().to_string(),
+            ticketing_provider: "linear".to_owned(),
+            harness_provider: "codex".to_owned(),
             },
             supervisor: supervisor.clone(),
             github: Healthy,
@@ -1131,6 +1161,8 @@ mod tests {
             config: AppConfig {
                 workspace: "/workspace".to_owned(),
                 event_store_path: temp_db.path().to_string_lossy().to_string(),
+            ticketing_provider: "linear".to_owned(),
+            harness_provider: "codex".to_owned(),
             },
             supervisor: supervisor.clone(),
             github: Healthy,
@@ -1214,6 +1246,8 @@ mod tests {
             config: AppConfig {
                 workspace: "/workspace".to_owned(),
                 event_store_path: temp_db.path().to_string_lossy().to_string(),
+            ticketing_provider: "linear".to_owned(),
+            harness_provider: "codex".to_owned(),
             },
             supervisor: supervisor.clone(),
             github: Healthy,
@@ -1260,6 +1294,8 @@ mod tests {
             config: AppConfig {
                 workspace: "/workspace".to_owned(),
                 event_store_path: temp_db.path().to_string_lossy().to_string(),
+            ticketing_provider: "linear".to_owned(),
+            harness_provider: "codex".to_owned(),
             },
             supervisor: supervisor.clone(),
             github: Healthy,
@@ -1311,6 +1347,8 @@ mod tests {
             config: AppConfig {
                 workspace: "/workspace".to_owned(),
                 event_store_path: temp_db.path().to_string_lossy().to_string(),
+            ticketing_provider: "linear".to_owned(),
+            harness_provider: "codex".to_owned(),
             },
             supervisor: supervisor.clone(),
             github: Healthy,
@@ -1375,8 +1413,10 @@ mod tests {
                 config: AppConfig {
                     workspace: "/workspace".to_owned(),
                     event_store_path: temp_db.path().to_string_lossy().to_string(),
-                },
-                supervisor: supervisor.clone(),
+            ticketing_provider: "linear".to_owned(),
+            harness_provider: "codex".to_owned(),
+            },
+            supervisor: supervisor.clone(),
                 github: Healthy,
             };
 
@@ -1421,6 +1461,8 @@ mod tests {
             config: AppConfig {
                 workspace: "/workspace".to_owned(),
                 event_store_path: temp_db.path().to_string_lossy().to_string(),
+            ticketing_provider: "linear".to_owned(),
+            harness_provider: "codex".to_owned(),
             },
             supervisor: supervisor.clone(),
             github: Healthy,
@@ -1456,6 +1498,8 @@ mod tests {
             config: AppConfig {
                 workspace: "/workspace".to_owned(),
                 event_store_path: temp_db.path().to_string_lossy().to_string(),
+            ticketing_provider: "linear".to_owned(),
+            harness_provider: "codex".to_owned(),
             },
             supervisor: QueryingSupervisor::default(),
             github: Healthy,
@@ -1489,6 +1533,8 @@ mod tests {
             config: AppConfig {
                 workspace: "/workspace".to_owned(),
                 event_store_path: temp_db.path().to_string_lossy().to_string(),
+            ticketing_provider: "linear".to_owned(),
+            harness_provider: "codex".to_owned(),
             },
             supervisor: QueryingSupervisor::default(),
             github: Healthy,
@@ -1526,6 +1572,8 @@ mod tests {
             config: AppConfig {
                 workspace: "/workspace".to_owned(),
                 event_store_path: temp_db.path().to_string_lossy().to_string(),
+            ticketing_provider: "linear".to_owned(),
+            harness_provider: "codex".to_owned(),
             },
             supervisor: supervisor.clone(),
             github: Healthy,
@@ -1576,6 +1624,8 @@ mod tests {
             config: AppConfig {
                 workspace: "/workspace".to_owned(),
                 event_store_path: temp_db.path().to_string_lossy().to_string(),
+            ticketing_provider: "linear".to_owned(),
+            harness_provider: "codex".to_owned(),
             },
             supervisor: QueryingSupervisor::default(),
             github: Healthy,
@@ -1605,6 +1655,8 @@ mod tests {
             config: AppConfig {
                 workspace: "/workspace".to_owned(),
                 event_store_path: temp_db.path().to_string_lossy().to_string(),
+            ticketing_provider: "linear".to_owned(),
+            harness_provider: "codex".to_owned(),
             },
             supervisor: supervisor.clone(),
             github: Healthy,
@@ -1633,6 +1685,8 @@ mod tests {
             config: AppConfig {
                 workspace: "/workspace".to_owned(),
                 event_store_path: temp_db.path().to_string_lossy().to_string(),
+            ticketing_provider: "linear".to_owned(),
+            harness_provider: "codex".to_owned(),
             },
             supervisor: supervisor.clone(),
             github: Healthy,
@@ -1696,6 +1750,8 @@ mod tests {
             config: AppConfig {
                 workspace: "/workspace".to_owned(),
                 event_store_path: temp_db.path().to_string_lossy().to_string(),
+            ticketing_provider: "linear".to_owned(),
+            harness_provider: "codex".to_owned(),
             },
             supervisor: supervisor.clone(),
             github: Healthy,
@@ -1755,6 +1811,8 @@ mod tests {
             config: AppConfig {
                 workspace: "/workspace".to_owned(),
                 event_store_path: temp_db.path().to_string_lossy().to_string(),
+            ticketing_provider: "linear".to_owned(),
+            harness_provider: "codex".to_owned(),
             },
             supervisor: supervisor.clone(),
             github: Healthy,

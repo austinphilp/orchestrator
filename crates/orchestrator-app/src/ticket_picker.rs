@@ -9,33 +9,29 @@ use orchestrator_ui::TicketPickerProvider;
 
 use crate::App;
 
-pub struct AppTicketPickerProvider<S, G, T, V, W>
+pub struct AppTicketPickerProvider<S, G, V>
 where
     S: Supervisor,
     G: GithubClient,
-    T: TicketingProvider,
     V: VcsProvider,
-    W: WorkerBackend,
 {
     app: Arc<App<S, G>>,
-    ticketing: Arc<T>,
+    ticketing: Arc<dyn TicketingProvider + Send + Sync>,
     vcs: Arc<V>,
-    worker_backend: Arc<W>,
+    worker_backend: Arc<dyn WorkerBackend + Send + Sync>,
 }
 
-impl<S, G, T, V, W> AppTicketPickerProvider<S, G, T, V, W>
+impl<S, G, V> AppTicketPickerProvider<S, G, V>
 where
     S: Supervisor,
     G: GithubClient,
-    T: TicketingProvider,
     V: VcsProvider,
-    W: WorkerBackend,
 {
     pub fn new(
         app: Arc<App<S, G>>,
-        ticketing: Arc<T>,
+        ticketing: Arc<dyn TicketingProvider + Send + Sync>,
         vcs: Arc<V>,
-        worker_backend: Arc<W>,
+        worker_backend: Arc<dyn WorkerBackend + Send + Sync>,
     ) -> Self {
         Self {
             app,
@@ -47,13 +43,11 @@ where
 }
 
 #[async_trait]
-impl<S, G, T, V, W> TicketPickerProvider for AppTicketPickerProvider<S, G, T, V, W>
+impl<S, G, V> TicketPickerProvider for AppTicketPickerProvider<S, G, V>
 where
     S: Supervisor + Send + Sync,
     G: GithubClient + Send + Sync,
-    T: TicketingProvider + Send + Sync,
     V: VcsProvider + Send + Sync,
-    W: WorkerBackend + Send + Sync,
 {
     async fn list_unfinished_tickets(&self) -> Result<Vec<TicketSummary>, CoreError> {
         let mut tickets = self
