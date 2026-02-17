@@ -19,5 +19,7 @@ Rust workspace for the Orchestrator bootstrap architecture.
 ```bash
 cargo check --workspace
 cargo test --workspace
+cargo ci-check
+cargo ci-test
 cargo run -p orchestrator-app
 ```
