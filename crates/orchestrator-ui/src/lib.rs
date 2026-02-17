@@ -74,6 +74,7 @@ pub enum CenterView {
         work_item_id: WorkItemId,
         inspector: ArtifactInspectorKind,
     },
+    SupervisorChatView,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -120,6 +121,7 @@ impl CenterView {
                 inspector.stack_label(),
                 work_item_id.as_str()
             ),
+            Self::SupervisorChatView => "SupervisorChat".to_owned(),
         }
     }
 }
@@ -366,6 +368,7 @@ fn project_center_pane(
             lines.push("Tab/Shift+Tab: cycle batch lanes".to_owned());
             lines.push("g/G: jump first/last item".to_owned());
             lines.push("Enter: open focus card".to_owned());
+            lines.push("c: toggle global supervisor chat".to_owned());
             lines.push("t: open terminal for selected item".to_owned());
             lines.push("v d/t/p/c: open diff/test/PR/chat inspector".to_owned());
             lines.push("Backspace: minimize top view".to_owned());
@@ -411,6 +414,16 @@ fn project_center_pane(
             work_item_id,
             inspector,
         } => project_artifact_inspector_pane(*inspector, work_item_id, domain),
+        CenterView::SupervisorChatView => CenterPaneState {
+            title: "Supervisor Chat".to_owned(),
+            lines: vec![
+                "Global supervisor Q&A (standalone from selected ticket).".to_owned(),
+                "Insert mode: type a question and press Enter to send.".to_owned(),
+                "Esc: return to Normal mode.".to_owned(),
+                "c: close chat panel and restore previous context.".to_owned(),
+                "Ctrl-c: cancel active supervisor stream.".to_owned(),
+            ],
+        },
     }
 }
 
@@ -472,9 +485,15 @@ enum SupervisorStreamEvent {
     },
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum SupervisorStreamTarget {
+    Inspector { work_item_id: WorkItemId },
+    GlobalChatPanel,
+}
+
 #[derive(Debug)]
 struct ActiveSupervisorChatStream {
-    work_item_id: WorkItemId,
+    target: SupervisorStreamTarget,
     receiver: mpsc::Receiver<SupervisorStreamEvent>,
     stream_id: Option<String>,
     lifecycle: SupervisorStreamLifecycle,
@@ -489,9 +508,12 @@ struct ActiveSupervisorChatStream {
 }
 
 impl ActiveSupervisorChatStream {
-    fn new(work_item_id: WorkItemId, receiver: mpsc::Receiver<SupervisorStreamEvent>) -> Self {
+    fn new(
+        target: SupervisorStreamTarget,
+        receiver: mpsc::Receiver<SupervisorStreamEvent>,
+    ) -> Self {
         Self {
-            work_item_id,
+            target,
             receiver,
             stream_id: None,
             lifecycle: SupervisorStreamLifecycle::Connecting,
@@ -595,6 +617,12 @@ impl ActiveSupervisorChatStream {
 
         lines
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+struct GlobalSupervisorChatReturnContext {
+    selected_inbox_index: Option<usize>,
+    selected_inbox_item_id: Option<InboxItemId>,
 }
 
 fn trim_to_trailing_chars(text: &mut String, max_chars: usize) {
@@ -1037,6 +1065,27 @@ fn build_supervisor_chat_request(
             LlmMessage {
                 role: LlmRole::User,
                 content: prompt_lines.join("\n"),
+                name: None,
+            },
+        ],
+        temperature: Some(0.2),
+        max_output_tokens: Some(700),
+    }
+}
+
+fn build_global_supervisor_chat_request(query: &str) -> LlmChatRequest {
+    LlmChatRequest {
+        model: supervisor_model_from_env(),
+        messages: vec![
+            LlmMessage {
+                role: LlmRole::System,
+                content: "You are the orchestrator supervisor. Answer concisely and operationally. If information is missing, say Unknown."
+                    .to_owned(),
+                name: None,
+            },
+            LlmMessage {
+                role: LlmRole::User,
+                content: query.to_owned(),
                 name: None,
             },
         ],
@@ -1625,6 +1674,9 @@ struct UiShellState {
     supervisor_provider: Option<Arc<dyn LlmProvider>>,
     supervisor_command_dispatcher: Option<Arc<dyn SupervisorCommandDispatcher>>,
     supervisor_chat_stream: Option<ActiveSupervisorChatStream>,
+    global_supervisor_chat_draft: String,
+    global_supervisor_chat_last_query: Option<String>,
+    global_supervisor_chat_return_context: Option<GlobalSupervisorChatReturnContext>,
     ticket_picker_provider: Option<Arc<dyn TicketPickerProvider>>,
     ticket_picker_sender: Option<mpsc::Sender<TicketPickerEvent>>,
     ticket_picker_receiver: Option<mpsc::Receiver<TicketPickerEvent>>,
@@ -1675,6 +1727,9 @@ impl UiShellState {
             supervisor_provider,
             supervisor_command_dispatcher,
             supervisor_chat_stream: None,
+            global_supervisor_chat_draft: String::new(),
+            global_supervisor_chat_last_query: None,
+            global_supervisor_chat_return_context: None,
             ticket_picker_provider,
             ticket_picker_sender,
             ticket_picker_receiver,
@@ -1692,6 +1747,7 @@ impl UiShellState {
             self.selected_inbox_index,
             self.selected_inbox_item_id.as_ref(),
         );
+        self.append_global_supervisor_chat_state(&mut ui_state);
         self.append_live_supervisor_chat(&mut ui_state);
         ui_state
     }
@@ -1812,6 +1868,46 @@ impl UiShellState {
     fn open_chat_inspector_for_selected(&mut self) {
         self.open_inspector_for_selected(ArtifactInspectorKind::Chat);
         self.start_supervisor_stream_for_selected();
+    }
+
+    fn toggle_global_supervisor_chat(&mut self) {
+        if self.is_global_supervisor_chat_active() {
+            self.close_global_supervisor_chat();
+        } else {
+            self.open_global_supervisor_chat();
+        }
+    }
+
+    fn open_global_supervisor_chat(&mut self) {
+        if self.is_global_supervisor_chat_active() {
+            self.enter_insert_mode();
+            return;
+        }
+
+        self.global_supervisor_chat_return_context = Some(GlobalSupervisorChatReturnContext {
+            selected_inbox_index: self.selected_inbox_index,
+            selected_inbox_item_id: self.selected_inbox_item_id.clone(),
+        });
+        let _ = self.view_stack.push_center(CenterView::SupervisorChatView);
+        self.enter_insert_mode();
+    }
+
+    fn close_global_supervisor_chat(&mut self) {
+        if !self.is_global_supervisor_chat_active() {
+            return;
+        }
+
+        if self.is_active_supervisor_stream_visible() {
+            self.cancel_supervisor_stream();
+        }
+
+        let _ = self.view_stack.pop_center();
+        self.enter_normal_mode();
+
+        if let Some(context) = self.global_supervisor_chat_return_context.take() {
+            self.selected_inbox_index = context.selected_inbox_index;
+            self.selected_inbox_item_id = context.selected_inbox_item_id;
+        }
     }
 
     fn open_focus_and_push_center(&mut self, inbox_item_id: InboxItemId, top_view: CenterView) {
@@ -2021,6 +2117,63 @@ impl UiShellState {
         self.ticket_picker_overlay.visible
     }
 
+    fn submit_global_supervisor_chat_query(&mut self) {
+        let query = self.global_supervisor_chat_draft.trim().to_owned();
+        if query.is_empty() {
+            self.status_warning = Some(
+                "supervisor query unavailable: enter a non-empty question before submitting"
+                    .to_owned(),
+            );
+            return;
+        }
+
+        let started = if let Some(dispatcher) = self.supervisor_command_dispatcher.clone() {
+            self.start_supervisor_stream_with_dispatcher_for_global_query(dispatcher, query.clone())
+        } else if let Some(provider) = self.supervisor_provider.clone() {
+            let request = build_global_supervisor_chat_request(query.as_str());
+            self.start_supervisor_stream_with_provider(
+                SupervisorStreamTarget::GlobalChatPanel,
+                provider,
+                request,
+            )
+        } else {
+            self.status_warning = Some(
+                "supervisor stream unavailable: no LLM provider or command dispatcher configured"
+                    .to_owned(),
+            );
+            false
+        };
+
+        if started {
+            self.global_supervisor_chat_draft.clear();
+            self.global_supervisor_chat_last_query = Some(query);
+        }
+    }
+
+    fn apply_global_chat_insert_key(&mut self, key: KeyEvent) -> bool {
+        if !self.is_global_supervisor_chat_active() || self.mode != UiMode::Insert {
+            return false;
+        }
+
+        match key.code {
+            KeyCode::Enter if key.modifiers.is_empty() => {
+                self.submit_global_supervisor_chat_query();
+                true
+            }
+            KeyCode::Backspace if key.modifiers.is_empty() => {
+                self.global_supervisor_chat_draft.pop();
+                true
+            }
+            KeyCode::Char(ch)
+                if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT =>
+            {
+                self.global_supervisor_chat_draft.push(ch);
+                true
+            }
+            _ => false,
+        }
+    }
+
     fn start_supervisor_stream_for_selected(&mut self) {
         let ui_state = project_ui_state(
             self.base_status.as_str(),
@@ -2041,7 +2194,7 @@ impl UiShellState {
         };
 
         if let Some(dispatcher) = self.supervisor_command_dispatcher.clone() {
-            self.start_supervisor_stream_with_dispatcher(dispatcher, selected_row);
+            let _ = self.start_supervisor_stream_with_dispatcher(dispatcher, selected_row);
             return;
         }
 
@@ -2054,34 +2207,58 @@ impl UiShellState {
         };
 
         let request = build_supervisor_chat_request(&selected_row, &self.domain);
-        let work_item_id = selected_row.work_item_id.clone();
-        let (sender, receiver) = mpsc::channel(SUPERVISOR_STREAM_CHANNEL_CAPACITY);
-        self.replace_supervisor_stream(work_item_id, receiver);
-        self.status_warning = None;
+        let _ = self.start_supervisor_stream_with_provider(
+            SupervisorStreamTarget::Inspector {
+                work_item_id: selected_row.work_item_id.clone(),
+            },
+            provider,
+            request,
+        );
+    }
 
-        match TokioHandle::try_current() {
-            Ok(handle) => {
-                handle.spawn(async move {
-                    run_supervisor_stream_task(provider, request, sender).await;
-                });
+    fn start_supervisor_stream_with_dispatcher_for_global_query(
+        &mut self,
+        dispatcher: Arc<dyn SupervisorCommandDispatcher>,
+        query: String,
+    ) -> bool {
+        let invocation = match CommandRegistry::default().to_untyped_invocation(
+            &Command::SupervisorQuery(SupervisorQueryArgs::Freeform {
+                query,
+                context: Some(SupervisorQueryContextArgs {
+                    selected_work_item_id: None,
+                    selected_session_id: None,
+                    scope: Some("global".to_owned()),
+                }),
+            }),
+        ) {
+            Ok(invocation) => invocation,
+            Err(error) => {
+                self.status_warning = Some(format!(
+                    "supervisor query unavailable: failed to build command invocation ({error})"
+                ));
+                return false;
             }
-            Err(_) => {
-                self.status_warning =
-                    Some("supervisor stream unavailable: tokio runtime is not active".to_owned());
-                if let Some(stream) = self.supervisor_chat_stream.as_mut() {
-                    stream.lifecycle = SupervisorStreamLifecycle::Error;
-                    stream.error_message =
-                        Some("tokio runtime unavailable; cannot spawn stream task".to_owned());
-                }
-            }
-        }
+        };
+
+        let context = SupervisorCommandContext {
+            selected_work_item_id: None,
+            selected_session_id: None,
+            scope: Some("global".to_owned()),
+        };
+
+        self.start_supervisor_stream_with_dispatcher_invocation(
+            SupervisorStreamTarget::GlobalChatPanel,
+            dispatcher,
+            invocation,
+            context,
+        )
     }
 
     fn start_supervisor_stream_with_dispatcher(
         &mut self,
         dispatcher: Arc<dyn SupervisorCommandDispatcher>,
         selected_row: UiInboxRow,
-    ) {
+    ) -> bool {
         let invocation = match CommandRegistry::default().to_untyped_invocation(
             &Command::SupervisorQuery(SupervisorQueryArgs::Template {
                 template: "status_current_session".to_owned(),
@@ -2094,7 +2271,7 @@ impl UiShellState {
                 self.status_warning = Some(format!(
                     "supervisor query unavailable: failed to build command invocation ({error})"
                 ));
-                return;
+                return false;
             }
         };
 
@@ -2111,32 +2288,69 @@ impl UiShellState {
                 .or_else(|| Some(format!("work_item:{}", selected_row.work_item_id.as_str()))),
         };
 
-        let work_item_id = selected_row.work_item_id.clone();
-        let (sender, receiver) = mpsc::channel(SUPERVISOR_STREAM_CHANNEL_CAPACITY);
-        self.replace_supervisor_stream(work_item_id, receiver);
-        self.status_warning = None;
+        self.start_supervisor_stream_with_dispatcher_invocation(
+            SupervisorStreamTarget::Inspector {
+                work_item_id: selected_row.work_item_id.clone(),
+            },
+            dispatcher,
+            invocation,
+            context,
+        )
+    }
 
+    fn start_supervisor_stream_with_provider(
+        &mut self,
+        target: SupervisorStreamTarget,
+        provider: Arc<dyn LlmProvider>,
+        request: LlmChatRequest,
+    ) -> bool {
+        let Some(handle) = self.supervisor_runtime_handle() else {
+            return false;
+        };
+
+        let (sender, receiver) = mpsc::channel(SUPERVISOR_STREAM_CHANNEL_CAPACITY);
+        self.replace_supervisor_stream(target, receiver);
+        self.status_warning = None;
+        handle.spawn(async move {
+            run_supervisor_stream_task(provider, request, sender).await;
+        });
+        true
+    }
+
+    fn start_supervisor_stream_with_dispatcher_invocation(
+        &mut self,
+        target: SupervisorStreamTarget,
+        dispatcher: Arc<dyn SupervisorCommandDispatcher>,
+        invocation: UntypedCommandInvocation,
+        context: SupervisorCommandContext,
+    ) -> bool {
+        let Some(handle) = self.supervisor_runtime_handle() else {
+            return false;
+        };
+
+        let (sender, receiver) = mpsc::channel(SUPERVISOR_STREAM_CHANNEL_CAPACITY);
+        self.replace_supervisor_stream(target, receiver);
+        self.status_warning = None;
+        handle.spawn(async move {
+            run_supervisor_command_task(dispatcher, invocation, context, sender).await;
+        });
+        true
+    }
+
+    fn supervisor_runtime_handle(&mut self) -> Option<TokioHandle> {
         match TokioHandle::try_current() {
-            Ok(handle) => {
-                handle.spawn(async move {
-                    run_supervisor_command_task(dispatcher, invocation, context, sender).await;
-                });
-            }
+            Ok(handle) => Some(handle),
             Err(_) => {
                 self.status_warning =
                     Some("supervisor stream unavailable: tokio runtime is not active".to_owned());
-                if let Some(stream) = self.supervisor_chat_stream.as_mut() {
-                    stream.lifecycle = SupervisorStreamLifecycle::Error;
-                    stream.error_message =
-                        Some("tokio runtime unavailable; cannot spawn stream task".to_owned());
-                }
+                None
             }
         }
     }
 
     fn replace_supervisor_stream(
         &mut self,
-        work_item_id: WorkItemId,
+        target: SupervisorStreamTarget,
         receiver: mpsc::Receiver<SupervisorStreamEvent>,
     ) {
         if let Some(previous_stream) = self.supervisor_chat_stream.take() {
@@ -2146,7 +2360,7 @@ impl UiShellState {
                 }
             }
         }
-        self.supervisor_chat_stream = Some(ActiveSupervisorChatStream::new(work_item_id, receiver));
+        self.supervisor_chat_stream = Some(ActiveSupervisorChatStream::new(target, receiver));
     }
 
     fn cancel_supervisor_stream(&mut self) {
@@ -2213,13 +2427,19 @@ impl UiShellState {
             return false;
         }
 
-        matches!(
-            self.view_stack.active_center(),
-            Some(CenterView::InspectorView {
-                work_item_id,
-                inspector: ArtifactInspectorKind::Chat,
-            }) if work_item_id == &stream.work_item_id
-        )
+        match (&stream.target, self.view_stack.active_center()) {
+            (
+                SupervisorStreamTarget::Inspector {
+                    work_item_id: stream_work_item_id,
+                },
+                Some(CenterView::InspectorView {
+                    work_item_id,
+                    inspector: ArtifactInspectorKind::Chat,
+                }),
+            ) => work_item_id == stream_work_item_id,
+            (SupervisorStreamTarget::GlobalChatPanel, Some(CenterView::SupervisorChatView)) => true,
+            _ => false,
+        }
     }
 
     fn tick_supervisor_stream(&mut self) {
@@ -2313,18 +2533,52 @@ impl UiShellState {
         let Some(stream) = self.supervisor_chat_stream.as_ref() else {
             return;
         };
-        let Some(CenterView::InspectorView {
-            work_item_id,
-            inspector: ArtifactInspectorKind::Chat,
-        }) = self.view_stack.active_center()
-        else {
-            return;
-        };
-        if &stream.work_item_id != work_item_id {
+        match (self.view_stack.active_center(), &stream.target) {
+            (
+                Some(CenterView::InspectorView {
+                    work_item_id,
+                    inspector: ArtifactInspectorKind::Chat,
+                }),
+                SupervisorStreamTarget::Inspector {
+                    work_item_id: stream_work_item_id,
+                },
+            ) if work_item_id == stream_work_item_id => {
+                ui_state.center_pane.lines.extend(stream.render_lines());
+            }
+            (Some(CenterView::SupervisorChatView), SupervisorStreamTarget::GlobalChatPanel) => {
+                ui_state.center_pane.lines.extend(stream.render_lines());
+            }
+            _ => {}
+        }
+    }
+
+    fn append_global_supervisor_chat_state(&self, ui_state: &mut UiState) {
+        if !self.is_global_supervisor_chat_active() {
             return;
         }
 
-        ui_state.center_pane.lines.extend(stream.render_lines());
+        ui_state.center_pane.lines.push(String::new());
+        if let Some(query) = self.global_supervisor_chat_last_query.as_deref() {
+            ui_state
+                .center_pane
+                .lines
+                .push(format!("Last query: {}", compact_focus_card_text(query)));
+        }
+        ui_state.center_pane.lines.push(format!(
+            "Draft: {}",
+            if self.global_supervisor_chat_draft.is_empty() {
+                "<type in Insert mode>".to_owned()
+            } else {
+                self.global_supervisor_chat_draft.clone()
+            }
+        ));
+    }
+
+    fn is_global_supervisor_chat_active(&self) -> bool {
+        matches!(
+            self.view_stack.active_center(),
+            Some(CenterView::SupervisorChatView)
+        )
     }
 
     fn set_selection(&mut self, selected_index: Option<usize>, rows: &[UiInboxRow]) {
@@ -3125,6 +3379,7 @@ fn group_tickets_by_status(
 enum UiCommand {
     EnterNormalMode,
     EnterInsertMode,
+    ToggleGlobalSupervisorChat,
     OpenTerminalForSelected,
     OpenDiffInspectorForSelected,
     OpenTestInspectorForSelected,
@@ -3154,9 +3409,10 @@ enum UiCommand {
 }
 
 impl UiCommand {
-    const ALL: [Self; 28] = [
+    const ALL: [Self; 29] = [
         Self::EnterNormalMode,
         Self::EnterInsertMode,
+        Self::ToggleGlobalSupervisorChat,
         Self::OpenTerminalForSelected,
         Self::OpenDiffInspectorForSelected,
         Self::OpenTestInspectorForSelected,
@@ -3189,6 +3445,7 @@ impl UiCommand {
         match self {
             Self::EnterNormalMode => "ui.mode.normal",
             Self::EnterInsertMode => "ui.mode.insert",
+            Self::ToggleGlobalSupervisorChat => "ui.supervisor_chat.toggle",
             Self::OpenTerminalForSelected => command_ids::UI_OPEN_TERMINAL_FOR_SELECTED,
             Self::OpenDiffInspectorForSelected => command_ids::UI_OPEN_DIFF_INSPECTOR_FOR_SELECTED,
             Self::OpenTestInspectorForSelected => command_ids::UI_OPEN_TEST_INSPECTOR_FOR_SELECTED,
@@ -3222,6 +3479,7 @@ impl UiCommand {
         match self {
             Self::EnterNormalMode => "Return to Normal mode",
             Self::EnterInsertMode => "Enter Insert mode",
+            Self::ToggleGlobalSupervisorChat => "Toggle global supervisor chat panel",
             Self::OpenTerminalForSelected => "Open terminal for selected item",
             Self::OpenDiffInspectorForSelected => "Open diff inspector for selected item",
             Self::OpenTestInspectorForSelected => "Open test inspector for selected item",
@@ -3298,6 +3556,7 @@ fn default_keymap_config() -> KeymapConfig {
                     binding(&["3"], UiCommand::JumpBatchReviewReady),
                     binding(&["4"], UiCommand::JumpBatchFyiDigest),
                     binding(&["s"], UiCommand::OpenTicketPicker),
+                    binding(&["c"], UiCommand::ToggleGlobalSupervisorChat),
                     binding(&["enter"], UiCommand::OpenFocusCard),
                     binding(&["t"], UiCommand::OpenTerminalForSelected),
                     binding(&["backspace"], UiCommand::MinimizeCenterView),
@@ -3361,7 +3620,7 @@ enum RoutedInput {
 fn mode_help(mode: UiMode) -> &'static str {
     match mode {
         UiMode::Normal => {
-            "j/k: select | Tab/S-Tab: batch cycle | 1-4 or z{1-4}: batch jump | g/G: first/last | s: start ticket | Enter: focus | t: terminal | v{d/t/p/c}: inspectors | i: insert | q: quit"
+            "j/k: select | Tab/S-Tab: batch cycle | 1-4 or z{1-4}: batch jump | g/G: first/last | s: start ticket | c: supervisor chat | Enter: focus | t: terminal | v{d/t/p/c}: inspectors | i: insert | q: quit"
         }
         UiMode::Insert => "Insert input active | Esc/Ctrl-[: Normal",
         UiMode::Terminal => "Terminal pass-through active | Esc or Ctrl-\\ Ctrl-n: Normal",
@@ -3400,13 +3659,18 @@ fn route_key_press(shell_state: &mut UiShellState, key: KeyEvent) -> RoutedInput
     }
 
     if is_escape_to_normal(key) {
-        if shell_state.is_active_supervisor_stream_visible() {
+        if shell_state.is_active_supervisor_stream_visible()
+            && !shell_state.is_global_supervisor_chat_active()
+        {
             shell_state.cancel_supervisor_stream();
         }
         return RoutedInput::Command(UiCommand::EnterNormalMode);
     }
     if is_ctrl_char(key, 'c') && shell_state.is_active_supervisor_stream_visible() {
         shell_state.cancel_supervisor_stream();
+        return RoutedInput::Ignore;
+    }
+    if shell_state.apply_global_chat_insert_key(key) {
         return RoutedInput::Ignore;
     }
 
@@ -3500,6 +3764,10 @@ fn dispatch_command(shell_state: &mut UiShellState, command: UiCommand) -> bool 
         }
         UiCommand::EnterInsertMode => {
             shell_state.enter_insert_mode();
+            false
+        }
+        UiCommand::ToggleGlobalSupervisorChat => {
+            shell_state.toggle_global_supervisor_chat();
             false
         }
         UiCommand::OpenTerminalForSelected => {
@@ -3600,7 +3868,11 @@ fn dispatch_command(shell_state: &mut UiShellState, command: UiCommand) -> bool 
             false
         }
         UiCommand::MinimizeCenterView => {
-            shell_state.minimize_center_view();
+            if shell_state.is_global_supervisor_chat_active() {
+                shell_state.close_global_supervisor_chat();
+            } else {
+                shell_state.minimize_center_view();
+            }
             false
         }
     }
@@ -4197,7 +4469,20 @@ mod tests {
     ) -> mpsc::Sender<SupervisorStreamEvent> {
         let (sender, receiver) = mpsc::channel(SUPERVISOR_STREAM_CHANNEL_CAPACITY);
         shell_state.supervisor_chat_stream = Some(ActiveSupervisorChatStream::new(
-            WorkItemId::new(work_item_id),
+            SupervisorStreamTarget::Inspector {
+                work_item_id: WorkItemId::new(work_item_id),
+            },
+            receiver,
+        ));
+        sender
+    }
+
+    fn attach_global_supervisor_stream(
+        shell_state: &mut UiShellState,
+    ) -> mpsc::Sender<SupervisorStreamEvent> {
+        let (sender, receiver) = mpsc::channel(SUPERVISOR_STREAM_CHANNEL_CAPACITY);
+        shell_state.supervisor_chat_stream = Some(ActiveSupervisorChatStream::new(
+            SupervisorStreamTarget::GlobalChatPanel,
             receiver,
         ));
         sender
@@ -4554,6 +4839,28 @@ mod tests {
     }
 
     #[test]
+    fn esc_in_global_chat_returns_to_normal_without_cancelling_stream() {
+        let mut shell_state = UiShellState::new("ready".to_owned(), triage_projection());
+        handle_key_press(&mut shell_state, key(KeyCode::Char('c')));
+        let _sender = attach_global_supervisor_stream(&mut shell_state);
+        if let Some(stream) = shell_state.supervisor_chat_stream.as_mut() {
+            stream.lifecycle = SupervisorStreamLifecycle::Streaming;
+        }
+
+        let should_quit = handle_key_press(&mut shell_state, key(KeyCode::Esc));
+        assert!(!should_quit);
+        assert_eq!(shell_state.mode, UiMode::Normal);
+        assert!(shell_state.is_global_supervisor_chat_active());
+
+        let stream = shell_state
+            .supervisor_chat_stream
+            .as_ref()
+            .expect("stream state present");
+        assert_eq!(stream.lifecycle, SupervisorStreamLifecycle::Streaming);
+        assert!(!stream.pending_cancel);
+    }
+
+    #[test]
     fn chat_stream_rate_limit_errors_surface_in_status_warning() {
         let mut shell_state = UiShellState::new("ready".to_owned(), inspector_projection());
         shell_state.open_inspector_for_selected(ArtifactInspectorKind::Chat);
@@ -4598,6 +4905,120 @@ mod tests {
 
         let rendered = shell_state.ui_state().center_pane.lines.join("\n");
         assert!(rendered.contains("Token usage: input=120 output=45 total=165"));
+    }
+
+    #[test]
+    fn global_supervisor_chat_toggle_opens_from_normal_navigation_mode() {
+        let mut shell_state = UiShellState::new("ready".to_owned(), triage_projection());
+        assert!(matches!(
+            shell_state.view_stack.active_center(),
+            Some(CenterView::InboxView)
+        ));
+        assert_eq!(shell_state.mode, UiMode::Normal);
+
+        handle_key_press(&mut shell_state, key(KeyCode::Char('c')));
+        assert!(matches!(
+            shell_state.view_stack.active_center(),
+            Some(CenterView::SupervisorChatView)
+        ));
+        assert_eq!(shell_state.mode, UiMode::Insert);
+    }
+
+    #[tokio::test]
+    async fn global_supervisor_chat_accepts_freeform_query_and_streams_response() {
+        let provider = Arc::new(TestLlmProvider::new(vec![
+            Ok(LlmStreamChunk {
+                delta: "System summary:\n".to_owned(),
+                finish_reason: None,
+                usage: None,
+                rate_limit: None,
+            }),
+            Ok(LlmStreamChunk {
+                delta: "No blockers right now.".to_owned(),
+                finish_reason: Some(LlmFinishReason::Stop),
+                usage: Some(LlmTokenUsage {
+                    input_tokens: 21,
+                    output_tokens: 8,
+                    total_tokens: 29,
+                }),
+                rate_limit: None,
+            }),
+        ]));
+        let provider_dyn: Arc<dyn LlmProvider> = provider;
+        let mut shell_state = UiShellState::new_with_supervisor(
+            "ready".to_owned(),
+            triage_projection(),
+            Some(provider_dyn),
+        );
+
+        handle_key_press(&mut shell_state, key(KeyCode::Char('c')));
+        for ch in "what needs me next?".chars() {
+            handle_key_press(&mut shell_state, key(KeyCode::Char(ch)));
+        }
+        handle_key_press(&mut shell_state, key(KeyCode::Enter));
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                shell_state.tick_supervisor_stream();
+                let rendered = shell_state.ui_state().center_pane.lines.join("\n");
+                if rendered.contains("No blockers right now.") {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("global chat stream should render response");
+
+        let rendered = shell_state.ui_state().center_pane.lines.join("\n");
+        assert!(rendered.contains("Last query: what needs me next?"));
+        assert!(rendered.contains("Live supervisor stream:"));
+        assert!(rendered.contains("Token usage: input=21 output=8 total=29"));
+    }
+
+    #[test]
+    fn closing_global_supervisor_chat_restores_prior_context_state() {
+        let mut shell_state = UiShellState::new("ready".to_owned(), triage_projection());
+        shell_state.move_selection(2);
+        shell_state.open_focus_card_for_selected();
+        let before_selection = shell_state.selected_inbox_item_id.clone();
+        let before_stack = shell_state.view_stack.center_views().to_vec();
+
+        handle_key_press(&mut shell_state, key(KeyCode::Char('c')));
+        assert!(matches!(
+            shell_state.view_stack.active_center(),
+            Some(CenterView::SupervisorChatView)
+        ));
+
+        handle_key_press(&mut shell_state, key(KeyCode::Esc));
+        handle_key_press(&mut shell_state, key(KeyCode::Char('j')));
+        handle_key_press(&mut shell_state, key(KeyCode::Char('c')));
+
+        assert_eq!(shell_state.selected_inbox_item_id, before_selection);
+        assert_eq!(
+            shell_state.view_stack.center_views(),
+            before_stack.as_slice()
+        );
+        assert_eq!(shell_state.mode, UiMode::Normal);
+    }
+
+    #[test]
+    fn failed_global_supervisor_query_preserves_draft_for_retry() {
+        let mut shell_state = UiShellState::new("ready".to_owned(), triage_projection());
+
+        handle_key_press(&mut shell_state, key(KeyCode::Char('c')));
+        for ch in "what changed?".chars() {
+            handle_key_press(&mut shell_state, key(KeyCode::Char(ch)));
+        }
+        handle_key_press(&mut shell_state, key(KeyCode::Enter));
+
+        assert_eq!(shell_state.global_supervisor_chat_draft, "what changed?");
+        assert_eq!(shell_state.global_supervisor_chat_last_query, None);
+        assert!(shell_state.supervisor_chat_stream.is_none());
+        assert!(shell_state
+            .status_warning
+            .as_deref()
+            .is_some_and(|warning| warning.contains("supervisor stream unavailable")));
     }
 
     #[tokio::test]
@@ -5204,6 +5625,10 @@ mod tests {
         assert_eq!(command_id(UiCommand::EnterNormalMode), "ui.mode.normal");
         assert_eq!(command_id(UiCommand::EnterInsertMode), "ui.mode.insert");
         assert_eq!(
+            command_id(UiCommand::ToggleGlobalSupervisorChat),
+            "ui.supervisor_chat.toggle"
+        );
+        assert_eq!(
             command_id(UiCommand::OpenTerminalForSelected),
             command_ids::UI_OPEN_TERMINAL_FOR_SELECTED
         );
@@ -5234,6 +5659,7 @@ mod tests {
         let all_commands = [
             UiCommand::EnterNormalMode,
             UiCommand::EnterInsertMode,
+            UiCommand::ToggleGlobalSupervisorChat,
             UiCommand::OpenTerminalForSelected,
             UiCommand::OpenDiffInspectorForSelected,
             UiCommand::OpenTestInspectorForSelected,
@@ -5397,6 +5823,10 @@ mod tests {
         assert_eq!(
             routed_command(route_key_press(&mut shell_state, key(KeyCode::Char('q')))),
             Some(UiCommand::QuitShell)
+        );
+        assert_eq!(
+            routed_command(route_key_press(&mut shell_state, key(KeyCode::Char('c')))),
+            Some(UiCommand::ToggleGlobalSupervisorChat)
         );
         assert_eq!(
             routed_command(route_key_press(&mut shell_state, key(KeyCode::Char('v')))),
