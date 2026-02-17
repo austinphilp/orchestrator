@@ -103,6 +103,62 @@ mutation CommentCreate($issueId: String!, $body: String!) {
 }
 "#;
 
+const TEAMS_QUERY: &str = r#"
+query Teams {
+  teams {
+    nodes {
+      id
+      key
+      name
+    }
+  }
+}
+"#;
+
+const TEAM_STATES_QUERY: &str = r#"
+query TeamStates($id: String!) {
+  team(id: $id) {
+    states {
+      nodes {
+        id
+        name
+      }
+    }
+  }
+}
+"#;
+
+const ISSUE_CREATE_MUTATION: &str = r#"
+mutation CreateIssue($input: IssueCreateInput!) {
+  issueCreate(input: $input) {
+    success
+    issue {
+      id
+      identifier
+      title
+      url
+      priority
+      updatedAt
+      project {
+        name
+      }
+      assignee {
+        id
+        name
+      }
+      state {
+        name
+      }
+      labels {
+        nodes {
+          name
+        }
+      }
+    }
+  }
+}
+"#;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkflowStateMapping {
     pub workflow_state: WorkflowState,
@@ -911,6 +967,242 @@ fn issue_to_summary(issue: &LinearIssueNode) -> TicketSummary {
     }
 }
 
+#[derive(Debug, Clone)]
+struct CreateTicketStateSpec {
+    team_token: Option<String>,
+    state_name: Option<String>,
+}
+
+fn parse_create_ticket_state_spec(raw_state: &str) -> CreateTicketStateSpec {
+    let raw = raw_state.trim();
+    if raw.is_empty() {
+        return CreateTicketStateSpec {
+            team_token: None,
+            state_name: None,
+        };
+    }
+
+    for separator in [":", "/"] {
+        if let Some((team, state)) = raw.split_once(separator) {
+            let team_token = team.trim();
+            let state_name = state.trim();
+            return CreateTicketStateSpec {
+                team_token: (!team_token.is_empty()).then_some(team_token.to_owned()),
+                state_name: (!state_name.is_empty()).then_some(state_name.to_owned()),
+            };
+        }
+    }
+
+    CreateTicketStateSpec {
+        team_token: None,
+        state_name: Some(raw.to_owned()),
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct ResolvedLinearState {
+    id: String,
+    name: String,
+}
+
+fn linear_api_error_is_auth(message: &str) -> bool {
+    let value = message.to_ascii_lowercase();
+    value.contains("unauthorized")
+        || value.contains("forbidden")
+        || value.contains("invalid api key")
+        || value.contains("authentication")
+        || value.contains("authentication failed")
+        || value.contains("token")
+        || value.contains("access denied")
+}
+
+fn normalize_linear_api_error(error: CoreError, action: &str) -> CoreError {
+    match error {
+        CoreError::DependencyUnavailable(message) if linear_api_error_is_auth(&message) => {
+            CoreError::Configuration(format!("Linear {action}: {message}"))
+        }
+        _ => error,
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct LinearTeamNode {
+    id: String,
+    key: Option<String>,
+    name: String,
+}
+
+#[derive(Debug)]
+struct LinearCreateIssueContext {
+    team_id: String,
+    team_state: Option<ResolvedLinearState>,
+}
+
+async fn resolve_linear_teams(
+    transport: &Arc<dyn GraphqlTransport>,
+) -> Result<Vec<LinearTeamNode>, CoreError> {
+    let data = transport
+        .execute(GraphqlRequest::new(TEAMS_QUERY, json!({})))
+        .await
+        .map_err(|error| normalize_linear_api_error(error, "could not resolve Linear teams"))?;
+    let payload: TeamListResponse = serde_json::from_value(data).map_err(|error| {
+        CoreError::DependencyUnavailable(format!("failed to decode Linear teams payload: {error}"))
+    })?;
+
+    if payload.teams.nodes.is_empty() {
+        return Err(CoreError::DependencyUnavailable(
+            "Linear did not return any teams for the authenticated user.".to_owned(),
+        ));
+    }
+
+    Ok(payload.teams.nodes)
+}
+
+fn team_matches_token(team: &LinearTeamNode, token: &str) -> bool {
+    let token = token.trim();
+    if team.id.eq(token) {
+        return true;
+    }
+    if let Some(key) = team.key.as_deref() {
+        if key.eq_ignore_ascii_case(token) {
+            return true;
+        }
+    }
+
+    team.name.eq_ignore_ascii_case(token)
+}
+
+fn linear_team_list_hint(teams: &[LinearTeamNode]) -> String {
+    teams
+        .iter()
+        .map(|team| {
+            if let Some(key) = &team.key {
+                format!("{} ({})", key, team.name)
+            } else {
+                team.name.to_owned()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+async fn resolve_linear_team_state_id(
+    transport: &Arc<dyn GraphqlTransport>,
+    team_id: &str,
+    target_state: &str,
+) -> Result<Option<ResolvedLinearState>, CoreError> {
+    let data = transport
+        .execute(GraphqlRequest::new(
+            TEAM_STATES_QUERY,
+            json!({ "id": team_id }),
+        ))
+        .await
+        .map_err(|error| {
+            normalize_linear_api_error(
+                error,
+                "could not resolve Linear state for team while creating issue",
+            )
+        })?;
+    let payload: TeamStatesResponse = serde_json::from_value(data).map_err(|error| {
+        CoreError::DependencyUnavailable(format!(
+            "failed to decode Linear team states payload: {error}"
+        ))
+    })?;
+    let team = payload.team.ok_or_else(|| {
+        CoreError::DependencyUnavailable(format!(
+            "Linear team lookup returned no team for id `{team_id}`."
+        ))
+    })?;
+
+    Ok(team
+        .states
+        .nodes
+        .into_iter()
+        .find(|state| state.name.eq_ignore_ascii_case(target_state.trim()))
+        .map(|state| ResolvedLinearState {
+            id: state.id,
+            name: state.name,
+        }))
+}
+
+async fn resolve_linear_create_context(
+    transport: &Arc<dyn GraphqlTransport>,
+    state: Option<&str>,
+) -> Result<LinearCreateIssueContext, CoreError> {
+    let teams = resolve_linear_teams(transport).await?;
+    let CreateTicketStateSpec { team_token, state_name } = state
+        .filter(|value| !value.trim().is_empty())
+        .map(parse_create_ticket_state_spec)
+        .unwrap_or(CreateTicketStateSpec {
+            team_token: None,
+            state_name: None,
+        });
+
+    let team = if let Some(token) = team_token.as_deref() {
+        teams
+            .iter()
+            .find(|team| team_matches_token(team, token))
+            .cloned()
+            .ok_or_else(|| {
+                CoreError::Configuration(format!(
+                    "No Linear team matches `{token}`. Available teams: {}",
+                    linear_team_list_hint(&teams)
+                ))
+            })?
+    } else if teams.len() == 1 {
+        teams[0].clone()
+    } else if state_name.is_none() {
+        return Err(CoreError::Configuration(
+            "Linear issueCreate requires a team when multiple teams are available. Provide the team in `state` as `<team-id|team-key>:<state>` or configure a default team.".to_owned(),
+        ));
+    } else {
+        let target_state = state_name.as_deref().expect("state present");
+        let mut matches = Vec::new();
+        for team in &teams {
+            if let Some(state) = resolve_linear_team_state_id(transport, &team.id, target_state).await?
+            {
+                matches.push((team.clone(), state));
+            }
+        }
+
+        if matches.is_empty() {
+            return Err(CoreError::Configuration(format!(
+                "Linear teams do not expose a state named `{target_state}`. Available teams: {}",
+                linear_team_list_hint(&teams)
+            )));
+        }
+        if matches.len() > 1 {
+            return Err(CoreError::Configuration(format!(
+                "State `{target_state}` exists in multiple teams. Provide team explicitly in `state` as `<team-id|team-key>:<state>`. Available teams: {}",
+                linear_team_list_hint(&teams)
+            )));
+        }
+        let (team, state) = matches.pop().expect("single match found");
+        return Ok(LinearCreateIssueContext {
+            team_id: team.id,
+            team_state: Some(state),
+        });
+    };
+
+    let team_state = if let Some(target_state) = state_name.as_deref() {
+            let state = resolve_linear_team_state_id(transport, &team.id, target_state).await?
+                .ok_or_else(|| {
+                    CoreError::Configuration(format!(
+                        "Linear team `{}` has no state named `{target_state}`.",
+                        team.id
+                    ))
+                })?;
+        Some(state)
+    } else {
+        None
+    };
+
+    Ok(LinearCreateIssueContext {
+        team_id: team.id,
+        team_state,
+    })
+}
+
 async fn resolve_linear_state_id(
     transport: &Arc<dyn GraphqlTransport>,
     issue_id: &str,
@@ -961,12 +1253,6 @@ async fn resolve_linear_state_id(
         id: matched_state.id.clone(),
         name: matched_state.name.clone(),
     })
-}
-
-#[derive(Debug, Clone)]
-struct ResolvedLinearState {
-    id: String,
-    name: String,
 }
 
 fn linear_provider_ticket_id(ticket_id: &TicketId) -> Result<&str, CoreError> {
@@ -1101,12 +1387,74 @@ impl TicketingProvider for LinearTicketingProvider {
 
     async fn create_ticket(
         &self,
-        _request: CreateTicketRequest,
+        request: CreateTicketRequest,
     ) -> Result<TicketSummary, CoreError> {
-        Err(CoreError::Configuration(
-            "Linear create_ticket is out of scope for AP-119; this adapter currently supports list/search and polling sync."
-                .to_owned(),
-        ))
+        let title = request.title.trim().to_owned();
+        if title.is_empty() {
+            return Err(CoreError::Configuration(
+                "Linear ticket title cannot be empty.".to_owned(),
+            ));
+        }
+        if !request.labels.is_empty() {
+            return Err(CoreError::Configuration(
+                "Linear create_ticket does not currently support label creation.".to_owned(),
+            ));
+        }
+
+        let context =
+            resolve_linear_create_context(&self.transport, request.state.as_deref()).await?;
+        let mut input = json!({
+            "teamId": context.team_id,
+            "title": title,
+        });
+
+        if let Some(description) = request.description.as_deref() {
+            let description = description.trim();
+            if !description.is_empty() {
+                input["description"] = json!(description);
+            }
+        }
+        if let Some(priority) = request.priority {
+            input["priority"] = json!(priority);
+        }
+        if let Some(team_state) = context.team_state {
+            input["stateId"] = json!(team_state.id);
+        }
+
+        let response = self
+            .transport
+            .execute(GraphqlRequest::new(ISSUE_CREATE_MUTATION, json!({ "input": input })))
+            .await
+            .map_err(|error| normalize_linear_api_error(error, "issue create failed"))?;
+        let payload: IssueCreateResponse = serde_json::from_value(response).map_err(|error| {
+            CoreError::DependencyUnavailable(format!("failed to decode Linear issueCreate payload: {error}"))
+        })?;
+        if !payload.issue_create.success {
+            return Err(CoreError::DependencyUnavailable(
+                "Linear issueCreate mutation returned success=false.".to_owned(),
+            ));
+        }
+
+        let issue = payload
+            .issue_create
+            .issue
+            .ok_or_else(|| CoreError::DependencyUnavailable(
+                "Linear issueCreate mutation did not return an issue payload."
+                    .to_owned(),
+            ))?;
+        let summary = issue_to_summary(&issue);
+        {
+            let mut cache = self.cache.write().expect("linear ticket cache write lock");
+            cache.tickets.insert(
+                issue.id.clone(),
+                CachedTicket {
+                    summary: summary.clone(),
+                    assignee_id: issue.assignee.and_then(|assignee| assignee.id),
+                },
+            );
+        }
+
+        Ok(summary)
     }
 
     async fn update_ticket_state(
@@ -1236,6 +1584,38 @@ struct GraphqlResponseEnvelope {
 #[derive(Debug, Deserialize)]
 struct GraphqlError {
     message: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct TeamListResponse {
+    teams: TeamListConnection,
+}
+
+#[derive(Debug, Deserialize)]
+struct TeamListConnection {
+    nodes: Vec<LinearTeamNode>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TeamStatesResponse {
+    team: Option<LinearTeamStateNode>,
+}
+
+#[derive(Debug, Deserialize)]
+struct LinearTeamStateNode {
+    states: IssueTeamStateConnection,
+}
+
+#[derive(Debug, Deserialize)]
+struct IssueCreateResponse {
+    #[serde(rename = "issueCreate")]
+    issue_create: IssueCreateResult,
+}
+
+#[derive(Debug, Deserialize)]
+struct IssueCreateResult {
+    success: bool,
+    issue: Option<LinearIssueNode>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1439,6 +1819,46 @@ mod tests {
         })
     }
 
+    fn teams_payload(teams: &[(&str, Option<&str>, &str)]) -> serde_json::Value {
+        json!({
+            "teams": {
+                "nodes": teams
+                    .iter()
+                    .map(|(id, key, name)| {
+                        if let Some(key) = key {
+                            json!({ "id": id, "key": key, "name": name })
+                        } else {
+                            json!({ "id": id, "name": name })
+                        }
+                    })
+                    .collect::<Vec<_>>()
+            }
+        })
+    }
+
+    fn team_states_payload(team_id: &str, states: &[(&str, &str)]) -> serde_json::Value {
+        json!({
+            "team": {
+                "id": team_id,
+                "states": {
+                    "nodes": states
+                        .iter()
+                        .map(|(id, name)| json!({ "id": id, "name": name }))
+                        .collect::<Vec<_>>()
+                }
+            }
+        })
+    }
+
+    fn issue_create_payload(issue: serde_json::Value) -> serde_json::Value {
+        json!({
+            "issueCreate": {
+                "success": true,
+                "issue": issue
+            }
+        })
+    }
+
     #[tokio::test]
     async fn sync_once_updates_cache_with_filtered_relevant_issues() {
         let query = TicketQuery {
@@ -1481,7 +1901,7 @@ mod tests {
             ))
             .await;
 
-        let provider = LinearTicketingProvider::with_transport(config, transport);
+        let provider = LinearTicketingProvider::with_transport(config, transport.clone());
         let synced = provider.sync_once().await.expect("sync succeeds");
 
         assert_eq!(synced.len(), 1);
@@ -1527,7 +1947,7 @@ mod tests {
             ))
             .await;
 
-        let provider = LinearTicketingProvider::with_transport(config, transport);
+        let provider = LinearTicketingProvider::with_transport(config, transport.clone());
         provider.sync_once().await.expect("seed cache");
 
         let result = provider
@@ -1607,7 +2027,7 @@ mod tests {
             ))
             .await;
 
-        let provider = LinearTicketingProvider::with_transport(config, transport);
+        let provider = LinearTicketingProvider::with_transport(config, transport.clone());
         let result = provider
             .list_tickets(TicketQuery {
                 assigned_to_me: false,
@@ -1672,7 +2092,7 @@ mod tests {
             ))
             .await;
 
-        let provider = LinearTicketingProvider::with_transport(config, transport);
+        let provider = LinearTicketingProvider::with_transport(config, transport.clone());
         provider.start_polling().await.expect("start polling");
 
         timeout(Duration::from_secs(1), async {
@@ -1731,7 +2151,7 @@ mod tests {
             ))
             .await;
 
-        let provider = LinearTicketingProvider::with_transport(config, transport);
+        let provider = LinearTicketingProvider::with_transport(config, transport.clone());
         provider
             .start_polling()
             .await
@@ -1752,28 +2172,287 @@ mod tests {
             .push_response(json!({ "viewer": { "id": "viewer-1" } }))
             .await;
 
-        let provider = LinearTicketingProvider::with_transport(config, transport);
+        let provider = LinearTicketingProvider::with_transport(config, transport.clone());
         provider.health_check().await.expect("health check");
     }
 
     #[tokio::test]
-    async fn create_ticket_remains_explicitly_out_of_scope() {
+    async fn create_ticket_succeeds_with_valid_input() {
         let sync_query = TicketQuery::default();
         let config = config_with(Duration::from_secs(60), sync_query);
         let transport = Arc::new(StubTransport::default());
-        let provider = LinearTicketingProvider::with_transport(config, transport);
+        transport
+            .push_response(teams_payload(&[("team-1", Some("ENG"), "Engineering")]))
+            .await;
+        transport
+            .push_response(issue_create_payload(issue_json(
+                "issue-801",
+                "AP-801",
+                "Add linear ticket create test",
+                "Todo",
+                "2026-02-16T13:00:00.000Z",
+                Some("viewer-1"),
+            )))
+            .await;
+        let provider = LinearTicketingProvider::with_transport(config, transport.clone());
+
+        let summary = provider
+            .create_ticket(CreateTicketRequest {
+                title: "Add linear ticket create test".to_owned(),
+                description: Some("Exercise create path".to_owned()),
+                state: None,
+                priority: None,
+                labels: Vec::new(),
+            })
+            .await
+            .expect("create succeeds");
+        assert_eq!(summary.ticket_id, TicketId::from_provider_uuid(TicketProvider::Linear, "issue-801"));
+        assert_eq!(summary.identifier, "AP-801");
+        assert_eq!(summary.title, "Add linear ticket create test");
+
+        let requests = transport.requests().await;
+        assert_eq!(requests.len(), 2);
+        assert!(requests[0].query.contains("Teams"));
+        assert_eq!(requests[1].query.contains("IssueCreate"), true);
+        assert_eq!(requests[1].variables["input"]["teamId"], json!("team-1"));
+        assert_eq!(
+            requests[1].variables["input"]["title"],
+            json!("Add linear ticket create test")
+        );
+        assert_eq!(requests[1].variables["input"]["description"], json!("Exercise create path"));
+    }
+
+    #[tokio::test]
+    async fn create_ticket_resolves_state_and_team_from_state_field() {
+        let sync_query = TicketQuery::default();
+        let config = config_with(Duration::from_secs(60), sync_query);
+        let transport = Arc::new(StubTransport::default());
+        transport
+            .push_response(teams_payload(&[
+                ("team-1", Some("ENG"), "Engineering"),
+                ("team-2", Some("OPS"), "Operations"),
+            ]))
+            .await;
+        transport
+            .push_response(team_states_payload("team-1", &[("state-1", "Todo"), ("state-2", "Done")]))
+            .await;
+        transport
+            .push_response(issue_create_payload(issue_json(
+                "issue-802",
+                "AP-802",
+                "State-mapped issue",
+                "Todo",
+                "2026-02-16T13:10:00.000Z",
+                Some("viewer-1"),
+            )))
+            .await;
+        let provider = LinearTicketingProvider::with_transport(config, transport.clone());
+
+        let summary = provider
+            .create_ticket(CreateTicketRequest {
+                title: "State-mapped issue".to_owned(),
+                description: None,
+                state: Some("ENG:Todo".to_owned()),
+                priority: None,
+                labels: Vec::new(),
+            })
+            .await
+            .expect("create succeeds");
+        assert_eq!(summary.ticket_id, TicketId::from_provider_uuid(TicketProvider::Linear, "issue-802"));
+        assert_eq!(summary.state, "Todo");
+
+        let requests = transport.requests().await;
+        assert_eq!(requests.len(), 3);
+        assert!(requests[0].query.contains("Teams"));
+        assert_eq!(requests[1].query.contains("TeamStates"), true);
+        assert_eq!(requests[2].query.contains("IssueCreate"), true);
+        assert_eq!(requests[1].variables["id"], json!("team-1"));
+        assert_eq!(requests[2].variables["input"]["stateId"], json!("state-1"));
+    }
+
+    #[tokio::test]
+    async fn create_ticket_rejects_empty_title_before_network_call() {
+        let sync_query = TicketQuery::default();
+        let config = config_with(Duration::from_secs(60), sync_query);
+        let transport = Arc::new(StubTransport::default());
+        let provider = LinearTicketingProvider::with_transport(config, transport.clone());
 
         let create_error = provider
             .create_ticket(CreateTicketRequest {
-                title: "x".to_owned(),
+                title: "   ".to_owned(),
                 description: None,
                 state: None,
                 priority: None,
                 labels: Vec::new(),
             })
             .await
-            .expect_err("create is out of scope");
-        assert!(create_error.to_string().contains("out of scope"));
+            .expect_err("empty title should fail");
+        assert!(create_error.to_string().contains("title cannot be empty"));
+        assert_eq!(transport.request_count().await, 0);
+    }
+
+    #[tokio::test]
+    async fn create_ticket_requires_team_when_state_omitted_with_multiple_teams() {
+        let sync_query = TicketQuery::default();
+        let config = config_with(Duration::from_secs(60), sync_query);
+        let transport = Arc::new(StubTransport::default());
+        transport
+            .push_response(teams_payload(&[
+                ("team-1", Some("ENG"), "Engineering"),
+                ("team-2", Some("OPS"), "Operations"),
+            ]))
+            .await;
+        let provider = LinearTicketingProvider::with_transport(config, transport.clone());
+
+        let create_error = provider
+            .create_ticket(CreateTicketRequest {
+                title: "Missing team".to_owned(),
+                description: None,
+                state: None,
+                priority: None,
+                labels: Vec::new(),
+            })
+            .await
+            .expect_err("missing team should fail");
+        assert!(create_error.to_string().contains("requires a team"));
+
+        let requests = transport.requests().await;
+        assert_eq!(requests.len(), 1);
+        assert!(requests[0].query.contains("Teams"));
+    }
+
+    #[tokio::test]
+    async fn create_ticket_rejects_unknown_state_name_for_team() {
+        let sync_query = TicketQuery::default();
+        let config = config_with(Duration::from_secs(60), sync_query);
+        let transport = Arc::new(StubTransport::default());
+        transport
+            .push_response(teams_payload(&[
+                ("team-1", Some("ENG"), "Engineering"),
+                ("team-2", Some("OPS"), "Operations"),
+            ]))
+            .await;
+        transport
+            .push_response(team_states_payload("team-1", &[("state-1", "Todo"), ("state-2", "Done")]))
+            .await;
+        transport
+            .push_response(team_states_payload("team-2", &[("state-3", "In Progress"), ("state-4", "Done")]))
+            .await;
+        let provider = LinearTicketingProvider::with_transport(config, transport);
+
+        let create_error = provider
+            .create_ticket(CreateTicketRequest {
+                title: "Missing state".to_owned(),
+                description: None,
+                state: Some("Unknown".to_owned()),
+                priority: None,
+                labels: Vec::new(),
+            })
+            .await
+            .expect_err("missing state should fail");
+        assert!(create_error.to_string().contains("do not expose a state named"));
+    }
+
+    #[tokio::test]
+    async fn create_ticket_resolves_team_by_name_as_token() {
+        let sync_query = TicketQuery::default();
+        let config = config_with(Duration::from_secs(60), sync_query);
+        let transport = Arc::new(StubTransport::default());
+        transport
+            .push_response(teams_payload(&[
+                ("team-1", Some("ENG"), "Engineering"),
+                ("team-2", Some("OPS"), "Operations"),
+            ]))
+            .await;
+        transport
+            .push_response(team_states_payload("team-1", &[("state-1", "Todo")]))
+            .await;
+        transport
+            .push_response(issue_create_payload(issue_json(
+                "issue-803",
+                "AP-803",
+                "Team name token",
+                "Todo",
+                "2026-02-16T13:20:00.000Z",
+                Some("viewer-1"),
+            )))
+            .await;
+        let provider = LinearTicketingProvider::with_transport(config, transport.clone());
+
+        let summary = provider
+            .create_ticket(CreateTicketRequest {
+                title: "Team name token".to_owned(),
+                description: None,
+                state: Some("Engineering:Todo".to_owned()),
+                priority: None,
+                labels: Vec::new(),
+            })
+            .await
+            .expect("create succeeds");
+        assert_eq!(
+            summary.ticket_id,
+            TicketId::from_provider_uuid(TicketProvider::Linear, "issue-803")
+        );
+
+        let requests = transport.requests().await;
+        assert_eq!(requests.len(), 3);
+        assert_eq!(requests[1].variables["id"], json!("team-1"));
+    }
+
+    #[tokio::test]
+    async fn create_ticket_omits_empty_description_from_issue_create_payload() {
+        let sync_query = TicketQuery::default();
+        let config = config_with(Duration::from_secs(60), sync_query);
+        let transport = Arc::new(StubTransport::default());
+        transport
+            .push_response(teams_payload(&[("team-1", Some("ENG"), "Engineering")]))
+            .await;
+        transport
+            .push_response(issue_create_payload(issue_json(
+                "issue-804",
+                "AP-804",
+                "No description",
+                "Todo",
+                "2026-02-16T13:25:00.000Z",
+                Some("viewer-1"),
+            )))
+            .await;
+        let provider = LinearTicketingProvider::with_transport(config, transport.clone());
+
+        provider
+            .create_ticket(CreateTicketRequest {
+                title: "No description".to_owned(),
+                description: Some("   ".to_owned()),
+                state: None,
+                priority: None,
+                labels: Vec::new(),
+            })
+            .await
+            .expect("create succeeds");
+
+        let requests = transport.requests().await;
+        assert!(!requests[1].variables["input"].as_object().unwrap().contains_key("description"));
+    }
+
+    #[tokio::test]
+    async fn create_ticket_rejects_labels_until_linear_support_is_implemented() {
+        let sync_query = TicketQuery::default();
+        let config = config_with(Duration::from_secs(60), sync_query);
+        let transport = Arc::new(StubTransport::default());
+        let provider = LinearTicketingProvider::with_transport(config, transport.clone());
+
+        let create_error = provider
+            .create_ticket(CreateTicketRequest {
+                title: "Label test".to_owned(),
+                description: None,
+                state: None,
+                priority: None,
+                labels: vec!["orchestrator".to_owned()],
+            })
+            .await
+            .expect_err("labels not supported should fail");
+        assert!(create_error.to_string().contains("does not currently support label creation"));
+        assert_eq!(transport.request_count().await, 0);
     }
 
     #[tokio::test]
@@ -2037,6 +2716,24 @@ mod tests {
         let error = parse_workflow_state_map_env("Done=Done, done=Canceled")
             .expect_err("duplicate workflow states should fail");
         assert!(error.to_string().contains("duplicate mapping"));
+    }
+
+    #[test]
+    fn parse_create_ticket_state_spec_handles_team_prefixes() {
+        let colon_spec = parse_create_ticket_state_spec("ENG:Todo");
+        assert_eq!(colon_spec.team_token.as_deref(), Some("ENG"));
+        assert_eq!(colon_spec.state_name.as_deref(), Some("Todo"));
+
+        let slash_spec = parse_create_ticket_state_spec("ops/Todo");
+        assert_eq!(slash_spec.team_token.as_deref(), Some("ops"));
+        assert_eq!(slash_spec.state_name.as_deref(), Some("Todo"));
+    }
+
+    #[test]
+    fn parse_create_ticket_state_spec_treats_whitespace_only_input_as_empty() {
+        let spec = parse_create_ticket_state_spec("   ");
+        assert!(spec.team_token.is_none());
+        assert!(spec.state_name.is_none());
     }
 
     #[test]
