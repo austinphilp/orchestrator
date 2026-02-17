@@ -69,9 +69,11 @@ pub use workflow::{
     WorkflowGuardContext, WorkflowTransitionError, WorkflowTransitionReason,
 };
 pub use workflow_automation::{
-    plan_workflow_automation, plan_workflow_automation_with_policy, WorkflowAutomationInboxIntent,
-    WorkflowAutomationPlan, WorkflowAutomationPolicy, WorkflowAutomationStep,
-    WorkflowAutomationTransitionIntent, READY_FOR_REVIEW_INBOX_TITLE,
+    plan_workflow_automation, plan_workflow_automation_with_policy, HumanApprovalGateMode,
+    WorkflowAutomationGatePolicy, WorkflowAutomationInboxIntent,
+    WorkflowAutomationNotificationPolicy, WorkflowAutomationPlan, WorkflowAutomationPolicy,
+    WorkflowAutomationStep, WorkflowAutomationTransitionIntent, WorkflowNotificationRoute,
+    DRAFT_PULL_REQUEST_INBOX_TITLE, NEEDS_APPROVAL_INBOX_TITLE, READY_FOR_REVIEW_INBOX_TITLE,
 };
 
 #[cfg(test)]
