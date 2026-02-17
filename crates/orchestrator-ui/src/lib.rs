@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::io::{self, Stdout};
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
@@ -11,11 +11,11 @@ use crossterm::terminal::{
 use crossterm::ExecutableCommand;
 use orchestrator_core::{
     attention_inbox_snapshot, command_ids, ArtifactKind, ArtifactProjection, AttentionBatchKind,
-    AttentionEngineConfig, AttentionPriorityBand, CoreError, InboxItemId, InboxItemKind,
-    LlmChatRequest, LlmFinishReason, LlmMessage, LlmProvider, LlmRateLimitState, LlmRole,
-    LlmTokenUsage, OrchestrationEventPayload, ProjectionState,
-    SelectedTicketFlowResult, TicketId, TicketSummary, WorkItemId, WorkerSessionId,
-    WorkerSessionStatus, WorkflowState,
+    AttentionEngineConfig, AttentionPriorityBand, Command, CommandRegistry, CoreError, InboxItemId,
+    InboxItemKind, LlmChatRequest, LlmFinishReason, LlmMessage, LlmProvider, LlmRateLimitState,
+    LlmResponseStream, LlmRole, LlmTokenUsage, OrchestrationEventPayload, ProjectionState,
+    SelectedTicketFlowResult, SupervisorQueryArgs, TicketId, TicketSummary,
+    UntypedCommandInvocation, WorkItemId, WorkerSessionId, WorkerSessionStatus, WorkflowState,
 };
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Layout, Rect};
@@ -45,6 +45,24 @@ pub trait TicketPickerProvider: Send + Sync {
         ticket: TicketSummary,
     ) -> Result<SelectedTicketFlowResult, CoreError>;
     async fn reload_projection(&self) -> Result<ProjectionState, CoreError>;
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct SupervisorCommandContext {
+    pub selected_work_item_id: Option<String>,
+    pub selected_session_id: Option<String>,
+    pub scope: Option<String>,
+}
+
+#[async_trait]
+pub trait SupervisorCommandDispatcher: Send + Sync {
+    async fn dispatch_supervisor_command(
+        &self,
+        invocation: UntypedCommandInvocation,
+        context: SupervisorCommandContext,
+    ) -> Result<(String, LlmResponseStream), CoreError>;
+
+    async fn cancel_supervisor_command(&self, stream_id: &str) -> Result<(), CoreError>;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1511,19 +1529,15 @@ impl TicketPickerOverlayState {
         preferred_ticket_id: Option<&TicketId>,
         preferred_project_index: Option<usize>,
     ) {
-        self.ticket_rows = self
-            .project_groups
-            .iter()
-            .enumerate()
-            .flat_map(|(project_index, project_group)| {
-                let mut rows = vec![TicketPickerRowRef::ProjectHeader { project_index }];
-                if !project_group.collapsed {
-                    rows.extend(
-                        project_group
-                            .status_groups
-                            .iter()
-                            .enumerate()
-                            .flat_map(move |(status_index, status_group)| {
+        self.ticket_rows =
+            self.project_groups
+                .iter()
+                .enumerate()
+                .flat_map(|(project_index, project_group)| {
+                    let mut rows = vec![TicketPickerRowRef::ProjectHeader { project_index }];
+                    if !project_group.collapsed {
+                        rows.extend(project_group.status_groups.iter().enumerate().flat_map(
+                            move |(status_index, status_group)| {
                                 status_group.tickets.iter().enumerate().map(
                                     move |(ticket_index, _)| TicketPickerRowRef::Ticket {
                                         project_index,
@@ -1531,12 +1545,12 @@ impl TicketPickerOverlayState {
                                         ticket_index,
                                     },
                                 )
-                            }),
-                    );
-                }
-                rows
-            })
-            .collect();
+                            },
+                        ));
+                    }
+                    rows
+                })
+                .collect();
 
         if self.ticket_rows.is_empty() {
             self.selected_row_index = None;
@@ -1613,6 +1627,7 @@ struct UiShellState {
     mode: UiMode,
     terminal_escape_pending: bool,
     supervisor_provider: Option<Arc<dyn LlmProvider>>,
+    supervisor_command_dispatcher: Option<Arc<dyn SupervisorCommandDispatcher>>,
     supervisor_chat_stream: Option<ActiveSupervisorChatStream>,
     ticket_picker_provider: Option<Arc<dyn TicketPickerProvider>>,
     ticket_picker_sender: Option<mpsc::Sender<TicketPickerEvent>>,
@@ -1624,7 +1639,7 @@ struct UiShellState {
 impl UiShellState {
     #[cfg(test)]
     fn new(status: String, domain: ProjectionState) -> Self {
-        Self::new_with_integrations(status, domain, None, None)
+        Self::new_with_integrations(status, domain, None, None, None)
     }
     #[cfg(test)]
     fn new_with_supervisor(
@@ -1632,13 +1647,14 @@ impl UiShellState {
         domain: ProjectionState,
         supervisor_provider: Option<Arc<dyn LlmProvider>>,
     ) -> Self {
-        Self::new_with_integrations(status, domain, supervisor_provider, None)
+        Self::new_with_integrations(status, domain, supervisor_provider, None, None)
     }
 
     fn new_with_integrations(
         status: String,
         domain: ProjectionState,
         supervisor_provider: Option<Arc<dyn LlmProvider>>,
+        supervisor_command_dispatcher: Option<Arc<dyn SupervisorCommandDispatcher>>,
         ticket_picker_provider: Option<Arc<dyn TicketPickerProvider>>,
     ) -> Self {
         let (ticket_picker_sender, ticket_picker_receiver) = if ticket_picker_provider.is_some() {
@@ -1661,6 +1677,7 @@ impl UiShellState {
             mode: UiMode::Normal,
             terminal_escape_pending: false,
             supervisor_provider,
+            supervisor_command_dispatcher,
             supervisor_chat_stream: None,
             ticket_picker_provider,
             ticket_picker_sender,
@@ -2009,12 +2026,6 @@ impl UiShellState {
     }
 
     fn start_supervisor_stream_for_selected(&mut self) {
-        let Some(provider) = self.supervisor_provider.clone() else {
-            self.status_warning =
-                Some("supervisor stream unavailable: no LLM provider configured".to_owned());
-            return;
-        };
-
         let ui_state = project_ui_state(
             self.base_status.as_str(),
             &self.domain,
@@ -2027,6 +2038,22 @@ impl UiShellState {
             .and_then(|index| ui_state.inbox_rows.get(index))
             .cloned()
         else {
+            self.status_warning = Some(
+                "supervisor query unavailable: select an inbox item before opening chat".to_owned(),
+            );
+            return;
+        };
+
+        if let Some(dispatcher) = self.supervisor_command_dispatcher.clone() {
+            self.start_supervisor_stream_with_dispatcher(dispatcher, selected_row);
+            return;
+        }
+
+        let Some(provider) = self.supervisor_provider.clone() else {
+            self.status_warning = Some(
+                "supervisor stream unavailable: no LLM provider or command dispatcher configured"
+                    .to_owned(),
+            );
             return;
         };
 
@@ -2040,6 +2067,62 @@ impl UiShellState {
             Ok(handle) => {
                 handle.spawn(async move {
                     run_supervisor_stream_task(provider, request, sender).await;
+                });
+            }
+            Err(_) => {
+                self.status_warning =
+                    Some("supervisor stream unavailable: tokio runtime is not active".to_owned());
+                if let Some(stream) = self.supervisor_chat_stream.as_mut() {
+                    stream.lifecycle = SupervisorStreamLifecycle::Error;
+                    stream.error_message =
+                        Some("tokio runtime unavailable; cannot spawn stream task".to_owned());
+                }
+            }
+        }
+    }
+
+    fn start_supervisor_stream_with_dispatcher(
+        &mut self,
+        dispatcher: Arc<dyn SupervisorCommandDispatcher>,
+        selected_row: UiInboxRow,
+    ) {
+        let invocation = match CommandRegistry::default().to_untyped_invocation(
+            &Command::SupervisorQuery(SupervisorQueryArgs::Template {
+                template: "status_current_session".to_owned(),
+                variables: BTreeMap::new(),
+            }),
+        ) {
+            Ok(invocation) => invocation,
+            Err(error) => {
+                self.status_warning = Some(format!(
+                    "supervisor query unavailable: failed to build command invocation ({error})"
+                ));
+                return;
+            }
+        };
+
+        let context = SupervisorCommandContext {
+            selected_work_item_id: Some(selected_row.work_item_id.as_str().to_owned()),
+            selected_session_id: selected_row
+                .session_id
+                .as_ref()
+                .map(|session_id| session_id.as_str().to_owned()),
+            scope: selected_row
+                .session_id
+                .as_ref()
+                .map(|session_id| format!("session:{}", session_id.as_str()))
+                .or_else(|| Some(format!("work_item:{}", selected_row.work_item_id.as_str()))),
+        };
+
+        let work_item_id = selected_row.work_item_id.clone();
+        let (sender, receiver) = mpsc::channel(SUPERVISOR_STREAM_CHANNEL_CAPACITY);
+        self.replace_supervisor_stream(work_item_id, receiver);
+        self.status_warning = None;
+
+        match TokioHandle::try_current() {
+            Ok(handle) => {
+                handle.spawn(async move {
+                    run_supervisor_command_task(dispatcher, invocation, context, sender).await;
                 });
             }
             Err(_) => {
@@ -2088,6 +2171,24 @@ impl UiShellState {
     }
 
     fn spawn_supervisor_cancel(&mut self, stream_id: String) {
+        if let Some(dispatcher) = self.supervisor_command_dispatcher.clone() {
+            match TokioHandle::try_current() {
+                Ok(handle) => {
+                    handle.spawn(async move {
+                        let _ = dispatcher
+                            .cancel_supervisor_command(stream_id.as_str())
+                            .await;
+                    });
+                }
+                Err(_) => {
+                    self.status_warning = Some(
+                        "supervisor cancel unavailable: tokio runtime is not active".to_owned(),
+                    );
+                }
+            }
+            return;
+        }
+
         let Some(provider) = self.supervisor_provider.clone() else {
             self.status_warning =
                 Some("supervisor cancel unavailable: no LLM provider configured".to_owned());
@@ -2319,7 +2420,7 @@ async fn run_supervisor_stream_task(
     request: LlmChatRequest,
     sender: mpsc::Sender<SupervisorStreamEvent>,
 ) {
-    let (stream_id, mut stream) = match provider.stream_chat(request).await {
+    let (stream_id, stream) = match provider.stream_chat(request).await {
         Ok(response) => response,
         Err(error) => {
             let _ = sender
@@ -2331,6 +2432,38 @@ async fn run_supervisor_stream_task(
         }
     };
 
+    relay_supervisor_stream(stream_id, stream, sender).await;
+}
+
+async fn run_supervisor_command_task(
+    dispatcher: Arc<dyn SupervisorCommandDispatcher>,
+    invocation: UntypedCommandInvocation,
+    context: SupervisorCommandContext,
+    sender: mpsc::Sender<SupervisorStreamEvent>,
+) {
+    let (stream_id, stream) = match dispatcher
+        .dispatch_supervisor_command(invocation, context)
+        .await
+    {
+        Ok(response) => response,
+        Err(error) => {
+            let _ = sender
+                .send(SupervisorStreamEvent::Failed {
+                    message: error.to_string(),
+                })
+                .await;
+            return;
+        }
+    };
+
+    relay_supervisor_stream(stream_id, stream, sender).await;
+}
+
+async fn relay_supervisor_stream(
+    stream_id: String,
+    mut stream: LlmResponseStream,
+    sender: mpsc::Sender<SupervisorStreamEvent>,
+) {
     if sender
         .send(SupervisorStreamEvent::Started { stream_id })
         .await
@@ -2468,6 +2601,7 @@ async fn run_ticket_picker_start_task(
 pub struct Ui {
     terminal: Terminal<CrosstermBackend<Stdout>>,
     supervisor_provider: Option<Arc<dyn LlmProvider>>,
+    supervisor_command_dispatcher: Option<Arc<dyn SupervisorCommandDispatcher>>,
     ticket_picker_provider: Option<Arc<dyn TicketPickerProvider>>,
 }
 
@@ -2481,12 +2615,21 @@ impl Ui {
         Ok(Self {
             terminal,
             supervisor_provider: None,
+            supervisor_command_dispatcher: None,
             ticket_picker_provider: None,
         })
     }
 
     pub fn with_supervisor_provider(mut self, provider: Arc<dyn LlmProvider>) -> Self {
         self.supervisor_provider = Some(provider);
+        self
+    }
+
+    pub fn with_supervisor_command_dispatcher(
+        mut self,
+        dispatcher: Arc<dyn SupervisorCommandDispatcher>,
+    ) -> Self {
+        self.supervisor_command_dispatcher = Some(dispatcher);
         self
     }
 
@@ -2500,6 +2643,7 @@ impl Ui {
             status.to_owned(),
             projection.clone(),
             self.supervisor_provider.clone(),
+            self.supervisor_command_dispatcher.clone(),
             self.ticket_picker_provider.clone(),
         );
         loop {
@@ -2665,9 +2809,10 @@ fn ticket_picker_popup(anchor_area: Rect) -> Option<Rect> {
 }
 
 fn render_ticket_picker_overlay_text(overlay: &TicketPickerOverlayState) -> String {
-    let mut lines =
-        vec!["j/k or arrows: move | h/Left: fold | l/Right: unfold | Enter: start | Esc: close"
-            .to_owned()];
+    let mut lines = vec![
+        "j/k or arrows: move | h/Left: fold | l/Right: unfold | Enter: start | Esc: close"
+            .to_owned(),
+    ];
 
     if overlay.loading {
         lines.push("Loading unfinished tickets...".to_owned());
@@ -2702,7 +2847,11 @@ fn render_ticket_picker_overlay_text(overlay: &TicketPickerOverlayState) -> Stri
             })
             .unwrap_or_default();
         let selected_prefix = if project_selected { ">" } else { " " };
-        let fold_marker = if project_group.collapsed { "[+]" } else { "[-]" };
+        let fold_marker = if project_group.collapsed {
+            "[+]"
+        } else {
+            "[-]"
+        };
         lines.push(format!(
             "{selected_prefix}{fold_marker} {} ({})",
             project_group.project,
@@ -2715,7 +2864,11 @@ fn render_ticket_picker_overlay_text(overlay: &TicketPickerOverlayState) -> Stri
         }
 
         for (status_index, status_group) in project_group.status_groups.iter().enumerate() {
-            lines.push(format!("   {} ({})", status_group.status, status_group.tickets.len()));
+            lines.push(format!(
+                "   {} ({})",
+                status_group.status,
+                status_group.tickets.len()
+            ));
             for (ticket_index, ticket) in status_group.tickets.iter().enumerate() {
                 let is_selected = overlay
                     .selected_row()
@@ -2925,22 +3078,23 @@ fn group_tickets_by_status(
     tickets: Vec<TicketSummary>,
     priority_states: &[String],
 ) -> Vec<TicketStatusGroup> {
-    let mut groups = tickets
-        .into_iter()
-        .fold(Vec::<TicketStatusGroup>::new(), |mut groups, ticket| {
-            if let Some(existing) = groups
-                .iter_mut()
-                .find(|group| group.status.eq_ignore_ascii_case(ticket.state.as_str()))
-            {
-                existing.tickets.push(ticket);
-            } else {
-                groups.push(TicketStatusGroup {
-                    status: ticket.state.clone(),
-                    tickets: vec![ticket],
-                });
-            }
-            groups
-        });
+    let mut groups =
+        tickets
+            .into_iter()
+            .fold(Vec::<TicketStatusGroup>::new(), |mut groups, ticket| {
+                if let Some(existing) = groups
+                    .iter_mut()
+                    .find(|group| group.status.eq_ignore_ascii_case(ticket.state.as_str()))
+                {
+                    existing.tickets.push(ticket);
+                } else {
+                    groups.push(TicketStatusGroup {
+                        status: ticket.state.clone(),
+                        tickets: vec![ticket],
+                    });
+                }
+                groups
+            });
 
     for group in &mut groups {
         group.tickets.sort_by(|left, right| {

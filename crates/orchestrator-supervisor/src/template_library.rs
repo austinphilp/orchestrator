@@ -192,6 +192,41 @@ Context pack:\n{}",
     ])
 }
 
+pub fn build_freeform_messages(
+    raw_query: &str,
+    context: &BoundedContextPack,
+) -> Result<Vec<LlmMessage>, CoreError> {
+    let query = raw_query.trim();
+    if query.is_empty() {
+        return Err(CoreError::InvalidCommandArgs {
+            command_id: command_ids::SUPERVISOR_QUERY.to_owned(),
+            reason: "freeform supervisor query requires a non-empty query string".to_owned(),
+        });
+    }
+
+    let user_prompt = format!(
+        "Operator question:\n\
+{query}\n\n\
+Respond directly to this question using only the context pack.\n\
+If evidence is missing, answer `Unknown` and list what is missing.\n\n\
+Context pack:\n{}",
+        render_context_pack(context)
+    );
+
+    Ok(vec![
+        LlmMessage {
+            role: LlmRole::System,
+            content: SUPERVISOR_SYSTEM_PROMPT.to_owned(),
+            name: None,
+        },
+        LlmMessage {
+            role: LlmRole::User,
+            content: user_prompt,
+            name: None,
+        },
+    ])
+}
+
 fn render_template_variables(variables: &BTreeMap<String, String>) -> String {
     if variables.is_empty() {
         return String::new();
@@ -400,6 +435,30 @@ mod tests {
         assert!(messages[1].content.contains("Template variables:"));
         assert!(messages[1].content.contains("- channel=review"));
         assert!(messages[1].content.contains("- ticket=AP-129"));
+    }
+
+    #[test]
+    fn build_freeform_messages_includes_operator_question_and_context() {
+        let context = sample_context_pack();
+        let messages =
+            build_freeform_messages("What changed today?", &context).expect("freeform messages");
+
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].role, LlmRole::System);
+        assert_eq!(messages[1].role, LlmRole::User);
+        assert!(messages[1].content.contains("Operator question:"));
+        assert!(messages[1].content.contains("What changed today?"));
+        assert!(messages[1].content.contains("Context pack:"));
+        assert!(messages[1].content.contains("evt-1"));
+    }
+
+    #[test]
+    fn build_freeform_messages_rejects_blank_query() {
+        let context = sample_context_pack();
+        let err = build_freeform_messages(" \n\t", &context).expect_err("blank query should fail");
+        assert!(err
+            .to_string()
+            .contains("freeform supervisor query requires a non-empty query string"));
     }
 
     fn sample_context_pack() -> BoundedContextPack {

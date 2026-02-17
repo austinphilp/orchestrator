@@ -37,8 +37,9 @@ async fn main() -> Result<()> {
     ));
 
     let state = app.startup_state().await?;
+    let supervisor_dispatcher: Arc<dyn orchestrator_ui::SupervisorCommandDispatcher> = app.clone();
     let mut ui = Ui::init()?
-        .with_supervisor_provider(Arc::new(app.supervisor.clone()))
+        .with_supervisor_command_dispatcher(supervisor_dispatcher)
         .with_ticket_picker_provider(ticket_picker_provider);
     ui.run(&state.status, &state.projection)?;
 
