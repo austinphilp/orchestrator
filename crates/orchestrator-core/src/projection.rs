@@ -178,7 +178,11 @@ pub fn apply_event(state: &mut ProjectionState, event: StoredEventEnvelope) {
             }
         }
         OrchestrationEventPayload::TicketSynced(_)
-        | OrchestrationEventPayload::UserResponded(_) => {}
+        | OrchestrationEventPayload::UserResponded(_)
+        | OrchestrationEventPayload::SupervisorQueryStarted(_)
+        | OrchestrationEventPayload::SupervisorQueryChunk(_)
+        | OrchestrationEventPayload::SupervisorQueryCancelled(_)
+        | OrchestrationEventPayload::SupervisorQueryFinished(_) => {}
     }
 
     state.events.push(event);

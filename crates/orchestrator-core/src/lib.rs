@@ -37,9 +37,11 @@ pub use events::{
     ArtifactCreatedPayload, InboxItemCreatedPayload, InboxItemResolvedPayload, NewEventEnvelope,
     OrchestrationEventPayload, OrchestrationEventType, SessionBlockedPayload,
     SessionCheckpointPayload, SessionCompletedPayload, SessionCrashedPayload,
-    SessionNeedsInputPayload, SessionSpawnedPayload, StoredEventEnvelope, TicketSyncedPayload,
-    UserRespondedPayload, WorkItemCreatedPayload, WorkflowTransitionPayload,
-    WorktreeCreatedPayload,
+    SessionNeedsInputPayload, SessionSpawnedPayload, StoredEventEnvelope,
+    SupervisorQueryCancellationSource, SupervisorQueryCancelledPayload,
+    SupervisorQueryChunkPayload, SupervisorQueryFinishedPayload, SupervisorQueryKind,
+    SupervisorQueryStartedPayload, TicketSyncedPayload, UserRespondedPayload,
+    WorkItemCreatedPayload, WorkflowTransitionPayload, WorktreeCreatedPayload,
 };
 pub use identifiers::{
     ArtifactId, InboxItemId, ProjectId, TicketId, TicketProvider, WorkItemId, WorkerSessionId,

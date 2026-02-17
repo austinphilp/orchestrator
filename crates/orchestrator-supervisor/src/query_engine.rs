@@ -3,7 +3,7 @@ use std::collections::HashSet;
 use orchestrator_core::{
     ArtifactId, ArtifactKind, ArtifactRecord, CoreError, EventStore, OrchestrationEventPayload,
     OrchestrationEventType, RetrievalScope, SqliteEventStore, StoredEventEnvelope,
-    SupervisorQueryContextArgs, TicketRecord, WorkItemId, WorkerSessionId,
+    SupervisorQueryContextArgs, SupervisorQueryKind, TicketRecord, WorkItemId, WorkerSessionId,
 };
 use serde_json::Value;
 
@@ -628,6 +628,67 @@ fn summarize_event_payload(payload: &OrchestrationEventPayload, max_chars: usize
                 "user responded: {}",
                 compact_text(response.message.as_str())
             )
+        }
+        OrchestrationEventPayload::SupervisorQueryStarted(started) => match started.kind {
+            SupervisorQueryKind::Template => format!(
+                "supervisor query {} started (template: {}, scope: {})",
+                started.query_id,
+                started.template.as_deref().unwrap_or("unknown"),
+                started.scope
+            ),
+            SupervisorQueryKind::Freeform => format!(
+                "supervisor query {} started (freeform, scope: {})",
+                started.query_id, started.scope
+            ),
+        },
+        OrchestrationEventPayload::SupervisorQueryChunk(chunk) => {
+            let mut summary = format!(
+                "supervisor query {} chunk #{} (+{} chars, total {} chars)",
+                chunk.query_id, chunk.chunk_index, chunk.delta_chars, chunk.cumulative_output_chars
+            );
+            if let Some(reason) = chunk.finish_reason.as_ref() {
+                summary.push_str(format!(" finish={reason:?}").as_str());
+            }
+            if let Some(usage) = chunk.usage.as_ref() {
+                summary.push_str(
+                    format!(
+                        " usage(input={}, output={}, total={})",
+                        usage.input_tokens, usage.output_tokens, usage.total_tokens
+                    )
+                    .as_str(),
+                );
+            }
+            summary
+        }
+        OrchestrationEventPayload::SupervisorQueryCancelled(cancelled) => format!(
+            "supervisor query {} cancel requested ({:?})",
+            cancelled.query_id, cancelled.source
+        ),
+        OrchestrationEventPayload::SupervisorQueryFinished(finished) => {
+            let mut summary = format!(
+                "supervisor query {} finished {:?} in {}ms (chunks={}, chars={})",
+                finished.query_id,
+                finished.finish_reason,
+                finished.duration_ms,
+                finished.chunk_count,
+                finished.output_chars
+            );
+            if let Some(usage) = finished.usage.as_ref() {
+                summary.push_str(
+                    format!(
+                        " usage(input={}, output={}, total={})",
+                        usage.input_tokens, usage.output_tokens, usage.total_tokens
+                    )
+                    .as_str(),
+                );
+            }
+            if let Some(source) = finished.cancellation_source.as_ref() {
+                summary.push_str(format!(" cancellation={source:?}").as_str());
+            }
+            if let Some(error) = finished.error.as_deref() {
+                summary.push_str(format!(" error={}", compact_text(error)).as_str());
+            }
+            summary
         }
     };
 

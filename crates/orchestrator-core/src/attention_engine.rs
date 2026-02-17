@@ -539,7 +539,11 @@ fn collect_timeline(
             OrchestrationEventPayload::TicketSynced(_)
             | OrchestrationEventPayload::WorkItemCreated(_)
             | OrchestrationEventPayload::WorktreeCreated(_)
-            | OrchestrationEventPayload::SessionCrashed(_) => {}
+            | OrchestrationEventPayload::SessionCrashed(_)
+            | OrchestrationEventPayload::SupervisorQueryStarted(_)
+            | OrchestrationEventPayload::SupervisorQueryChunk(_)
+            | OrchestrationEventPayload::SupervisorQueryCancelled(_)
+            | OrchestrationEventPayload::SupervisorQueryFinished(_) => {}
         }
     }
 

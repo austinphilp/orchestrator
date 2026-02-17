@@ -763,6 +763,9 @@ fn project_chat_inspector_lines(
     } else {
         lines.extend(event_lines.into_iter().map(|line| format!("- {line}")));
     }
+    if let Some(summary) = latest_supervisor_query_metrics_line(work_item_id, domain) {
+        lines.push(format!("- {summary}"));
+    }
 
     lines.push(String::new());
     lines.push("Chat artifacts:".to_owned());
@@ -1000,6 +1003,29 @@ fn collect_chat_event_lines(work_item_id: &WorkItemId, domain: &ProjectionState)
                 "worker blocked: {}",
                 compact_focus_card_text(payload.reason.as_str())
             )),
+            OrchestrationEventPayload::SupervisorQueryStarted(payload) => {
+                let descriptor = payload
+                    .template
+                    .as_deref()
+                    .map(|template| format!("template={template}"))
+                    .or_else(|| payload.query.as_deref().map(|_| "freeform".to_owned()))
+                    .unwrap_or_else(|| "unknown".to_owned());
+                Some(format!(
+                    "supervisor query started: {descriptor} ({})",
+                    payload.query_id
+                ))
+            }
+            OrchestrationEventPayload::SupervisorQueryCancelled(payload) => Some(format!(
+                "supervisor query cancel requested: {:?} ({})",
+                payload.source, payload.query_id
+            )),
+            OrchestrationEventPayload::SupervisorQueryFinished(payload) => Some(format!(
+                "supervisor query finished {:?}: {}ms, {} chunks, {} chars",
+                payload.finish_reason,
+                payload.duration_ms,
+                payload.chunk_count,
+                payload.output_chars
+            )),
             _ => None,
         };
 
@@ -1013,6 +1039,50 @@ fn collect_chat_event_lines(work_item_id: &WorkItemId, domain: &ProjectionState)
 
     lines.reverse();
     lines
+}
+
+fn latest_supervisor_query_metrics_line(
+    work_item_id: &WorkItemId,
+    domain: &ProjectionState,
+) -> Option<String> {
+    for event in domain.events.iter().rev().take(INSPECTOR_EVENT_SCAN_LIMIT) {
+        if event.work_item_id.as_ref() != Some(work_item_id) {
+            continue;
+        }
+
+        let OrchestrationEventPayload::SupervisorQueryFinished(payload) = &event.payload else {
+            continue;
+        };
+
+        let usage = payload
+            .usage
+            .as_ref()
+            .map(|usage| {
+                format!(
+                    " usage(input={} output={} total={})",
+                    usage.input_tokens, usage.output_tokens, usage.total_tokens
+                )
+            })
+            .unwrap_or_default();
+        let cancellation = payload
+            .cancellation_source
+            .as_ref()
+            .map(|source| format!(" cancellation={source:?}"))
+            .unwrap_or_default();
+
+        return Some(format!(
+            "Latest query metrics: id={} reason={:?} duration={}ms chunks={} chars={}{}{}",
+            payload.query_id,
+            payload.finish_reason,
+            payload.duration_ms,
+            payload.chunk_count,
+            payload.output_chars,
+            usage,
+            cancellation
+        ));
+    }
+
+    None
 }
 
 fn build_supervisor_chat_request(
@@ -3912,7 +3982,7 @@ mod tests {
         LlmProviderKind, LlmResponseStream, LlmResponseSubscription, LlmStreamChunk,
         OrchestrationEventPayload, OrchestrationEventType, SessionBlockedPayload,
         SessionCheckpointPayload, SessionNeedsInputPayload, SessionProjection, StoredEventEnvelope,
-        UserRespondedPayload, WorkItemProjection, WorkflowState,
+        SupervisorQueryFinishedPayload, UserRespondedPayload, WorkItemProjection, WorkflowState,
     };
     use std::collections::VecDeque;
     use std::sync::{Arc, Mutex};
@@ -4758,6 +4828,52 @@ mod tests {
         assert!(chat_rendered.contains("Supervisor output:"));
         assert!(chat_rendered.contains("you: Please summarize the supervisor output."));
         assert!(chat_rendered.contains("artifact://chat/wi-inspector"));
+    }
+
+    #[test]
+    fn chat_inspector_surfaces_latest_supervisor_query_metrics() {
+        let mut projection = inspector_projection();
+        projection.events.push(StoredEventEnvelope {
+            event_id: "evt-inspector-supervisor-finished".to_owned(),
+            sequence: 4,
+            occurred_at: "2026-02-16T09:03:00Z".to_owned(),
+            work_item_id: Some(WorkItemId::new("wi-inspector")),
+            session_id: Some(WorkerSessionId::new("sess-inspector")),
+            event_type: OrchestrationEventType::SupervisorQueryFinished,
+            payload: OrchestrationEventPayload::SupervisorQueryFinished(
+                SupervisorQueryFinishedPayload {
+                    query_id: "supq-1".to_owned(),
+                    stream_id: "stream-1".to_owned(),
+                    started_at: "2026-02-16T09:02:58Z".to_owned(),
+                    finished_at: "2026-02-16T09:03:00Z".to_owned(),
+                    duration_ms: 2010,
+                    finish_reason: LlmFinishReason::Stop,
+                    chunk_count: 6,
+                    output_chars: 412,
+                    usage: Some(LlmTokenUsage {
+                        input_tokens: 144,
+                        output_tokens: 41,
+                        total_tokens: 185,
+                    }),
+                    error: None,
+                    cancellation_source: None,
+                },
+            ),
+            schema_version: 1,
+        });
+
+        let work_item_id = WorkItemId::new("wi-inspector");
+        let mut stack = ViewStack::default();
+        stack.replace_center(CenterView::InspectorView {
+            work_item_id,
+            inspector: ArtifactInspectorKind::Chat,
+        });
+        let chat_state = project_ui_state("ready", &projection, &stack, None, None);
+        let rendered = chat_state.center_pane.lines.join("\n");
+
+        assert!(rendered.contains("Latest query metrics: id=supq-1"));
+        assert!(rendered.contains("duration=2010ms"));
+        assert!(rendered.contains("usage(input=144 output=41 total=185)"));
     }
 
     #[test]
