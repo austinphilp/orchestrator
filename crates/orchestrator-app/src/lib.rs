@@ -1,8 +1,14 @@
 use orchestrator_core::{
-    rebuild_projection, CoreError, EventStore, GithubClient, ProjectionState,
+    command_ids, rebuild_projection, Command, CommandRegistry, CoreError, EventStore, GithubClient,
+    LlmChatRequest, LlmProvider, LlmResponseStream, ProjectionState, RetrievalScope,
     SelectedTicketFlowConfig, SelectedTicketFlowResult, SqliteEventStore, Supervisor,
-    TicketSummary, VcsProvider, WorkerBackend,
+    SupervisorQueryArgs, TicketSummary, UntypedCommandInvocation, VcsProvider, WorkItemId,
+    WorkerBackend, WorkerSessionId,
 };
+use orchestrator_supervisor::{
+    build_freeform_messages, build_template_messages_with_variables, SupervisorQueryEngine,
+};
+use orchestrator_ui::{SupervisorCommandContext, SupervisorCommandDispatcher};
 use serde::{Deserialize, Serialize};
 mod ticket_picker;
 pub use ticket_picker::AppTicketPickerProvider;
@@ -14,9 +20,24 @@ pub struct AppConfig {
     pub event_store_path: String,
 }
 
-fn default_event_store_path() -> String {
-    "./orchestrator-events.db".to_owned()
+const LEGACY_DEFAULT_WORKSPACE_PATH: &str = "./";
+const LEGACY_DEFAULT_EVENT_STORE_PATH: &str = "./orchestrator-events.db";
+
+fn default_workspace_path() -> String {
+    default_orchestrator_data_dir()
+        .join("workspace")
+        .to_string_lossy()
+        .to_string()
 }
+
+fn default_event_store_path() -> String {
+    default_orchestrator_data_dir()
+        .join("orchestrator-events.db")
+        .to_string_lossy()
+        .to_string()
+}
+
+const DEFAULT_SUPERVISOR_MODEL: &str = "openai/gpt-4o-mini";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct StartupState {
@@ -27,7 +48,7 @@ pub struct StartupState {
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
-            workspace: "./".to_owned(),
+            workspace: default_workspace_path(),
             event_store_path: default_event_store_path(),
         }
     }
@@ -70,6 +91,96 @@ fn default_config_path() -> Result<std::path::PathBuf, CoreError> {
         .join("config.toml"))
 }
 
+fn default_orchestrator_data_dir() -> std::path::PathBuf {
+    resolve_data_local_dir().join("orchestrator")
+}
+
+fn resolve_data_local_dir() -> std::path::PathBuf {
+    #[cfg(target_os = "windows")]
+    {
+        if let Ok(path) = std::env::var("LOCALAPPDATA") {
+            let path = path.trim();
+            if !path.is_empty() {
+                return absolutize_path(std::path::PathBuf::from(path));
+            }
+        }
+        if let Ok(path) = std::env::var("APPDATA") {
+            let path = path.trim();
+            if !path.is_empty() {
+                return absolutize_path(std::path::PathBuf::from(path));
+            }
+        }
+        if let Some(home) = resolve_home_dir() {
+            return home.join("AppData").join("Local");
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        if let Some(home) = resolve_home_dir() {
+            return home.join("Library").join("Application Support");
+        }
+    }
+
+    #[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
+    {
+        if let Ok(path) = std::env::var("XDG_DATA_HOME") {
+            let path = path.trim();
+            if !path.is_empty() {
+                return absolutize_path(std::path::PathBuf::from(path));
+            }
+        }
+        if let Some(home) = resolve_home_dir() {
+            return home.join(".local").join("share");
+        }
+    }
+
+    std::env::temp_dir()
+}
+
+fn resolve_home_dir() -> Option<std::path::PathBuf> {
+    std::env::var("HOME")
+        .ok()
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+        .map(std::path::PathBuf::from)
+        .or_else(|| {
+            std::env::var("USERPROFILE")
+                .ok()
+                .map(|value| value.trim().to_owned())
+                .filter(|value| !value.is_empty())
+                .map(std::path::PathBuf::from)
+        })
+}
+
+fn absolutize_path(path: std::path::PathBuf) -> std::path::PathBuf {
+    if path.is_absolute() {
+        return path;
+    }
+
+    if let Ok(current) = std::env::current_dir() {
+        return current.join(path);
+    }
+
+    std::env::temp_dir().join(path)
+}
+
+fn persist_config(path: &std::path::Path, config: &AppConfig) -> Result<(), CoreError> {
+    let rendered = toml::to_string_pretty(config).map_err(|err| {
+        CoreError::Configuration(format!(
+            "Failed to serialize ORCHESTRATOR_CONFIG for {}: {err}",
+            path.display()
+        ))
+    })?;
+
+    std::fs::write(path, rendered.as_bytes()).map_err(|err| {
+        CoreError::Configuration(format!(
+            "Failed to write ORCHESTRATOR_CONFIG to {}: {err}",
+            path.display()
+        ))
+    })
+}
+
 fn load_or_create_config(path: &std::path::Path) -> Result<AppConfig, CoreError> {
     let raw = match std::fs::read_to_string(path) {
         Ok(raw) => raw,
@@ -85,20 +196,14 @@ fn load_or_create_config(path: &std::path::Path) -> Result<AppConfig, CoreError>
                 }
             }
 
-            let rendered = toml::to_string_pretty(&AppConfig::default()).map_err(|err| {
+            let default_config = AppConfig::default();
+            persist_config(path, &default_config)?;
+
+            toml::to_string_pretty(&default_config).map_err(|err| {
                 CoreError::Configuration(format!(
                     "Failed to serialize default ORCHESTRATOR_CONFIG: {err}"
                 ))
-            })?;
-
-            std::fs::write(path, rendered.as_bytes()).map_err(|err| {
-                CoreError::Configuration(format!(
-                    "Failed to write default ORCHESTRATOR_CONFIG to {}: {err}",
-                    path.display()
-                ))
-            })?;
-
-            rendered
+            })?
         }
         Err(err) => {
             return Err(CoreError::Configuration(format!(
@@ -108,12 +213,52 @@ fn load_or_create_config(path: &std::path::Path) -> Result<AppConfig, CoreError>
         }
     };
 
-    toml::from_str(&raw).map_err(|err| {
+    let mut config: AppConfig = toml::from_str(&raw).map_err(|err| {
         CoreError::Configuration(format!(
             "Failed to parse ORCHESTRATOR_CONFIG from {}: {err}",
             path.display()
         ))
-    })
+    })?;
+
+    let mut changed = false;
+    if config.workspace.trim() == LEGACY_DEFAULT_WORKSPACE_PATH {
+        config.workspace = default_workspace_path();
+        changed = true;
+    }
+    if config.event_store_path.trim() == LEGACY_DEFAULT_EVENT_STORE_PATH {
+        config.event_store_path = default_event_store_path();
+        changed = true;
+    }
+
+    if changed {
+        persist_config(path, &config)?;
+    }
+
+    Ok(config)
+}
+
+fn ensure_event_store_parent_dir(path: &str) -> Result<(), CoreError> {
+    let parent = std::path::PathBuf::from(path)
+        .parent()
+        .map(std::path::Path::to_path_buf);
+
+    if let Some(parent) = parent {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(&parent).map_err(|err| {
+                CoreError::Configuration(format!(
+                    "Failed to create parent directory {} for event store: {err}",
+                    parent.display()
+                ))
+            })?;
+        }
+    }
+
+    Ok(())
+}
+
+fn open_event_store(path: &str) -> Result<SqliteEventStore, CoreError> {
+    ensure_event_store_parent_dir(path)?;
+    SqliteEventStore::open(path)
 }
 
 pub struct App<S: Supervisor, G: GithubClient> {
@@ -127,7 +272,7 @@ impl<S: Supervisor, G: GithubClient> App<S, G> {
         self.supervisor.health_check().await?;
         self.github.health_check().await?;
 
-        let store = SqliteEventStore::open(&self.config.event_store_path)?;
+        let store = open_event_store(&self.config.event_store_path)?;
         let events = store.read_ordered()?;
         let projection = rebuild_projection(&events);
 
@@ -143,7 +288,7 @@ impl<S: Supervisor, G: GithubClient> App<S, G> {
         vcs: &dyn VcsProvider,
         worker_backend: &dyn WorkerBackend,
     ) -> Result<SelectedTicketFlowResult, CoreError> {
-        let mut store = SqliteEventStore::open(&self.config.event_store_path)?;
+        let mut store = open_event_store(&self.config.event_store_path)?;
         let flow_config = SelectedTicketFlowConfig::from_workspace_root(&self.config.workspace);
 
         orchestrator_core::start_or_resume_selected_ticket(
@@ -157,16 +302,160 @@ impl<S: Supervisor, G: GithubClient> App<S, G> {
     }
 }
 
+fn supervisor_model_from_env() -> String {
+    std::env::var("ORCHESTRATOR_SUPERVISOR_MODEL")
+        .ok()
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| DEFAULT_SUPERVISOR_MODEL.to_owned())
+}
+
+fn invalid_supervisor_query_usage(reason: impl Into<String>) -> CoreError {
+    CoreError::InvalidCommandArgs {
+        command_id: command_ids::SUPERVISOR_QUERY.to_owned(),
+        reason: reason.into(),
+    }
+}
+
+fn parse_context_identifier(raw: &str, field: &str) -> Result<String, CoreError> {
+    let normalized = raw.trim();
+    if normalized.is_empty() {
+        return Err(invalid_supervisor_query_usage(format!(
+            "malformed context: `{field}` must be a non-empty identifier"
+        )));
+    }
+
+    Ok(normalized.to_owned())
+}
+
+fn parse_scope_hint(raw_scope: &str) -> Result<RetrievalScope, CoreError> {
+    let normalized = raw_scope.trim();
+    if normalized.is_empty() {
+        return Err(invalid_supervisor_query_usage(
+            "malformed context: `scope` is empty; expected `global`, `work_item:<id>`, or `session:<id>`",
+        ));
+    }
+
+    if normalized.eq_ignore_ascii_case("global") {
+        return Ok(RetrievalScope::Global);
+    }
+
+    let Some((raw_kind, raw_value)) = normalized.split_once(':') else {
+        return Err(invalid_supervisor_query_usage(format!(
+            "malformed context: unsupported scope '{normalized}'; expected `global`, `work_item:<id>`, or `session:<id>`"
+        )));
+    };
+
+    let value = parse_context_identifier(raw_value, "scope identifier")?;
+    match raw_kind.trim().to_ascii_lowercase().as_str() {
+        "work_item" | "workitem" => Ok(RetrievalScope::WorkItem(WorkItemId::new(value))),
+        "session" => Ok(RetrievalScope::Session(WorkerSessionId::new(value))),
+        _ => Err(invalid_supervisor_query_usage(format!(
+            "malformed context: unsupported scope kind '{raw_kind}'; expected `work_item` or `session`"
+        ))),
+    }
+}
+
+fn resolve_supervisor_query_scope(
+    context: &SupervisorCommandContext,
+) -> Result<RetrievalScope, CoreError> {
+    if let Some(scope) = context.scope.as_deref() {
+        return parse_scope_hint(scope);
+    }
+
+    if let Some(session_id) = context.selected_session_id.as_deref() {
+        let session_id = parse_context_identifier(session_id, "selected_session_id")?;
+        return Ok(RetrievalScope::Session(WorkerSessionId::new(session_id)));
+    }
+
+    if let Some(work_item_id) = context.selected_work_item_id.as_deref() {
+        let work_item_id = parse_context_identifier(work_item_id, "selected_work_item_id")?;
+        return Ok(RetrievalScope::WorkItem(WorkItemId::new(work_item_id)));
+    }
+
+    Err(invalid_supervisor_query_usage(
+        "malformed context: missing selected item; select an inbox item before running supervisor.query",
+    ))
+}
+
+impl<S, G> App<S, G>
+where
+    S: Supervisor + LlmProvider + Send + Sync,
+    G: GithubClient + Send + Sync,
+{
+    async fn execute_supervisor_query(
+        &self,
+        args: SupervisorQueryArgs,
+        context: SupervisorCommandContext,
+    ) -> Result<(String, LlmResponseStream), CoreError> {
+        let scope = resolve_supervisor_query_scope(&context)?;
+        let store = open_event_store(&self.config.event_store_path)?;
+        let query_engine = SupervisorQueryEngine::default();
+        let context_pack = query_engine.build_context_pack(&store, scope)?;
+        let messages = match args {
+            SupervisorQueryArgs::Template {
+                template,
+                variables,
+            } => build_template_messages_with_variables(
+                template.as_str(),
+                &variables,
+                &context_pack,
+            )?,
+            SupervisorQueryArgs::Freeform { query } => {
+                build_freeform_messages(query.as_str(), &context_pack)?
+            }
+        };
+
+        self.supervisor
+            .stream_chat(LlmChatRequest {
+                model: supervisor_model_from_env(),
+                messages,
+                temperature: Some(0.2),
+                max_output_tokens: Some(700),
+            })
+            .await
+    }
+}
+
+#[async_trait::async_trait]
+impl<S, G> SupervisorCommandDispatcher for App<S, G>
+where
+    S: Supervisor + LlmProvider + Send + Sync,
+    G: GithubClient + Send + Sync,
+{
+    async fn dispatch_supervisor_command(
+        &self,
+        invocation: UntypedCommandInvocation,
+        context: SupervisorCommandContext,
+    ) -> Result<(String, LlmResponseStream), CoreError> {
+        let command = CommandRegistry::default().parse_invocation(&invocation)?;
+        match command {
+            Command::SupervisorQuery(args) => self.execute_supervisor_query(args, context).await,
+            command => Err(invalid_supervisor_query_usage(format!(
+                "unsupported command '{}' for supervisor runtime dispatch; expected '{}'",
+                command.id(),
+                command_ids::SUPERVISOR_QUERY
+            ))),
+        }
+    }
+
+    async fn cancel_supervisor_command(&self, stream_id: &str) -> Result<(), CoreError> {
+        self.supervisor.cancel_stream(stream_id).await
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use orchestrator_core::test_support::{with_env_var, TestDbPath};
+    use orchestrator_core::test_support::{with_env_var, with_env_vars, TestDbPath};
     use orchestrator_core::{
-        BackendCapabilities, BackendKind, RuntimeResult, SessionHandle, SpawnSpec,
+        BackendCapabilities, BackendKind, LlmFinishReason, LlmProviderKind,
+        LlmResponseSubscription, LlmStreamChunk, RuntimeResult, SessionHandle, SpawnSpec,
         TerminalSnapshot, TicketId, TicketProvider, TicketSummary, WorktreeStatus,
     };
+    use std::collections::{BTreeMap, VecDeque};
     use std::path::{Path, PathBuf};
-    use std::sync::Mutex;
+    use std::sync::{Arc, Mutex};
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn unique_temp_path(prefix: &str) -> PathBuf {
@@ -174,7 +463,10 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_nanos();
-        std::env::temp_dir().join(format!("orchestrator-app-config-{prefix}-{now}-{}", std::process::id()))
+        std::env::temp_dir().join(format!(
+            "orchestrator-app-config-{prefix}-{now}-{}",
+            std::process::id()
+        ))
     }
 
     fn write_config_file(path: &Path, raw: &str) {
@@ -194,6 +486,34 @@ mod tests {
         let _ = std::fs::remove_dir_all(path);
     }
 
+    fn expected_default_data_dir(home: &Path) -> PathBuf {
+        #[cfg(target_os = "windows")]
+        {
+            return home.join("AppData").join("Local").join("orchestrator");
+        }
+
+        #[cfg(target_os = "macos")]
+        {
+            return home
+                .join("Library")
+                .join("Application Support")
+                .join("orchestrator");
+        }
+
+        #[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
+        {
+            home.join(".local").join("share").join("orchestrator")
+        }
+    }
+
+    fn expected_default_workspace(home: &Path) -> PathBuf {
+        expected_default_data_dir(home).join("workspace")
+    }
+
+    fn expected_default_event_store(home: &Path) -> PathBuf {
+        expected_default_data_dir(home).join("orchestrator-events.db")
+    }
+
     struct Healthy;
 
     #[async_trait::async_trait]
@@ -210,24 +530,132 @@ mod tests {
         }
     }
 
+    #[derive(Clone, Default)]
+    struct QueryingSupervisor {
+        requests: Arc<Mutex<Vec<LlmChatRequest>>>,
+        cancelled_streams: Arc<Mutex<Vec<String>>>,
+        stream_chunks: Arc<Vec<LlmStreamChunk>>,
+    }
+
+    impl QueryingSupervisor {
+        fn with_chunks(stream_chunks: Vec<LlmStreamChunk>) -> Self {
+            Self {
+                requests: Arc::new(Mutex::new(Vec::new())),
+                cancelled_streams: Arc::new(Mutex::new(Vec::new())),
+                stream_chunks: Arc::new(stream_chunks),
+            }
+        }
+
+        fn requests(&self) -> Vec<LlmChatRequest> {
+            self.requests.lock().expect("request lock").clone()
+        }
+
+        fn cancelled_streams(&self) -> Vec<String> {
+            self.cancelled_streams.lock().expect("cancel lock").clone()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl Supervisor for QueryingSupervisor {
+        async fn health_check(&self) -> Result<(), CoreError> {
+            Ok(())
+        }
+    }
+
+    struct TestLlmStream {
+        chunks: VecDeque<LlmStreamChunk>,
+    }
+
+    #[async_trait::async_trait]
+    impl LlmResponseSubscription for TestLlmStream {
+        async fn next_chunk(&mut self) -> Result<Option<LlmStreamChunk>, CoreError> {
+            Ok(self.chunks.pop_front())
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl LlmProvider for QueryingSupervisor {
+        fn kind(&self) -> LlmProviderKind {
+            LlmProviderKind::OpenRouter
+        }
+
+        async fn health_check(&self) -> Result<(), CoreError> {
+            Ok(())
+        }
+
+        async fn stream_chat(
+            &self,
+            request: LlmChatRequest,
+        ) -> Result<(String, LlmResponseStream), CoreError> {
+            self.requests.lock().expect("request lock").push(request);
+            Ok((
+                "test-stream-1".to_owned(),
+                Box::new(TestLlmStream {
+                    chunks: self.stream_chunks.iter().cloned().collect(),
+                }),
+            ))
+        }
+
+        async fn cancel_stream(&self, stream_id: &str) -> Result<(), CoreError> {
+            self.cancelled_streams
+                .lock()
+                .expect("cancel lock")
+                .push(stream_id.to_owned());
+            Ok(())
+        }
+    }
+
+    fn template_query_invocation(template: &str) -> UntypedCommandInvocation {
+        CommandRegistry::default()
+            .to_untyped_invocation(&Command::SupervisorQuery(SupervisorQueryArgs::Template {
+                template: template.to_owned(),
+                variables: BTreeMap::new(),
+            }))
+            .expect("serialize supervisor.query")
+    }
+
     #[test]
     fn config_defaults_when_env_missing() {
         let home = unique_temp_dir("home");
-        let expected = home.join(".config").join("orchestrator").join("config.toml");
+        let expected = home
+            .join(".config")
+            .join("orchestrator")
+            .join("config.toml");
+        let expected_workspace = expected_default_workspace(&home);
+        let expected_event_store = expected_default_event_store(&home);
 
-        with_env_var("HOME", Some(home.to_str().unwrap()), || {
-            with_env_var("USERPROFILE", None, || {
-                with_env_var("ORCHESTRATOR_CONFIG", None, || {
-                    let config = AppConfig::from_env().expect("default config");
-                    assert_eq!(config, AppConfig::default());
-                    assert_eq!(expected, default_config_path().expect("default config path"));
-                    assert!(expected.exists());
-                    let raw = std::fs::read_to_string(expected.clone()).unwrap();
-                    let parsed: AppConfig = toml::from_str(&raw).unwrap();
-                    assert_eq!(parsed, AppConfig::default());
-                });
-            });
-        });
+        with_env_vars(
+            &[
+                ("HOME", Some(home.to_str().unwrap())),
+                ("USERPROFILE", None),
+                ("ORCHESTRATOR_CONFIG", None),
+                ("XDG_DATA_HOME", None),
+                ("LOCALAPPDATA", None),
+                ("APPDATA", None),
+            ],
+            || {
+                let config = AppConfig::from_env().expect("default config");
+                assert_eq!(config.workspace, expected_workspace.to_string_lossy());
+                assert_eq!(
+                    config.event_store_path,
+                    expected_event_store.to_string_lossy()
+                );
+                assert!(Path::new(&config.workspace).is_absolute());
+                assert!(Path::new(&config.event_store_path).is_absolute());
+                assert_eq!(
+                    expected,
+                    default_config_path().expect("default config path")
+                );
+                assert!(expected.exists());
+                let raw = std::fs::read_to_string(expected.clone()).unwrap();
+                let parsed: AppConfig = toml::from_str(&raw).unwrap();
+                assert_eq!(parsed.workspace, expected_workspace.to_string_lossy());
+                assert_eq!(
+                    parsed.event_store_path,
+                    expected_event_store.to_string_lossy()
+                );
+            },
+        );
 
         remove_temp_path(&home);
     }
@@ -235,20 +663,39 @@ mod tests {
     #[test]
     fn config_creates_default_when_missing() {
         let home = unique_temp_dir("create");
-        let expected = home.join(".config").join("orchestrator").join("config.toml");
+        let expected = home
+            .join(".config")
+            .join("orchestrator")
+            .join("config.toml");
+        let expected_workspace = expected_default_workspace(&home);
+        let expected_event_store = expected_default_event_store(&home);
 
-        with_env_var("HOME", Some(home.to_str().unwrap()), || {
-            with_env_var("USERPROFILE", None, || {
-                with_env_var("ORCHESTRATOR_CONFIG", Some(expected.to_str().unwrap()), || {
-                    let config = AppConfig::from_env().expect("bootstrap config");
-                    assert_eq!(config, AppConfig::default());
-                    assert!(expected.exists());
-                    let contents = std::fs::read_to_string(expected.clone()).unwrap();
-                    let parsed: AppConfig = toml::from_str(&contents).unwrap();
-                    assert_eq!(parsed, AppConfig::default());
-                });
-            });
-        });
+        with_env_vars(
+            &[
+                ("HOME", Some(home.to_str().unwrap())),
+                ("USERPROFILE", None),
+                ("ORCHESTRATOR_CONFIG", Some(expected.to_str().unwrap())),
+                ("XDG_DATA_HOME", None),
+                ("LOCALAPPDATA", None),
+                ("APPDATA", None),
+            ],
+            || {
+                let config = AppConfig::from_env().expect("bootstrap config");
+                assert_eq!(config.workspace, expected_workspace.to_string_lossy());
+                assert_eq!(
+                    config.event_store_path,
+                    expected_event_store.to_string_lossy()
+                );
+                assert!(expected.exists());
+                let contents = std::fs::read_to_string(expected.clone()).unwrap();
+                let parsed: AppConfig = toml::from_str(&contents).unwrap();
+                assert_eq!(parsed.workspace, expected_workspace.to_string_lossy());
+                assert_eq!(
+                    parsed.event_store_path,
+                    expected_event_store.to_string_lossy()
+                );
+            },
+        );
 
         remove_temp_path(&home);
     }
@@ -262,11 +709,15 @@ mod tests {
             "workspace = '/tmp/work'\nevent_store_path = '/tmp/events.db'\n",
         );
 
-        with_env_var("ORCHESTRATOR_CONFIG", Some(config_path.to_str().unwrap()), || {
-            let config = AppConfig::from_env().expect("parse config");
-            assert_eq!(config.workspace, "/tmp/work");
-            assert_eq!(config.event_store_path, "/tmp/events.db");
-        });
+        with_env_var(
+            "ORCHESTRATOR_CONFIG",
+            Some(config_path.to_str().unwrap()),
+            || {
+                let config = AppConfig::from_env().expect("parse config");
+                assert_eq!(config.workspace, "/tmp/work");
+                assert_eq!(config.event_store_path, "/tmp/events.db");
+            },
+        );
 
         remove_temp_path(&home);
     }
@@ -276,12 +727,95 @@ mod tests {
         let home = unique_temp_dir("partial");
         let config_path = home.join("config.toml");
         write_config_file(&config_path, "workspace = '/tmp/work'\n");
+        let expected_event_store = expected_default_event_store(&home);
 
-        with_env_var("ORCHESTRATOR_CONFIG", Some(config_path.to_str().unwrap()), || {
-            let config = AppConfig::from_env().expect("parse config");
-            assert_eq!(config.workspace, "/tmp/work");
-            assert_eq!(config.event_store_path, default_event_store_path());
-        });
+        with_env_vars(
+            &[
+                ("HOME", Some(home.to_str().unwrap())),
+                ("USERPROFILE", None),
+                ("ORCHESTRATOR_CONFIG", Some(config_path.to_str().unwrap())),
+                ("XDG_DATA_HOME", None),
+                ("LOCALAPPDATA", None),
+                ("APPDATA", None),
+            ],
+            || {
+                let config = AppConfig::from_env().expect("parse config");
+                assert_eq!(config.workspace, "/tmp/work");
+                assert_eq!(
+                    config.event_store_path,
+                    expected_event_store.to_string_lossy()
+                );
+            },
+        );
+
+        remove_temp_path(&home);
+    }
+
+    #[test]
+    fn config_upgrades_legacy_relative_defaults() {
+        let home = unique_temp_dir("legacy-upgrade");
+        let config_path = home.join("config.toml");
+        write_config_file(
+            &config_path,
+            "workspace = './'\nevent_store_path = './orchestrator-events.db'\n",
+        );
+        let expected_workspace = expected_default_workspace(&home);
+        let expected_event_store = expected_default_event_store(&home);
+
+        with_env_vars(
+            &[
+                ("HOME", Some(home.to_str().unwrap())),
+                ("USERPROFILE", None),
+                ("ORCHESTRATOR_CONFIG", Some(config_path.to_str().unwrap())),
+                ("XDG_DATA_HOME", None),
+                ("LOCALAPPDATA", None),
+                ("APPDATA", None),
+            ],
+            || {
+                let config = AppConfig::from_env().expect("config should load");
+                assert_eq!(config.workspace, expected_workspace.to_string_lossy());
+                assert_eq!(
+                    config.event_store_path,
+                    expected_event_store.to_string_lossy()
+                );
+
+                let rewritten = std::fs::read_to_string(&config_path).expect("read rewritten");
+                let parsed: AppConfig = toml::from_str(&rewritten).expect("parse rewritten");
+                assert_eq!(parsed.workspace, expected_workspace.to_string_lossy());
+                assert_eq!(
+                    parsed.event_store_path,
+                    expected_event_store.to_string_lossy()
+                );
+            },
+        );
+
+        remove_temp_path(&home);
+    }
+
+    #[test]
+    fn config_preserves_non_legacy_relative_paths() {
+        let home = unique_temp_dir("relative-preserved");
+        let config_path = home.join("config.toml");
+        write_config_file(
+            &config_path,
+            "workspace = './custom-workspace'\nevent_store_path = './custom-events.db'\n",
+        );
+
+        with_env_vars(
+            &[
+                ("HOME", Some(home.to_str().unwrap())),
+                ("USERPROFILE", None),
+                ("ORCHESTRATOR_CONFIG", Some(config_path.to_str().unwrap())),
+                ("XDG_DATA_HOME", None),
+                ("LOCALAPPDATA", None),
+                ("APPDATA", None),
+            ],
+            || {
+                let config = AppConfig::from_env().expect("config should load");
+                assert_eq!(config.workspace, "./custom-workspace");
+                assert_eq!(config.event_store_path, "./custom-events.db");
+            },
+        );
 
         remove_temp_path(&home);
     }
@@ -290,17 +824,23 @@ mod tests {
     fn config_rejects_invalid_toml_file() {
         let home = unique_temp_dir("invalid");
         let config_path = home.join("config.toml");
-        write_config_file(&config_path, "workspace = '/tmp/work'\nevent_store_path = [\n");
+        write_config_file(
+            &config_path,
+            "workspace = '/tmp/work'\nevent_store_path = [\n",
+        );
 
-        with_env_var("ORCHESTRATOR_CONFIG", Some(config_path.to_str().unwrap()), || {
-            let err = AppConfig::from_env().expect_err("invalid toml should fail");
-            let message = err.to_string();
-            assert!(message.contains("Failed to parse ORCHESTRATOR_CONFIG"));
-        });
+        with_env_var(
+            "ORCHESTRATOR_CONFIG",
+            Some(config_path.to_str().unwrap()),
+            || {
+                let err = AppConfig::from_env().expect_err("invalid toml should fail");
+                let message = err.to_string();
+                assert!(message.contains("Failed to parse ORCHESTRATOR_CONFIG"));
+            },
+        );
 
         remove_temp_path(&home);
     }
-
 
     #[tokio::test]
     async fn startup_composition_succeeds_with_mock_adapters() {
@@ -492,5 +1032,152 @@ mod tests {
         );
         assert_eq!(vcs.create_calls.lock().expect("lock").len(), 1);
         assert_eq!(backend.spawn_calls.lock().expect("lock").len(), 1);
+    }
+
+    #[tokio::test]
+    async fn supervisor_query_dispatch_streams_from_runtime_handler() {
+        let temp_db = TestDbPath::new("app-supervisor-query-dispatch");
+        let supervisor = QueryingSupervisor::with_chunks(vec![
+            LlmStreamChunk {
+                delta: "Current activity: worker is implementing AP-180".to_owned(),
+                finish_reason: None,
+                usage: None,
+                rate_limit: None,
+            },
+            LlmStreamChunk {
+                delta: String::new(),
+                finish_reason: Some(LlmFinishReason::Stop),
+                usage: None,
+                rate_limit: None,
+            },
+        ]);
+
+        let app = App {
+            config: AppConfig {
+                workspace: "/workspace".to_owned(),
+                event_store_path: temp_db.path().to_string_lossy().to_string(),
+            },
+            supervisor: supervisor.clone(),
+            github: Healthy,
+        };
+
+        let (stream_id, mut stream) = app
+            .dispatch_supervisor_command(
+                template_query_invocation("status_current_session"),
+                SupervisorCommandContext {
+                    selected_work_item_id: Some("wi-query".to_owned()),
+                    selected_session_id: Some("sess-query".to_owned()),
+                    scope: Some("session:sess-query".to_owned()),
+                },
+            )
+            .await
+            .expect("dispatch should stream");
+
+        assert_eq!(stream_id, "test-stream-1");
+
+        let first = stream
+            .next_chunk()
+            .await
+            .expect("poll first chunk")
+            .expect("first chunk");
+        assert!(first.delta.contains("Current activity"));
+        assert_eq!(first.finish_reason, None);
+
+        let requests = supervisor.requests();
+        assert_eq!(requests.len(), 1);
+        assert!(requests[0].messages[1]
+            .content
+            .contains("Template: Current activity"));
+        assert!(requests[0].messages[1]
+            .content
+            .contains("Scope: session:sess-query"));
+        assert!(requests[0].messages[1].content.contains("Context pack:"));
+    }
+
+    #[tokio::test]
+    async fn supervisor_query_dispatch_rejects_unknown_template_with_guidance() {
+        let temp_db = TestDbPath::new("app-supervisor-query-template-error");
+        let app = App {
+            config: AppConfig {
+                workspace: "/workspace".to_owned(),
+                event_store_path: temp_db.path().to_string_lossy().to_string(),
+            },
+            supervisor: QueryingSupervisor::default(),
+            github: Healthy,
+        };
+
+        let err = match app
+            .dispatch_supervisor_command(
+                template_query_invocation("not-a-template"),
+                SupervisorCommandContext {
+                    selected_work_item_id: Some("wi-query".to_owned()),
+                    selected_session_id: None,
+                    scope: Some("work_item:wi-query".to_owned()),
+                },
+            )
+            .await
+        {
+            Ok(_) => panic!("unknown template should fail"),
+            Err(err) => err,
+        };
+
+        let message = err.to_string();
+        assert!(message.contains("unknown supervisor template"));
+        assert!(message.contains("current_activity"));
+        assert!(message.contains("recommended_response"));
+    }
+
+    #[tokio::test]
+    async fn supervisor_query_dispatch_rejects_malformed_context_scope() {
+        let temp_db = TestDbPath::new("app-supervisor-query-context-error");
+        let app = App {
+            config: AppConfig {
+                workspace: "/workspace".to_owned(),
+                event_store_path: temp_db.path().to_string_lossy().to_string(),
+            },
+            supervisor: QueryingSupervisor::default(),
+            github: Healthy,
+        };
+
+        let err = match app
+            .dispatch_supervisor_command(
+                template_query_invocation("status"),
+                SupervisorCommandContext {
+                    selected_work_item_id: Some("wi-query".to_owned()),
+                    selected_session_id: None,
+                    scope: Some("session:  ".to_owned()),
+                },
+            )
+            .await
+        {
+            Ok(_) => panic!("malformed scope should fail"),
+            Err(err) => err,
+        };
+
+        assert!(err.to_string().contains("malformed context"));
+        assert!(err.to_string().contains("scope identifier"));
+    }
+
+    #[tokio::test]
+    async fn supervisor_query_dispatch_forwards_cancel_to_provider() {
+        let temp_db = TestDbPath::new("app-supervisor-query-cancel");
+        let supervisor = QueryingSupervisor::default();
+        let app = App {
+            config: AppConfig {
+                workspace: "/workspace".to_owned(),
+                event_store_path: temp_db.path().to_string_lossy().to_string(),
+            },
+            supervisor: supervisor.clone(),
+            github: Healthy,
+        };
+
+        app.cancel_supervisor_command("stream-cancel-7")
+            .await
+            .expect("cancel should succeed");
+
+        assert_eq!(
+            supervisor.cancelled_streams(),
+            vec!["stream-cancel-7".to_owned()]
+        );
     }
 }

@@ -322,9 +322,15 @@ def current_branch(repo: Path) -> str:
     return branch
 
 
-def sort_key_from_title(title: str, prefix: str) -> tuple[Any, ...]:
+def _safe_text(value: str | None) -> str:
+    return (value or "").strip()
+
+
+def sort_key_from_title(title: str | None, prefix: str) -> tuple[Any, ...]:
     # Expected child ticket format: ORCH2-A1: ...
     # Epic format: ORCH2-EPIC A: ...
+    title = _safe_text(title)
+    prefix = _safe_text(prefix)
     child_pat = re.compile(rf"^{re.escape(prefix)}([A-Z]+)(\d+)\b")
     epic_pat = re.compile(rf"^{re.escape(prefix)}EPIC\s+([A-Z]+)\b")
     if m := child_pat.match(title):
@@ -334,17 +340,20 @@ def sort_key_from_title(title: str, prefix: str) -> tuple[Any, ...]:
     if m := epic_pat.match(title):
         letters = m.group(1)
         return (1, letters, 0, title)
-        return (2, title)
+    return (2, title)
 
 
 def sort_key_for_issue(issue: Issue, prefix: str, identifier_prefix: str | None = None) -> tuple[Any, ...]:
-    m = re.search(r"-(\d+)\b", issue.identifier)
+    identifier = _safe_text(issue.identifier)
+    m = re.search(r"-(\d+)\b", identifier)
     if m:
-        return (0, int(m.group(1)), issue.identifier)
+        return (0, int(m.group(1)), identifier)
     return sort_key_from_title(issue.title, prefix)
 
 
 def is_epic_title(title: str, prefix: str) -> bool:
+    title = _safe_text(title)
+    prefix = _safe_text(prefix)
     if re.search(r"\bEPIC\b", title, flags=re.IGNORECASE):
         return True
     if prefix and re.match(rf"^{re.escape(prefix)}EPIC\s+[A-Z]+\b", title):
@@ -467,10 +476,13 @@ def review_ticket_with_codex(
     repo: Path,
     issue: Issue,
     design_plan_path: Path,
+    profile: str | None,
     model: str | None,
     future_plan_outline: str,
 ) -> None:
     cmd = [codex_bin]
+    if profile:
+        cmd.extend(["--profile", profile])
     if model:
         cmd.extend(["-m", model])
     cmd.extend(
@@ -485,11 +497,20 @@ def review_ticket_with_codex(
     run_cmd(cmd, cwd=repo)
 
 
-def generate_plan_with_codex(codex_bin: str, repo: Path, issue: Issue, design_plan_path: Path, model: str | None) -> str:
+def generate_plan_with_codex(
+    codex_bin: str,
+    repo: Path,
+    issue: Issue,
+    design_plan_path: Path,
+    profile: str | None,
+    model: str | None,
+) -> str:
     with tempfile.NamedTemporaryFile(prefix="ralph-plan-", suffix=".md", delete=False) as tmp:
         plan_path = Path(tmp.name)
     try:
         cmd = [codex_bin]
+        if profile:
+            cmd.extend(["--profile", profile])
         if model:
             cmd.extend(["-m", model])
         cmd.extend(
@@ -537,8 +558,17 @@ def apply_plan_block(existing_description: str, plan_markdown: str, issue_identi
     return block + "\n"
 
 
-def implement_ticket_with_codex(codex_bin: str, repo: Path, issue: Issue, design_plan_path: Path, model: str | None) -> None:
+def implement_ticket_with_codex(
+    codex_bin: str,
+    repo: Path,
+    issue: Issue,
+    design_plan_path: Path,
+    profile: str | None,
+    model: str | None,
+) -> None:
     cmd = [codex_bin]
+    if profile:
+        cmd.extend(["--profile", profile])
     if model:
         cmd.extend(["-m", model])
     cmd.extend(
@@ -647,6 +677,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--include-epics", action="store_true", help="Include EPIC tickets in loop")
     parser.add_argument("--codex-bin", default="codex", help="Codex CLI binary")
     parser.add_argument("--codex-model", default=None, help="Optional Codex model override")
+    parser.add_argument(
+        "--codex-profile",
+        default="spark",
+        help="Optional Codex profile override passed to `codex --profile`",
+    )
     parser.add_argument("--max-tickets", type=int, default=7, help="Max number of tickets to process (0 = all)")
     parser.add_argument("--continue-on-error", action="store_true", help="Continue with next ticket on failure")
     parser.add_argument("--dry-run", action="store_true", help="Plan/list only; do not mutate Linear/git or run Codex")
@@ -729,7 +764,14 @@ def main() -> int:
 
             # 1) Generate plan.
             print("[1/7] Generating implementation plan via Codex (read-only)...")
-            plan_md = generate_plan_with_codex(args.codex_bin, repo, issue, design_plan, args.codex_model)
+            plan_md = generate_plan_with_codex(
+                args.codex_bin,
+                repo,
+                issue,
+                design_plan,
+                args.codex_profile,
+                args.codex_model,
+            )
 
             # 2) Update ticket description.
             print("[2/7] Updating Linear ticket description with Ralph plan block...")
@@ -742,7 +784,14 @@ def main() -> int:
 
             # 4) Implement.
             print("[4/7] Implementing ticket via Codex...")
-            implement_ticket_with_codex(args.codex_bin, repo, issue, design_plan, args.codex_model)
+            implement_ticket_with_codex(
+                args.codex_bin,
+                repo,
+                issue,
+                design_plan,
+                args.codex_profile,
+                args.codex_model,
+            )
 
             # 5) Review + harden.
             print("[5/7] Running Codex review/hardening pass...")
@@ -759,6 +808,7 @@ def main() -> int:
                 repo,
                 issue,
                 design_plan,
+                args.codex_profile,
                 args.codex_model,
                 format_future_plan_outline(plan_outline, args.prefix),
             )

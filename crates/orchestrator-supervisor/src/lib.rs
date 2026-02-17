@@ -19,8 +19,8 @@ pub use query_engine::{
     RetrievalPackStats, SupervisorQueryEngine, SupervisorRetrievalSource,
 };
 pub use template_library::{
-    build_template_messages, build_template_messages_with_variables, supervisor_template_catalog,
-    SupervisorTemplate, SUPERVISOR_TEMPLATE_CURRENT_ACTIVITY,
+    build_freeform_messages, build_template_messages, build_template_messages_with_variables,
+    supervisor_template_catalog, SupervisorTemplate, SUPERVISOR_TEMPLATE_CURRENT_ACTIVITY,
     SUPERVISOR_TEMPLATE_RECOMMENDED_RESPONSE, SUPERVISOR_TEMPLATE_RISK_ASSESSMENT,
     SUPERVISOR_TEMPLATE_WHAT_CHANGED, SUPERVISOR_TEMPLATE_WHAT_NEEDS_ME,
 };
