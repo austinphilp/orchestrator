@@ -21,7 +21,42 @@ fn merge_supervisor_query_context(
     fallback_context: SupervisorCommandContext,
     invocation_context: Option<SupervisorQueryContextArgs>,
 ) -> SupervisorCommandContext {
-    invocation_context.unwrap_or(fallback_context)
+    let Some(invocation_context) = invocation_context else {
+        return fallback_context;
+    };
+
+    let mut merged = fallback_context;
+
+    let invocation_scope = invocation_context.scope;
+    let has_explicit_scope = invocation_scope.is_some();
+    let invocation_session_id = invocation_context.selected_session_id;
+    let has_invocation_session = invocation_session_id.is_some();
+    let invocation_work_item_id = invocation_context.selected_work_item_id;
+
+    if let Some(scope) = invocation_scope {
+        if scope == "global" {
+            merged.selected_work_item_id = None;
+            merged.selected_session_id = None;
+        }
+        merged.scope = Some(scope);
+    }
+
+    if let Some(session_id) = invocation_session_id {
+        if !has_explicit_scope {
+            merged.scope = Some(format!("session:{session_id}"));
+        }
+        merged.selected_session_id = Some(session_id);
+    }
+
+    if let Some(work_item_id) = invocation_work_item_id {
+        if !has_explicit_scope && !has_invocation_session {
+            merged.scope = Some(format!("work_item:{work_item_id}"));
+            merged.selected_session_id = None;
+        }
+        merged.selected_work_item_id = Some(work_item_id);
+    }
+
+    merged
 }
 
 fn args_context(args: &SupervisorQueryArgs) -> Option<SupervisorQueryContextArgs> {
@@ -44,7 +79,7 @@ where
     let scope = resolve_supervisor_query_scope(&context)?;
     let store = open_event_store(event_store_path)?;
     let query_engine = SupervisorQueryEngine::default();
-    let context_pack = query_engine.build_context_pack(&store, scope)?;
+    let context_pack = query_engine.build_context_pack_with_filters(&store, scope, &context)?;
     let messages = match args {
         SupervisorQueryArgs::Template {
             template,
