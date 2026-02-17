@@ -43,6 +43,10 @@ impl CommandRunner for ProcessCommandRunner {
     }
 }
 
+pub fn default_system_url_opener() -> Result<SystemUrlOpener<ProcessCommandRunner>, CoreError> {
+    SystemUrlOpener::new(ProcessCommandRunner)
+}
+
 pub struct SystemUrlOpener<R: CommandRunner> {
     runner: R,
     command: UrlOpenCommand,

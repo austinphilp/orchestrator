@@ -364,7 +364,7 @@ mod tests {
     use orchestrator_core::test_support::{with_env_var, with_env_vars, TestDbPath};
     use orchestrator_core::{
         ArtifactCreatedPayload, ArtifactId, ArtifactKind, ArtifactRecord, BackendCapabilities,
-        BackendKind, CodeHostKind, Command, CommandRegistry, DOMAIN_EVENT_SCHEMA_VERSION,
+        BackendKind, CodeHostKind, Command, CommandRegistry, DOMAIN_EVENT_SCHEMA_VERSION, command_ids,
         LlmChatRequest,
         LlmFinishReason, LlmProviderKind, LlmResponseStream, LlmResponseSubscription,
         LlmStreamChunk, NewEventEnvelope, OrchestrationEventPayload, RuntimeMappingRecord,
@@ -2083,7 +2083,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn supervisor_runtime_dispatch_supports_open_review_tabs() {
+    async fn supervisor_runtime_dispatch_open_review_tabs_requires_context() {
         let temp_db = TestDbPath::new("app-runtime-command-open-review-tabs");
         let app = App {
             config: AppConfig {
@@ -2099,32 +2099,17 @@ mod tests {
             .to_untyped_invocation(&Command::GithubOpenReviewTabs)
             .expect("serialize github.open_review_tabs");
 
-        let (stream_id, mut stream) = app
+        let err = match app
             .dispatch_supervisor_command(invocation, SupervisorCommandContext::default())
             .await
-            .expect("open_review_tabs should be supported at runtime");
-        assert!(stream_id.starts_with("runtime-"));
+        {
+            Ok(_) => panic!("open_review_tabs should require context"),
+            Err(err) => err,
+        };
 
-        let first_chunk = stream
-            .next_chunk()
-            .await
-            .expect("read runtime chunk")
-            .expect("expected one chunk");
-        assert_eq!(first_chunk.finish_reason, Some(LlmFinishReason::Stop));
-        assert!(
-            first_chunk
-                .delta
-                .contains("github.open_review_tabs command accepted"),
-            "runtime command should return a non-empty acknowledgement"
-        );
-        assert!(
-            stream
-                .next_chunk()
-                .await
-                .expect("stream close")
-                .is_none(),
-            "runtime command stream should terminate after acknowledgement"
-        );
+        let message = err.to_string();
+        assert!(message.contains("requires an active runtime session or selected work item context"));
+        assert!(message.contains(command_ids::GITHUB_OPEN_REVIEW_TABS));
     }
 
     #[tokio::test]
