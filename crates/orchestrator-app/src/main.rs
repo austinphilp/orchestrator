@@ -1,6 +1,9 @@
 use anyhow::Result;
-use orchestrator_app::{App, AppConfig};
-use orchestrator_github::{GhCliClient, ProcessCommandRunner};
+use backend_opencode::{OpenCodeBackend, OpenCodeBackendConfig};
+use integration_git::{GitCliVcsProvider, ProcessCommandRunner as GitProcessCommandRunner};
+use integration_linear::LinearTicketingProvider;
+use orchestrator_app::{App, AppConfig, AppTicketPickerProvider};
+use orchestrator_github::{GhCliClient, ProcessCommandRunner as GhProcessCommandRunner};
 use orchestrator_supervisor::OpenRouterSupervisor;
 use orchestrator_ui::Ui;
 use std::sync::Arc;
@@ -15,16 +18,28 @@ async fn main() -> Result<()> {
 
     let config = AppConfig::from_env()?;
     let supervisor = OpenRouterSupervisor::from_env()?;
-    let github = GhCliClient::new(ProcessCommandRunner)?;
+    let github = GhCliClient::new(GhProcessCommandRunner)?;
 
-    let app = App {
+    let app = Arc::new(App {
         config,
         supervisor,
         github,
-    };
+    });
+
+    let ticketing = Arc::new(LinearTicketingProvider::from_env()?);
+    let vcs = Arc::new(GitCliVcsProvider::new(GitProcessCommandRunner)?);
+    let worker_backend = Arc::new(OpenCodeBackend::new(OpenCodeBackendConfig::default()));
+    let ticket_picker_provider = Arc::new(AppTicketPickerProvider::new(
+        Arc::clone(&app),
+        ticketing,
+        vcs,
+        worker_backend,
+    ));
 
     let state = app.startup_state().await?;
-    let mut ui = Ui::init()?.with_supervisor_provider(Arc::new(app.supervisor.clone()));
+    let mut ui = Ui::init()?
+        .with_supervisor_provider(Arc::new(app.supervisor.clone()))
+        .with_ticket_picker_provider(ticket_picker_provider);
     ui.run(&state.status, &state.projection)?;
 
     Ok(())

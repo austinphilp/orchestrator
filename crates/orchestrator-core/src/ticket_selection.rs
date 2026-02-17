@@ -955,6 +955,7 @@ mod tests {
             ticket_id: TicketId::from("linear:issue-126"),
             identifier: "AP-126".to_owned(),
             title: "Implement ticket selected start resume orchestration flow".to_owned(),
+            project: None,
             state: "In Progress".to_owned(),
             url: "https://linear.app/acme/issue/AP-126".to_owned(),
             priority: Some(2),

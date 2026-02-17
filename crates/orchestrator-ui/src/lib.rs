@@ -3,6 +3,7 @@ use std::io::{self, Stdout};
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
+use async_trait::async_trait;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
@@ -10,10 +11,11 @@ use crossterm::terminal::{
 use crossterm::ExecutableCommand;
 use orchestrator_core::{
     attention_inbox_snapshot, command_ids, ArtifactKind, ArtifactProjection, AttentionBatchKind,
-    AttentionEngineConfig, AttentionPriorityBand, InboxItemId, InboxItemKind, LlmChatRequest,
-    LlmFinishReason, LlmMessage, LlmProvider, LlmRateLimitState, LlmRole, LlmTokenUsage,
-    OrchestrationEventPayload, ProjectionState, WorkItemId, WorkerSessionId, WorkerSessionStatus,
-    WorkflowState,
+    AttentionEngineConfig, AttentionPriorityBand, CoreError, InboxItemId, InboxItemKind,
+    LlmChatRequest, LlmFinishReason, LlmMessage, LlmProvider, LlmRateLimitState, LlmRole,
+    LlmTokenUsage, OrchestrationEventPayload, ProjectionState,
+    SelectedTicketFlowResult, TicketId, TicketSummary, WorkItemId, WorkerSessionId,
+    WorkerSessionStatus, WorkflowState,
 };
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Layout, Rect};
@@ -29,6 +31,21 @@ pub use keymap::{
     key_stroke_from_event, KeyBindingConfig, KeyPrefixConfig, KeyStroke, KeymapCompileError,
     KeymapConfig, KeymapLookupResult, KeymapTrie, ModeKeymapConfig,
 };
+
+const TICKET_PICKER_EVENT_CHANNEL_CAPACITY: usize = 32;
+const TICKET_PICKER_PRIORITY_STATES_ENV: &str = "ORCHESTRATOR_TICKET_PICKER_PRIORITY_STATES";
+const TICKET_PICKER_PRIORITY_STATES_DEFAULT: &[&str] =
+    &["In Progress", "Final Approval", "Todo", "Backlog"];
+
+#[async_trait]
+pub trait TicketPickerProvider: Send + Sync {
+    async fn list_unfinished_tickets(&self) -> Result<Vec<TicketSummary>, CoreError>;
+    async fn start_or_resume_ticket(
+        &self,
+        ticket: TicketSummary,
+    ) -> Result<SelectedTicketFlowResult, CoreError>;
+    async fn reload_projection(&self) -> Result<ProjectionState, CoreError>;
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CenterView {
@@ -1353,6 +1370,236 @@ struct WhichKeyOverlayState {
     hints: Vec<WhichKeyHint>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TicketStatusGroup {
+    status: String,
+    tickets: Vec<TicketSummary>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TicketProjectGroup {
+    project: String,
+    collapsed: bool,
+    status_groups: Vec<TicketStatusGroup>,
+}
+
+impl TicketProjectGroup {
+    fn ticket_count(&self) -> usize {
+        self.status_groups
+            .iter()
+            .map(|status_group| status_group.tickets.len())
+            .sum()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TicketPickerRowRef {
+    ProjectHeader {
+        project_index: usize,
+    },
+    Ticket {
+        project_index: usize,
+        status_index: usize,
+        ticket_index: usize,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+struct TicketPickerOverlayState {
+    visible: bool,
+    loading: bool,
+    starting_ticket_id: Option<TicketId>,
+    error: Option<String>,
+    project_groups: Vec<TicketProjectGroup>,
+    ticket_rows: Vec<TicketPickerRowRef>,
+    selected_row_index: Option<usize>,
+}
+
+impl TicketPickerOverlayState {
+    fn selected_row(&self) -> Option<&TicketPickerRowRef> {
+        self.selected_row_index
+            .and_then(|index| self.ticket_rows.get(index))
+    }
+
+    fn selected_project_index(&self) -> Option<usize> {
+        match self.selected_row()? {
+            TicketPickerRowRef::ProjectHeader { project_index } => Some(*project_index),
+            TicketPickerRowRef::Ticket { project_index, .. } => Some(*project_index),
+        }
+    }
+
+    fn selected_ticket(&self) -> Option<&TicketSummary> {
+        let row = self.selected_row()?;
+        let TicketPickerRowRef::Ticket {
+            project_index,
+            status_index,
+            ticket_index,
+        } = row
+        else {
+            return None;
+        };
+        self.project_groups
+            .get(*project_index)
+            .and_then(|project_group| project_group.status_groups.get(*status_index))
+            .and_then(|status_group| status_group.tickets.get(*ticket_index))
+    }
+
+    fn open(&mut self) {
+        self.visible = true;
+        self.loading = true;
+        self.error = None;
+    }
+
+    fn close(&mut self) {
+        self.visible = false;
+        self.loading = false;
+        self.starting_ticket_id = None;
+        self.error = None;
+    }
+
+    fn apply_tickets(&mut self, tickets: Vec<TicketSummary>, priority_states: &[String]) {
+        let selected_project_index = self.selected_project_index();
+        let selected_ticket_id = self
+            .selected_ticket()
+            .map(|ticket| ticket.ticket_id.clone());
+        let collapsed_projects = self
+            .project_groups
+            .iter()
+            .filter(|project_group| project_group.collapsed)
+            .map(|project_group| normalize_ticket_project(project_group.project.as_str()))
+            .collect::<HashSet<_>>();
+        self.project_groups =
+            group_tickets_by_project(tickets, priority_states, &collapsed_projects);
+        self.rebuild_ticket_rows(selected_ticket_id.as_ref(), selected_project_index);
+    }
+
+    fn move_selection(&mut self, delta: isize) {
+        if self.ticket_rows.is_empty() {
+            self.selected_row_index = None;
+            return;
+        }
+
+        let current = self.selected_row_index.unwrap_or(0) as isize;
+        let upper = self.ticket_rows.len() as isize - 1;
+        self.selected_row_index = Some((current + delta).clamp(0, upper) as usize);
+    }
+
+    fn fold_selected_project(&mut self) {
+        self.set_selected_project_collapsed(true);
+    }
+
+    fn unfold_selected_project(&mut self) {
+        self.set_selected_project_collapsed(false);
+    }
+
+    fn set_selected_project_collapsed(&mut self, collapsed: bool) {
+        let Some(project_index) = self.selected_project_index() else {
+            return;
+        };
+        let Some(project_group) = self.project_groups.get_mut(project_index) else {
+            return;
+        };
+        if project_group.collapsed == collapsed {
+            return;
+        }
+        project_group.collapsed = collapsed;
+        self.rebuild_ticket_rows(None, Some(project_index));
+    }
+
+    fn rebuild_ticket_rows(
+        &mut self,
+        preferred_ticket_id: Option<&TicketId>,
+        preferred_project_index: Option<usize>,
+    ) {
+        self.ticket_rows = self
+            .project_groups
+            .iter()
+            .enumerate()
+            .flat_map(|(project_index, project_group)| {
+                let mut rows = vec![TicketPickerRowRef::ProjectHeader { project_index }];
+                if !project_group.collapsed {
+                    rows.extend(
+                        project_group
+                            .status_groups
+                            .iter()
+                            .enumerate()
+                            .flat_map(move |(status_index, status_group)| {
+                                status_group.tickets.iter().enumerate().map(
+                                    move |(ticket_index, _)| TicketPickerRowRef::Ticket {
+                                        project_index,
+                                        status_index,
+                                        ticket_index,
+                                    },
+                                )
+                            }),
+                    );
+                }
+                rows
+            })
+            .collect();
+
+        if self.ticket_rows.is_empty() {
+            self.selected_row_index = None;
+            return;
+        }
+
+        if let Some(preferred_ticket_id) = preferred_ticket_id {
+            if let Some(index) = self.ticket_rows.iter().position(|row| {
+                let TicketPickerRowRef::Ticket {
+                    project_index,
+                    status_index,
+                    ticket_index,
+                } = row
+                else {
+                    return false;
+                };
+                self.project_groups
+                    .get(*project_index)
+                    .and_then(|project_group| project_group.status_groups.get(*status_index))
+                    .and_then(|status_group| status_group.tickets.get(*ticket_index))
+                    .map(|ticket| ticket.ticket_id == *preferred_ticket_id)
+                    .unwrap_or_default()
+            }) {
+                self.selected_row_index = Some(index);
+                return;
+            }
+        }
+
+        if let Some(preferred_project_index) = preferred_project_index {
+            if let Some(index) = self.ticket_rows.iter().position(|row| {
+                matches!(
+                    row,
+                    TicketPickerRowRef::ProjectHeader { project_index }
+                        if *project_index == preferred_project_index
+                )
+            }) {
+                self.selected_row_index = Some(index);
+                return;
+            }
+        }
+
+        self.selected_row_index = Some(0);
+    }
+}
+
+#[derive(Debug, Clone)]
+enum TicketPickerEvent {
+    TicketsLoaded {
+        tickets: Vec<TicketSummary>,
+    },
+    TicketsLoadFailed {
+        message: String,
+    },
+    TicketStarted {
+        projection: Option<ProjectionState>,
+        tickets: Option<Vec<TicketSummary>>,
+        warning: Option<String>,
+    },
+    TicketStartFailed {
+        message: String,
+    },
+}
+
 struct UiShellState {
     base_status: String,
     status_warning: Option<String>,
@@ -1367,18 +1614,40 @@ struct UiShellState {
     terminal_escape_pending: bool,
     supervisor_provider: Option<Arc<dyn LlmProvider>>,
     supervisor_chat_stream: Option<ActiveSupervisorChatStream>,
+    ticket_picker_provider: Option<Arc<dyn TicketPickerProvider>>,
+    ticket_picker_sender: Option<mpsc::Sender<TicketPickerEvent>>,
+    ticket_picker_receiver: Option<mpsc::Receiver<TicketPickerEvent>>,
+    ticket_picker_overlay: TicketPickerOverlayState,
+    ticket_picker_priority_states: Vec<String>,
 }
 
 impl UiShellState {
+    #[cfg(test)]
     fn new(status: String, domain: ProjectionState) -> Self {
-        Self::new_with_supervisor(status, domain, None)
+        Self::new_with_integrations(status, domain, None, None)
     }
-
+    #[cfg(test)]
     fn new_with_supervisor(
         status: String,
         domain: ProjectionState,
         supervisor_provider: Option<Arc<dyn LlmProvider>>,
     ) -> Self {
+        Self::new_with_integrations(status, domain, supervisor_provider, None)
+    }
+
+    fn new_with_integrations(
+        status: String,
+        domain: ProjectionState,
+        supervisor_provider: Option<Arc<dyn LlmProvider>>,
+        ticket_picker_provider: Option<Arc<dyn TicketPickerProvider>>,
+    ) -> Self {
+        let (ticket_picker_sender, ticket_picker_receiver) = if ticket_picker_provider.is_some() {
+            let (sender, receiver) = mpsc::channel(TICKET_PICKER_EVENT_CHANNEL_CAPACITY);
+            (Some(sender), Some(receiver))
+        } else {
+            (None, None)
+        };
+
         Self {
             base_status: status,
             status_warning: None,
@@ -1393,6 +1662,11 @@ impl UiShellState {
             terminal_escape_pending: false,
             supervisor_provider,
             supervisor_chat_stream: None,
+            ticket_picker_provider,
+            ticket_picker_sender,
+            ticket_picker_receiver,
+            ticket_picker_overlay: TicketPickerOverlayState::default(),
+            ticket_picker_priority_states: ticket_picker_priority_states_from_env(),
         }
     }
 
@@ -1539,6 +1813,199 @@ impl UiShellState {
         if !self.is_terminal_view_active() {
             self.enter_normal_mode();
         }
+    }
+
+    fn open_ticket_picker(&mut self) {
+        if self.ticket_picker_provider.is_none() {
+            self.status_warning =
+                Some("ticket picker unavailable: no ticket provider configured".to_owned());
+            return;
+        }
+
+        self.enter_normal_mode();
+        self.ticket_picker_overlay.open();
+        self.spawn_ticket_picker_load();
+    }
+
+    fn close_ticket_picker(&mut self) {
+        self.ticket_picker_overlay.close();
+    }
+
+    fn move_ticket_picker_selection(&mut self, delta: isize) {
+        if !self.ticket_picker_overlay.visible {
+            return;
+        }
+        self.ticket_picker_overlay.move_selection(delta);
+    }
+
+    fn fold_ticket_picker_selected_project(&mut self) {
+        if !self.ticket_picker_overlay.visible {
+            return;
+        }
+        self.ticket_picker_overlay.fold_selected_project();
+    }
+
+    fn unfold_ticket_picker_selected_project(&mut self) {
+        if !self.ticket_picker_overlay.visible {
+            return;
+        }
+        self.ticket_picker_overlay.unfold_selected_project();
+    }
+
+    fn start_selected_ticket_from_picker(&mut self) {
+        if !self.ticket_picker_overlay.visible {
+            return;
+        }
+        let Some(ticket) = self.ticket_picker_overlay.selected_ticket().cloned() else {
+            return;
+        };
+        if self.ticket_picker_overlay.starting_ticket_id.is_some() {
+            return;
+        }
+
+        self.ticket_picker_overlay.error = None;
+        self.ticket_picker_overlay.starting_ticket_id = Some(ticket.ticket_id.clone());
+        self.spawn_ticket_picker_start(ticket);
+    }
+
+    fn spawn_ticket_picker_load(&mut self) {
+        let Some(provider) = self.ticket_picker_provider.clone() else {
+            self.ticket_picker_overlay.loading = false;
+            self.ticket_picker_overlay.error =
+                Some("ticket provider unavailable while loading tickets".to_owned());
+            return;
+        };
+        let Some(sender) = self.ticket_picker_sender.clone() else {
+            self.ticket_picker_overlay.loading = false;
+            self.ticket_picker_overlay.error =
+                Some("ticket picker event channel unavailable while loading tickets".to_owned());
+            return;
+        };
+
+        self.ticket_picker_overlay.loading = true;
+
+        match TokioHandle::try_current() {
+            Ok(handle) => {
+                handle.spawn(async move {
+                    run_ticket_picker_load_task(provider, sender).await;
+                });
+            }
+            Err(_) => {
+                self.ticket_picker_overlay.loading = false;
+                self.ticket_picker_overlay.error =
+                    Some("tokio runtime unavailable; cannot load tickets".to_owned());
+            }
+        }
+    }
+
+    fn spawn_ticket_picker_start(&mut self, ticket: TicketSummary) {
+        let Some(provider) = self.ticket_picker_provider.clone() else {
+            self.ticket_picker_overlay.starting_ticket_id = None;
+            self.ticket_picker_overlay.error =
+                Some("ticket provider unavailable while starting ticket".to_owned());
+            return;
+        };
+        let Some(sender) = self.ticket_picker_sender.clone() else {
+            self.ticket_picker_overlay.starting_ticket_id = None;
+            self.ticket_picker_overlay.error =
+                Some("ticket picker event channel unavailable while starting ticket".to_owned());
+            return;
+        };
+
+        match TokioHandle::try_current() {
+            Ok(handle) => {
+                handle.spawn(async move {
+                    run_ticket_picker_start_task(provider, ticket, sender).await;
+                });
+            }
+            Err(_) => {
+                self.ticket_picker_overlay.starting_ticket_id = None;
+                self.ticket_picker_overlay.error =
+                    Some("tokio runtime unavailable; cannot start ticket".to_owned());
+            }
+        }
+    }
+
+    fn tick_ticket_picker(&mut self) {
+        self.poll_ticket_picker_events();
+    }
+
+    fn poll_ticket_picker_events(&mut self) {
+        let mut events = Vec::new();
+
+        {
+            let Some(receiver) = self.ticket_picker_receiver.as_mut() else {
+                return;
+            };
+
+            loop {
+                match receiver.try_recv() {
+                    Ok(event) => events.push(event),
+                    Err(TryRecvError::Empty) => break,
+                    Err(TryRecvError::Disconnected) => {
+                        self.status_warning =
+                            Some("ticket picker event channel closed unexpectedly".to_owned());
+                        break;
+                    }
+                }
+            }
+        }
+
+        for event in events {
+            self.apply_ticket_picker_event(event);
+        }
+    }
+
+    fn apply_ticket_picker_event(&mut self, event: TicketPickerEvent) {
+        match event {
+            TicketPickerEvent::TicketsLoaded { tickets } => {
+                self.ticket_picker_overlay.loading = false;
+                self.ticket_picker_overlay.error = None;
+                self.ticket_picker_overlay
+                    .apply_tickets(tickets, &self.ticket_picker_priority_states);
+            }
+            TicketPickerEvent::TicketsLoadFailed { message } => {
+                self.ticket_picker_overlay.loading = false;
+                self.ticket_picker_overlay.error = Some(message.clone());
+                self.status_warning = Some(format!(
+                    "ticket picker load warning: {}",
+                    compact_focus_card_text(message.as_str())
+                ));
+            }
+            TicketPickerEvent::TicketStarted {
+                projection,
+                tickets,
+                warning,
+            } => {
+                self.ticket_picker_overlay.starting_ticket_id = None;
+                self.ticket_picker_overlay.error = None;
+                if let Some(projection) = projection {
+                    self.domain = projection;
+                }
+                if let Some(tickets) = tickets {
+                    self.ticket_picker_overlay
+                        .apply_tickets(tickets, &self.ticket_picker_priority_states);
+                }
+                if let Some(message) = warning {
+                    self.status_warning = Some(format!(
+                        "ticket picker start warning: {}",
+                        compact_focus_card_text(message.as_str())
+                    ));
+                }
+            }
+            TicketPickerEvent::TicketStartFailed { message } => {
+                self.ticket_picker_overlay.starting_ticket_id = None;
+                self.ticket_picker_overlay.error = Some(message.clone());
+                self.status_warning = Some(format!(
+                    "ticket picker start warning: {}",
+                    compact_focus_card_text(message.as_str())
+                ));
+            }
+        }
+    }
+
+    fn is_ticket_picker_visible(&self) -> bool {
+        self.ticket_picker_overlay.visible
     }
 
     fn start_supervisor_stream_for_selected(&mut self) {
@@ -1939,9 +2406,69 @@ async fn run_supervisor_stream_task(
     }
 }
 
+async fn run_ticket_picker_load_task(
+    provider: Arc<dyn TicketPickerProvider>,
+    sender: mpsc::Sender<TicketPickerEvent>,
+) {
+    match provider.list_unfinished_tickets().await {
+        Ok(tickets) => {
+            let _ = sender
+                .send(TicketPickerEvent::TicketsLoaded { tickets })
+                .await;
+        }
+        Err(error) => {
+            let _ = sender
+                .send(TicketPickerEvent::TicketsLoadFailed {
+                    message: error.to_string(),
+                })
+                .await;
+        }
+    }
+}
+
+async fn run_ticket_picker_start_task(
+    provider: Arc<dyn TicketPickerProvider>,
+    ticket: TicketSummary,
+    sender: mpsc::Sender<TicketPickerEvent>,
+) {
+    if let Err(error) = provider.start_or_resume_ticket(ticket).await {
+        let _ = sender
+            .send(TicketPickerEvent::TicketStartFailed {
+                message: error.to_string(),
+            })
+            .await;
+        return;
+    }
+
+    let mut warning = Vec::new();
+    let projection = match provider.reload_projection().await {
+        Ok(projection) => Some(projection),
+        Err(error) => {
+            warning.push(format!("failed to reload projection: {error}"));
+            None
+        }
+    };
+    let tickets = match provider.list_unfinished_tickets().await {
+        Ok(tickets) => Some(tickets),
+        Err(error) => {
+            warning.push(format!("failed to refresh tickets: {error}"));
+            None
+        }
+    };
+
+    let _ = sender
+        .send(TicketPickerEvent::TicketStarted {
+            projection,
+            tickets,
+            warning: (!warning.is_empty()).then(|| warning.join("; ")),
+        })
+        .await;
+}
+
 pub struct Ui {
     terminal: Terminal<CrosstermBackend<Stdout>>,
     supervisor_provider: Option<Arc<dyn LlmProvider>>,
+    ticket_picker_provider: Option<Arc<dyn TicketPickerProvider>>,
 }
 
 impl Ui {
@@ -1954,6 +2481,7 @@ impl Ui {
         Ok(Self {
             terminal,
             supervisor_provider: None,
+            ticket_picker_provider: None,
         })
     }
 
@@ -1962,17 +2490,21 @@ impl Ui {
         self
     }
 
+    pub fn with_ticket_picker_provider(mut self, provider: Arc<dyn TicketPickerProvider>) -> Self {
+        self.ticket_picker_provider = Some(provider);
+        self
+    }
+
     pub fn run(&mut self, status: &str, projection: &ProjectionState) -> io::Result<()> {
-        let mut shell_state = match self.supervisor_provider.clone() {
-            Some(provider) => UiShellState::new_with_supervisor(
-                status.to_owned(),
-                projection.clone(),
-                Some(provider),
-            ),
-            None => UiShellState::new(status.to_owned(), projection.clone()),
-        };
+        let mut shell_state = UiShellState::new_with_integrations(
+            status.to_owned(),
+            projection.clone(),
+            self.supervisor_provider.clone(),
+            self.ticket_picker_provider.clone(),
+        );
         loop {
             shell_state.tick_supervisor_stream();
+            shell_state.tick_ticket_picker();
             let ui_state = shell_state.ui_state();
             self.terminal.draw(|frame| {
                 let area = frame.area();
@@ -2013,6 +2545,9 @@ impl Ui {
 
                 if let Some(which_key) = shell_state.which_key_overlay.as_ref() {
                     render_which_key_overlay(frame, center_area, which_key);
+                }
+                if shell_state.ticket_picker_overlay.visible {
+                    render_ticket_picker_overlay(frame, main, &shell_state.ticket_picker_overlay);
                 }
             })?;
 
@@ -2094,6 +2629,137 @@ fn render_center_panel(ui_state: &UiState) -> String {
     lines.join("\n")
 }
 
+fn render_ticket_picker_overlay(
+    frame: &mut ratatui::Frame<'_>,
+    anchor_area: Rect,
+    overlay: &TicketPickerOverlayState,
+) {
+    let content = render_ticket_picker_overlay_text(overlay);
+    let Some(popup) = ticket_picker_popup(anchor_area) else {
+        return;
+    };
+
+    frame.render_widget(Clear, popup);
+    frame.render_widget(
+        Paragraph::new(content).block(Block::default().title("start ticket").borders(Borders::ALL)),
+        popup,
+    );
+}
+
+fn ticket_picker_popup(anchor_area: Rect) -> Option<Rect> {
+    if anchor_area.width < 20 || anchor_area.height < 10 {
+        return None;
+    }
+
+    let width = ((anchor_area.width as f32) * 0.78).round() as u16;
+    let height = ((anchor_area.height as f32) * 0.82).round() as u16;
+    let width = width.clamp(20, anchor_area.width.saturating_sub(2));
+    let height = height.clamp(10, anchor_area.height.saturating_sub(2));
+
+    Some(Rect {
+        x: anchor_area.x + (anchor_area.width.saturating_sub(width)) / 2,
+        y: anchor_area.y + (anchor_area.height.saturating_sub(height)) / 2,
+        width,
+        height,
+    })
+}
+
+fn render_ticket_picker_overlay_text(overlay: &TicketPickerOverlayState) -> String {
+    let mut lines =
+        vec!["j/k or arrows: move | h/Left: fold | l/Right: unfold | Enter: start | Esc: close"
+            .to_owned()];
+
+    if overlay.loading {
+        lines.push("Loading unfinished tickets...".to_owned());
+    }
+    if let Some(starting_ticket_id) = overlay.starting_ticket_id.as_ref() {
+        lines.push(format!("Starting {}...", starting_ticket_id.as_str()));
+    }
+    if let Some(error) = overlay.error.as_ref() {
+        lines.push(format!(
+            "Error: {}",
+            compact_focus_card_text(error.as_str())
+        ));
+    }
+
+    lines.push(String::new());
+
+    if overlay.project_groups.is_empty() {
+        lines.push("No unfinished tickets found.".to_owned());
+        return lines.join("\n");
+    }
+
+    for (project_index, project_group) in overlay.project_groups.iter().enumerate() {
+        let project_selected = overlay
+            .selected_row()
+            .map(|row| {
+                matches!(
+                    row,
+                    TicketPickerRowRef::ProjectHeader {
+                        project_index: selected_project_index,
+                    } if *selected_project_index == project_index
+                )
+            })
+            .unwrap_or_default();
+        let selected_prefix = if project_selected { ">" } else { " " };
+        let fold_marker = if project_group.collapsed { "[+]" } else { "[-]" };
+        lines.push(format!(
+            "{selected_prefix}{fold_marker} {} ({})",
+            project_group.project,
+            project_group.ticket_count()
+        ));
+
+        if project_group.collapsed {
+            lines.push(String::new());
+            continue;
+        }
+
+        for (status_index, status_group) in project_group.status_groups.iter().enumerate() {
+            lines.push(format!("   {} ({})", status_group.status, status_group.tickets.len()));
+            for (ticket_index, ticket) in status_group.tickets.iter().enumerate() {
+                let is_selected = overlay
+                    .selected_row()
+                    .map(|row| {
+                        matches!(
+                            row,
+                            TicketPickerRowRef::Ticket {
+                                project_index: selected_project_index,
+                                status_index: selected_status_index,
+                                ticket_index: selected_ticket_index,
+                            } if *selected_project_index == project_index
+                                && *selected_status_index == status_index
+                                && *selected_ticket_index == ticket_index
+                        )
+                    })
+                    .unwrap_or_default();
+                let selected_prefix = if is_selected { ">" } else { " " };
+                let starting_prefix = if overlay
+                    .starting_ticket_id
+                    .as_ref()
+                    .map(|id| id == &ticket.ticket_id)
+                    .unwrap_or_default()
+                {
+                    "*"
+                } else {
+                    " "
+                };
+                lines.push(format!(
+                    "{selected_prefix}{starting_prefix}    {}: {}",
+                    ticket.identifier,
+                    compact_focus_card_text(ticket.title.as_str())
+                ));
+            }
+        }
+        lines.push(String::new());
+    }
+
+    if lines.last().map(|line| line.is_empty()).unwrap_or(false) {
+        lines.pop();
+    }
+
+    lines.join("\n")
+}
+
 fn render_which_key_overlay(
     frame: &mut ratatui::Frame<'_>,
     anchor_area: Rect,
@@ -2166,6 +2832,144 @@ fn render_which_key_overlay_text(overlay: &WhichKeyOverlayState) -> String {
     lines.join("\n")
 }
 
+fn ticket_picker_priority_states_from_env() -> Vec<String> {
+    match std::env::var(TICKET_PICKER_PRIORITY_STATES_ENV) {
+        Ok(raw) => {
+            let parsed = raw
+                .split(',')
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToOwned::to_owned)
+                .collect::<Vec<_>>();
+            if parsed.is_empty() {
+                TICKET_PICKER_PRIORITY_STATES_DEFAULT
+                    .iter()
+                    .map(|value| (*value).to_owned())
+                    .collect()
+            } else {
+                parsed
+            }
+        }
+        Err(_) => TICKET_PICKER_PRIORITY_STATES_DEFAULT
+            .iter()
+            .map(|value| (*value).to_owned())
+            .collect(),
+    }
+}
+
+fn normalize_ticket_state(value: &str) -> String {
+    value.trim().to_ascii_lowercase()
+}
+
+fn normalize_ticket_project(value: &str) -> String {
+    value.trim().to_ascii_lowercase()
+}
+
+fn is_unfinished_ticket_state(state: &str) -> bool {
+    let normalized = normalize_ticket_state(state);
+    !matches!(
+        normalized.as_str(),
+        "done" | "completed" | "canceled" | "cancelled"
+    )
+}
+
+fn ticket_project_name(ticket: &TicketSummary) -> String {
+    ticket
+        .project
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("No Project")
+        .to_owned()
+}
+
+fn group_tickets_by_project(
+    tickets: Vec<TicketSummary>,
+    priority_states: &[String],
+    collapsed_projects: &HashSet<String>,
+) -> Vec<TicketProjectGroup> {
+    let mut projects = tickets
+        .into_iter()
+        .filter(|ticket| is_unfinished_ticket_state(ticket.state.as_str()))
+        .fold(
+            Vec::<(String, Vec<TicketSummary>)>::new(),
+            |mut project_buckets, ticket| {
+                let project_name = ticket_project_name(&ticket);
+                if let Some(existing) = project_buckets
+                    .iter_mut()
+                    .find(|(name, _)| name.eq_ignore_ascii_case(project_name.as_str()))
+                {
+                    existing.1.push(ticket);
+                } else {
+                    project_buckets.push((project_name, vec![ticket]));
+                }
+                project_buckets
+            },
+        );
+
+    projects.sort_by(|left, right| {
+        normalize_ticket_project(left.0.as_str()).cmp(&normalize_ticket_project(right.0.as_str()))
+    });
+
+    projects
+        .into_iter()
+        .map(|(project, project_tickets)| TicketProjectGroup {
+            collapsed: collapsed_projects.contains(&normalize_ticket_project(project.as_str())),
+            project,
+            status_groups: group_tickets_by_status(project_tickets, priority_states),
+        })
+        .collect()
+}
+
+fn group_tickets_by_status(
+    tickets: Vec<TicketSummary>,
+    priority_states: &[String],
+) -> Vec<TicketStatusGroup> {
+    let mut groups = tickets
+        .into_iter()
+        .fold(Vec::<TicketStatusGroup>::new(), |mut groups, ticket| {
+            if let Some(existing) = groups
+                .iter_mut()
+                .find(|group| group.status.eq_ignore_ascii_case(ticket.state.as_str()))
+            {
+                existing.tickets.push(ticket);
+            } else {
+                groups.push(TicketStatusGroup {
+                    status: ticket.state.clone(),
+                    tickets: vec![ticket],
+                });
+            }
+            groups
+        });
+
+    for group in &mut groups {
+        group.tickets.sort_by(|left, right| {
+            right
+                .updated_at
+                .cmp(&left.updated_at)
+                .then_with(|| left.identifier.cmp(&right.identifier))
+        });
+    }
+
+    groups.sort_by(|left, right| {
+        left.status
+            .to_ascii_lowercase()
+            .cmp(&right.status.to_ascii_lowercase())
+    });
+
+    let mut ordered = Vec::with_capacity(groups.len());
+    for priority_state in priority_states {
+        if let Some(index) = groups.iter().position(|group| {
+            normalize_ticket_state(group.status.as_str())
+                == normalize_ticket_state(priority_state.as_str())
+        }) {
+            ordered.push(groups.remove(index));
+        }
+    }
+    ordered.extend(groups);
+    ordered
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum UiCommand {
     EnterNormalMode,
@@ -2187,12 +2991,19 @@ enum UiCommand {
     JumpBatchApprovals,
     JumpBatchReviewReady,
     JumpBatchFyiDigest,
+    OpenTicketPicker,
+    CloseTicketPicker,
+    TicketPickerMoveNext,
+    TicketPickerMovePrevious,
+    TicketPickerFoldProject,
+    TicketPickerUnfoldProject,
+    TicketPickerStartSelected,
     OpenFocusCard,
     MinimizeCenterView,
 }
 
 impl UiCommand {
-    const ALL: [Self; 21] = [
+    const ALL: [Self; 28] = [
         Self::EnterNormalMode,
         Self::EnterInsertMode,
         Self::OpenTerminalForSelected,
@@ -2212,6 +3023,13 @@ impl UiCommand {
         Self::JumpBatchApprovals,
         Self::JumpBatchReviewReady,
         Self::JumpBatchFyiDigest,
+        Self::OpenTicketPicker,
+        Self::CloseTicketPicker,
+        Self::TicketPickerMoveNext,
+        Self::TicketPickerMovePrevious,
+        Self::TicketPickerFoldProject,
+        Self::TicketPickerUnfoldProject,
+        Self::TicketPickerStartSelected,
         Self::OpenFocusCard,
         Self::MinimizeCenterView,
     ];
@@ -2237,6 +3055,13 @@ impl UiCommand {
             Self::JumpBatchApprovals => "ui.jump_batch.approvals",
             Self::JumpBatchReviewReady => "ui.jump_batch.review_ready",
             Self::JumpBatchFyiDigest => "ui.jump_batch.fyi_digest",
+            Self::OpenTicketPicker => "ui.ticket_picker.open",
+            Self::CloseTicketPicker => "ui.ticket_picker.close",
+            Self::TicketPickerMoveNext => "ui.ticket_picker.move_next",
+            Self::TicketPickerMovePrevious => "ui.ticket_picker.move_previous",
+            Self::TicketPickerFoldProject => "ui.ticket_picker.fold_project",
+            Self::TicketPickerUnfoldProject => "ui.ticket_picker.unfold_project",
+            Self::TicketPickerStartSelected => "ui.ticket_picker.start_selected",
             Self::OpenFocusCard => "ui.open_focus_card_for_selected",
             Self::MinimizeCenterView => "ui.center.pop",
         }
@@ -2263,6 +3088,13 @@ impl UiCommand {
             Self::JumpBatchApprovals => "Jump to Approvals lane",
             Self::JumpBatchReviewReady => "Jump to PR Reviews lane",
             Self::JumpBatchFyiDigest => "Jump to FYI Digest lane",
+            Self::OpenTicketPicker => "Open ticket picker",
+            Self::CloseTicketPicker => "Close ticket picker",
+            Self::TicketPickerMoveNext => "Move to next ticket picker row",
+            Self::TicketPickerMovePrevious => "Move to previous ticket picker row",
+            Self::TicketPickerFoldProject => "Fold selected project in ticket picker",
+            Self::TicketPickerUnfoldProject => "Unfold selected project in ticket picker",
+            Self::TicketPickerStartSelected => "Start selected ticket",
             Self::OpenFocusCard => "Open focus card for selected item",
             Self::MinimizeCenterView => "Minimize active center view",
         }
@@ -2314,6 +3146,7 @@ fn default_keymap_config() -> KeymapConfig {
                     binding(&["2"], UiCommand::JumpBatchApprovals),
                     binding(&["3"], UiCommand::JumpBatchReviewReady),
                     binding(&["4"], UiCommand::JumpBatchFyiDigest),
+                    binding(&["s"], UiCommand::OpenTicketPicker),
                     binding(&["enter"], UiCommand::OpenFocusCard),
                     binding(&["t"], UiCommand::OpenTerminalForSelected),
                     binding(&["backspace"], UiCommand::MinimizeCenterView),
@@ -2376,7 +3209,7 @@ enum RoutedInput {
 fn mode_help(mode: UiMode) -> &'static str {
     match mode {
         UiMode::Normal => {
-            "j/k: select | Tab/S-Tab: batch cycle | 1-4 or z{1-4}: batch jump | g/G: first/last | Enter: focus | t: terminal | v{d/t/p/c}: inspectors | i: insert | q: quit"
+            "j/k: select | Tab/S-Tab: batch cycle | 1-4 or z{1-4}: batch jump | g/G: first/last | s: start ticket | Enter: focus | t: terminal | v{d/t/p/c}: inspectors | i: insert | q: quit"
         }
         UiMode::Insert => "Insert input active | Esc/Ctrl-[: Normal",
         UiMode::Terminal => "Terminal pass-through active | Esc or Ctrl-\\ Ctrl-n: Normal",
@@ -2402,6 +3235,10 @@ fn handle_key_press(shell_state: &mut UiShellState, key: KeyEvent) -> bool {
 }
 
 fn route_key_press(shell_state: &mut UiShellState, key: KeyEvent) -> RoutedInput {
+    if shell_state.is_ticket_picker_visible() {
+        return route_ticket_picker_key(shell_state, key);
+    }
+
     if is_escape_to_normal(key) {
         if shell_state.is_active_supervisor_stream_visible() {
             shell_state.cancel_supervisor_stream();
@@ -2422,6 +3259,31 @@ fn route_key_press(shell_state: &mut UiShellState, key: KeyEvent) -> RoutedInput
                 RoutedInput::Command(UiCommand::EnterNormalMode)
             }
         }
+    }
+}
+
+fn route_ticket_picker_key(_shell_state: &mut UiShellState, key: KeyEvent) -> RoutedInput {
+    if is_escape_to_normal(key) {
+        return RoutedInput::Command(UiCommand::CloseTicketPicker);
+    }
+
+    if !key.modifiers.is_empty() {
+        return RoutedInput::Ignore;
+    }
+
+    match key.code {
+        KeyCode::Char('j') | KeyCode::Down => RoutedInput::Command(UiCommand::TicketPickerMoveNext),
+        KeyCode::Char('k') | KeyCode::Up => {
+            RoutedInput::Command(UiCommand::TicketPickerMovePrevious)
+        }
+        KeyCode::Char('h') | KeyCode::Left => {
+            RoutedInput::Command(UiCommand::TicketPickerFoldProject)
+        }
+        KeyCode::Char('l') | KeyCode::Right => {
+            RoutedInput::Command(UiCommand::TicketPickerUnfoldProject)
+        }
+        KeyCode::Enter => RoutedInput::Command(UiCommand::TicketPickerStartSelected),
+        _ => RoutedInput::Ignore,
     }
 }
 
@@ -2543,6 +3405,34 @@ fn dispatch_command(shell_state: &mut UiShellState, command: UiCommand) -> bool 
         }
         UiCommand::JumpBatchFyiDigest => {
             shell_state.jump_to_batch(InboxBatchKind::FyiDigest);
+            false
+        }
+        UiCommand::OpenTicketPicker => {
+            shell_state.open_ticket_picker();
+            false
+        }
+        UiCommand::CloseTicketPicker => {
+            shell_state.close_ticket_picker();
+            false
+        }
+        UiCommand::TicketPickerMoveNext => {
+            shell_state.move_ticket_picker_selection(1);
+            false
+        }
+        UiCommand::TicketPickerMovePrevious => {
+            shell_state.move_ticket_picker_selection(-1);
+            false
+        }
+        UiCommand::TicketPickerFoldProject => {
+            shell_state.fold_ticket_picker_selected_project();
+            false
+        }
+        UiCommand::TicketPickerUnfoldProject => {
+            shell_state.unfold_ticket_picker_selected_project();
+            false
+        }
+        UiCommand::TicketPickerStartSelected => {
+            shell_state.start_selected_ticket_from_picker();
             false
         }
         UiCommand::OpenFocusCard => {

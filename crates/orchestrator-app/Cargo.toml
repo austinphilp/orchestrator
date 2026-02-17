@@ -5,6 +5,10 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+integration-linear = { path = "../integration-linear" }
+integration-git = { path = "../integration-git" }
+backend-opencode = { path = "../backend-opencode" }
+async-trait.workspace = true
 anyhow.workspace = true
 orchestrator-core = { path = "../orchestrator-core" }
 orchestrator-github = { path = "../orchestrator-github" }
@@ -17,5 +21,4 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 
 [dev-dependencies]
-async-trait.workspace = true
 orchestrator-core = { path = "../orchestrator-core", features = ["test-support"] }
