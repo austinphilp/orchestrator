@@ -23,3 +23,8 @@ cargo ci-check
 cargo ci-test
 cargo run -p orchestrator-app
 ```
+
+Configuration:
+- Set `ORCHESTRATOR_CONFIG` to a path containing TOML config (for example `/path/to/config.toml`).
+- If `ORCHESTRATOR_CONFIG` is not set, the app defaults to `~/.config/orchestrator/config.toml`.
+- When the resolved config file does not exist, the app creates it with default values on first run.

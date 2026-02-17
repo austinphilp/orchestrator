@@ -43,6 +43,9 @@ query ListOpenIssues($first: Int!) {
       url
       priority
       updatedAt
+      project {
+        name
+      }
       assignee {
         id
       }
@@ -880,6 +883,7 @@ fn issue_to_summary(issue: &LinearIssueNode) -> TicketSummary {
         ticket_id: TicketId::from_provider_uuid(TicketProvider::Linear, &issue.id),
         identifier: issue.identifier.clone(),
         title: issue.title.clone(),
+        project: issue.project.as_ref().map(|project| project.name.clone()),
         state: issue
             .state
             .as_ref()
@@ -1302,9 +1306,15 @@ struct LinearIssueNode {
     priority: Option<i32>,
     #[serde(rename = "updatedAt")]
     updated_at: String,
+    project: Option<LinearProjectNode>,
     assignee: Option<LinearAssigneeNode>,
     state: Option<LinearStateNode>,
     labels: Option<LinearLabelConnection>,
+}
+
+#[derive(Debug, Deserialize)]
+struct LinearProjectNode {
+    name: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1394,6 +1404,7 @@ mod tests {
             "url": format!("https://linear.app/example/issue/{identifier}"),
             "priority": 2,
             "updatedAt": updated_at,
+            "project": { "name": "Orchestrator" },
             "assignee": assignee_id.map(|value| json!({ "id": value })),
             "state": { "name": state },
             "labels": { "nodes": [{ "name": "orchestrator" }] }

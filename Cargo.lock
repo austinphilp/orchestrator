@@ -871,6 +871,9 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "backend-opencode",
+ "integration-git",
+ "integration-linear",
  "orchestrator-core",
  "orchestrator-github",
  "orchestrator-supervisor",

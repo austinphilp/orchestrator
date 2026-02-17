@@ -34,6 +34,8 @@ pub struct TicketSummary {
     pub ticket_id: TicketId,
     pub identifier: String,
     pub title: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project: Option<String>,
     pub state: String,
     pub url: String,
     pub priority: Option<i32>,

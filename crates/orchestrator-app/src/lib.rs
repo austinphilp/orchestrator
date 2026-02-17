@@ -4,8 +4,10 @@ use orchestrator_core::{
     TicketSummary, VcsProvider, WorkerBackend,
 };
 use serde::{Deserialize, Serialize};
+mod ticket_picker;
+pub use ticket_picker::AppTicketPickerProvider;
 
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AppConfig {
     pub workspace: String,
     #[serde(default = "default_event_store_path")]
@@ -33,16 +35,85 @@ impl Default for AppConfig {
 
 impl AppConfig {
     pub fn from_env() -> Result<Self, CoreError> {
-        match std::env::var("ORCHESTRATOR_CONFIG") {
-            Ok(raw) => toml::from_str(&raw).map_err(|err| {
-                CoreError::Configuration(format!("Failed to parse ORCHESTRATOR_CONFIG: {err}"))
-            }),
-            Err(std::env::VarError::NotPresent) => Ok(Self::default()),
-            Err(_) => Err(CoreError::Configuration(
-                "ORCHESTRATOR_CONFIG contained invalid UTF-8".to_owned(),
-            )),
-        }
+        let path = config_path_from_env()?;
+        load_or_create_config(&path)
     }
+}
+
+fn config_path_from_env() -> Result<std::path::PathBuf, CoreError> {
+    match std::env::var("ORCHESTRATOR_CONFIG") {
+        Ok(raw) => Ok(raw.into()),
+        Err(std::env::VarError::NotPresent) => default_config_path(),
+        Err(_) => Err(CoreError::Configuration(
+            "ORCHESTRATOR_CONFIG contained invalid UTF-8".to_owned(),
+        )),
+    }
+}
+
+fn default_config_path() -> Result<std::path::PathBuf, CoreError> {
+    let home = std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .map_err(|_| {
+            CoreError::Configuration(
+                "Unable to resolve home directory from HOME or USERPROFILE".to_owned(),
+            )
+        })?;
+    if home.trim().is_empty() {
+        return Err(CoreError::Configuration(
+            "HOME and USERPROFILE values are empty".to_owned(),
+        ));
+    }
+
+    Ok(std::path::PathBuf::from(home)
+        .join(".config")
+        .join("orchestrator")
+        .join("config.toml"))
+}
+
+fn load_or_create_config(path: &std::path::Path) -> Result<AppConfig, CoreError> {
+    let raw = match std::fs::read_to_string(path) {
+        Ok(raw) => raw,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            if let Some(parent) = path.parent() {
+                if !parent.as_os_str().is_empty() {
+                    std::fs::create_dir_all(parent).map_err(|err| {
+                        CoreError::Configuration(format!(
+                            "Failed to create parent directory {} for ORCHESTRATOR_CONFIG: {err}",
+                            parent.display()
+                        ))
+                    })?;
+                }
+            }
+
+            let rendered = toml::to_string_pretty(&AppConfig::default()).map_err(|err| {
+                CoreError::Configuration(format!(
+                    "Failed to serialize default ORCHESTRATOR_CONFIG: {err}"
+                ))
+            })?;
+
+            std::fs::write(path, rendered.as_bytes()).map_err(|err| {
+                CoreError::Configuration(format!(
+                    "Failed to write default ORCHESTRATOR_CONFIG to {}: {err}",
+                    path.display()
+                ))
+            })?;
+
+            rendered
+        }
+        Err(err) => {
+            return Err(CoreError::Configuration(format!(
+                "Failed to read ORCHESTRATOR_CONFIG from {}: {err}",
+                path.display()
+            )));
+        }
+    };
+
+    toml::from_str(&raw).map_err(|err| {
+        CoreError::Configuration(format!(
+            "Failed to parse ORCHESTRATOR_CONFIG from {}: {err}",
+            path.display()
+        ))
+    })
 }
 
 pub struct App<S: Supervisor, G: GithubClient> {
@@ -96,6 +167,32 @@ mod tests {
     };
     use std::path::{Path, PathBuf};
     use std::sync::Mutex;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn unique_temp_path(prefix: &str) -> PathBuf {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        std::env::temp_dir().join(format!("orchestrator-app-config-{prefix}-{now}-{}", std::process::id()))
+    }
+
+    fn write_config_file(path: &Path, raw: &str) {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).expect("create fixture config parent");
+        }
+        std::fs::write(path, raw.as_bytes()).expect("write fixture config");
+    }
+
+    fn unique_temp_dir(prefix: &str) -> PathBuf {
+        let path = unique_temp_path(prefix);
+        std::fs::create_dir_all(&path).expect("create temp dir");
+        path
+    }
+
+    fn remove_temp_path(path: &Path) {
+        let _ = std::fs::remove_dir_all(path);
+    }
 
     struct Healthy;
 
@@ -115,37 +212,95 @@ mod tests {
 
     #[test]
     fn config_defaults_when_env_missing() {
-        with_env_var("ORCHESTRATOR_CONFIG", None, || {
-            let config = AppConfig::from_env().expect("default config");
-            assert_eq!(config, AppConfig::default());
+        let home = unique_temp_dir("home");
+        let expected = home.join(".config").join("orchestrator").join("config.toml");
+
+        with_env_var("HOME", Some(home.to_str().unwrap()), || {
+            with_env_var("USERPROFILE", None, || {
+                with_env_var("ORCHESTRATOR_CONFIG", None, || {
+                    let config = AppConfig::from_env().expect("default config");
+                    assert_eq!(config, AppConfig::default());
+                    assert_eq!(expected, default_config_path().expect("default config path"));
+                    assert!(expected.exists());
+                    let raw = std::fs::read_to_string(expected.clone()).unwrap();
+                    let parsed: AppConfig = toml::from_str(&raw).unwrap();
+                    assert_eq!(parsed, AppConfig::default());
+                });
+            });
         });
+
+        remove_temp_path(&home);
     }
 
     #[test]
-    fn config_parses_from_toml_env() {
-        with_env_var(
-            "ORCHESTRATOR_CONFIG",
-            Some("workspace = '/tmp/work'\nevent_store_path = '/tmp/events.db'"),
-            || {
-                let config = AppConfig::from_env().expect("parse config");
-                assert_eq!(config.workspace, "/tmp/work");
-                assert_eq!(config.event_store_path, "/tmp/events.db");
-            },
-        );
+    fn config_creates_default_when_missing() {
+        let home = unique_temp_dir("create");
+        let expected = home.join(".config").join("orchestrator").join("config.toml");
+
+        with_env_var("HOME", Some(home.to_str().unwrap()), || {
+            with_env_var("USERPROFILE", None, || {
+                with_env_var("ORCHESTRATOR_CONFIG", Some(expected.to_str().unwrap()), || {
+                    let config = AppConfig::from_env().expect("bootstrap config");
+                    assert_eq!(config, AppConfig::default());
+                    assert!(expected.exists());
+                    let contents = std::fs::read_to_string(expected.clone()).unwrap();
+                    let parsed: AppConfig = toml::from_str(&contents).unwrap();
+                    assert_eq!(parsed, AppConfig::default());
+                });
+            });
+        });
+
+        remove_temp_path(&home);
     }
 
     #[test]
-    fn config_defaults_event_store_path_when_missing_in_toml_env() {
-        with_env_var(
-            "ORCHESTRATOR_CONFIG",
-            Some("workspace = '/tmp/work'"),
-            || {
-                let config = AppConfig::from_env().expect("parse config");
-                assert_eq!(config.workspace, "/tmp/work");
-                assert_eq!(config.event_store_path, default_event_store_path());
-            },
+    fn config_parses_from_toml_file() {
+        let home = unique_temp_dir("parse");
+        let config_path = home.join("config.toml");
+        write_config_file(
+            &config_path,
+            "workspace = '/tmp/work'\nevent_store_path = '/tmp/events.db'\n",
         );
+
+        with_env_var("ORCHESTRATOR_CONFIG", Some(config_path.to_str().unwrap()), || {
+            let config = AppConfig::from_env().expect("parse config");
+            assert_eq!(config.workspace, "/tmp/work");
+            assert_eq!(config.event_store_path, "/tmp/events.db");
+        });
+
+        remove_temp_path(&home);
     }
+
+    #[test]
+    fn config_defaults_event_store_path_when_missing_in_toml_file() {
+        let home = unique_temp_dir("partial");
+        let config_path = home.join("config.toml");
+        write_config_file(&config_path, "workspace = '/tmp/work'\n");
+
+        with_env_var("ORCHESTRATOR_CONFIG", Some(config_path.to_str().unwrap()), || {
+            let config = AppConfig::from_env().expect("parse config");
+            assert_eq!(config.workspace, "/tmp/work");
+            assert_eq!(config.event_store_path, default_event_store_path());
+        });
+
+        remove_temp_path(&home);
+    }
+
+    #[test]
+    fn config_rejects_invalid_toml_file() {
+        let home = unique_temp_dir("invalid");
+        let config_path = home.join("config.toml");
+        write_config_file(&config_path, "workspace = '/tmp/work'\nevent_store_path = [\n");
+
+        with_env_var("ORCHESTRATOR_CONFIG", Some(config_path.to_str().unwrap()), || {
+            let err = AppConfig::from_env().expect_err("invalid toml should fail");
+            let message = err.to_string();
+            assert!(message.contains("Failed to parse ORCHESTRATOR_CONFIG"));
+        });
+
+        remove_temp_path(&home);
+    }
+
 
     #[tokio::test]
     async fn startup_composition_succeeds_with_mock_adapters() {
@@ -318,6 +473,7 @@ mod tests {
             ticket_id: TicketId::from_provider_uuid(TicketProvider::Linear, "issue-126"),
             identifier: "AP-126".to_owned(),
             title: "Implement ticket selected start resume orchestration flow".to_owned(),
+            project: None,
             state: "In Progress".to_owned(),
             url: "https://linear.app/acme/issue/AP-126".to_owned(),
             priority: Some(2),

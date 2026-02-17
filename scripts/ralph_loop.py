@@ -35,6 +35,7 @@ from typing import Any
 LINEAR_ENDPOINT = "https://api.linear.app/graphql"
 PLAN_START = "<!-- ralph-plan:start -->"
 PLAN_END = "<!-- ralph-plan:end -->"
+SUPERVISOR_TICKET_IDS = "AP-180,AP-181,AP-182,AP-183,AP-184,AP-185,AP-186"
 
 
 class RalphError(RuntimeError):
@@ -132,15 +133,21 @@ class LinearClient:
         data = self.gql(query, {"teamId": team_id})
         return data["workflowStates"]["nodes"]
 
-    def list_pending_issues(self, project_id: str, prefix: str) -> list[Issue]:
+    def list_pending_issues(
+        self,
+        team_id: str,
+        prefix: str,
+        identifier_prefix: str | None = None,
+        project_id: str | None = None,
+        identifier_filter: set[str] | None = None,
+    ) -> list[Issue]:
         query = """
-        query($projectId:ID!, $prefix:String!){
+        query($teamId:ID!){
           issues(
             first:250,
             filter:{
-              project:{ id:{ eq:$projectId } },
               archivedAt:{ null:true },
-              title:{ contains:$prefix },
+              team:{ id:{ eq:$teamId } },
               state:{ type:{ nin:["completed","canceled"] } }
             }
           ){
@@ -155,45 +162,84 @@ class LinearClient:
           }
         }
         """
-        data = self.gql(query, {"projectId": project_id, "prefix": prefix})
+        data = self.gql(query, {"teamId": team_id})
         out: list[Issue] = []
+        identifier_filter = identifier_filter or set()
         for n in data["issues"]["nodes"]:
+            title = n["title"]
+            identifier = n["identifier"]
+            project = n.get("project")
+            issue_project_id = project.get("id") if project else None
+
+            if project_id and issue_project_id != project_id:
+                continue
+            if identifier_filter and identifier not in identifier_filter:
+                continue
+            if prefix and prefix not in title:
+                if not identifier_prefix or not identifier.startswith(identifier_prefix):
+                    continue
+            if identifier_prefix and not identifier.startswith(identifier_prefix):
+                if not prefix or prefix not in title:
+                    continue
             out.append(
                 Issue(
                     id=n["id"],
-                    identifier=n["identifier"],
-                    title=n["title"],
+                    identifier=identifier,
+                    title=title,
                     description=n.get("description") or "",
                     state_name=n["state"]["name"],
                     state_type=n["state"]["type"],
-                    project_id=n["project"]["id"],
-                    project_name=n["project"]["name"],
+                    project_id=issue_project_id or "",
+                    project_name=(project.get("name") or "") if project else "",
                 )
             )
         return out
 
-    def list_project_plan_outline(self, project_id: str, prefix: str) -> list[dict[str, str]]:
+    def list_project_plan_outline(
+        self,
+        team_id: str,
+        prefix: str,
+        identifier_prefix: str | None = None,
+        project_id: str | None = None,
+        identifier_filter: set[str] | None = None,
+    ) -> list[dict[str, str]]:
         query = """
-        query($projectId:ID!, $prefix:String!){
+        query($teamId:ID!){
           issues(
             first:250,
             filter:{
-              project:{ id:{ eq:$projectId } },
               archivedAt:{ null:true },
-              title:{ contains:$prefix }
+              team:{ id:{ eq:$teamId } },
             }
           ){
             nodes {
               identifier
               title
               state { name type }
+              project { id name }
             }
           }
         }
         """
-        data = self.gql(query, {"projectId": project_id, "prefix": prefix})
+        data = self.gql(query, {"teamId": team_id})
         out: list[dict[str, str]] = []
+        identifier_filter = identifier_filter or set()
         for n in data["issues"]["nodes"]:
+            title = n["title"]
+            identifier = n["identifier"]
+            project = n.get("project")
+            issue_project_id = project.get("id") if project else None
+
+            if project_id and issue_project_id != project_id:
+                continue
+            if identifier_filter and identifier not in identifier_filter:
+                continue
+            if prefix and prefix not in title:
+                if not identifier_prefix or not identifier.startswith(identifier_prefix):
+                    continue
+            if identifier_prefix and not identifier.startswith(identifier_prefix):
+                if not prefix or prefix not in title:
+                    continue
             out.append(
                 {
                     "identifier": n["identifier"],
@@ -288,11 +334,28 @@ def sort_key_from_title(title: str, prefix: str) -> tuple[Any, ...]:
     if m := epic_pat.match(title):
         letters = m.group(1)
         return (1, letters, 0, title)
-    return (2, title)
+        return (2, title)
+
+
+def sort_key_for_issue(issue: Issue, prefix: str, identifier_prefix: str | None = None) -> tuple[Any, ...]:
+    m = re.search(r"-(\d+)\b", issue.identifier)
+    if m:
+        return (0, int(m.group(1)), issue.identifier)
+    return sort_key_from_title(issue.title, prefix)
 
 
 def is_epic_title(title: str, prefix: str) -> bool:
-    return bool(re.match(rf"^{re.escape(prefix)}EPIC\s+[A-Z]+\b", title))
+    if re.search(r"\bEPIC\b", title, flags=re.IGNORECASE):
+        return True
+    if prefix and re.match(rf"^{re.escape(prefix)}EPIC\s+[A-Z]+\b", title):
+        return True
+    return False
+
+
+def parse_identifier_filter(value: str | None) -> set[str]:
+    if not value:
+        return set()
+    return {entry.strip().upper() for entry in value.split(",") if entry.strip()}
 
 
 def compose_plan_prompt(issue: Issue, repo_root: Path, design_plan_path: Path) -> str:
@@ -570,15 +633,21 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run Ralph loop over pending ORCH2 Linear tickets.")
     parser.add_argument("--repo", default=".", help="Path to repository root (default: current directory)")
     parser.add_argument("--design-plan", default="orchestrator-design-plan.md", help="Design plan markdown file")
-    parser.add_argument("--project-id", default="7a2ba0db-e026-4887-9f7a-ee7a50c6c48b", help="Linear project ID")
+    parser.add_argument("--project-id", default="", help="Optional Linear project ID filter")
+    parser.add_argument(
+        "--identifier-ids",
+        default=SUPERVISOR_TICKET_IDS,
+        help="Comma-separated ticket identifiers to include (defaults to AP-180..AP-186).",
+    )
     parser.add_argument("--team-id", default="85372e13-5228-4d18-b518-0e845c2c0683", help="Linear team ID")
-    parser.add_argument("--prefix", default="ORCH2-", help="Ticket title prefix to process")
+    parser.add_argument("--prefix", default="", help="Ticket title prefix to process")
+    parser.add_argument("--identifier-prefix", default="AP-", help="Ticket identifier prefix to include (e.g. AP-)")
     parser.add_argument("--in-progress-name", default="In Progress", help="Linear state name used for in-progress")
     parser.add_argument("--done-name", default="Done", help="Linear state name used for completion")
     parser.add_argument("--include-epics", action="store_true", help="Include EPIC tickets in loop")
     parser.add_argument("--codex-bin", default="codex", help="Codex CLI binary")
     parser.add_argument("--codex-model", default=None, help="Optional Codex model override")
-    parser.add_argument("--max-tickets", type=int, default=0, help="Max number of tickets to process (0 = all)")
+    parser.add_argument("--max-tickets", type=int, default=7, help="Max number of tickets to process (0 = all)")
     parser.add_argument("--continue-on-error", action="store_true", help="Continue with next ticket on failure")
     parser.add_argument("--dry-run", action="store_true", help="Plan/list only; do not mutate Linear/git or run Codex")
     parser.add_argument(
@@ -624,8 +693,16 @@ def main() -> int:
     in_progress_id = state_by_name[args.in_progress_name]
     done_id = state_by_name[args.done_name]
 
-    issues = linear.list_pending_issues(args.project_id, args.prefix)
-    issues.sort(key=lambda i: sort_key_from_title(i.title, args.prefix))
+    project_id = args.project_id.strip() or None
+    identifier_filter = parse_identifier_filter(args.identifier_ids)
+    issues = linear.list_pending_issues(
+        args.team_id,
+        args.prefix,
+        args.identifier_prefix,
+        project_id=project_id,
+        identifier_filter=identifier_filter,
+    )
+    issues.sort(key=lambda i: sort_key_for_issue(i, args.prefix, args.identifier_prefix))
 
     if not args.include_epics:
         issues = [i for i in issues if not is_epic_title(i.title, args.prefix)]
@@ -670,7 +747,13 @@ def main() -> int:
             # 5) Review + harden.
             print("[5/7] Running Codex review/hardening pass...")
             review_baseline = snapshot_worktree(repo)
-            plan_outline = linear.list_project_plan_outline(args.project_id, args.prefix)
+            plan_outline = linear.list_project_plan_outline(
+                args.team_id,
+                args.prefix,
+                args.identifier_prefix,
+                project_id=project_id,
+                identifier_filter=identifier_filter,
+            )
             review_ticket_with_codex(
                 args.codex_bin,
                 repo,
