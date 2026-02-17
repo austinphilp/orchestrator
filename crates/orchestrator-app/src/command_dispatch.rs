@@ -1,0 +1,89 @@
+use orchestrator_core::{
+    command_ids, resolve_supervisor_query_scope, Command, CommandRegistry, CoreError,
+    LlmChatRequest, LlmProvider, LlmResponseStream, SupervisorQueryArgs,
+    SupervisorQueryContextArgs, UntypedCommandInvocation,
+};
+use orchestrator_supervisor::{
+    build_freeform_messages, build_template_messages_with_variables, SupervisorQueryEngine,
+};
+use orchestrator_ui::SupervisorCommandContext;
+
+use crate::{open_event_store, supervisor_model_from_env};
+
+fn invalid_supervisor_query_usage(reason: impl Into<String>) -> CoreError {
+    CoreError::InvalidCommandArgs {
+        command_id: command_ids::SUPERVISOR_QUERY.to_owned(),
+        reason: reason.into(),
+    }
+}
+
+fn merge_supervisor_query_context(
+    fallback_context: SupervisorCommandContext,
+    invocation_context: Option<SupervisorQueryContextArgs>,
+) -> SupervisorCommandContext {
+    invocation_context.unwrap_or(fallback_context)
+}
+
+fn args_context(args: &SupervisorQueryArgs) -> Option<SupervisorQueryContextArgs> {
+    match args {
+        SupervisorQueryArgs::Template { context, .. } => context.clone(),
+        SupervisorQueryArgs::Freeform { context, .. } => context.clone(),
+    }
+}
+
+async fn execute_supervisor_query<P>(
+    supervisor: &P,
+    event_store_path: &str,
+    args: SupervisorQueryArgs,
+    fallback_context: SupervisorCommandContext,
+) -> Result<(String, LlmResponseStream), CoreError>
+where
+    P: LlmProvider + Send + Sync + ?Sized,
+{
+    let context = merge_supervisor_query_context(fallback_context, args_context(&args));
+    let scope = resolve_supervisor_query_scope(&context)?;
+    let store = open_event_store(event_store_path)?;
+    let query_engine = SupervisorQueryEngine::default();
+    let context_pack = query_engine.build_context_pack(&store, scope)?;
+    let messages = match args {
+        SupervisorQueryArgs::Template {
+            template,
+            variables,
+            ..
+        } => build_template_messages_with_variables(template.as_str(), &variables, &context_pack)?,
+        SupervisorQueryArgs::Freeform { query, .. } => {
+            build_freeform_messages(query.as_str(), &context_pack)?
+        }
+    };
+
+    supervisor
+        .stream_chat(LlmChatRequest {
+            model: supervisor_model_from_env(),
+            messages,
+            temperature: Some(0.2),
+            max_output_tokens: Some(700),
+        })
+        .await
+}
+
+pub(crate) async fn dispatch_supervisor_runtime_command<P>(
+    supervisor: &P,
+    event_store_path: &str,
+    invocation: UntypedCommandInvocation,
+    context: SupervisorCommandContext,
+) -> Result<(String, LlmResponseStream), CoreError>
+where
+    P: LlmProvider + Send + Sync + ?Sized,
+{
+    let command = CommandRegistry::default().parse_invocation(&invocation)?;
+    match command {
+        Command::SupervisorQuery(args) => {
+            execute_supervisor_query(supervisor, event_store_path, args, context).await
+        }
+        command => Err(invalid_supervisor_query_usage(format!(
+            "unsupported command '{}' for supervisor runtime dispatch; expected '{}'",
+            command.id(),
+            command_ids::SUPERVISOR_QUERY
+        ))),
+    }
+}

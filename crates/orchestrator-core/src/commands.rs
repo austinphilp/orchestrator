@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::CoreError;
+use crate::{CoreError, RetrievalScope, WorkItemId, WorkerSessionId};
 
 /// Stable command identifiers shared across every orchestration invocation surface.
 ///
@@ -41,10 +41,24 @@ pub enum SupervisorQueryArgs {
         template: String,
         #[serde(default)]
         variables: BTreeMap<String, String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        context: Option<SupervisorQueryContextArgs>,
     },
     Freeform {
         query: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        context: Option<SupervisorQueryContextArgs>,
     },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct SupervisorQueryContextArgs {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selected_work_item_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selected_session_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -340,13 +354,43 @@ fn parse_supervisor_query(args: Option<&Value>) -> Result<Command, CoreError> {
     let parsed: SupervisorQueryArgs =
         serde_json::from_value(args.clone()).map_err(|err| CoreError::CommandSchemaMismatch {
             command_id: ids::SUPERVISOR_QUERY.to_owned(),
-            expected: "{kind: 'template', template: string, variables?: object<string,string>} or {kind: 'freeform', query: string}".to_owned(),
+            expected: "{kind: 'template', template: string, variables?: object<string,string>, context?: {scope?: string, selected_work_item_id?: string, selected_session_id?: string}} or {kind: 'freeform', query: string, context?: {scope?: string, selected_work_item_id?: string, selected_session_id?: string}}".to_owned(),
             details: err.to_string(),
         })?;
 
     Ok(Command::SupervisorQuery(validate_supervisor_query_args(
         parsed,
     )?))
+}
+
+pub fn resolve_supervisor_query_scope(
+    context: &SupervisorQueryContextArgs,
+) -> Result<RetrievalScope, CoreError> {
+    let normalized_context = validate_supervisor_query_context(Some(context.clone()))?.ok_or_else(|| {
+        CoreError::InvalidCommandArgs {
+            command_id: ids::SUPERVISOR_QUERY.to_owned(),
+            reason: "malformed context: missing selected item; select an inbox item before running supervisor.query".to_owned(),
+        }
+    })?;
+
+    if let Some(scope) = normalized_context.scope.as_deref() {
+        return normalized_scope_to_retrieval_scope(scope);
+    }
+
+    if let Some(session_id) = normalized_context.selected_session_id {
+        return Ok(RetrievalScope::Session(WorkerSessionId::new(session_id)));
+    }
+
+    if let Some(work_item_id) = normalized_context.selected_work_item_id {
+        return Ok(RetrievalScope::WorkItem(WorkItemId::new(work_item_id)));
+    }
+
+    Err(CoreError::InvalidCommandArgs {
+        command_id: ids::SUPERVISOR_QUERY.to_owned(),
+        reason:
+            "malformed context: missing selected item; select an inbox item before running supervisor.query"
+                .to_owned(),
+    })
 }
 
 fn validate_supervisor_query_args(
@@ -356,6 +400,7 @@ fn validate_supervisor_query_args(
         SupervisorQueryArgs::Template {
             template,
             variables,
+            context,
         } => {
             let normalized_template = template.trim();
             if normalized_template.is_empty() {
@@ -364,12 +409,14 @@ fn validate_supervisor_query_args(
                     reason: "template query requires a non-empty template name".to_owned(),
                 });
             }
+            let context = validate_supervisor_query_context(context)?;
             Ok(SupervisorQueryArgs::Template {
                 template: normalized_template.to_owned(),
                 variables,
+                context,
             })
         }
-        SupervisorQueryArgs::Freeform { query } => {
+        SupervisorQueryArgs::Freeform { query, context } => {
             if query.trim().is_empty() {
                 return Err(CoreError::InvalidCommandArgs {
                     command_id: ids::SUPERVISOR_QUERY.to_owned(),
@@ -377,8 +424,116 @@ fn validate_supervisor_query_args(
                         .to_owned(),
                 });
             }
-            Ok(SupervisorQueryArgs::Freeform { query })
+            let context = validate_supervisor_query_context(context)?;
+            Ok(SupervisorQueryArgs::Freeform { query, context })
         }
+    }
+}
+
+fn validate_supervisor_query_context(
+    context: Option<SupervisorQueryContextArgs>,
+) -> Result<Option<SupervisorQueryContextArgs>, CoreError> {
+    let Some(context) = context else {
+        return Ok(None);
+    };
+
+    let selected_work_item_id =
+        normalize_context_identifier(context.selected_work_item_id, "selected_work_item_id")?;
+    let selected_session_id =
+        normalize_context_identifier(context.selected_session_id, "selected_session_id")?;
+    let scope = normalize_context_scope(context.scope)?;
+
+    if selected_work_item_id.is_none() && selected_session_id.is_none() && scope.is_none() {
+        return Ok(None);
+    }
+
+    Ok(Some(SupervisorQueryContextArgs {
+        selected_work_item_id,
+        selected_session_id,
+        scope,
+    }))
+}
+
+fn normalize_context_identifier(
+    raw: Option<String>,
+    field: &str,
+) -> Result<Option<String>, CoreError> {
+    let Some(raw) = raw else {
+        return Ok(None);
+    };
+    let normalized = raw.trim();
+    if normalized.is_empty() {
+        return Err(CoreError::InvalidCommandArgs {
+            command_id: ids::SUPERVISOR_QUERY.to_owned(),
+            reason: format!("malformed context: `{field}` must be a non-empty identifier"),
+        });
+    }
+    Ok(Some(normalized.to_owned()))
+}
+
+fn normalize_context_scope(raw_scope: Option<String>) -> Result<Option<String>, CoreError> {
+    let Some(raw_scope) = raw_scope else {
+        return Ok(None);
+    };
+
+    let normalized = raw_scope.trim();
+    if normalized.is_empty() {
+        return Err(CoreError::InvalidCommandArgs {
+            command_id: ids::SUPERVISOR_QUERY.to_owned(),
+            reason: "malformed context: `scope` is empty; expected `global`, `work_item:<id>`, or `session:<id>`".to_owned(),
+        });
+    }
+
+    if normalized.eq_ignore_ascii_case("global") {
+        return Ok(Some("global".to_owned()));
+    }
+
+    let Some((raw_kind, raw_value)) = normalized.split_once(':') else {
+        return Err(CoreError::InvalidCommandArgs {
+            command_id: ids::SUPERVISOR_QUERY.to_owned(),
+            reason: format!(
+                "malformed context: unsupported scope '{normalized}'; expected `global`, `work_item:<id>`, or `session:<id>`"
+            ),
+        });
+    };
+
+    let value = normalize_context_identifier(Some(raw_value.to_owned()), "scope identifier")?
+        .expect("scope identifier must exist");
+    match raw_kind.trim().to_ascii_lowercase().as_str() {
+        "work_item" | "workitem" => Ok(Some(format!("work_item:{value}"))),
+        "session" => Ok(Some(format!("session:{value}"))),
+        _ => Err(CoreError::InvalidCommandArgs {
+            command_id: ids::SUPERVISOR_QUERY.to_owned(),
+            reason: format!(
+                "malformed context: unsupported scope kind '{raw_kind}'; expected `work_item` or `session`"
+            ),
+        }),
+    }
+}
+
+fn normalized_scope_to_retrieval_scope(scope: &str) -> Result<RetrievalScope, CoreError> {
+    if scope == "global" {
+        return Ok(RetrievalScope::Global);
+    }
+
+    let Some((kind, value)) = scope.split_once(':') else {
+        return Err(CoreError::InvalidCommandArgs {
+            command_id: ids::SUPERVISOR_QUERY.to_owned(),
+            reason: format!(
+                "malformed context: unsupported scope '{scope}'; expected `global`, `work_item:<id>`, or `session:<id>`"
+            ),
+        });
+    };
+
+    match kind {
+        "work_item" => Ok(RetrievalScope::WorkItem(WorkItemId::new(value.to_owned()))),
+        "session" => Ok(RetrievalScope::Session(WorkerSessionId::new(value.to_owned()))),
+        _ => Err(CoreError::InvalidCommandArgs {
+            command_id: ids::SUPERVISOR_QUERY.to_owned(),
+            reason: format!(
+                "malformed context: unsupported scope kind '{kind}'; expected `work_item` or `session`"
+            ),
+        }),
     }
 }
 
@@ -464,6 +619,7 @@ mod tests {
             Command::SupervisorQuery(SupervisorQueryArgs::Template {
                 template: "summarize_ticket".to_owned(),
                 variables: BTreeMap::from([("ticket_id".to_owned(), "AP-96".to_owned())]),
+                context: None,
             })
         );
     }
@@ -486,8 +642,65 @@ mod tests {
             parsed,
             Command::SupervisorQuery(SupervisorQueryArgs::Freeform {
                 query: "What changed in this ticket?".to_owned(),
+                context: None,
             })
         );
+    }
+
+    #[test]
+    fn supervisor_query_accepts_and_normalizes_context_payload() {
+        let registry = CommandRegistry::new().expect("registry");
+        let invocation = UntypedCommandInvocation {
+            command_id: ids::SUPERVISOR_QUERY.to_owned(),
+            args: Some(json!({
+                "kind": "template",
+                "template": "status",
+                "context": {
+                    "scope": " SESSION : sess-42 ",
+                    "selected_work_item_id": " wi-1 "
+                }
+            })),
+        };
+
+        let parsed = registry
+            .parse_invocation(&invocation)
+            .expect("valid context payload");
+        assert_eq!(
+            parsed,
+            Command::SupervisorQuery(SupervisorQueryArgs::Template {
+                template: "status".to_owned(),
+                variables: BTreeMap::new(),
+                context: Some(SupervisorQueryContextArgs {
+                    selected_work_item_id: Some("wi-1".to_owned()),
+                    selected_session_id: None,
+                    scope: Some("session:sess-42".to_owned()),
+                }),
+            })
+        );
+    }
+
+    #[test]
+    fn resolve_supervisor_query_scope_uses_normalized_scope_hint() {
+        let scope = resolve_supervisor_query_scope(&SupervisorQueryContextArgs {
+            selected_work_item_id: Some("wi-fallback".to_owned()),
+            selected_session_id: None,
+            scope: Some(" SESSION : sess-42 ".to_owned()),
+        })
+        .expect("scope should normalize");
+
+        assert_eq!(
+            scope,
+            RetrievalScope::Session(WorkerSessionId::new("sess-42"))
+        );
+    }
+
+    #[test]
+    fn resolve_supervisor_query_scope_rejects_missing_selected_item() {
+        let err = resolve_supervisor_query_scope(&SupervisorQueryContextArgs::default())
+            .expect_err("missing selectors should fail");
+
+        let message = err.to_string();
+        assert!(message.contains("missing selected item"));
     }
 
     #[test]
@@ -544,6 +757,50 @@ mod tests {
     }
 
     #[test]
+    fn supervisor_query_rejects_blank_context_identifier() {
+        let registry = CommandRegistry::new().expect("registry");
+        let invocation = UntypedCommandInvocation {
+            command_id: ids::SUPERVISOR_QUERY.to_owned(),
+            args: Some(json!({
+                "kind": "template",
+                "template": "status",
+                "context": {
+                    "selected_work_item_id": "  "
+                }
+            })),
+        };
+
+        let err = registry
+            .parse_invocation(&invocation)
+            .expect_err("blank context id should fail");
+        let message = err.to_string();
+        assert!(message.contains("malformed context"));
+        assert!(message.contains("selected_work_item_id"));
+    }
+
+    #[test]
+    fn supervisor_query_rejects_malformed_context_scope() {
+        let registry = CommandRegistry::new().expect("registry");
+        let invocation = UntypedCommandInvocation {
+            command_id: ids::SUPERVISOR_QUERY.to_owned(),
+            args: Some(json!({
+                "kind": "freeform",
+                "query": "status?",
+                "context": {
+                    "scope": "session:   "
+                }
+            })),
+        };
+
+        let err = registry
+            .parse_invocation(&invocation)
+            .expect_err("malformed scope should fail");
+        let message = err.to_string();
+        assert!(message.contains("malformed context"));
+        assert!(message.contains("scope identifier"));
+    }
+
+    #[test]
     fn duplicate_command_ids_fail_fast() {
         let duplicate = CommandDefinition::new(
             CommandMetadata {
@@ -566,6 +823,11 @@ mod tests {
         let typed = Command::SupervisorQuery(SupervisorQueryArgs::Template {
             template: "triage".to_owned(),
             variables: BTreeMap::from([("project".to_owned(), "orchestrator".to_owned())]),
+            context: Some(SupervisorQueryContextArgs {
+                selected_work_item_id: None,
+                selected_session_id: Some("sess-77".to_owned()),
+                scope: Some("session:sess-77".to_owned()),
+            }),
         });
 
         let untyped = registry

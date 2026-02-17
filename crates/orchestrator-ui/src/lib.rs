@@ -14,8 +14,9 @@ use orchestrator_core::{
     AttentionEngineConfig, AttentionPriorityBand, Command, CommandRegistry, CoreError, InboxItemId,
     InboxItemKind, LlmChatRequest, LlmFinishReason, LlmMessage, LlmProvider, LlmRateLimitState,
     LlmResponseStream, LlmRole, LlmTokenUsage, OrchestrationEventPayload, ProjectionState,
-    SelectedTicketFlowResult, SupervisorQueryArgs, TicketId, TicketSummary,
-    UntypedCommandInvocation, WorkItemId, WorkerSessionId, WorkerSessionStatus, WorkflowState,
+    SelectedTicketFlowResult, SupervisorQueryArgs, SupervisorQueryContextArgs, TicketId,
+    TicketSummary, UntypedCommandInvocation, WorkItemId, WorkerSessionId, WorkerSessionStatus,
+    WorkflowState,
 };
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Layout, Rect};
@@ -47,12 +48,7 @@ pub trait TicketPickerProvider: Send + Sync {
     async fn reload_projection(&self) -> Result<ProjectionState, CoreError>;
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct SupervisorCommandContext {
-    pub selected_work_item_id: Option<String>,
-    pub selected_session_id: Option<String>,
-    pub scope: Option<String>,
-}
+pub type SupervisorCommandContext = SupervisorQueryContextArgs;
 
 #[async_trait]
 pub trait SupervisorCommandDispatcher: Send + Sync {
@@ -2090,6 +2086,7 @@ impl UiShellState {
             &Command::SupervisorQuery(SupervisorQueryArgs::Template {
                 template: "status_current_session".to_owned(),
                 variables: BTreeMap::new(),
+                context: None,
             }),
         ) {
             Ok(invocation) => invocation,
@@ -3353,10 +3350,11 @@ struct TerminalPassthrough {
     key: KeyEvent,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum RoutedInput {
     Command(UiCommand),
     TerminalPassthrough(TerminalPassthrough),
+    UnsupportedCommand { command_id: String },
     Ignore,
 }
 
@@ -3382,6 +3380,14 @@ fn handle_key_press(shell_state: &mut UiShellState, key: KeyEvent) -> bool {
             }
             shell_state.forward_terminal_key(passthrough.key);
             shell_state.terminal_escape_pending = false;
+            false
+        }
+        RoutedInput::UnsupportedCommand { command_id } => {
+            shell_state.status_warning = Some(format!(
+                "unsupported command mapping '{}' in {} mode keymap",
+                command_id,
+                shell_state.mode.label()
+            ));
             false
         }
         RoutedInput::Ignore => false,
@@ -3451,7 +3457,7 @@ fn route_configured_mode_key(shell_state: &mut UiShellState, key: KeyEvent) -> R
             shell_state.which_key_overlay = None;
             UiCommand::from_id(command_id.as_str())
                 .map(RoutedInput::Command)
-                .unwrap_or(RoutedInput::Ignore)
+                .unwrap_or(RoutedInput::UnsupportedCommand { command_id })
         }
         KeymapLookupResult::Prefix { .. } => {
             shell_state.refresh_which_key_overlay();
@@ -4753,6 +4759,32 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn unsupported_keymap_command_id_surfaces_warning_instead_of_no_op() {
+        let mut shell_state = UiShellState::new("ready".to_owned(), inspector_projection());
+        let custom_keymap = KeymapTrie::compile(
+            &KeymapConfig {
+                modes: vec![ModeKeymapConfig {
+                    mode: UiMode::Normal,
+                    bindings: vec![KeyBindingConfig {
+                        keys: vec!["x".to_owned()],
+                        command_id: command_ids::SUPERVISOR_QUERY.to_owned(),
+                    }],
+                    prefixes: Vec::new(),
+                }],
+            },
+            |_| true,
+        )
+        .expect("custom keymap should compile");
+        shell_state.keymap = Box::leak(Box::new(custom_keymap));
+
+        let should_quit = handle_key_press(&mut shell_state, key(KeyCode::Char('x')));
+        assert!(!should_quit);
+        let status = shell_state.ui_state().status;
+        assert!(status.contains("unsupported command mapping"));
+        assert!(status.contains(command_ids::SUPERVISOR_QUERY));
     }
 
     #[test]

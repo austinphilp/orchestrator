@@ -28,8 +28,9 @@ pub use attention_engine::{
     AttentionInboxItem, AttentionInboxSnapshot, AttentionPriorityBand, AttentionScoreBreakdown,
 };
 pub use commands::{
-    ids as command_ids, Command, CommandArgSummary, CommandDefinition, CommandMetadata,
-    CommandRegistry, SupervisorQueryArgs, UntypedCommandInvocation,
+    ids as command_ids, resolve_supervisor_query_scope, Command, CommandArgSummary,
+    CommandDefinition, CommandMetadata, CommandRegistry, SupervisorQueryArgs,
+    SupervisorQueryContextArgs, UntypedCommandInvocation,
 };
 pub use error::CoreError;
 pub use events::{
