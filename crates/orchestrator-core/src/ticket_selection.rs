@@ -573,6 +573,7 @@ fn parse_ticket_provider_identity(
 
     let provider = match provider {
         "linear" => TicketProvider::Linear,
+        "shortcut" => TicketProvider::Shortcut,
         other => {
             return Err(CoreError::Configuration(format!(
                 "Unsupported ticket provider '{}' in ticket id '{}'.",

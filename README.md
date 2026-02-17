@@ -8,11 +8,13 @@ Rust workspace for the Orchestrator bootstrap architecture.
 - `orchestrator-core`: shared domain models, traits, and errors.
 - `orchestrator-runtime`: PTY/session lifecycle interfaces and runtime boundaries.
 - `backend-opencode`: OpenCode `WorkerBackend` adapter over runtime PTY primitives.
+- `backend-codex`: Codex-compatible `WorkerBackend` adapter (uses `backend-opencode` transport).
 - `orchestrator-ui`: minimal ratatui-based interface loop.
 - `orchestrator-supervisor`: OpenRouter supervisor adapter.
 - `orchestrator-github`: `gh` CLI adapter with process abstraction.
 - `integration-git`: Git CLI adapter for repository discovery and worktree lifecycle.
 - `integration-linear`: Linear GraphQL adapter with polling-backed ticket cache.
+- `integration-shortcut`: Shortcut adapter for tickets.
 
 ## Quick start
 
@@ -28,3 +30,9 @@ Configuration:
 - Set `ORCHESTRATOR_CONFIG` to a path containing TOML config (for example `/path/to/config.toml`).
 - If `ORCHESTRATOR_CONFIG` is not set, the app defaults to `~/.config/orchestrator/config.toml`.
 - When the resolved config file does not exist, the app creates it with default values on first run.
+- Choose runtime providers via config or environment:
+  - `ORCHESTRATOR_TICKETING_PROVIDER=linear|shortcut` (defaults to `linear`).
+  - `ORCHESTRATOR_HARNESS_PROVIDER=opencode|codex` (defaults to `codex`).
+- Optional CLI overrides:
+  - `--ticketing-provider linear|shortcut`
+  - `--harness-provider opencode|codex`

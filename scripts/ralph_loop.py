@@ -35,7 +35,8 @@ from typing import Any
 LINEAR_ENDPOINT = "https://api.linear.app/graphql"
 PLAN_START = "<!-- ralph-plan:start -->"
 PLAN_END = "<!-- ralph-plan:end -->"
-SUPERVISOR_TICKET_IDS = "AP-180,AP-181,AP-182,AP-183,AP-184,AP-185,AP-186"
+SUPERVISOR_TICKET_IDS = ""
+ORCHESTRATOR_PROJECT_NAME = "Orchestrator"
 
 
 class RalphError(RuntimeError):
@@ -139,6 +140,7 @@ class LinearClient:
         prefix: str,
         identifier_prefix: str | None = None,
         project_id: str | None = None,
+        project_name: str | None = None,
         identifier_filter: set[str] | None = None,
     ) -> list[Issue]:
         query = """
@@ -170,8 +172,13 @@ class LinearClient:
             identifier = n["identifier"]
             project = n.get("project")
             issue_project_id = project.get("id") if project else None
+            issue_project_name = (project.get("name") if project else None) or ""
+            issue_project_name_normalized = issue_project_name.casefold()
+            filter_project_name = project_name.casefold() if project_name else None
 
             if project_id and issue_project_id != project_id:
+                continue
+            if filter_project_name and issue_project_name_normalized != filter_project_name:
                 continue
             if identifier_filter and identifier not in identifier_filter:
                 continue
@@ -190,7 +197,7 @@ class LinearClient:
                     state_name=n["state"]["name"],
                     state_type=n["state"]["type"],
                     project_id=issue_project_id or "",
-                    project_name=(project.get("name") or "") if project else "",
+                    project_name=issue_project_name,
                 )
             )
         return out
@@ -201,6 +208,7 @@ class LinearClient:
         prefix: str,
         identifier_prefix: str | None = None,
         project_id: str | None = None,
+        project_name: str | None = None,
         identifier_filter: set[str] | None = None,
     ) -> list[dict[str, str]]:
         query = """
@@ -229,8 +237,12 @@ class LinearClient:
             identifier = n["identifier"]
             project = n.get("project")
             issue_project_id = project.get("id") if project else None
+            issue_project_name = (project.get("name") if project else None) or ""
+            filter_project_name = project_name.casefold() if project_name else None
 
             if project_id and issue_project_id != project_id:
+                continue
+            if filter_project_name and issue_project_name.casefold() != filter_project_name:
                 continue
             if identifier_filter and identifier not in identifier_filter:
                 continue
@@ -665,13 +677,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--design-plan", default="orchestrator-design-plan.md", help="Design plan markdown file")
     parser.add_argument("--project-id", default="", help="Optional Linear project ID filter")
     parser.add_argument(
+        "--project-name",
+        default="",
+        help="Optional Linear project name filter. Defaults to Orchestrator when no project ID is provided.",
+    )
+    parser.add_argument(
         "--identifier-ids",
         default=SUPERVISOR_TICKET_IDS,
-        help="Comma-separated ticket identifiers to include (defaults to AP-180..AP-186).",
+        help="Comma-separated ticket identifiers to include (default: no identifier filter).",
     )
     parser.add_argument("--team-id", default="85372e13-5228-4d18-b518-0e845c2c0683", help="Linear team ID")
     parser.add_argument("--prefix", default="", help="Ticket title prefix to process")
-    parser.add_argument("--identifier-prefix", default="AP-", help="Ticket identifier prefix to include (e.g. AP-)")
+    parser.add_argument("--identifier-prefix", default="", help="Ticket identifier prefix to include (e.g. AP-). Leave empty for all identifiers.")
     parser.add_argument("--in-progress-name", default="In Progress", help="Linear state name used for in-progress")
     parser.add_argument("--done-name", default="Done", help="Linear state name used for completion")
     parser.add_argument("--include-epics", action="store_true", help="Include EPIC tickets in loop")
@@ -729,12 +746,27 @@ def main() -> int:
     done_id = state_by_name[args.done_name]
 
     project_id = args.project_id.strip() or None
+    project_name = args.project_name.strip()
+    if not project_id and not project_name:
+        project_name = ORCHESTRATOR_PROJECT_NAME
+    project_name = project_name or None
+
+    if project_id and project_name:
+        print(f"Filtering by project id='{project_id}' and project name='{project_name}'.")
+    elif project_id:
+        print(f"Filtering by project id='{project_id}'.")
+    elif project_name:
+        print(f"Filtering by project name='{project_name}'.")
+    else:
+        print("No project filter configured; all team projects will be included.")
+
     identifier_filter = parse_identifier_filter(args.identifier_ids)
     issues = linear.list_pending_issues(
         args.team_id,
         args.prefix,
         args.identifier_prefix,
         project_id=project_id,
+        project_name=project_name,
         identifier_filter=identifier_filter,
     )
     issues.sort(key=lambda i: sort_key_for_issue(i, args.prefix, args.identifier_prefix))
@@ -801,6 +833,7 @@ def main() -> int:
                 args.prefix,
                 args.identifier_prefix,
                 project_id=project_id,
+                project_name=project_name,
                 identifier_filter=identifier_filter,
             )
             review_ticket_with_codex(

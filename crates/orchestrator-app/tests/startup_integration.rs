@@ -40,6 +40,8 @@ async fn startup_path_cleanly_initializes() {
         config: AppConfig {
             workspace: "./".to_owned(),
             event_store_path: temp_db.path().to_string_lossy().to_string(),
+            ticketing_provider: "linear".to_owned(),
+            harness_provider: "codex".to_owned(),
         },
         supervisor: MockAdapter { pass: true },
         github: MockAdapter { pass: true },

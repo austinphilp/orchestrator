@@ -1,0 +1,11 @@
+[package]
+name = "backend-codex"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+backend-opencode = { path = "../backend-opencode" }
+async-trait.workspace = true
+orchestrator-runtime = { path = "../orchestrator-runtime" }
+

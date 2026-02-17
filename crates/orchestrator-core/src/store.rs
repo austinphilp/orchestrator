@@ -1669,12 +1669,14 @@ impl EventStore for SqliteEventStore {
 fn provider_to_str(provider: &TicketProvider) -> &'static str {
     match provider {
         TicketProvider::Linear => "linear",
+        TicketProvider::Shortcut => "shortcut",
     }
 }
 
 fn str_to_provider(value: &str) -> Result<TicketProvider, rusqlite::Error> {
     match value {
         "linear" => Ok(TicketProvider::Linear),
+        "shortcut" => Ok(TicketProvider::Shortcut),
         other => Err(to_from_sql_error(std::io::Error::other(format!(
             "unknown ticket provider: {other}"
         )))),
