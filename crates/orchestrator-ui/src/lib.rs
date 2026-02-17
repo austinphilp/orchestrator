@@ -4061,6 +4061,71 @@ mod tests {
         }
     }
 
+    #[derive(Debug)]
+    struct TestSupervisorDispatcher {
+        requests: Mutex<Vec<(UntypedCommandInvocation, SupervisorCommandContext)>>,
+        chunks: Mutex<Option<Vec<Result<LlmStreamChunk, CoreError>>>>,
+        cancelled_streams: Mutex<Vec<String>>,
+    }
+
+    impl TestSupervisorDispatcher {
+        fn new(chunks: Vec<Result<LlmStreamChunk, CoreError>>) -> Self {
+            Self {
+                requests: Mutex::new(Vec::new()),
+                chunks: Mutex::new(Some(chunks)),
+                cancelled_streams: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn requests(&self) -> Vec<(UntypedCommandInvocation, SupervisorCommandContext)> {
+            self.requests
+                .lock()
+                .expect("dispatcher request lock")
+                .clone()
+        }
+
+        fn cancelled_streams(&self) -> Vec<String> {
+            self.cancelled_streams
+                .lock()
+                .expect("dispatcher cancel lock")
+                .clone()
+        }
+    }
+
+    #[async_trait]
+    impl SupervisorCommandDispatcher for TestSupervisorDispatcher {
+        async fn dispatch_supervisor_command(
+            &self,
+            invocation: UntypedCommandInvocation,
+            context: SupervisorCommandContext,
+        ) -> Result<(String, LlmResponseStream), CoreError> {
+            self.requests
+                .lock()
+                .expect("dispatcher request lock")
+                .push((invocation, context));
+            let chunks = self
+                .chunks
+                .lock()
+                .expect("dispatcher stream lock")
+                .take()
+                .unwrap_or_default();
+            Ok((
+                "dispatcher-stream".to_owned(),
+                Box::new(TestLlmStream {
+                    chunks: chunks.into(),
+                }),
+            ))
+        }
+
+        async fn cancel_supervisor_command(&self, stream_id: &str) -> Result<(), CoreError> {
+            self.cancelled_streams
+                .lock()
+                .expect("dispatcher cancel lock")
+                .push(stream_id.to_owned());
+            Ok(())
+        }
+    }
+
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
     }
@@ -5092,6 +5157,146 @@ mod tests {
         assert!(rendered.contains("Token usage: input=21 output=8 total=29"));
     }
 
+    #[tokio::test]
+    async fn selected_chat_entry_uses_dispatcher_template_invocation_and_renders_stream() {
+        let dispatcher = Arc::new(TestSupervisorDispatcher::new(vec![
+            Ok(LlmStreamChunk {
+                delta: "Current activity: running focused tests.".to_owned(),
+                finish_reason: None,
+                usage: None,
+                rate_limit: None,
+            }),
+            Ok(LlmStreamChunk {
+                delta: "No blockers detected.".to_owned(),
+                finish_reason: Some(LlmFinishReason::Stop),
+                usage: None,
+                rate_limit: None,
+            }),
+        ]));
+        let dispatcher_dyn: Arc<dyn SupervisorCommandDispatcher> = dispatcher.clone();
+        let mut shell_state = UiShellState::new_with_integrations(
+            "ready".to_owned(),
+            inspector_projection(),
+            None,
+            Some(dispatcher_dyn),
+            None,
+        );
+
+        shell_state.open_chat_inspector_for_selected();
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                shell_state.tick_supervisor_stream();
+                let rendered = shell_state.ui_state().center_pane.lines.join("\n");
+                if rendered.contains("No blockers detected.") {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("selected chat stream should render dispatcher response");
+
+        let requests = dispatcher.requests();
+        assert_eq!(requests.len(), 1);
+        let (invocation, context) = &requests[0];
+        let command = CommandRegistry::default()
+            .parse_invocation(invocation)
+            .expect("dispatcher invocation should parse");
+        assert!(matches!(
+            command,
+            Command::SupervisorQuery(SupervisorQueryArgs::Template { template, .. })
+                if template == "status_current_session"
+        ));
+        assert_eq!(
+            context.selected_work_item_id.as_deref(),
+            Some("wi-inspector")
+        );
+        assert_eq!(
+            context.selected_session_id.as_deref(),
+            Some("sess-inspector")
+        );
+        assert_eq!(context.scope.as_deref(), Some("session:sess-inspector"));
+
+        let rendered = shell_state.ui_state().center_pane.lines.join("\n");
+        assert!(rendered.contains("Live supervisor stream:"));
+        assert!(rendered.contains("Current activity: running focused tests."));
+        assert!(rendered.contains("No blockers detected."));
+    }
+
+    #[tokio::test]
+    async fn global_chat_panel_dispatcher_open_close_and_message_rendering() {
+        let dispatcher = Arc::new(TestSupervisorDispatcher::new(vec![
+            Ok(LlmStreamChunk {
+                delta: "Global status: ".to_owned(),
+                finish_reason: None,
+                usage: None,
+                rate_limit: None,
+            }),
+            Ok(LlmStreamChunk {
+                delta: "two approvals need review.".to_owned(),
+                finish_reason: Some(LlmFinishReason::Stop),
+                usage: None,
+                rate_limit: None,
+            }),
+        ]));
+        let dispatcher_dyn: Arc<dyn SupervisorCommandDispatcher> = dispatcher.clone();
+        let mut shell_state = UiShellState::new_with_integrations(
+            "ready".to_owned(),
+            triage_projection(),
+            None,
+            Some(dispatcher_dyn),
+            None,
+        );
+
+        assert!(!shell_state.is_global_supervisor_chat_active());
+        handle_key_press(&mut shell_state, key(KeyCode::Char('c')));
+        assert!(shell_state.is_global_supervisor_chat_active());
+        assert_eq!(shell_state.mode, UiMode::Insert);
+
+        for ch in "what needs me next globally?".chars() {
+            handle_key_press(&mut shell_state, key(KeyCode::Char(ch)));
+        }
+        handle_key_press(&mut shell_state, key(KeyCode::Enter));
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                shell_state.tick_supervisor_stream();
+                let rendered = shell_state.ui_state().center_pane.lines.join("\n");
+                if rendered.contains("two approvals need review.") {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("global chat stream should render dispatcher response");
+
+        let requests = dispatcher.requests();
+        assert_eq!(requests.len(), 1);
+        let (invocation, context) = &requests[0];
+        let command = CommandRegistry::default()
+            .parse_invocation(invocation)
+            .expect("dispatcher invocation should parse");
+        assert!(matches!(
+            command,
+            Command::SupervisorQuery(SupervisorQueryArgs::Freeform { query, .. })
+                if query == "what needs me next globally?"
+        ));
+        assert_eq!(context.scope.as_deref(), Some("global"));
+        assert!(context.selected_work_item_id.is_none());
+        assert!(context.selected_session_id.is_none());
+
+        let rendered = shell_state.ui_state().center_pane.lines.join("\n");
+        assert!(rendered.contains("Last query: what needs me next globally?"));
+        assert!(rendered.contains("Global status: two approvals need review."));
+
+        handle_key_press(&mut shell_state, key(KeyCode::Esc));
+        assert_eq!(shell_state.mode, UiMode::Normal);
+        handle_key_press(&mut shell_state, key(KeyCode::Char('c')));
+        assert!(!shell_state.is_global_supervisor_chat_active());
+    }
+
     #[test]
     fn closing_global_supervisor_chat_restores_prior_context_state() {
         let mut shell_state = UiShellState::new("ready".to_owned(), triage_projection());
@@ -5169,6 +5374,47 @@ mod tests {
         })
         .await
         .expect("stream cancellation should be forwarded");
+    }
+
+    #[tokio::test]
+    async fn opening_new_dispatcher_chat_stream_cancels_active_stream_with_known_id() {
+        let dispatcher = Arc::new(TestSupervisorDispatcher::new(vec![Ok(LlmStreamChunk {
+            delta: String::new(),
+            finish_reason: Some(LlmFinishReason::Stop),
+            usage: None,
+            rate_limit: None,
+        })]));
+        let dispatcher_dyn: Arc<dyn SupervisorCommandDispatcher> = dispatcher.clone();
+        let mut shell_state = UiShellState::new_with_integrations(
+            "ready".to_owned(),
+            inspector_projection(),
+            None,
+            Some(dispatcher_dyn),
+            None,
+        );
+        shell_state.open_inspector_for_selected(ArtifactInspectorKind::Chat);
+        let _sender = attach_supervisor_stream(&mut shell_state, "wi-inspector");
+        if let Some(stream) = shell_state.supervisor_chat_stream.as_mut() {
+            stream.lifecycle = SupervisorStreamLifecycle::Streaming;
+            stream.stream_id = Some("dispatcher-stream-old".to_owned());
+        }
+
+        shell_state.start_supervisor_stream_for_selected();
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if dispatcher
+                    .cancelled_streams()
+                    .iter()
+                    .any(|id| id == "dispatcher-stream-old")
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("dispatcher stream cancellation should be forwarded");
     }
 
     #[tokio::test]
