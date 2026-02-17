@@ -1,13 +1,16 @@
 use std::collections::HashMap;
 use std::collections::VecDeque;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use orchestrator_core::{
-    command_ids, resolve_supervisor_query_scope, Command, CommandRegistry, CoreError, EventStore,
-    LlmChatRequest, LlmFinishReason, LlmProvider, LlmResponseStream, LlmResponseSubscription,
-    LlmStreamChunk, LlmTokenUsage, NewEventEnvelope, OrchestrationEventPayload, RetrievalScope,
+    command_ids, resolve_supervisor_query_scope, ArtifactKind, Command, CommandRegistry, CodeHostProvider,
+    CoreError, EventStore, LlmChatRequest, LlmFinishReason, LlmProvider, LlmResponseStream,
+    LlmResponseSubscription, LlmStreamChunk, LlmTokenUsage, NewEventEnvelope,
+    OrchestrationEventPayload, PullRequestRef, RepositoryRef, RetrievalScope, RuntimeMappingRecord,
+    SqliteEventStore,
     SupervisorQueryArgs, SupervisorQueryCancellationSource, SupervisorQueryCancelledPayload,
     SupervisorQueryChunkPayload, SupervisorQueryContextArgs, SupervisorQueryFinishedPayload,
     SupervisorQueryKind, SupervisorQueryStartedPayload, UntypedCommandInvocation, WorkItemId,
@@ -32,8 +35,6 @@ const SUPPORTED_RUNTIME_COMMAND_IDS: [&str; 3] = [
     command_ids::GITHUB_OPEN_REVIEW_TABS,
 ];
 
-const WORKFLOW_APPROVE_PR_READY_ACK: &str =
-    "workflow.approve_pr_ready command accepted. This action is not yet wired to a workflow executor.";
 const GITHUB_OPEN_REVIEW_TABS_ACK: &str =
     "github.open_review_tabs command accepted. This action is not yet wired to a tab launcher.";
 
@@ -294,6 +295,229 @@ fn query_text(args: &SupervisorQueryArgs) -> Option<String> {
         SupervisorQueryArgs::Template { .. } => None,
         SupervisorQueryArgs::Freeform { query, .. } => Some(query.clone()),
     }
+}
+
+fn parse_pull_request_number(url: &str) -> Result<u64, CoreError> {
+    let normalized = normalize_pull_request_url(url);
+    let segment = normalized
+        .split("/pull/")
+        .nth(1)
+        .ok_or_else(|| CoreError::Configuration(format!("Could not resolve PR number from URL `{url}`")))?;
+
+    let digits = segment.chars().take_while(char::is_ascii_digit).collect::<String>();
+    if digits.is_empty() {
+        return Err(CoreError::Configuration(format!(
+            "Pull request URL `{url}` does not include a numeric PR number"
+        )));
+    }
+
+    digits.parse::<u64>().map_err(|error| {
+        CoreError::Configuration(format!(
+            "Failed to parse PR number from URL `{url}`: {error}"
+        ))
+    })
+}
+
+fn parse_pull_request_repository(url: &str) -> Result<(String, String), CoreError> {
+    let normalized = normalize_pull_request_url(url);
+    let path = normalized
+        .split_once("/pull/")
+        .map(|(before, _)| before)
+        .ok_or_else(|| CoreError::Configuration(format!("Invalid PR URL `{url}`")))?
+        .split_once("://")
+        .map(|(_, path)| path)
+        .unwrap_or(normalized)
+        .split_once('/')
+        .ok_or_else(|| CoreError::Configuration(format!("Invalid PR URL `{url}`")))?
+        .1
+        .to_owned();
+
+    let mut parts = path.split('/').filter(|value| !value.is_empty());
+    let owner = parts
+        .next()
+        .ok_or_else(|| CoreError::Configuration(format!("Invalid PR URL `{url}`")))?;
+    let name = parts
+        .next()
+        .ok_or_else(|| CoreError::Configuration(format!("Invalid PR URL `{url}`")))?;
+
+    let repository = format!("{owner}/{name}");
+    Ok((repository.clone(), repository))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_pull_request_number_supports_query_and_fragment_suffix() {
+        let number = parse_pull_request_number("https://github.com/acme/repo/pull/123?draft=true#section")
+            .expect("parse numeric suffix");
+        assert_eq!(number, 123);
+    }
+
+    #[test]
+    fn parse_pull_request_number_rejects_missing_pull_segment() {
+        let err = parse_pull_request_number("https://github.com/acme/repo/issues/123")
+            .expect_err("missing /pull");
+        assert!(matches!(err, CoreError::Configuration { .. }));
+    }
+
+    #[test]
+    fn parse_pull_request_repository_parses_without_scheme() {
+        let (name, id) = parse_pull_request_repository("github.com/acme/repo/pull/777")
+            .expect("parse repo without scheme");
+        assert_eq!(name, "acme/repo");
+        assert_eq!(id, "acme/repo");
+    }
+
+    #[test]
+    fn parse_pull_request_repository_rejects_short_path() {
+        let err = parse_pull_request_repository("https://github.com/pull/777")
+            .expect_err("repository name missing");
+        assert!(matches!(err, CoreError::Configuration { .. }));
+    }
+
+    #[test]
+    fn parse_pull_request_repository_trims_surrounding_punctuation() {
+        let (name, id) =
+            parse_pull_request_repository("(\"https://github.com/acme/repo/pull/777\",)")
+                .expect("parse url with punctuation");
+        assert_eq!(name, "acme/repo");
+        assert_eq!(id, "acme/repo");
+    }
+}
+
+fn normalize_pull_request_url(url: &str) -> &str {
+    url.trim()
+        .trim_matches(|ch: char| ch == '"' || ch == '\'' || ch == '(' || ch == ')')
+        .trim_end_matches(|ch: char| ch == ',' || ch == ';' || ch == '.')
+}
+
+fn resolve_runtime_mapping_for_context(
+    store: &SqliteEventStore,
+    context: &SupervisorCommandContext,
+) -> Result<RuntimeMappingRecord, CoreError> {
+    let mappings = store.list_runtime_mappings()?;
+
+    if let Some(session_id) = context.selected_session_id.as_deref() {
+        if let Some(mapping) = mappings
+            .iter()
+            .find(|mapping| mapping.session.session_id.as_str() == session_id)
+        {
+            return Ok(mapping.clone());
+        }
+
+        return Err(CoreError::Configuration(format!(
+            "workflow.approve_pr_ready could not resolve runtime mapping for selected session '{session_id}'"
+        )));
+    }
+
+    if let Some(work_item_id) = context.selected_work_item_id.as_deref() {
+        if let Some(mapping) = mappings
+            .iter()
+            .find(|mapping| mapping.work_item_id.as_str() == work_item_id)
+        {
+            return Ok(mapping.clone());
+        }
+
+        return Err(CoreError::Configuration(format!(
+            "workflow.approve_pr_ready could not resolve runtime mapping for selected work item '{work_item_id}'"
+        )));
+    }
+
+    Err(CoreError::Configuration(
+        "workflow.approve_pr_ready requires an active runtime session or selected work item context".to_owned(),
+    ))
+}
+
+fn resolve_pull_request_for_mapping(
+    store: &SqliteEventStore,
+    mapping: &RuntimeMappingRecord,
+) -> Result<PullRequestRef, CoreError> {
+    let events = store.read_event_with_artifacts(&mapping.work_item_id)?;
+    let mut candidate_parse_error: Option<CoreError> = None;
+
+    for stored in events.iter().rev() {
+        for artifact_id in stored.artifact_ids.iter().rev() {
+            let Some(artifact) = store.get_artifact(artifact_id)? else {
+                continue;
+            };
+
+            if artifact.kind != ArtifactKind::PR {
+                continue;
+            }
+
+            let url = artifact.storage_ref.trim();
+            if url.is_empty() {
+                continue;
+            }
+
+            let number = match parse_pull_request_number(url) {
+                Ok(number) => number,
+                Err(error) => {
+                    candidate_parse_error = Some(error);
+                    continue;
+                }
+            };
+            let (repository_name, repository_id) = match parse_pull_request_repository(url) {
+                Ok(repository) => repository,
+                Err(error) => {
+                    candidate_parse_error = Some(error);
+                    continue;
+                }
+            };
+            return Ok(PullRequestRef {
+                repository: RepositoryRef {
+                    id: repository_id,
+                    name: repository_name,
+                    root: PathBuf::from(mapping.worktree.path.clone()),
+                },
+                number,
+                url: url.to_owned(),
+            });
+        }
+    }
+
+    if let Some(candidate_error) = candidate_parse_error {
+        return Err(CoreError::Configuration(format!(
+            "workflow.approve_pr_ready could not resolve a usable PR artifact for work item '{}': {}",
+            mapping.work_item_id.as_str(),
+            candidate_error
+        )));
+    }
+
+    Err(CoreError::Configuration(format!(
+        "workflow.approve_pr_ready could not resolve a PR artifact for work item '{}'",
+        mapping.work_item_id.as_str()
+    )))
+}
+
+async fn execute_workflow_approve_pr_ready<C>(
+    code_host: &C,
+    event_store_path: &str,
+    context: SupervisorCommandContext,
+) -> Result<(String, LlmResponseStream), CoreError>
+where
+    C: CodeHostProvider + ?Sized,
+{
+    let store = open_event_store(event_store_path)?;
+    let runtime = resolve_runtime_mapping_for_context(&store, &context)?;
+    let pr = resolve_pull_request_for_mapping(&store, &runtime)?;
+
+    code_host
+        .mark_ready_for_review(&pr)
+        .await
+        .map_err(|error| {
+            CoreError::DependencyUnavailable(format!(
+                "workflow.approve_pr_ready failed for PR #{}: {error}",
+                pr.number
+            ))
+        })?;
+
+    runtime_command_response(&format!(
+        "workflow.approve_pr_ready command completed for PR #{}",
+        pr.number
+    ))
 }
 
 fn append_supervisor_event(
@@ -643,6 +867,7 @@ where
 
 pub(crate) async fn dispatch_supervisor_runtime_command<P>(
     supervisor: &P,
+    code_host: &impl CodeHostProvider,
     event_store_path: &str,
     invocation: UntypedCommandInvocation,
     context: SupervisorCommandContext,
@@ -655,9 +880,9 @@ where
         Command::SupervisorQuery(args) => {
             execute_supervisor_query(supervisor, event_store_path, args, context).await
         }
-        Command::WorkflowApprovePrReady => runtime_command_response(
-            WORKFLOW_APPROVE_PR_READY_ACK,
-        ),
+        Command::WorkflowApprovePrReady => {
+            execute_workflow_approve_pr_ready(code_host, event_store_path, context).await
+        }
         Command::GithubOpenReviewTabs => runtime_command_response(
             GITHUB_OPEN_REVIEW_TABS_ACK,
         ),

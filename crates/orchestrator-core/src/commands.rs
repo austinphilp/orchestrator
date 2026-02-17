@@ -619,6 +619,33 @@ mod tests {
     }
 
     #[test]
+    fn workflow_approve_pr_ready_is_zero_arg_command() {
+        let registry = CommandRegistry::new().expect("registry");
+        let parsed = registry
+            .parse_invocation(&UntypedCommandInvocation {
+                command_id: ids::WORKFLOW_APPROVE_PR_READY.to_owned(),
+                args: None,
+            })
+            .expect("workflow.approve_pr_ready should be zero-arg");
+
+        assert_eq!(parsed, Command::WorkflowApprovePrReady);
+    }
+
+    #[test]
+    fn workflow_approve_pr_ready_rejects_unexpected_args() {
+        let registry = CommandRegistry::new().expect("registry");
+        let invocation = UntypedCommandInvocation {
+            command_id: ids::WORKFLOW_APPROVE_PR_READY.to_owned(),
+            args: Some(json!({"unexpected": true})),
+        };
+
+        let err = registry
+            .parse_invocation(&invocation)
+            .expect_err("workflow args should be rejected");
+        assert!(matches!(err, CoreError::InvalidCommandArgs { .. }));
+    }
+
+    #[test]
     fn supervisor_query_accepts_template_args() {
         let registry = CommandRegistry::new().expect("registry");
         let invocation = UntypedCommandInvocation {
