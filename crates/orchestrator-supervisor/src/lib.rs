@@ -104,7 +104,10 @@ impl SseDataParser {
         }
 
         if flush_partial_line && !self.pending.is_empty() {
-            let line = std::mem::take(&mut self.pending);
+            let mut line = std::mem::take(&mut self.pending);
+            if line.last().copied() == Some(b'\r') {
+                line.pop();
+            }
             self.consume_line(&line, &mut events);
         }
 
@@ -984,6 +987,118 @@ mod tests {
     }
 
     #[test]
+    fn sse_parser_finish_flushes_partial_event() {
+        let mut parser = SseDataParser::default();
+        assert!(parser.push(b"data: partial event").is_empty());
+        assert_eq!(parser.finish(), vec!["partial event".to_owned()]);
+    }
+
+    #[test]
+    fn sse_parser_finish_trims_partial_line_carriage_return() {
+        let mut parser = SseDataParser::default();
+        assert!(parser.push(b"data: partial event\r").is_empty());
+        assert_eq!(parser.finish(), vec!["partial event".to_owned()]);
+    }
+
+    #[test]
+    fn parse_stream_event_table_driven_edges() {
+        enum Expected<'a> {
+            Chunk {
+                delta: &'a str,
+                finish_reason: Option<LlmFinishReason>,
+                usage: Option<LlmTokenUsage>,
+            },
+            ErrorContains(&'a str),
+        }
+
+        struct Case<'a> {
+            name: &'a str,
+            event: &'a str,
+            expected: Expected<'a>,
+        }
+
+        let cases = vec![
+            Case {
+                name: "delta as plain string is accepted",
+                event: r#"{"choices":[{"delta":"hello"}]}"#,
+                expected: Expected::Chunk {
+                    delta: "hello",
+                    finish_reason: None,
+                    usage: None,
+                },
+            },
+            Case {
+                name: "unknown finish reason maps to error sentinel",
+                event: r#"{"choices":[{"delta":{"content":"x"},"finish_reason":"mystery"}]}"#,
+                expected: Expected::Chunk {
+                    delta: "x",
+                    finish_reason: Some(LlmFinishReason::Error),
+                    usage: None,
+                },
+            },
+            Case {
+                name: "usage-only event still emits a chunk",
+                event: r#"{"choices":[],"usage":{"input_tokens":2,"output_tokens":3}}"#,
+                expected: Expected::Chunk {
+                    delta: "",
+                    finish_reason: None,
+                    usage: Some(LlmTokenUsage {
+                        input_tokens: 2,
+                        output_tokens: 3,
+                        total_tokens: 5,
+                    }),
+                },
+            },
+            Case {
+                name: "error payload is surfaced",
+                event: r#"{"error":{"message":"quota exhausted"}}"#,
+                expected: Expected::ErrorContains("quota exhausted"),
+            },
+            Case {
+                name: "invalid json is rejected",
+                event: r#"{"choices":[{"delta":{"content":"broken"}}]"#,
+                expected: Expected::ErrorContains("invalid JSON"),
+            },
+        ];
+
+        for case in cases {
+            match case.expected {
+                Expected::Chunk {
+                    delta,
+                    finish_reason,
+                    usage,
+                } => {
+                    let chunks = parse_stream_event(case.event)
+                        .unwrap_or_else(|error| panic!("case '{}' failed: {error}", case.name));
+                    assert_eq!(
+                        chunks.len(),
+                        1,
+                        "case '{}' should emit one chunk",
+                        case.name
+                    );
+                    let chunk = &chunks[0];
+                    assert_eq!(chunk.delta, delta, "case '{}' delta mismatch", case.name);
+                    assert_eq!(
+                        chunk.finish_reason, finish_reason,
+                        "case '{}' finish reason mismatch",
+                        case.name
+                    );
+                    assert_eq!(chunk.usage, usage, "case '{}' usage mismatch", case.name);
+                }
+                Expected::ErrorContains(needle) => {
+                    let error = parse_stream_event(case.event)
+                        .expect_err("case should produce parser error");
+                    assert!(
+                        error.to_string().contains(needle),
+                        "case '{}' expected error containing '{needle}', got '{error}'",
+                        case.name
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
     fn parse_stream_event_derives_total_tokens_when_missing() {
         let event = r#"{"choices":[{"delta":{"content":"hi"}}],"usage":{"prompt_tokens":4,"completion_tokens":2}}"#;
         let chunks = parse_stream_event(event).expect("parse stream event");
@@ -1002,6 +1117,30 @@ mod tests {
         let event = r#"{"choices":[{"delta":{"content":"hi"}}],"usage":{"prompt_tokens":4294967296,"completion_tokens":2,"total_tokens":4294967298}}"#;
         let chunks = parse_stream_event(event).expect("parse stream event");
         assert_eq!(chunks.first().and_then(|chunk| chunk.usage.clone()), None);
+    }
+
+    #[tokio::test]
+    async fn cancel_stream_is_idempotent_for_unknown_stream_id() {
+        let provider = OpenRouterSupervisor::with_base_url("test-key", "http://127.0.0.1:8080")
+            .expect("provider");
+        provider
+            .cancel_stream("openrouter-stream-missing")
+            .await
+            .expect("unknown stream id should be ignored");
+    }
+
+    #[tokio::test]
+    async fn cancel_stream_marks_registered_stream_as_cancelled() {
+        let provider = OpenRouterSupervisor::with_base_url("test-key", "http://127.0.0.1:8080")
+            .expect("provider");
+        let control = provider.insert_stream_control("openrouter-stream-test");
+        assert!(!control.is_cancelled(), "stream should start as active");
+
+        provider
+            .cancel_stream("openrouter-stream-test")
+            .await
+            .expect("cancel should succeed");
+        assert!(control.is_cancelled(), "stream should be marked cancelled");
     }
 
     fn spawn_test_server(handler: impl FnOnce(TcpStream) + Send + 'static) -> String {

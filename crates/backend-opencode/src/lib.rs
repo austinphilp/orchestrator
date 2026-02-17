@@ -1079,6 +1079,210 @@ sleep 1"#
         assert!(events_three.is_empty());
     }
 
+    #[test]
+    fn parser_protocol_tags_support_aliases_and_reject_boundary_mismatches() {
+        enum Expected<'a> {
+            Checkpoint {
+                summary: &'a str,
+                detail: Option<&'a str>,
+                file_refs: &'a [&'a str],
+            },
+            NeedsInput {
+                id: &'a str,
+                question: &'a str,
+                default: Option<&'a str>,
+            },
+            Artifact {
+                kind: BackendArtifactKind,
+                artifact_id: Option<&'a str>,
+                uri: Option<&'a str>,
+            },
+            Done {
+                summary: Option<&'a str>,
+            },
+            None,
+        }
+
+        struct Case<'a> {
+            name: &'a str,
+            line: &'a [u8],
+            expected: Expected<'a>,
+        }
+
+        let cases = vec![
+            Case {
+                name: "checkpoint accepts stage/file_refs aliases",
+                line: br#"@@checkpoint {"stage":"planning","detail":"drafted plan","file_refs":["a.rs","b.rs"]}"#,
+                expected: Expected::Checkpoint {
+                    summary: "planning",
+                    detail: Some("drafted plan"),
+                    file_refs: &["a.rs", "b.rs"],
+                },
+            },
+            Case {
+                name: "needs_input accepts prompt aliases",
+                line: br#"@@needs_input {"prompt_id":"ask-1","prompt":"Choose path?","default_option":"A"}"#,
+                expected: Expected::NeedsInput {
+                    id: "ask-1",
+                    question: "Choose path?",
+                    default: Some("A"),
+                },
+            },
+            Case {
+                name: "artifact accepts id/url aliases and normalizes kind",
+                line: br#"@@artifact {"kind":"pull-request","id":"artifact-7","url":"https://example.test/pr/7"}"#,
+                expected: Expected::Artifact {
+                    kind: BackendArtifactKind::PullRequest,
+                    artifact_id: Some("artifact-7"),
+                    uri: Some("https://example.test/pr/7"),
+                },
+            },
+            Case {
+                name: "done accepts omitted payload",
+                line: b"@@done",
+                expected: Expected::Done { summary: None },
+            },
+            Case {
+                name: "done accepts explicit summary payload",
+                line: br#"@@done {"summary":"finished"}"#,
+                expected: Expected::Done {
+                    summary: Some("finished"),
+                },
+            },
+            Case {
+                name: "tag prefix must match full token",
+                line: br#"@@checkpointed {"stage":"nope"}"#,
+                expected: Expected::None,
+            },
+            Case {
+                name: "needs_input rejects malformed json payload",
+                line: br#"@@needs_input {"id":"x","question":1}"#,
+                expected: Expected::None,
+            },
+        ];
+
+        for case in cases {
+            let event = parse_protocol_line(case.line);
+            match case.expected {
+                Expected::Checkpoint {
+                    summary,
+                    detail,
+                    file_refs,
+                } => {
+                    let event = event.unwrap_or_else(|| {
+                        panic!("case '{}' expected checkpoint event", case.name)
+                    });
+                    let BackendEvent::Checkpoint(BackendCheckpointEvent {
+                        summary: actual_summary,
+                        detail: actual_detail,
+                        file_refs: actual_refs,
+                    }) = event
+                    else {
+                        panic!("case '{}' produced unexpected checkpoint event", case.name);
+                    };
+                    assert_eq!(actual_summary, summary, "case '{}' summary", case.name);
+                    assert_eq!(
+                        actual_detail.as_deref(),
+                        detail,
+                        "case '{}' detail",
+                        case.name
+                    );
+                    let actual_refs = actual_refs.iter().map(String::as_str).collect::<Vec<_>>();
+                    assert_eq!(actual_refs, file_refs, "case '{}' file refs", case.name);
+                }
+                Expected::NeedsInput {
+                    id,
+                    question,
+                    default,
+                } => {
+                    let event = event.unwrap_or_else(|| {
+                        panic!("case '{}' expected needs_input event", case.name)
+                    });
+                    assert!(
+                        matches!(
+                            event,
+                            BackendEvent::NeedsInput(BackendNeedsInputEvent {
+                                prompt_id: actual_id,
+                                question: actual_question,
+                                default_option: actual_default,
+                                ..
+                            }) if actual_id == id
+                                && actual_question == question
+                                && actual_default.as_deref() == default
+                        ),
+                        "case '{}' produced unexpected needs_input event",
+                        case.name
+                    );
+                }
+                Expected::Artifact {
+                    kind,
+                    artifact_id,
+                    uri,
+                } => {
+                    let event = event
+                        .unwrap_or_else(|| panic!("case '{}' expected artifact event", case.name));
+                    assert!(
+                        matches!(
+                            event,
+                            BackendEvent::Artifact(BackendArtifactEvent {
+                                kind: actual_kind,
+                                artifact_id: actual_id,
+                                uri: actual_uri,
+                                ..
+                            }) if actual_kind == kind
+                                && actual_id.as_ref().map(|id| id.as_str()) == artifact_id
+                                && actual_uri.as_deref() == uri
+                        ),
+                        "case '{}' produced unexpected artifact event",
+                        case.name
+                    );
+                }
+                Expected::Done { summary } => {
+                    let event =
+                        event.unwrap_or_else(|| panic!("case '{}' expected done event", case.name));
+                    assert!(
+                        matches!(
+                            event,
+                            BackendEvent::Done(BackendDoneEvent { summary: actual_summary })
+                                if actual_summary.as_deref() == summary
+                        ),
+                        "case '{}' produced unexpected done event",
+                        case.name
+                    );
+                }
+                Expected::None => assert!(
+                    event.is_none(),
+                    "case '{}' expected parser to ignore line",
+                    case.name
+                ),
+            }
+        }
+    }
+
+    #[test]
+    fn parser_finish_flushes_partial_protocol_lines() {
+        let mut parser = SupervisorProtocolParser::default();
+
+        let events = parser.ingest(br#"@@done {"summary":"almost"}"#);
+        assert!(events.is_empty(), "partial line should remain buffered");
+
+        let flushed = parser.finish();
+        assert_eq!(flushed.len(), 1);
+        assert!(matches!(
+            &flushed[0],
+            BackendEvent::Done(BackendDoneEvent {
+                summary: Some(summary)
+            }) if summary == "almost"
+        ));
+
+        let mut malformed = SupervisorProtocolParser::default();
+        malformed.ingest(br#"@@checkpoint {"stage":"oops""#);
+        assert!(
+            malformed.finish().is_empty(),
+            "malformed buffered protocol lines should be ignored"
+        );
+    }
+
     #[tokio::test]
     async fn parser_extracts_heuristic_events_from_unstructured_lines() {
         let mut parser = SupervisorProtocolParser::default();
