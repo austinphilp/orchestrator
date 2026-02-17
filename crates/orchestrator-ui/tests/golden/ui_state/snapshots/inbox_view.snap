@@ -1,0 +1,38 @@
+status: ready
+mode: Normal
+selected_inbox_index: 0
+selected_inbox_item_id: inbox-decision
+center_stack: Inbox
+center_title: Inbox View
+
+[inbox]
+Batch lanes: [1] Decide / Unblock 1 | [2] Approvals 1 | [3] PR Reviews 1 | [4] FYI Digest 1
+
+Urgent:
+> [ ] NeedsDecision: Choose parser migration strategy
+
+Attention:
+  [ ] NeedsApproval: Approve PR-ready transition
+  [ ] ReadyForReview: Review implementation evidence
+
+Background:
+  [ ] FYI: FYI: background agent progress
+
+[center]
+Stack: Inbox
+
+4 unresolved inbox items
+[1] Decide / Unblock: 1 unresolved / 1 total
+[2] Approvals: 1 unresolved / 1 total
+[3] PR Reviews: 1 unresolved / 1 total
+[4] FYI Digest: 1 unresolved / 1 total
+j/k or arrows: move selection
+Tab/Shift+Tab: cycle batch lanes
+g/G: jump first/last item
+Enter: open focus card
+t: open terminal for selected item
+v d/t/p/c: open diff/test/PR/chat inspector
+Backspace: minimize top view
+
+[which-key]
+(none)

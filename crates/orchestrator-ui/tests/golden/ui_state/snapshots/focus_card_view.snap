@@ -1,0 +1,40 @@
+status: ready
+mode: Normal
+selected_inbox_index: 0
+selected_inbox_item_id: inbox-focus
+center_stack: FocusCard(inbox-focus)
+center_title: Focus Card inbox-focus
+
+[inbox]
+Batch lanes: [1] Decide / Unblock 1
+
+Urgent:
+> [ ] NeedsDecision: Confirm golden snapshot update workflow
+
+[center]
+Stack: FocusCard(inbox-focus)
+
+Title: Confirm golden snapshot update workflow
+Kind: NeedsDecision
+Work item: wi-focus
+Workflow: Implementing
+Session: sess-focus (Blocked)
+
+Why attention is required:
+- The worker needs a decision before it can continue implementation. Session status is Blocked.
+
+Recommended response:
+- Answer the worker prompt to unblock progress: Should snapshot updates use ORCHESTRATOR_UPDATE_GOLDENS?
+
+Evidence:
+- Latest input request: Should snapshot updates use ORCHESTRATOR_UPDATE_GOLDENS?
+- Latest blocker reason: Need confirmation before locking golden workflow
+- Latest checkpoint summary: Recorded failing tests and narrowed issue to center view stack rendering
+- LogSnippet artifact 'Test output tail' -> artifact://logs/wi-focus?tail=2+failures+in+ui+snapshot+tests
+- PR artifact 'Draft PR #138' -> https://github.com/example/orchestrator/pull/138
+
+Shortcuts: t terminal | v d diff | v t tests | v p PR | v c chat
+Backspace: minimize top view
+
+[which-key]
+(none)

@@ -1,0 +1,163 @@
+{
+  "status": "ready",
+  "selected_inbox_item_id": "inbox-focus",
+  "center_view_stack": [
+    {
+      "type": "focus_card",
+      "inbox_item_id": "inbox-focus"
+    }
+  ],
+  "events": [
+    {
+      "sequence": 1,
+      "event_id": "evt-focus-1",
+      "occurred_at": "2026-02-16T10:00:00Z",
+      "work_item_id": "wi-focus",
+      "payload": {
+        "type": "WorkItemCreated",
+        "data": {
+          "work_item_id": "wi-focus",
+          "ticket_id": "linear:AP-138",
+          "project_id": "orchestrator"
+        }
+      }
+    },
+    {
+      "sequence": 2,
+      "event_id": "evt-focus-2",
+      "occurred_at": "2026-02-16T10:00:10Z",
+      "work_item_id": "wi-focus",
+      "session_id": "sess-focus",
+      "payload": {
+        "type": "SessionSpawned",
+        "data": {
+          "session_id": "sess-focus",
+          "work_item_id": "wi-focus",
+          "model": "openai/gpt-4o-mini"
+        }
+      }
+    },
+    {
+      "sequence": 3,
+      "event_id": "evt-focus-3",
+      "occurred_at": "2026-02-16T10:00:20Z",
+      "work_item_id": "wi-focus",
+      "payload": {
+        "type": "WorkflowTransition",
+        "data": {
+          "work_item_id": "wi-focus",
+          "from": "Planning",
+          "to": "Implementing"
+        }
+      }
+    },
+    {
+      "sequence": 4,
+      "event_id": "evt-focus-4",
+      "occurred_at": "2026-02-16T10:00:30Z",
+      "work_item_id": "wi-focus",
+      "payload": {
+        "type": "ArtifactCreated",
+        "data": {
+          "artifact_id": "artifact-focus-pr",
+          "work_item_id": "wi-focus",
+          "kind": "PR",
+          "label": "Draft PR #138",
+          "uri": "https://github.com/example/orchestrator/pull/138"
+        }
+      }
+    },
+    {
+      "sequence": 5,
+      "event_id": "evt-focus-5",
+      "occurred_at": "2026-02-16T10:00:40Z",
+      "work_item_id": "wi-focus",
+      "payload": {
+        "type": "ArtifactCreated",
+        "data": {
+          "artifact_id": "artifact-focus-log",
+          "work_item_id": "wi-focus",
+          "kind": "LogSnippet",
+          "label": "Test output tail",
+          "uri": "artifact://logs/wi-focus?tail=2+failures+in+ui+snapshot+tests"
+        }
+      }
+    },
+    {
+      "sequence": 6,
+      "event_id": "evt-focus-6",
+      "occurred_at": "2026-02-16T10:00:50Z",
+      "work_item_id": "wi-focus",
+      "session_id": "sess-focus",
+      "payload": {
+        "type": "SessionCheckpoint",
+        "data": {
+          "session_id": "sess-focus",
+          "artifact_id": "artifact-focus-log",
+          "summary": "Recorded failing tests and narrowed issue to center view stack rendering"
+        }
+      }
+    },
+    {
+      "sequence": 7,
+      "event_id": "evt-focus-7",
+      "occurred_at": "2026-02-16T10:01:00Z",
+      "work_item_id": "wi-focus",
+      "session_id": "sess-focus",
+      "payload": {
+        "type": "SessionNeedsInput",
+        "data": {
+          "session_id": "sess-focus",
+          "prompt": "Should snapshot updates use ORCHESTRATOR_UPDATE_GOLDENS?",
+          "prompt_id": "focus-q1",
+          "options": ["yes", "no"],
+          "default_option": "yes"
+        }
+      }
+    },
+    {
+      "sequence": 8,
+      "event_id": "evt-focus-8",
+      "occurred_at": "2026-02-16T10:01:10Z",
+      "work_item_id": "wi-focus",
+      "session_id": "sess-focus",
+      "payload": {
+        "type": "SessionBlocked",
+        "data": {
+          "session_id": "sess-focus",
+          "reason": "Need confirmation before locking golden workflow"
+        }
+      }
+    },
+    {
+      "sequence": 9,
+      "event_id": "evt-focus-9",
+      "occurred_at": "2026-02-16T10:01:20Z",
+      "work_item_id": "wi-focus",
+      "session_id": "sess-focus",
+      "payload": {
+        "type": "UserResponded",
+        "data": {
+          "session_id": "sess-focus",
+          "work_item_id": "wi-focus",
+          "message": "Yes, use ORCHESTRATOR_UPDATE_GOLDENS=1 for intentional updates."
+        }
+      }
+    },
+    {
+      "sequence": 10,
+      "event_id": "evt-focus-10",
+      "occurred_at": "2026-02-16T10:01:30Z",
+      "work_item_id": "wi-focus",
+      "payload": {
+        "type": "InboxItemCreated",
+        "data": {
+          "inbox_item_id": "inbox-focus",
+          "work_item_id": "wi-focus",
+          "kind": "NeedsDecision",
+          "title": "Confirm golden snapshot update workflow"
+        }
+      }
+    }
+  ]
+}
