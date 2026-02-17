@@ -4,7 +4,8 @@ use orchestrator_core::{
     SupervisorQueryContextArgs, UntypedCommandInvocation,
 };
 use orchestrator_supervisor::{
-    build_freeform_messages, build_template_messages_with_variables, SupervisorQueryEngine,
+    build_freeform_messages, build_inferred_template_messages,
+    build_template_messages_with_variables, infer_template_from_query, SupervisorQueryEngine,
 };
 use orchestrator_ui::SupervisorCommandContext;
 
@@ -87,7 +88,11 @@ where
             ..
         } => build_template_messages_with_variables(template.as_str(), &variables, &context_pack)?,
         SupervisorQueryArgs::Freeform { query, .. } => {
-            build_freeform_messages(query.as_str(), &context_pack)?
+            if let Some(template) = infer_template_from_query(query.as_str()) {
+                build_inferred_template_messages(template, query.as_str(), &context_pack)?
+            } else {
+                build_freeform_messages(query.as_str(), &context_pack)?
+            }
         }
     };
 
