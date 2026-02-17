@@ -433,6 +433,8 @@ const INSPECTOR_EVENT_SCAN_LIMIT: usize = 512;
 const SUPERVISOR_STREAM_CHANNEL_CAPACITY: usize = 128;
 const SUPERVISOR_STREAM_MAX_TRANSCRIPT_CHARS: usize = 24_000;
 const SUPERVISOR_STREAM_RENDER_LINE_LIMIT: usize = 80;
+const SUPERVISOR_STREAM_HIGH_COST_TOTAL_TOKENS: u32 = 900;
+const SUPERVISOR_STREAM_LOW_TOKEN_HEADROOM: u32 = 120;
 const DEFAULT_SUPERVISOR_MODEL: &str = "openai/gpt-4o-mini";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -459,6 +461,29 @@ impl SupervisorStreamLifecycle {
 
     fn is_active(self) -> bool {
         matches!(self, Self::Connecting | Self::Streaming | Self::Cancelling)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SupervisorResponseState {
+    Nominal,
+    NoContext,
+    AuthUnavailable,
+    BackendUnavailable,
+    RateLimited,
+    HighCost,
+}
+
+impl SupervisorResponseState {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Nominal => "nominal",
+            Self::NoContext => "no-context",
+            Self::AuthUnavailable => "auth-unavailable",
+            Self::BackendUnavailable => "backend-unavailable",
+            Self::RateLimited => "rate-limited",
+            Self::HighCost => "high-cost",
+        }
     }
 }
 
@@ -497,6 +522,7 @@ struct ActiveSupervisorChatStream {
     receiver: mpsc::Receiver<SupervisorStreamEvent>,
     stream_id: Option<String>,
     lifecycle: SupervisorStreamLifecycle,
+    response_state: SupervisorResponseState,
     transcript: String,
     pending_delta: String,
     pending_chunk_count: usize,
@@ -504,6 +530,8 @@ struct ActiveSupervisorChatStream {
     last_rate_limit: Option<LlmRateLimitState>,
     usage: Option<LlmTokenUsage>,
     error_message: Option<String>,
+    state_message: Option<String>,
+    cooldown_hint: Option<String>,
     pending_cancel: bool,
 }
 
@@ -517,6 +545,7 @@ impl ActiveSupervisorChatStream {
             receiver,
             stream_id: None,
             lifecycle: SupervisorStreamLifecycle::Connecting,
+            response_state: SupervisorResponseState::Nominal,
             transcript: String::new(),
             pending_delta: String::new(),
             pending_chunk_count: 0,
@@ -524,8 +553,35 @@ impl ActiveSupervisorChatStream {
             last_rate_limit: None,
             usage: None,
             error_message: None,
+            state_message: None,
+            cooldown_hint: None,
             pending_cancel: false,
         }
+    }
+
+    fn terminal_state(
+        target: SupervisorStreamTarget,
+        response_state: SupervisorResponseState,
+        message: impl Into<String>,
+    ) -> Self {
+        let (_sender, receiver) = mpsc::channel(1);
+        let mut stream = Self::new(target, receiver);
+        stream.lifecycle = SupervisorStreamLifecycle::Error;
+        stream.response_state = response_state;
+        stream.state_message = Some(supervisor_state_message(response_state).to_owned());
+        stream.error_message = Some(message.into());
+        stream
+    }
+
+    fn set_response_state(
+        &mut self,
+        state: SupervisorResponseState,
+        state_message: Option<String>,
+        cooldown_hint: Option<String>,
+    ) {
+        self.response_state = state;
+        self.state_message = state_message;
+        self.cooldown_hint = cooldown_hint;
     }
 
     fn flush_pending_delta(&mut self) {
@@ -546,6 +602,7 @@ impl ActiveSupervisorChatStream {
             String::new(),
             "Live supervisor stream:".to_owned(),
             format!("- State: {}", self.lifecycle.label()),
+            format!("- Supervisor state: {}", self.response_state.label()),
         ];
 
         if self.last_flush_coalesced_chunks > 1 {
@@ -589,6 +646,18 @@ impl ActiveSupervisorChatStream {
                 compact_focus_card_text(error_message)
             ));
         }
+        if let Some(state_message) = self.state_message.as_deref() {
+            lines.push(format!(
+                "- Guidance: {}",
+                compact_focus_card_text(state_message)
+            ));
+        }
+        if let Some(cooldown_hint) = self.cooldown_hint.as_deref() {
+            lines.push(format!("- Cooldown: {cooldown_hint}"));
+        }
+        if self.response_state != SupervisorResponseState::Nominal {
+            lines.extend(self.response_state_guidance_lines());
+        }
 
         lines.push(String::new());
         lines.push("Streaming response:".to_owned());
@@ -616,6 +685,55 @@ impl ActiveSupervisorChatStream {
         }
 
         lines
+    }
+
+    fn response_state_guidance_lines(&self) -> Vec<String> {
+        let mut lines = vec!["- Retry guidance:".to_owned()];
+        match self.response_state {
+            SupervisorResponseState::Nominal => return Vec::new(),
+            SupervisorResponseState::NoContext => {
+                lines.push(
+                    "  Select a work item/session or submit a non-empty global question."
+                        .to_owned(),
+                );
+            }
+            SupervisorResponseState::AuthUnavailable => {
+                lines.push("  Verify OpenRouter credentials and re-run the query.".to_owned());
+            }
+            SupervisorResponseState::BackendUnavailable => {
+                lines.push("  Check network/runtime availability, then retry.".to_owned());
+            }
+            SupervisorResponseState::RateLimited => {
+                lines.push("  Wait for cooldown and retry with narrower context.".to_owned());
+            }
+            SupervisorResponseState::HighCost => {
+                lines.push(
+                    "  Prefer template queries or a tighter scope to reduce token usage."
+                        .to_owned(),
+                );
+            }
+        }
+
+        lines.push("- Safe fallback prompts:".to_owned());
+        for prompt in self.fallback_prompts() {
+            lines.push(format!("  {prompt}"));
+        }
+        lines
+    }
+
+    fn fallback_prompts(&self) -> [&'static str; 3] {
+        match &self.target {
+            SupervisorStreamTarget::Inspector { .. } => [
+                "Template `status_current_session`",
+                "Template `what_is_blocking`",
+                "Freeform `What needs me now?`",
+            ],
+            SupervisorStreamTarget::GlobalChatPanel => [
+                "Freeform `What needs my attention globally?`",
+                "Freeform `What changed in the last 30 minutes?`",
+                "Template `next_actions`",
+            ],
+        }
     }
 }
 
@@ -1172,10 +1290,16 @@ fn supervisor_model_from_env() -> String {
         .unwrap_or_else(|| DEFAULT_SUPERVISOR_MODEL.to_owned())
 }
 
-fn classify_supervisor_stream_error(message: &str) -> &'static str {
+fn classify_supervisor_stream_error(message: &str) -> SupervisorResponseState {
     let lower = message.to_ascii_lowercase();
     if lower.contains("429") || lower.contains("rate limit") {
-        "rate-limit"
+        SupervisorResponseState::RateLimited
+    } else if lower.contains("missing selected item")
+        || lower.contains("select an inbox item")
+        || lower.contains("non-empty question")
+        || lower.contains("malformed context")
+    {
+        SupervisorResponseState::NoContext
     } else if lower.contains("401")
         || lower.contains("403")
         || lower.contains("unauthorized")
@@ -1183,18 +1307,85 @@ fn classify_supervisor_stream_error(message: &str) -> &'static str {
         || lower.contains("auth")
         || lower.contains("api key")
     {
-        "auth"
+        SupervisorResponseState::AuthUnavailable
     } else if lower.contains("network")
         || lower.contains("timeout")
         || lower.contains("connect")
         || lower.contains("transport")
         || lower.contains("dns")
         || lower.contains("tls")
+        || lower.contains("no llm provider")
+        || lower.contains("tokio runtime")
+        || lower.contains("dependency unavailable")
     {
-        "network"
+        SupervisorResponseState::BackendUnavailable
     } else {
-        "stream"
+        SupervisorResponseState::BackendUnavailable
     }
+}
+
+fn response_state_warning_label(state: SupervisorResponseState) -> &'static str {
+    match state {
+        SupervisorResponseState::Nominal => "supervisor",
+        SupervisorResponseState::NoContext => "no-context",
+        SupervisorResponseState::AuthUnavailable => "auth",
+        SupervisorResponseState::BackendUnavailable => "backend",
+        SupervisorResponseState::RateLimited => "rate-limit",
+        SupervisorResponseState::HighCost => "high-cost",
+    }
+}
+
+fn supervisor_state_message(state: SupervisorResponseState) -> &'static str {
+    match state {
+        SupervisorResponseState::Nominal => "Supervisor stream is healthy.",
+        SupervisorResponseState::NoContext => {
+            "No usable context was available for this supervisor request."
+        }
+        SupervisorResponseState::AuthUnavailable => {
+            "Supervisor authentication failed. Check configured API credentials."
+        }
+        SupervisorResponseState::BackendUnavailable => {
+            "Supervisor backend is currently unavailable."
+        }
+        SupervisorResponseState::RateLimited => "Supervisor is rate-limited. Retry after cooldown.",
+        SupervisorResponseState::HighCost => {
+            "Supervisor response cost is high. Use tighter prompts or template queries."
+        }
+    }
+}
+
+fn parse_rate_limit_cooldown_hint(message: &str) -> Option<String> {
+    let lowered = message.to_ascii_lowercase();
+    if let Some(index) = lowered.find("rate limit reset at ") {
+        let suffix = &message[index + "rate limit reset at ".len()..];
+        let reset_at = suffix
+            .split('.')
+            .next()
+            .unwrap_or_default()
+            .trim()
+            .trim_matches('`');
+        if !reset_at.is_empty() {
+            return Some(format!("rate limit reset at {reset_at}"));
+        }
+    }
+
+    if let Some(index) = lowered.find("retry after ") {
+        let suffix = &message[index + "retry after ".len()..];
+        let cooldown = suffix
+            .split('.')
+            .next()
+            .unwrap_or_default()
+            .trim()
+            .trim_matches('`');
+        if !cooldown.is_empty() {
+            return Some(format!("retry after {cooldown}"));
+        }
+    }
+    None
+}
+
+fn usage_trips_high_cost_state(usage: &LlmTokenUsage) -> bool {
+    usage.total_tokens >= SUPERVISOR_STREAM_HIGH_COST_TOTAL_TOKENS
 }
 
 fn latest_checkpoint_summary_for_work_item(
@@ -2190,9 +2381,13 @@ impl UiShellState {
     fn submit_global_supervisor_chat_query(&mut self) {
         let query = self.global_supervisor_chat_draft.trim().to_owned();
         if query.is_empty() {
-            self.status_warning = Some(
-                "supervisor query unavailable: enter a non-empty question before submitting"
-                    .to_owned(),
+            let message =
+                "supervisor query unavailable: enter a non-empty question before submitting";
+            self.status_warning = Some(message.to_owned());
+            self.set_supervisor_terminal_state(
+                SupervisorStreamTarget::GlobalChatPanel,
+                SupervisorResponseState::NoContext,
+                message,
             );
             return;
         }
@@ -2207,9 +2402,13 @@ impl UiShellState {
                 request,
             )
         } else {
-            self.status_warning = Some(
-                "supervisor stream unavailable: no LLM provider or command dispatcher configured"
-                    .to_owned(),
+            let message =
+                "supervisor stream unavailable: no LLM provider or command dispatcher configured";
+            self.status_warning = Some(message.to_owned());
+            self.set_supervisor_terminal_state(
+                SupervisorStreamTarget::GlobalChatPanel,
+                SupervisorResponseState::BackendUnavailable,
+                message,
             );
             false
         };
@@ -2268,22 +2467,23 @@ impl UiShellState {
             return;
         }
 
+        let target = SupervisorStreamTarget::Inspector {
+            work_item_id: selected_row.work_item_id.clone(),
+        };
         let Some(provider) = self.supervisor_provider.clone() else {
-            self.status_warning = Some(
-                "supervisor stream unavailable: no LLM provider or command dispatcher configured"
-                    .to_owned(),
+            let message =
+                "supervisor stream unavailable: no LLM provider or command dispatcher configured";
+            self.status_warning = Some(message.to_owned());
+            self.set_supervisor_terminal_state(
+                target,
+                SupervisorResponseState::BackendUnavailable,
+                message,
             );
             return;
         };
 
         let request = build_supervisor_chat_request(&selected_row, &self.domain);
-        let _ = self.start_supervisor_stream_with_provider(
-            SupervisorStreamTarget::Inspector {
-                work_item_id: selected_row.work_item_id.clone(),
-            },
-            provider,
-            request,
-        );
+        let _ = self.start_supervisor_stream_with_provider(target, provider, request);
     }
 
     fn start_supervisor_stream_with_dispatcher_for_global_query(
@@ -2303,9 +2503,16 @@ impl UiShellState {
         ) {
             Ok(invocation) => invocation,
             Err(error) => {
-                self.status_warning = Some(format!(
+                let message = format!(
                     "supervisor query unavailable: failed to build command invocation ({error})"
-                ));
+                );
+                let state = classify_supervisor_stream_error(message.as_str());
+                self.status_warning = Some(message.clone());
+                self.set_supervisor_terminal_state(
+                    SupervisorStreamTarget::GlobalChatPanel,
+                    state,
+                    message,
+                );
                 return false;
             }
         };
@@ -2338,9 +2545,18 @@ impl UiShellState {
         ) {
             Ok(invocation) => invocation,
             Err(error) => {
-                self.status_warning = Some(format!(
+                let message = format!(
                     "supervisor query unavailable: failed to build command invocation ({error})"
-                ));
+                );
+                let state = classify_supervisor_stream_error(message.as_str());
+                self.status_warning = Some(message.clone());
+                self.set_supervisor_terminal_state(
+                    SupervisorStreamTarget::Inspector {
+                        work_item_id: selected_row.work_item_id.clone(),
+                    },
+                    state,
+                    message,
+                );
                 return false;
             }
         };
@@ -2375,6 +2591,11 @@ impl UiShellState {
         request: LlmChatRequest,
     ) -> bool {
         let Some(handle) = self.supervisor_runtime_handle() else {
+            self.set_supervisor_terminal_state(
+                target,
+                SupervisorResponseState::BackendUnavailable,
+                "supervisor stream unavailable: tokio runtime is not active",
+            );
             return false;
         };
 
@@ -2395,6 +2616,11 @@ impl UiShellState {
         context: SupervisorCommandContext,
     ) -> bool {
         let Some(handle) = self.supervisor_runtime_handle() else {
+            self.set_supervisor_terminal_state(
+                target,
+                SupervisorResponseState::BackendUnavailable,
+                "supervisor stream unavailable: tokio runtime is not active",
+            );
             return false;
         };
 
@@ -2416,6 +2642,26 @@ impl UiShellState {
                 None
             }
         }
+    }
+
+    fn set_supervisor_terminal_state(
+        &mut self,
+        target: SupervisorStreamTarget,
+        response_state: SupervisorResponseState,
+        message: impl Into<String>,
+    ) {
+        if let Some(previous_stream) = self.supervisor_chat_stream.take() {
+            if previous_stream.lifecycle.is_active() {
+                if let Some(stream_id) = previous_stream.stream_id {
+                    self.spawn_supervisor_cancel(stream_id);
+                }
+            }
+        }
+        self.supervisor_chat_stream = Some(ActiveSupervisorChatStream::terminal_state(
+            target,
+            response_state,
+            message,
+        ));
     }
 
     fn replace_supervisor_stream(
@@ -2535,6 +2781,9 @@ impl UiShellState {
                         if stream.lifecycle != SupervisorStreamLifecycle::Cancelling {
                             stream.lifecycle = SupervisorStreamLifecycle::Streaming;
                         }
+                        stream.response_state = SupervisorResponseState::Nominal;
+                        stream.state_message = None;
+                        stream.cooldown_hint = None;
                         if stream.pending_cancel {
                             stream.pending_cancel = false;
                             cancel_stream_id = Some(stream_id);
@@ -2547,13 +2796,73 @@ impl UiShellState {
                         }
                     }
                     Ok(SupervisorStreamEvent::RateLimit { state }) => {
-                        stream.last_rate_limit = Some(state);
+                        let exhausted = state.requests_remaining.is_some_and(|value| value == 0)
+                            || state.tokens_remaining.is_some_and(|value| value == 0);
+                        let low_headroom = state
+                            .tokens_remaining
+                            .is_some_and(|value| value <= SUPERVISOR_STREAM_LOW_TOKEN_HEADROOM);
+                        stream.last_rate_limit = Some(state.clone());
+                        if exhausted {
+                            stream.set_response_state(
+                                SupervisorResponseState::RateLimited,
+                                Some(
+                                    "Provider quota is exhausted for the current window."
+                                        .to_owned(),
+                                ),
+                                state
+                                    .reset_at
+                                    .as_deref()
+                                    .map(|reset_at| format!("rate limit reset at {reset_at}")),
+                            );
+                            warning_message = Some(
+                                "supervisor rate limit reached; wait for cooldown before retry"
+                                    .to_owned(),
+                            );
+                        } else if low_headroom
+                            && stream.response_state == SupervisorResponseState::Nominal
+                        {
+                            stream.set_response_state(
+                                SupervisorResponseState::HighCost,
+                                Some(
+                                    "Remaining token headroom is low; tighten follow-up scope."
+                                        .to_owned(),
+                                ),
+                                state
+                                    .reset_at
+                                    .as_deref()
+                                    .map(|reset_at| format!("rate limit reset at {reset_at}")),
+                            );
+                        }
                     }
                     Ok(SupervisorStreamEvent::Usage { usage }) => {
+                        if usage_trips_high_cost_state(&usage)
+                            && stream.response_state != SupervisorResponseState::RateLimited
+                        {
+                            stream.set_response_state(
+                                SupervisorResponseState::HighCost,
+                                Some(format!(
+                                    "Response consumed {} tokens; prefer tighter prompts.",
+                                    usage.total_tokens
+                                )),
+                                None,
+                            );
+                        }
                         stream.usage = Some(usage);
                     }
                     Ok(SupervisorStreamEvent::Finished { reason, usage }) => {
                         if let Some(usage) = usage {
+                            if usage_trips_high_cost_state(&usage)
+                                && stream.response_state != SupervisorResponseState::RateLimited
+                            {
+                                stream.set_response_state(
+                                    SupervisorResponseState::HighCost,
+                                    Some(format!(
+                                        "Response consumed {} tokens; prefer tighter prompts.",
+                                        usage.total_tokens
+                                    )),
+                                    None,
+                                );
+                            }
                             stream.usage = Some(usage);
                         }
                         stream.lifecycle = match reason {
@@ -2562,13 +2871,33 @@ impl UiShellState {
                             _ => SupervisorStreamLifecycle::Completed,
                         };
                         if reason == LlmFinishReason::Error {
+                            stream.set_response_state(
+                                SupervisorResponseState::BackendUnavailable,
+                                Some(
+                                    "The supervisor stream ended unexpectedly; safe to retry."
+                                        .to_owned(),
+                                ),
+                                None,
+                            );
                             warning_message =
                                 Some("supervisor stream ended with error finish reason".to_owned());
                         }
                     }
                     Ok(SupervisorStreamEvent::Failed { message }) => {
+                        let response_state = classify_supervisor_stream_error(&message);
+                        let cooldown_hint =
+                            if response_state == SupervisorResponseState::RateLimited {
+                                parse_rate_limit_cooldown_hint(message.as_str())
+                            } else {
+                                None
+                            };
                         stream.error_message = Some(message.clone());
                         stream.lifecycle = SupervisorStreamLifecycle::Error;
+                        stream.set_response_state(
+                            response_state,
+                            Some(supervisor_state_message(response_state).to_owned()),
+                            cooldown_hint,
+                        );
                         warning_message = Some(message);
                     }
                     Err(TryRecvError::Empty) => break,
@@ -2578,6 +2907,14 @@ impl UiShellState {
                             || stream.lifecycle == SupervisorStreamLifecycle::Cancelling
                         {
                             stream.lifecycle = SupervisorStreamLifecycle::Error;
+                            stream.set_response_state(
+                                SupervisorResponseState::BackendUnavailable,
+                                Some(
+                                    "Supervisor transport closed unexpectedly; retry is safe."
+                                        .to_owned(),
+                                ),
+                                None,
+                            );
                             warning_message =
                                 Some("supervisor stream channel closed unexpectedly".to_owned());
                         }
@@ -2591,9 +2928,10 @@ impl UiShellState {
             self.spawn_supervisor_cancel(stream_id);
         }
         if let Some(message) = warning_message {
+            let state = classify_supervisor_stream_error(message.as_str());
             self.status_warning = Some(format!(
                 "supervisor {} warning: {}",
-                classify_supervisor_stream_error(message.as_str()),
+                response_state_warning_label(state),
                 compact_focus_card_text(message.as_str())
             ));
         }
@@ -5059,6 +5397,147 @@ mod tests {
         assert!(ui_state.status.contains("warning"));
         let rendered = ui_state.center_pane.lines.join("\n");
         assert!(rendered.contains("Error: OpenRouter request failed"));
+        assert!(rendered.contains("Supervisor state: rate-limited"));
+        assert!(rendered.contains("Retry guidance:"));
+    }
+
+    #[test]
+    fn global_chat_empty_query_sets_no_context_state_with_fallback_prompts() {
+        let mut shell_state = UiShellState::new("ready".to_owned(), triage_projection());
+        handle_key_press(&mut shell_state, key(KeyCode::Char('c')));
+        handle_key_press(&mut shell_state, key(KeyCode::Enter));
+
+        let stream = shell_state
+            .supervisor_chat_stream
+            .as_ref()
+            .expect("empty global query should set terminal state");
+        assert_eq!(stream.response_state, SupervisorResponseState::NoContext);
+        let rendered = shell_state.ui_state().center_pane.lines.join("\n");
+        assert!(rendered.contains("Supervisor state: no-context"));
+        assert!(rendered.contains("Safe fallback prompts:"));
+    }
+
+    #[test]
+    fn rate_limit_error_with_retry_after_surfaces_cooldown_hint() {
+        let mut shell_state = UiShellState::new("ready".to_owned(), inspector_projection());
+        shell_state.open_inspector_for_selected(ArtifactInspectorKind::Chat);
+        let sender = attach_supervisor_stream(&mut shell_state, "wi-inspector");
+
+        sender
+            .try_send(SupervisorStreamEvent::Failed {
+                message:
+                    "OpenRouter request failed with status 429: quota exhausted. Retry after 17s."
+                        .to_owned(),
+            })
+            .expect("send failure");
+        shell_state.poll_supervisor_stream_events();
+
+        let rendered = shell_state.ui_state().center_pane.lines.join("\n");
+        assert!(rendered.contains("Supervisor state: rate-limited"));
+        assert!(rendered.contains("Cooldown: retry after 17s"));
+    }
+
+    #[test]
+    fn rate_limit_error_with_reset_at_surfaces_reset_cooldown_hint() {
+        let mut shell_state = UiShellState::new("ready".to_owned(), inspector_projection());
+        shell_state.open_inspector_for_selected(ArtifactInspectorKind::Chat);
+        let sender = attach_supervisor_stream(&mut shell_state, "wi-inspector");
+
+        sender
+            .try_send(SupervisorStreamEvent::Failed {
+                message: "OpenRouter request failed with status 429: quota exhausted. Retry after rate limit reset at 2026-02-17T12:00:00Z. This is recoverable; retry with a smaller context or wait for cooldown.".to_owned(),
+            })
+            .expect("send failure");
+        shell_state.poll_supervisor_stream_events();
+
+        let rendered = shell_state.ui_state().center_pane.lines.join("\n");
+        assert!(rendered.contains("Cooldown: rate limit reset at 2026-02-17T12:00:00Z"));
+        assert!(!rendered.contains("Cooldown: retry after rate"));
+    }
+
+    #[test]
+    fn auth_failure_clears_prior_rate_limit_cooldown_hint() {
+        let mut shell_state = UiShellState::new("ready".to_owned(), inspector_projection());
+        shell_state.open_inspector_for_selected(ArtifactInspectorKind::Chat);
+        let sender = attach_supervisor_stream(&mut shell_state, "wi-inspector");
+
+        sender
+            .try_send(SupervisorStreamEvent::Failed {
+                message:
+                    "OpenRouter request failed with status 429: quota exhausted. Retry after 17s."
+                        .to_owned(),
+            })
+            .expect("send rate limit failure");
+        shell_state.poll_supervisor_stream_events();
+
+        sender
+            .try_send(SupervisorStreamEvent::Failed {
+                message: "OpenRouter request failed with status 401: unauthorized".to_owned(),
+            })
+            .expect("send auth failure");
+        shell_state.poll_supervisor_stream_events();
+
+        let rendered = shell_state.ui_state().center_pane.lines.join("\n");
+        assert!(rendered.contains("Supervisor state: auth-unavailable"));
+        assert!(!rendered.contains("Cooldown:"));
+    }
+
+    #[test]
+    fn auth_failures_surface_auth_unavailable_state() {
+        let mut shell_state = UiShellState::new("ready".to_owned(), inspector_projection());
+        shell_state.open_inspector_for_selected(ArtifactInspectorKind::Chat);
+        let sender = attach_supervisor_stream(&mut shell_state, "wi-inspector");
+
+        sender
+            .try_send(SupervisorStreamEvent::Failed {
+                message: "OpenRouter request failed with status 401: unauthorized".to_owned(),
+            })
+            .expect("send failure");
+        shell_state.poll_supervisor_stream_events();
+
+        let stream = shell_state
+            .supervisor_chat_stream
+            .as_ref()
+            .expect("stream state present");
+        assert_eq!(
+            stream.response_state,
+            SupervisorResponseState::AuthUnavailable
+        );
+        let rendered = shell_state.ui_state().center_pane.lines.join("\n");
+        assert!(rendered.contains("Supervisor state: auth-unavailable"));
+    }
+
+    #[test]
+    fn high_cost_usage_sets_high_cost_state_with_guidance() {
+        let mut shell_state = UiShellState::new("ready".to_owned(), inspector_projection());
+        shell_state.open_inspector_for_selected(ArtifactInspectorKind::Chat);
+        let sender = attach_supervisor_stream(&mut shell_state, "wi-inspector");
+
+        sender
+            .try_send(SupervisorStreamEvent::Usage {
+                usage: LlmTokenUsage {
+                    input_tokens: 700,
+                    output_tokens: 260,
+                    total_tokens: 960,
+                },
+            })
+            .expect("send usage");
+        sender
+            .try_send(SupervisorStreamEvent::Finished {
+                reason: LlmFinishReason::Stop,
+                usage: None,
+            })
+            .expect("send finished");
+        shell_state.tick_supervisor_stream();
+
+        let stream = shell_state
+            .supervisor_chat_stream
+            .as_ref()
+            .expect("stream state present");
+        assert_eq!(stream.response_state, SupervisorResponseState::HighCost);
+        let rendered = shell_state.ui_state().center_pane.lines.join("\n");
+        assert!(rendered.contains("Supervisor state: high-cost"));
+        assert!(rendered.contains("Safe fallback prompts:"));
     }
 
     #[test]
@@ -5335,7 +5814,17 @@ mod tests {
 
         assert_eq!(shell_state.global_supervisor_chat_draft, "what changed?");
         assert_eq!(shell_state.global_supervisor_chat_last_query, None);
-        assert!(shell_state.supervisor_chat_stream.is_none());
+        let stream = shell_state
+            .supervisor_chat_stream
+            .as_ref()
+            .expect("failed query should surface terminal state");
+        assert_eq!(
+            stream.response_state,
+            SupervisorResponseState::BackendUnavailable
+        );
+        let rendered = shell_state.ui_state().center_pane.lines.join("\n");
+        assert!(rendered.contains("Supervisor state: backend-unavailable"));
+        assert!(rendered.contains("Retry guidance:"));
         assert!(shell_state
             .status_warning
             .as_deref()

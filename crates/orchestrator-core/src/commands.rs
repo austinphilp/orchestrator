@@ -5,6 +5,9 @@ use serde_json::Value;
 
 use crate::{CoreError, RetrievalScope, WorkItemId, WorkerSessionId};
 
+const SUPERVISOR_CONTEXT_IDENTIFIER_MAX_CHARS: usize = 128;
+const SUPERVISOR_CONTEXT_SCOPE_MAX_CHARS: usize = 160;
+
 /// Stable command identifiers shared across every orchestration invocation surface.
 ///
 /// These IDs are public API vocabulary. They must be treated as stable contracts and
@@ -468,6 +471,15 @@ fn normalize_context_identifier(
             reason: format!("malformed context: `{field}` must be a non-empty identifier"),
         });
     }
+    if normalized.chars().count() > SUPERVISOR_CONTEXT_IDENTIFIER_MAX_CHARS {
+        return Err(CoreError::InvalidCommandArgs {
+            command_id: ids::SUPERVISOR_QUERY.to_owned(),
+            reason: format!(
+                "malformed context: `{field}` exceeds {} characters; shorten the identifier",
+                SUPERVISOR_CONTEXT_IDENTIFIER_MAX_CHARS
+            ),
+        });
+    }
     Ok(Some(normalized.to_owned()))
 }
 
@@ -481,6 +493,15 @@ fn normalize_context_scope(raw_scope: Option<String>) -> Result<Option<String>, 
         return Err(CoreError::InvalidCommandArgs {
             command_id: ids::SUPERVISOR_QUERY.to_owned(),
             reason: "malformed context: `scope` is empty; expected `global`, `work_item:<id>`, or `session:<id>`".to_owned(),
+        });
+    }
+    if normalized.chars().count() > SUPERVISOR_CONTEXT_SCOPE_MAX_CHARS {
+        return Err(CoreError::InvalidCommandArgs {
+            command_id: ids::SUPERVISOR_QUERY.to_owned(),
+            reason: format!(
+                "malformed context: `scope` exceeds {} characters; shorten the scope path",
+                SUPERVISOR_CONTEXT_SCOPE_MAX_CHARS
+            ),
         });
     }
 
@@ -812,6 +833,30 @@ mod tests {
     }
 
     #[test]
+    fn supervisor_query_rejects_overlong_context_identifier() {
+        let registry = CommandRegistry::new().expect("registry");
+        let too_long = "w".repeat(SUPERVISOR_CONTEXT_IDENTIFIER_MAX_CHARS + 1);
+        let invocation = UntypedCommandInvocation {
+            command_id: ids::SUPERVISOR_QUERY.to_owned(),
+            args: Some(json!({
+                "kind": "template",
+                "template": "status",
+                "context": {
+                    "selected_work_item_id": too_long
+                }
+            })),
+        };
+
+        let err = registry
+            .parse_invocation(&invocation)
+            .expect_err("overlong context id should fail");
+        let message = err.to_string();
+        assert!(message.contains("malformed context"));
+        assert!(message.contains("selected_work_item_id"));
+        assert!(message.contains("exceeds"));
+    }
+
+    #[test]
     fn supervisor_query_rejects_malformed_context_scope() {
         let registry = CommandRegistry::new().expect("registry");
         let invocation = UntypedCommandInvocation {
@@ -831,6 +876,30 @@ mod tests {
         let message = err.to_string();
         assert!(message.contains("malformed context"));
         assert!(message.contains("scope identifier"));
+    }
+
+    #[test]
+    fn supervisor_query_rejects_overlong_context_scope_path() {
+        let registry = CommandRegistry::new().expect("registry");
+        let too_long = format!("session:{}", "s".repeat(SUPERVISOR_CONTEXT_SCOPE_MAX_CHARS));
+        let invocation = UntypedCommandInvocation {
+            command_id: ids::SUPERVISOR_QUERY.to_owned(),
+            args: Some(json!({
+                "kind": "freeform",
+                "query": "status?",
+                "context": {
+                    "scope": too_long
+                }
+            })),
+        };
+
+        let err = registry
+            .parse_invocation(&invocation)
+            .expect_err("overlong scope should fail");
+        let message = err.to_string();
+        assert!(message.contains("malformed context"));
+        assert!(message.contains("scope"));
+        assert!(message.contains("exceeds"));
     }
 
     #[test]
