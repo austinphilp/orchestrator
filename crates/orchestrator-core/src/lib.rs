@@ -16,11 +16,12 @@ mod workflow_automation;
 
 pub use adapters::{
     AddTicketCommentRequest, CodeHostKind, CodeHostProvider, CreatePullRequestRequest,
-    CreateTicketRequest, CreateWorktreeRequest, DeleteWorktreeRequest, GithubClient,
-    LlmChatRequest, LlmFinishReason, LlmMessage, LlmProvider, LlmProviderKind, LlmRateLimitState,
-    LlmResponseStream, LlmResponseSubscription, LlmRole, LlmStreamChunk, LlmTokenUsage,
-    PullRequestRef, PullRequestSummary, RepositoryRef, ReviewerRequest, Supervisor,
-    TicketAttachment, TicketQuery, TicketSummary, TicketingProvider, UpdateTicketStateRequest,
+    CreateTicketRequest, CreateWorktreeRequest, DeleteWorktreeRequest, GetTicketRequest,
+    GithubClient, LlmChatRequest, LlmFinishReason, LlmMessage, LlmProvider, LlmProviderKind,
+    LlmRateLimitState, LlmResponseStream, LlmResponseSubscription, LlmRole, LlmStreamChunk,
+    LlmTool, LlmToolCall, LlmToolFunction, LlmToolResult, PullRequestRef, PullRequestSummary,
+    RepositoryRef, ReviewerRequest, Supervisor, TicketAttachment, TicketDetails, TicketQuery,
+    TicketSummary, TicketingProvider, UpdateTicketDescriptionRequest, UpdateTicketStateRequest,
     UrlOpener, VcsProvider, WorktreeManager, WorktreeStatus, WorktreeSummary,
 };
 pub use attention_engine::{

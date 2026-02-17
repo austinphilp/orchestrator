@@ -1,6 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
+use serde_json::Value;
 use serde::{Deserialize, Serialize};
 
 use crate::{CoreError, TicketId, TicketProvider, WorktreeId};
@@ -73,6 +74,25 @@ pub struct AddTicketCommentRequest {
     pub attachments: Vec<TicketAttachment>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GetTicketRequest {
+    pub ticket_id: TicketId,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TicketDetails {
+    #[serde(flatten)]
+    pub summary: TicketSummary,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UpdateTicketDescriptionRequest {
+    pub ticket_id: TicketId,
+    pub description: String,
+}
+
 #[async_trait]
 pub trait TicketingProvider: Send + Sync {
     fn provider(&self) -> TicketProvider;
@@ -80,8 +100,24 @@ pub trait TicketingProvider: Send + Sync {
     async fn list_tickets(&self, query: TicketQuery) -> Result<Vec<TicketSummary>, CoreError>;
     async fn create_ticket(&self, request: CreateTicketRequest)
         -> Result<TicketSummary, CoreError>;
+    async fn get_ticket(&self, request: GetTicketRequest)
+        -> Result<TicketDetails, CoreError> {
+        Err(CoreError::DependencyUnavailable(format!(
+            "get_ticket is not implemented by {} provider",
+            self.provider()
+        )))
+    }
     async fn update_ticket_state(&self, request: UpdateTicketStateRequest)
         -> Result<(), CoreError>;
+    async fn update_ticket_description(
+        &self,
+        request: UpdateTicketDescriptionRequest,
+    ) -> Result<(), CoreError> {
+        Err(CoreError::DependencyUnavailable(format!(
+            "update_ticket_description is not implemented by {} provider",
+            self.provider()
+        )))
+    }
     async fn add_comment(&self, request: AddTicketCommentRequest) -> Result<(), CoreError>;
 }
 
@@ -297,12 +333,74 @@ pub struct LlmMessage {
     pub role: LlmRole,
     pub content: String,
     pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tool_calls: Vec<LlmToolCall>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_call_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LlmToolCall {
+    pub id: String,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub arguments: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LlmToolFunction {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    pub parameters: Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LlmTool {
+    #[serde(rename = "type")]
+    pub tool_type: String,
+    pub function: LlmToolFunction,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LlmToolResult {
+    pub content: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum LlmToolChoice {
+    Auto(String),
+    None(String),
+    Required(String),
+    Specific { function: LlmToolChoiceFunction },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LlmToolChoiceFunction {
+    pub name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LlmToolCallOutput {
+    pub tool_call_id: String,
+    pub output: String,
+}
+
+impl Default for LlmToolChoice {
+    fn default() -> Self {
+        Self::Auto("auto".to_owned())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LlmChatRequest {
     pub model: String,
     pub messages: Vec<LlmMessage>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tools: Vec<LlmTool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_choice: Option<Value>,
     pub temperature: Option<f32>,
     pub max_output_tokens: Option<u32>,
 }
@@ -334,6 +432,8 @@ pub struct LlmRateLimitState {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LlmStreamChunk {
     pub delta: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tool_calls: Vec<LlmToolCall>,
     pub finish_reason: Option<LlmFinishReason>,
     pub usage: Option<LlmTokenUsage>,
     pub rate_limit: Option<LlmRateLimitState>,

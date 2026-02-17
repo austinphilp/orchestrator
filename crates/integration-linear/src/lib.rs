@@ -6,8 +6,8 @@ use std::time::{Duration, SystemTime};
 use async_trait::async_trait;
 use orchestrator_core::{
     AddTicketCommentRequest, CoreError, CreateTicketRequest, TicketAttachment, TicketId,
-    TicketProvider, TicketQuery, TicketSummary, TicketingProvider, UpdateTicketStateRequest,
-    WorkflowState,
+    GetTicketRequest, TicketDetails, TicketProvider, TicketQuery, TicketSummary, TicketingProvider,
+    UpdateTicketDescriptionRequest, UpdateTicketStateRequest, WorkflowState,
 };
 use serde::Deserialize;
 use serde_json::json;
@@ -155,6 +155,43 @@ mutation CreateIssue($input: IssueCreateInput!) {
         }
       }
     }
+  }
+}
+"#;
+
+const ISSUE_DETAILS_QUERY: &str = r#"
+query IssueDetails($id: String!) {
+  issue(id: $id) {
+    id
+    identifier
+    title
+    description
+    url
+    priority
+    updatedAt
+    project {
+      name
+    }
+    assignee {
+      id
+      name
+    }
+    state {
+      name
+    }
+    labels {
+      nodes {
+        name
+      }
+    }
+  }
+}
+"#;
+
+const UPDATE_ISSUE_DESCRIPTION_MUTATION: &str = r#"
+mutation UpdateIssueDescription($id: String!, $description: String!) {
+  issueUpdate(id: $id, input: { description: $description }) {
+    success
   }
 }
 "#;
@@ -1502,6 +1539,80 @@ impl TicketingProvider for LinearTicketingProvider {
         Ok(())
     }
 
+    async fn get_ticket(&self, request: GetTicketRequest) -> Result<TicketDetails, CoreError> {
+        let issue_id = linear_provider_ticket_id(&request.ticket_id)?;
+        let response = self
+            .transport
+            .execute(GraphqlRequest::new(
+                ISSUE_DETAILS_QUERY,
+                json!({ "id": issue_id }),
+            ))
+            .await?;
+
+        let payload: IssueDetailsResponse = serde_json::from_value(response).map_err(|error| {
+            CoreError::DependencyUnavailable(format!("failed to decode Linear issue payload: {error}"))
+        })?;
+        let issue = payload
+            .issue
+            .ok_or_else(|| CoreError::DependencyUnavailable(format!(
+                "Linear issue lookup returned no issue for id `{issue_id}`."
+            )))?;
+        let summary = issue_to_summary(&issue);
+
+        {
+            let mut cache = self.cache.write().expect("linear ticket cache write lock");
+            cache.tickets.insert(
+                issue.id.clone(),
+                CachedTicket {
+                    summary: summary.clone(),
+                    assignee_id: issue.assignee.as_ref().and_then(|assignee| assignee.id.clone()),
+                },
+            );
+        }
+
+        Ok(TicketDetails {
+            summary,
+            description: issue.description,
+        })
+    }
+
+    async fn update_ticket_description(
+        &self,
+        request: UpdateTicketDescriptionRequest,
+    ) -> Result<(), CoreError> {
+        let issue_id = linear_provider_ticket_id(&request.ticket_id)?;
+        let description = request.description.trim();
+        if description.is_empty() {
+            return Err(CoreError::Configuration(
+                "Linear ticket description updates require non-empty text.".to_owned(),
+            ));
+        }
+
+        let response = self
+            .transport
+            .execute(GraphqlRequest::new(
+                UPDATE_ISSUE_DESCRIPTION_MUTATION,
+                json!({
+                    "id": issue_id,
+                    "description": description,
+                }),
+            ))
+            .await?;
+        let payload: UpdateIssueDescriptionResponse =
+            serde_json::from_value(response).map_err(|error| {
+                CoreError::DependencyUnavailable(format!(
+                    "failed to decode Linear update-description payload: {error}"
+                ))
+            })?;
+        if !payload.issue_update.success {
+            return Err(CoreError::DependencyUnavailable(
+                "Linear issueUpdate mutation returned success=false for description update.".to_owned(),
+            ));
+        }
+
+        Ok(())
+    }
+
     async fn add_comment(&self, request: AddTicketCommentRequest) -> Result<(), CoreError> {
         let issue_id = linear_provider_ticket_id(&request.ticket_id)?;
         let body = compose_linear_comment_body(request.comment.as_str(), &request.attachments)?;
@@ -1613,6 +1724,11 @@ struct IssueCreateResponse {
 }
 
 #[derive(Debug, Deserialize)]
+struct IssueDetailsResponse {
+    issue: Option<LinearIssueNode>,
+}
+
+#[derive(Debug, Deserialize)]
 struct IssueCreateResult {
     success: bool,
     issue: Option<LinearIssueNode>,
@@ -1662,6 +1778,12 @@ struct CommentCreateResponse {
 }
 
 #[derive(Debug, Deserialize)]
+struct UpdateIssueDescriptionResponse {
+    #[serde(rename = "issueUpdate")]
+    issue_update: MutationResult,
+}
+
+#[derive(Debug, Deserialize)]
 struct MutationResult {
     success: bool,
 }
@@ -1687,6 +1809,8 @@ struct LinearIssueNode {
     id: String,
     identifier: String,
     title: String,
+    #[serde(default)]
+    description: Option<String>,
     url: String,
     priority: Option<i32>,
     #[serde(rename = "updatedAt")]
@@ -2621,6 +2745,74 @@ mod tests {
             .await
             .expect_err("empty comment should fail");
         assert!(error.to_string().contains("non-empty"));
+    }
+
+    #[tokio::test]
+    async fn get_ticket_fetches_summary_and_description() {
+        let sync_query = TicketQuery::default();
+        let config = config_with(Duration::from_secs(60), sync_query);
+        let transport = Arc::new(StubTransport::default());
+        transport
+            .push_response(json!({
+                "issue": {
+                    "id": "issue-1001",
+                    "identifier": "AP-1001",
+                    "title": "Fetch ticket details",
+                    "description": "Tracks a high-priority bug",
+                    "url": "https://linear.app/example/issue/AP-1001",
+                    "priority": 3,
+                    "updatedAt": "2026-02-17T14:00:00.000Z",
+                    "project": { "name": "Orchestrator" },
+                    "assignee": { "id": "viewer-1" },
+                    "state": { "name": "In Progress" },
+                    "labels": { "nodes": [{ "name": "orchestrator" }] }
+                }
+            }))
+            .await;
+        let provider = LinearTicketingProvider::with_transport(config, transport.clone());
+
+        let details = provider
+            .get_ticket(GetTicketRequest {
+                ticket_id: TicketId::from("linear:issue-1001"),
+            })
+            .await
+            .expect("get ticket succeeds");
+
+        assert_eq!(details.summary.identifier, "AP-1001");
+        assert_eq!(details.summary.title, "Fetch ticket details");
+        assert_eq!(details.description, Some("Tracks a high-priority bug".to_owned()));
+
+        let requests = transport.requests().await;
+        assert_eq!(requests.len(), 1);
+        assert!(requests[0].query.contains("IssueDetails"));
+        assert_eq!(requests[0].variables["id"], json!("issue-1001"));
+    }
+
+    #[tokio::test]
+    async fn update_ticket_description_updates_issue_description() {
+        let sync_query = TicketQuery::default();
+        let config = config_with(Duration::from_secs(60), sync_query);
+        let transport = Arc::new(StubTransport::default());
+        transport
+            .push_response(json!({
+                "issueUpdate": { "success": true }
+            }))
+            .await;
+        let provider = LinearTicketingProvider::with_transport(config, transport.clone());
+
+        provider
+            .update_ticket_description(UpdateTicketDescriptionRequest {
+                ticket_id: TicketId::from("linear:issue-1002"),
+                description: "Updated by command".to_owned(),
+            })
+            .await
+            .expect("description update succeeds");
+
+        let requests = transport.requests().await;
+        assert_eq!(requests.len(), 1);
+        assert!(requests[0].query.contains("UpdateIssueDescription"));
+        assert_eq!(requests[0].variables["id"], json!("issue-1002"));
+        assert_eq!(requests[0].variables["description"], json!("Updated by command"));
     }
 
     #[tokio::test]

@@ -708,7 +708,7 @@ impl ActiveSupervisorChatStream {
             }
             SupervisorResponseState::HighCost => {
                 lines.push(
-                    "  Prefer template queries or a tighter scope to reduce token usage."
+                    "  Use a tighter scope and fewer freeform questions to reduce token usage."
                         .to_owned(),
                 );
             }
@@ -724,14 +724,14 @@ impl ActiveSupervisorChatStream {
     fn fallback_prompts(&self) -> [&'static str; 3] {
         match &self.target {
             SupervisorStreamTarget::Inspector { .. } => [
-                "Template `status_current_session`",
-                "Template `what_is_blocking`",
+                "What is the current status of this session?",
+                "What is blocking this ticket?",
                 "Freeform `What needs me now?`",
             ],
             SupervisorStreamTarget::GlobalChatPanel => [
                 "Freeform `What needs my attention globally?`",
                 "Freeform `What changed in the last 30 minutes?`",
-                "Template `next_actions`",
+                "What should I do next?",
             ],
         }
     }
@@ -1243,20 +1243,26 @@ fn build_supervisor_chat_request(
 
     LlmChatRequest {
         model: supervisor_model_from_env(),
+        tools: Vec::new(),
         messages: vec![
             LlmMessage {
                 role: LlmRole::System,
                 content: "You are the orchestrator supervisor. Keep responses terse, operational, and grounded in provided context."
                     .to_owned(),
                 name: None,
+                tool_calls: Vec::new(),
+                tool_call_id: None,
             },
             LlmMessage {
                 role: LlmRole::User,
                 content: prompt_lines.join("\n"),
                 name: None,
+                tool_calls: Vec::new(),
+                tool_call_id: None,
             },
         ],
         temperature: Some(0.2),
+        tool_choice: None,
         max_output_tokens: Some(700),
     }
 }
@@ -1264,20 +1270,26 @@ fn build_supervisor_chat_request(
 fn build_global_supervisor_chat_request(query: &str) -> LlmChatRequest {
     LlmChatRequest {
         model: supervisor_model_from_env(),
+        tools: Vec::new(),
         messages: vec![
             LlmMessage {
                 role: LlmRole::System,
                 content: "You are the orchestrator supervisor. Answer concisely and operationally. If information is missing, say Unknown."
                     .to_owned(),
                 name: None,
+                tool_calls: Vec::new(),
+                tool_call_id: None,
             },
             LlmMessage {
                 role: LlmRole::User,
                 content: query.to_owned(),
                 name: None,
+                tool_calls: Vec::new(),
+                tool_call_id: None,
             },
         ],
         temperature: Some(0.2),
+        tool_choice: None,
         max_output_tokens: Some(700),
     }
 }
@@ -1349,7 +1361,7 @@ fn supervisor_state_message(state: SupervisorResponseState) -> &'static str {
         }
         SupervisorResponseState::RateLimited => "Supervisor is rate-limited. Retry after cooldown.",
         SupervisorResponseState::HighCost => {
-            "Supervisor response cost is high. Use tighter prompts or template queries."
+            "Supervisor response cost is high. Use a tighter scope or narrower questions."
         }
     }
 }
@@ -2537,9 +2549,8 @@ impl UiShellState {
         selected_row: UiInboxRow,
     ) -> bool {
         let invocation = match CommandRegistry::default().to_untyped_invocation(
-            &Command::SupervisorQuery(SupervisorQueryArgs::Template {
-                template: "status_current_session".to_owned(),
-                variables: BTreeMap::new(),
+            &Command::SupervisorQuery(SupervisorQueryArgs::Freeform {
+                query: "What is the current status of this ticket?".to_owned(),
                 context: None,
             }),
         ) {
@@ -5589,12 +5600,14 @@ mod tests {
         let provider = Arc::new(TestLlmProvider::new(vec![
             Ok(LlmStreamChunk {
                 delta: "System summary:\n".to_owned(),
+                tool_calls: Vec::new(),
                 finish_reason: None,
                 usage: None,
                 rate_limit: None,
             }),
             Ok(LlmStreamChunk {
                 delta: "No blockers right now.".to_owned(),
+                tool_calls: Vec::new(),
                 finish_reason: Some(LlmFinishReason::Stop),
                 usage: Some(LlmTokenUsage {
                     input_tokens: 21,
@@ -5637,16 +5650,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn selected_chat_entry_uses_dispatcher_template_invocation_and_renders_stream() {
+    async fn selected_chat_entry_uses_dispatcher_freeform_invocation_and_renders_stream() {
         let dispatcher = Arc::new(TestSupervisorDispatcher::new(vec![
             Ok(LlmStreamChunk {
                 delta: "Current activity: running focused tests.".to_owned(),
+                tool_calls: Vec::new(),
                 finish_reason: None,
                 usage: None,
                 rate_limit: None,
             }),
             Ok(LlmStreamChunk {
                 delta: "No blockers detected.".to_owned(),
+                tool_calls: Vec::new(),
                 finish_reason: Some(LlmFinishReason::Stop),
                 usage: None,
                 rate_limit: None,
@@ -5684,8 +5699,8 @@ mod tests {
             .expect("dispatcher invocation should parse");
         assert!(matches!(
             command,
-            Command::SupervisorQuery(SupervisorQueryArgs::Template { template, .. })
-                if template == "status_current_session"
+            Command::SupervisorQuery(SupervisorQueryArgs::Freeform { query, .. })
+                if query == "What is the current status of this ticket?"
         ));
         assert_eq!(
             context.selected_work_item_id.as_deref(),
@@ -5708,12 +5723,14 @@ mod tests {
         let dispatcher = Arc::new(TestSupervisorDispatcher::new(vec![
             Ok(LlmStreamChunk {
                 delta: "Global status: ".to_owned(),
+                tool_calls: Vec::new(),
                 finish_reason: None,
                 usage: None,
                 rate_limit: None,
             }),
             Ok(LlmStreamChunk {
                 delta: "two approvals need review.".to_owned(),
+                tool_calls: Vec::new(),
                 finish_reason: Some(LlmFinishReason::Stop),
                 usage: None,
                 rate_limit: None,
@@ -5869,6 +5886,7 @@ mod tests {
     async fn opening_new_dispatcher_chat_stream_cancels_active_stream_with_known_id() {
         let dispatcher = Arc::new(TestSupervisorDispatcher::new(vec![Ok(LlmStreamChunk {
             delta: String::new(),
+            tool_calls: Vec::new(),
             finish_reason: Some(LlmFinishReason::Stop),
             usage: None,
             rate_limit: None,
@@ -5911,6 +5929,7 @@ mod tests {
         let provider = Arc::new(TestLlmProvider::new(vec![
             Ok(LlmStreamChunk {
                 delta: String::new(),
+                tool_calls: Vec::new(),
                 finish_reason: None,
                 usage: Some(LlmTokenUsage {
                     input_tokens: 20,
@@ -5921,6 +5940,7 @@ mod tests {
             }),
             Ok(LlmStreamChunk {
                 delta: "done".to_owned(),
+                tool_calls: Vec::new(),
                 finish_reason: Some(LlmFinishReason::Stop),
                 usage: None,
                 rate_limit: None,
@@ -5929,12 +5949,16 @@ mod tests {
         let provider_dyn: Arc<dyn LlmProvider> = provider;
         let request = LlmChatRequest {
             model: "test-model".to_owned(),
+            tools: Vec::new(),
             messages: vec![LlmMessage {
                 role: LlmRole::User,
                 content: "status".to_owned(),
                 name: None,
+                tool_calls: Vec::new(),
+                tool_call_id: None,
             }],
             temperature: None,
+            tool_choice: None,
             max_output_tokens: None,
         };
 

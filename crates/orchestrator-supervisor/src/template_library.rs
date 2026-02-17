@@ -284,11 +284,15 @@ Context pack:\n{}",
             role: LlmRole::System,
             content: SUPERVISOR_SYSTEM_PROMPT.to_owned(),
             name: None,
+            tool_calls: Vec::new(),
+            tool_call_id: None,
         },
         LlmMessage {
             role: LlmRole::User,
             content: user_prompt,
             name: None,
+            tool_calls: Vec::new(),
+            tool_call_id: None,
         },
     ])
 }
@@ -319,11 +323,15 @@ Context pack:\n{}",
             role: LlmRole::System,
             content: SUPERVISOR_SYSTEM_PROMPT.to_owned(),
             name: None,
+            tool_calls: Vec::new(),
+            tool_call_id: None,
         },
         LlmMessage {
             role: LlmRole::User,
             content: user_prompt,
             name: None,
+            tool_calls: Vec::new(),
+            tool_call_id: None,
         },
     ])
 }

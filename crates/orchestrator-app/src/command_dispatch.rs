@@ -7,10 +7,12 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use orchestrator_core::{
     command_ids, resolve_supervisor_query_scope, ArtifactKind, Command, CommandRegistry, CodeHostProvider,
-    CoreError, EventStore, LlmChatRequest, LlmFinishReason, LlmProvider, LlmResponseStream,
-    LlmResponseSubscription, LlmStreamChunk, LlmTokenUsage, NewEventEnvelope,
+    AddTicketCommentRequest, CoreError, EventStore, GetTicketRequest, LlmChatRequest, LlmFinishReason,
+    LlmMessage, LlmProvider, LlmResponseStream, LlmResponseSubscription, LlmRole, LlmStreamChunk,
+    LlmTool, LlmToolCall, LlmToolCallOutput, LlmToolFunction, LlmTokenUsage, NewEventEnvelope,
     OrchestrationEventPayload, PullRequestRef, RepositoryRef, RetrievalScope, RuntimeMappingRecord,
-    SqliteEventStore, UrlOpener,
+    SqliteEventStore, TicketAttachment, TicketDetails, TicketId, TicketQuery, TicketSummary,
+    TicketingProvider, UpdateTicketDescriptionRequest, UpdateTicketStateRequest, UrlOpener,
     SupervisorQueryArgs, SupervisorQueryCancellationSource, SupervisorQueryCancelledPayload,
     SupervisorQueryChunkPayload, SupervisorQueryContextArgs, SupervisorQueryFinishedPayload,
     SupervisorQueryKind, SupervisorQueryStartedPayload, UntypedCommandInvocation, WorkItemId,
@@ -18,13 +20,462 @@ use orchestrator_core::{
 };
 use orchestrator_github::default_system_url_opener;
 use orchestrator_supervisor::{
-    build_freeform_messages, build_inferred_template_messages,
-    build_template_messages_with_variables, infer_template_from_query, SupervisorQueryEngine,
+    build_freeform_messages, build_template_messages_with_variables, SupervisorQueryEngine,
 };
 use orchestrator_ui::SupervisorCommandContext;
+use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
 use tracing::warn;
 
 use crate::{open_event_store, supervisor_model_from_env};
+
+const MAX_TOOL_LOOP_ITERATIONS: usize = 8;
+const TOOL_CALL_PROGRESS_PREFIX: &str = "[tool-call]";
+const TOOL_RESULT_PREFIX: &str = "[tool-result]";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+enum SupervisorTool {
+    ListTickets,
+    GetTicket,
+    UpdateTicketState,
+    UpdateTicketDescription,
+    AddTicketComment,
+}
+
+impl SupervisorTool {
+    fn name(&self) -> &'static str {
+        match self {
+            Self::ListTickets => "list_tickets",
+            Self::GetTicket => "get_ticket",
+            Self::UpdateTicketState => "update_ticket_state",
+            Self::UpdateTicketDescription => "update_ticket_description",
+            Self::AddTicketComment => "add_ticket_comment",
+        }
+    }
+
+    fn from_name(raw: &str) -> Option<Self> {
+        match raw {
+            "list_tickets" => Some(Self::ListTickets),
+            "get_ticket" => Some(Self::GetTicket),
+            "update_ticket_state" => Some(Self::UpdateTicketState),
+            "update_ticket_description" => Some(Self::UpdateTicketDescription),
+            "add_ticket_comment" => Some(Self::AddTicketComment),
+            _ => None,
+        }
+    }
+
+    fn definition(&self) -> LlmTool {
+        let function = match self {
+            Self::ListTickets => LlmToolFunction {
+                name: self.name().to_owned(),
+                description: Some("List support tickets with optional filters".to_owned()),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "assigned_to_me": { "type": "boolean" },
+                        "states": {
+                            "type": "array",
+                            "items": { "type": "string" },
+                        },
+                        "search": { "type": "string" },
+                        "limit": { "type": "integer", "minimum": 1 },
+                    },
+                    "additionalProperties": false,
+                }),
+            },
+            Self::GetTicket => LlmToolFunction {
+                name: self.name().to_owned(),
+                description: Some("Fetch a specific ticket by id".to_owned()),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "ticket_id": { "type": "string" },
+                    },
+                    "required": ["ticket_id"],
+                    "additionalProperties": false,
+                }),
+            },
+            Self::UpdateTicketState => LlmToolFunction {
+                name: self.name().to_owned(),
+                description: Some("Update a ticket's workflow/state value".to_owned()),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "ticket_id": { "type": "string" },
+                        "state": { "type": "string" },
+                    },
+                    "required": ["ticket_id", "state"],
+                    "additionalProperties": false,
+                }),
+            },
+            Self::UpdateTicketDescription => LlmToolFunction {
+                name: self.name().to_owned(),
+                description: Some("Update a ticket description".to_owned()),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "ticket_id": { "type": "string" },
+                        "description": { "type": "string" },
+                    },
+                    "required": ["ticket_id", "description"],
+                    "additionalProperties": false,
+                }),
+            },
+            Self::AddTicketComment => LlmToolFunction {
+                name: self.name().to_owned(),
+                description: Some("Attach a comment and optional attachments to a ticket".to_owned()),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "ticket_id": { "type": "string" },
+                        "comment": { "type": "string" },
+                        "attachments": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "label": { "type": "string" },
+                                    "url": { "type": "string" },
+                                },
+                                "required": ["url"],
+                                "additionalProperties": false,
+                            },
+                        },
+                    },
+                    "required": ["ticket_id", "comment"],
+                    "additionalProperties": false,
+                }),
+            },
+        };
+
+        LlmTool {
+            tool_type: "function".to_owned(),
+            function,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ListTicketsToolArgs {
+    #[serde(default)]
+    assigned_to_me: bool,
+    #[serde(default)]
+    states: Vec<String>,
+    #[serde(default)]
+    search: Option<String>,
+    limit: Option<u32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct GetTicketToolArgs {
+    ticket_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct UpdateTicketStateToolArgs {
+    ticket_id: String,
+    state: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct UpdateTicketDescriptionToolArgs {
+    ticket_id: String,
+    description: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct AddTicketCommentToolArgs {
+    ticket_id: String,
+    comment: String,
+    #[serde(default)]
+    attachments: Vec<ToolAttachmentPayload>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ToolAttachmentPayload {
+    #[serde(default)]
+    label: Option<String>,
+    url: String,
+}
+
+#[derive(Debug, Clone)]
+struct ToolingStream {
+    chunks: VecDeque<LlmStreamChunk>,
+}
+
+impl ToolingStream {
+    fn new(chunks: Vec<LlmStreamChunk>) -> Self {
+        Self {
+            chunks: VecDeque::from(chunks),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl LlmResponseSubscription for ToolingStream {
+    async fn next_chunk(&mut self) -> Result<Option<LlmStreamChunk>, CoreError> {
+        Ok(self.chunks.pop_front())
+    }
+}
+
+fn supervisor_tools() -> Vec<LlmTool> {
+    vec![
+        SupervisorTool::ListTickets.definition(),
+        SupervisorTool::GetTicket.definition(),
+        SupervisorTool::UpdateTicketState.definition(),
+        SupervisorTool::UpdateTicketDescription.definition(),
+        SupervisorTool::AddTicketComment.definition(),
+    ]
+}
+
+fn tool_progress_chunk(call: &LlmToolCall) -> LlmStreamChunk {
+    let arguments = if call.arguments.trim().is_empty() {
+        "{}".to_owned()
+    } else {
+        call.arguments.to_owned()
+    };
+
+    LlmStreamChunk {
+        delta: format!("{TOOL_CALL_PROGRESS_PREFIX} {} {}", call.name, arguments),
+        tool_calls: Vec::new(),
+        finish_reason: None,
+        usage: None,
+        rate_limit: None,
+    }
+}
+
+fn tool_result_payload<T>(value: T) -> String
+where
+    T: Serialize,
+{
+    serde_json::to_string_pretty(&value).unwrap_or_else(|error| {
+        serde_json::json!({
+            "error": format!("failed to serialize tool output: {error}")
+        })
+        .to_string()
+    })
+}
+
+struct SupervisorTurnState {
+    chunks: Vec<LlmStreamChunk>,
+    assistant_message: LlmMessage,
+    finish_reason: LlmFinishReason,
+}
+
+async fn run_supervisor_turn<P>(
+    supervisor: &P,
+    messages: Vec<LlmMessage>,
+) -> Result<SupervisorTurnState, CoreError>
+where
+    P: LlmProvider + Send + Sync + ?Sized,
+{
+    let (stream_id, mut stream) = supervisor
+        .stream_chat(LlmChatRequest {
+            model: supervisor_model_from_env(),
+            messages,
+            tools: supervisor_tools(),
+            temperature: Some(0.2),
+            tool_choice: None,
+            max_output_tokens: Some(700),
+        })
+        .await?;
+
+    drop(stream_id);
+
+    let mut chunks = Vec::new();
+    let mut assistant_content = String::new();
+    let mut tool_calls: std::collections::HashMap<String, (String, String)> = HashMap::new();
+    let mut call_order = Vec::new();
+    let mut finish_reason = None;
+
+    while let Some(chunk) = stream.next_chunk().await? {
+        let mut chunk = chunk;
+
+        if !chunk.delta.is_empty() {
+            assistant_content.push_str(chunk.delta.as_str());
+        }
+
+        if !chunk.tool_calls.is_empty() {
+            for call in &chunk.tool_calls {
+                let entry = tool_calls
+                    .entry(call.id.clone())
+                    .or_insert_with(|| {
+                        call_order.push(call.id.clone());
+                        (call.name.clone(), String::new())
+                    });
+                entry.0 = call.name.clone();
+                entry.1.push_str(call.arguments.as_str());
+            }
+        }
+
+        if matches!(chunk.finish_reason, Some(LlmFinishReason::ToolCall)) {
+            chunk.finish_reason = None;
+            chunks.push(chunk);
+            finish_reason = Some(LlmFinishReason::ToolCall);
+            break;
+        }
+
+        chunks.push(chunk.clone());
+        if chunk.finish_reason.is_some() {
+            finish_reason = chunk.finish_reason.clone();
+            break;
+        }
+    }
+
+    let finish_reason = finish_reason.unwrap_or(LlmFinishReason::Stop);
+    let tool_calls = call_order
+        .into_iter()
+        .filter_map(|call_id| {
+            let (name, arguments) = tool_calls.remove(&call_id)?;
+            Some(LlmToolCall {
+                id: call_id,
+                name,
+                arguments,
+            })
+        })
+        .collect::<Vec<_>>();
+
+    Ok(SupervisorTurnState {
+        chunks,
+        assistant_message: LlmMessage {
+            role: LlmRole::Assistant,
+            content: assistant_content,
+            name: None,
+            tool_calls,
+            tool_call_id: None,
+        },
+        finish_reason,
+    })
+}
+
+fn parse_tool_args<T>(tool_name: &str, raw: &str) -> Result<T, CoreError>
+where
+    T: DeserializeOwned,
+{
+    let payload = if raw.trim().is_empty() {
+        json!({})
+    } else {
+        serde_json::from_str::<Value>(raw).map_err(|error| {
+            CoreError::DependencyUnavailable(format!(
+                "tool '{tool_name}' arguments are not valid JSON: {error}"
+            ))
+        })?
+    };
+
+    serde_json::from_value(payload).map_err(|error| {
+        CoreError::DependencyUnavailable(format!(
+            "tool '{tool_name}' arguments are malformed for expected schema: {error}"
+        ))
+    })
+}
+
+async fn execute_tool_call(
+    ticketing: &dyn TicketingProvider,
+    call: &LlmToolCall,
+) -> Result<LlmToolCallOutput, CoreError> {
+    let Some(tool) = SupervisorTool::from_name(call.name.as_str()) else {
+        return Ok(LlmToolCallOutput {
+            tool_call_id: call.id.clone(),
+            output: tool_result_payload(serde_json::json!({
+                "error": format!("unsupported tool '{}'; available: list_tickets, get_ticket, update_ticket_state, update_ticket_description, add_ticket_comment", call.name)
+            })),
+        });
+    };
+
+    let output = match tool {
+        SupervisorTool::ListTickets => {
+            let args: ListTicketsToolArgs = parse_tool_args("list_tickets", call.arguments.as_str())?;
+            let tickets = ticketing
+                .list_tickets(TicketQuery {
+                    assigned_to_me: args.assigned_to_me,
+                    states: args.states,
+                    search: args.search,
+                    limit: args.limit,
+                })
+                .await?;
+            tool_result_payload(tickets)
+        }
+        SupervisorTool::GetTicket => {
+            let args: GetTicketToolArgs = parse_tool_args("get_ticket", call.arguments.as_str())?;
+            let ticket = ticketing
+                .get_ticket(GetTicketRequest {
+                    ticket_id: TicketId::from(args.ticket_id),
+                })
+                .await?;
+            tool_result_payload(ticket)
+        }
+        SupervisorTool::UpdateTicketState => {
+            let args: UpdateTicketStateToolArgs =
+                parse_tool_args("update_ticket_state", call.arguments.as_str())?;
+            ticketing
+                .update_ticket_state(UpdateTicketStateRequest {
+                    ticket_id: TicketId::from(args.ticket_id),
+                    state: args.state,
+                })
+                .await?;
+            tool_result_payload(serde_json::json!({ "ok": true }))
+        }
+        SupervisorTool::UpdateTicketDescription => {
+            let args: UpdateTicketDescriptionToolArgs =
+                parse_tool_args("update_ticket_description", call.arguments.as_str())?;
+            ticketing
+                .update_ticket_description(UpdateTicketDescriptionRequest {
+                    ticket_id: TicketId::from(args.ticket_id),
+                    description: args.description,
+                })
+                .await?;
+            tool_result_payload(serde_json::json!({ "ok": true }))
+        }
+        SupervisorTool::AddTicketComment => {
+            let args: AddTicketCommentToolArgs =
+                parse_tool_args("add_ticket_comment", call.arguments.as_str())?;
+            let attachments = args
+                .attachments
+                .into_iter()
+                .map(|attachment| TicketAttachment {
+                    label: attachment.label.unwrap_or_default(),
+                    url: attachment.url,
+                })
+                .collect();
+
+            ticketing
+                .add_comment(AddTicketCommentRequest {
+                    ticket_id: TicketId::from(args.ticket_id),
+                    comment: args.comment,
+                    attachments,
+                })
+                .await?;
+            tool_result_payload(serde_json::json!({ "ok": true }))
+        }
+    };
+
+    Ok(LlmToolCallOutput {
+        tool_call_id: call.id.clone(),
+        output,
+    })
+}
+
+async fn execute_tool_calls(
+    ticketing: &dyn TicketingProvider,
+    calls: Vec<LlmToolCall>,
+) -> Result<Vec<LlmToolCallOutput>, CoreError> {
+    let mut outputs = Vec::new();
+    for call in calls {
+        match execute_tool_call(ticketing, &call).await {
+            Ok(result) => outputs.push(result),
+            Err(error) => {
+                outputs.push(LlmToolCallOutput {
+                    tool_call_id: call.id,
+                    output: tool_result_payload(serde_json::json!({
+                        "error": error.to_string()
+                    })),
+                });
+            }
+        }
+    }
+    Ok(outputs)
+}
 
 static SUPERVISOR_QUERY_EVENT_COUNTER: AtomicU64 = AtomicU64::new(1);
 static SUPERVISOR_QUERY_ID_COUNTER: AtomicU64 = AtomicU64::new(1);
@@ -252,9 +703,7 @@ fn query_kind(args: &SupervisorQueryArgs) -> SupervisorQueryKind {
 fn query_template(args: &SupervisorQueryArgs) -> Option<String> {
     match args {
         SupervisorQueryArgs::Template { template, .. } => Some(template.clone()),
-        SupervisorQueryArgs::Freeform { query, .. } => {
-            infer_template_from_query(query.as_str()).map(|template| template.key().to_owned())
-        }
+        SupervisorQueryArgs::Freeform { .. } => None,
     }
 }
 
@@ -267,6 +716,7 @@ impl RuntimeCommandResultStream {
         Self {
             chunks: VecDeque::from([LlmStreamChunk {
                 delta: message,
+                tool_calls: Vec::new(),
                 finish_reason: Some(LlmFinishReason::Stop),
                 usage: None,
                 rate_limit: None,
@@ -1146,6 +1596,7 @@ pub(crate) fn record_user_initiated_supervisor_cancel(event_store_path: &str, st
 
 async fn execute_supervisor_query<P>(
     supervisor: &P,
+    ticketing: &impl TicketingProvider,
     event_store_path: &str,
     args: SupervisorQueryArgs,
     fallback_context: SupervisorCommandContext,
@@ -1166,22 +1617,89 @@ where
             ..
         } => build_template_messages_with_variables(template.as_str(), variables, &context_pack)?,
         SupervisorQueryArgs::Freeform { query, .. } => {
-            if let Some(template) = infer_template_from_query(query.as_str()) {
-                build_inferred_template_messages(template, query.as_str(), &context_pack)?
-            } else {
-                build_freeform_messages(query.as_str(), &context_pack)?
-            }
+            build_freeform_messages(query.as_str(), &context_pack)?
         }
     };
 
-    let (stream_id, stream) = supervisor
-        .stream_chat(LlmChatRequest {
-            model: supervisor_model_from_env(),
-            messages,
-            temperature: Some(0.2),
-            max_output_tokens: Some(700),
-        })
-        .await?;
+    let mut messages = messages;
+    let mut queued_chunks = VecDeque::new();
+    let mut completed = false;
+    let stream_id = next_runtime_stream_id();
+
+    for iteration in 0..MAX_TOOL_LOOP_ITERATIONS {
+        let turn = run_supervisor_turn(supervisor, messages.clone()).await?;
+        for chunk in turn.chunks {
+            queued_chunks.push_back(chunk);
+        }
+
+        if matches!(turn.finish_reason, LlmFinishReason::ToolCall) {
+            if turn.assistant_message.tool_calls.is_empty() {
+                return Err(CoreError::DependencyUnavailable(
+                    "assistant requested a tool call but did not provide tool arguments".to_owned(),
+                ));
+            }
+
+            messages.push(turn.assistant_message.clone());
+            for call in &turn.assistant_message.tool_calls {
+                queued_chunks.push_back(tool_progress_chunk(call));
+            }
+
+            let outputs = execute_tool_calls(ticketing, turn.assistant_message.tool_calls).await?;
+            let names = turn
+                .assistant_message
+                .tool_calls
+                .iter()
+                .map(|call| (call.id.as_str(), call.name.as_str()))
+                .collect::<std::collections::HashMap<_, _>>();
+
+            for output in outputs {
+                let call_name = names
+                    .get(output.tool_call_id.as_str())
+                    .copied()
+                    .unwrap_or("tool");
+                queued_chunks.push_back(LlmStreamChunk {
+                    delta: format!("{TOOL_RESULT_PREFIX} {call_name} {} {}", output.tool_call_id, output.output),
+                    tool_calls: Vec::new(),
+                    finish_reason: None,
+                    usage: None,
+                    rate_limit: None,
+                });
+                messages.push(LlmMessage {
+                    role: LlmRole::Tool,
+                    content: output.output,
+                    name: Some(call_name.to_owned()),
+                    tool_calls: Vec::new(),
+                    tool_call_id: Some(output.tool_call_id),
+                });
+            }
+
+            if iteration + 1 >= MAX_TOOL_LOOP_ITERATIONS {
+                return Err(CoreError::DependencyUnavailable(format!(
+                    "tool calling exceeded loop limit of {MAX_TOOL_LOOP_ITERATIONS} iterations"
+                )));
+            }
+
+            continue;
+        }
+
+        completed = matches!(
+            turn.finish_reason,
+            LlmFinishReason::Stop
+                | LlmFinishReason::Length
+                | LlmFinishReason::ContentFilter
+                | LlmFinishReason::Cancelled
+                | LlmFinishReason::Error
+        );
+        break;
+    }
+
+    if !completed {
+        return Err(CoreError::DependencyUnavailable(format!(
+            "tool-calling did not complete within {MAX_TOOL_LOOP_ITERATIONS} turns"
+        )));
+    }
+
+    let stream = ToolingStream::new(queued_chunks.into_iter().collect());
 
     let query_id = next_supervisor_query_id();
     let started_at = now_timestamp();
@@ -1272,6 +1790,7 @@ async fn execute_github_open_review_tabs(
 pub(crate) async fn dispatch_supervisor_runtime_command<P>(
     supervisor: &P,
     code_host: &impl CodeHostProvider,
+    ticketing: &impl TicketingProvider,
     event_store_path: &str,
     invocation: UntypedCommandInvocation,
     context: SupervisorCommandContext,
@@ -1282,7 +1801,7 @@ where
     let command = CommandRegistry::default().parse_invocation(&invocation)?;
     match command {
         Command::SupervisorQuery(args) => {
-            execute_supervisor_query(supervisor, event_store_path, args, context).await
+            execute_supervisor_query(supervisor, ticketing, event_store_path, args, context).await
         }
         Command::WorkflowApprovePrReady => {
             execute_workflow_approve_pr_ready(code_host, event_store_path, context).await

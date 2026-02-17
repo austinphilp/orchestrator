@@ -327,6 +327,27 @@ fn as_openrouter_message(message: LlmMessage) -> Value {
     if let Some(name) = message.name {
         payload.insert("name".to_owned(), Value::String(name));
     }
+    if !message.tool_calls.is_empty() {
+        let calls = message
+            .tool_calls
+            .into_iter()
+            .map(|call| {
+                let mut function = Map::new();
+                function.insert("name".to_owned(), Value::String(call.name));
+                function.insert("arguments".to_owned(), Value::String(call.arguments));
+
+                let mut entry = Map::new();
+                entry.insert("id".to_owned(), Value::String(call.id));
+                entry.insert("type".to_owned(), Value::String("function".to_owned()));
+                entry.insert("function".to_owned(), Value::Object(function));
+                Value::Object(entry)
+            })
+            .collect::<Vec<_>>();
+        payload.insert("tool_calls".to_owned(), Value::Array(calls));
+    }
+    if let Some(tool_call_id) = message.tool_call_id {
+        payload.insert("tool_call_id".to_owned(), Value::String(tool_call_id));
+    }
 
     Value::Object(payload)
 }
@@ -345,6 +366,34 @@ fn request_body(request: LlmChatRequest) -> Value {
         ),
     );
     payload.insert("stream".to_owned(), Value::Bool(true));
+
+    if !request.tools.is_empty() {
+        payload.insert(
+            "tools".to_owned(),
+            Value::Array(
+                request
+                    .tools
+                    .into_iter()
+                    .map(|tool| {
+                        let mut function = Map::new();
+                        function.insert("name".to_owned(), Value::String(tool.function.name));
+                        if let Some(description) = tool.function.description {
+                            function.insert("description".to_owned(), Value::String(description));
+                        }
+                        function.insert("parameters".to_owned(), tool.function.parameters);
+
+                        let mut descriptor = Map::new();
+                        descriptor.insert("type".to_owned(), Value::String(tool.tool_type));
+                        descriptor.insert("function".to_owned(), Value::Object(function));
+                        Value::Object(descriptor)
+                    })
+                    .collect(),
+            ),
+        );
+    }
+    if let Some(tool_choice) = request.tool_choice {
+        payload.insert("tool_choice".to_owned(), tool_choice);
+    }
 
     if let Some(temperature) = request.temperature {
         payload.insert("temperature".to_owned(), Value::from(temperature));
@@ -368,6 +417,7 @@ async fn run_openrouter_stream(
         let _ = sender
             .send(Ok(LlmStreamChunk {
                 delta: String::new(),
+                tool_calls: Vec::new(),
                 finish_reason: Some(LlmFinishReason::Cancelled),
                 usage: None,
                 rate_limit: None,
@@ -389,6 +439,7 @@ async fn run_openrouter_stream(
         _ = cancellation.notify.notified() => {
             let _ = sender.send(Ok(LlmStreamChunk {
                 delta: String::new(),
+                tool_calls: Vec::new(),
                 finish_reason: Some(LlmFinishReason::Cancelled),
                 usage: None,
                 rate_limit: None,
@@ -427,13 +478,14 @@ async fn run_openrouter_stream(
 
     loop {
         if cancellation.is_cancelled() {
-            let _ = sender
-                .send(Ok(LlmStreamChunk {
-                    delta: String::new(),
-                    finish_reason: Some(LlmFinishReason::Cancelled),
-                    usage: None,
-                    rate_limit: None,
-                }))
+                let _ = sender
+                    .send(Ok(LlmStreamChunk {
+                        delta: String::new(),
+                        tool_calls: Vec::new(),
+                        finish_reason: Some(LlmFinishReason::Cancelled),
+                        usage: None,
+                        rate_limit: None,
+                    }))
                 .await;
             return;
         }
@@ -442,6 +494,7 @@ async fn run_openrouter_stream(
             _ = cancellation.notify.notified() => {
                 let _ = sender.send(Ok(LlmStreamChunk {
                     delta: String::new(),
+                    tool_calls: Vec::new(),
                     finish_reason: Some(LlmFinishReason::Cancelled),
                     usage: None,
                     rate_limit: None,
@@ -457,12 +510,13 @@ async fn run_openrouter_stream(
                     if event.trim() == "[DONE]" {
                         if !finished
                             && sender
-                                .send(Ok(LlmStreamChunk {
-                                    delta: String::new(),
-                                    finish_reason: Some(LlmFinishReason::Stop),
-                                    usage: None,
-                                    rate_limit: rate_limit.take(),
-                                }))
+                                    .send(Ok(LlmStreamChunk {
+                                        delta: String::new(),
+                                        tool_calls: Vec::new(),
+                                        finish_reason: Some(LlmFinishReason::Stop),
+                                        usage: None,
+                                        rate_limit: rate_limit.take(),
+                                    }))
                                 .await
                                 .is_err()
                         {
@@ -519,6 +573,7 @@ async fn run_openrouter_stream(
                     let _ = sender
                         .send(Ok(LlmStreamChunk {
                             delta: String::new(),
+                            tool_calls: Vec::new(),
                             finish_reason: Some(LlmFinishReason::Stop),
                             usage: None,
                             rate_limit: rate_limit.take(),
@@ -573,17 +628,62 @@ fn parse_stream_event(event: &str) -> Result<Vec<LlmStreamChunk>, CoreError> {
             })
             .unwrap_or_default()
             .to_owned();
+
+        let mut tool_calls = Vec::new();
+        if let Some(raw_tool_calls) = choice.get("delta").and_then(Value::as_object).and_then(|delta| delta.get("tool_calls"))
+        {
+            if let Some(values) = raw_tool_calls.as_array() {
+                for raw_call in values {
+                    let id = raw_call
+                        .get("id")
+                        .and_then(Value::as_str)
+                        .or_else(|| {
+                            raw_call
+                                .get("function")
+                                .and_then(Value::as_object)
+                                .and_then(|function| function.get("id"))
+                                .and_then(Value::as_str)
+                        })
+                        .unwrap_or_default()
+                        .to_owned();
+
+                    let function = raw_call.get("function").and_then(Value::as_object);
+                    let name = function
+                        .and_then(|function| function.get("name"))
+                        .and_then(Value::as_str)
+                        .or_else(|| raw_call.get("name").and_then(Value::as_str))
+                        .unwrap_or_default()
+                        .to_owned();
+
+                    let arguments = function
+                        .and_then(|function| function.get("arguments"))
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_owned();
+
+                    if !id.is_empty() || !name.is_empty() {
+                        tool_calls.push(LlmToolCall {
+                            id,
+                            name,
+                            arguments,
+                        });
+                    }
+                }
+            }
+        }
+
         let finish_reason = choice
             .get("finish_reason")
             .and_then(Value::as_str)
             .map(to_finish_reason);
 
-        if delta.is_empty() && finish_reason.is_none() && usage.is_none() {
+        if delta.is_empty() && tool_calls.is_empty() && finish_reason.is_none() && usage.is_none() {
             continue;
         }
 
         chunks.push(LlmStreamChunk {
             delta,
+            tool_calls,
             finish_reason,
             usage: usage.clone(),
             rate_limit: None,
@@ -594,6 +694,7 @@ fn parse_stream_event(event: &str) -> Result<Vec<LlmStreamChunk>, CoreError> {
         if let Some(usage) = usage {
             chunks.push(LlmStreamChunk {
                 delta: String::new(),
+                tool_calls: Vec::new(),
                 finish_reason: None,
                 usage: Some(usage),
                 rate_limit: None,
@@ -783,11 +884,15 @@ mod tests {
         let empty_model = match provider
             .stream_chat(LlmChatRequest {
                 model: "   ".to_owned(),
+                tools: Vec::new(),
                 messages: vec![LlmMessage {
                     role: LlmRole::User,
                     content: "hello".to_owned(),
                     name: None,
+                    tool_calls: Vec::new(),
+                    tool_call_id: None,
                 }],
+                tool_choice: None,
                 temperature: None,
                 max_output_tokens: None,
             })
@@ -799,12 +904,14 @@ mod tests {
         assert!(empty_model.to_string().contains("model"));
 
         let empty_messages = match provider
-            .stream_chat(LlmChatRequest {
-                model: "openrouter/mock-model".to_owned(),
-                messages: Vec::new(),
-                temperature: None,
-                max_output_tokens: None,
-            })
+                .stream_chat(LlmChatRequest {
+                    model: "openrouter/mock-model".to_owned(),
+                    tools: Vec::new(),
+                    messages: Vec::new(),
+                    tool_choice: None,
+                    temperature: None,
+                    max_output_tokens: None,
+                })
             .await
         {
             Ok(_) => panic!("expected empty messages to fail"),
@@ -831,11 +938,15 @@ mod tests {
         let provider = OpenRouterSupervisor::with_base_url("test-key", base_url).expect("provider");
         let request = LlmChatRequest {
             model: "openrouter/mock-model".to_owned(),
+            tools: Vec::new(),
             messages: vec![LlmMessage {
                 role: LlmRole::User,
                 content: "Say hello".to_owned(),
                 name: None,
+                tool_calls: Vec::new(),
+                tool_call_id: None,
             }],
+            tool_choice: None,
             temperature: Some(0.2),
             max_output_tokens: Some(32),
         };
@@ -891,11 +1002,15 @@ mod tests {
         let provider = OpenRouterSupervisor::with_base_url("test-key", base_url).expect("provider");
         let request = LlmChatRequest {
             model: "openrouter/mock-model".to_owned(),
+            tools: Vec::new(),
             messages: vec![LlmMessage {
                 role: LlmRole::User,
                 content: "Cancel me".to_owned(),
                 name: None,
+                tool_calls: Vec::new(),
+                tool_call_id: None,
             }],
+            tool_choice: None,
             temperature: None,
             max_output_tokens: None,
         };
@@ -935,11 +1050,15 @@ mod tests {
         let provider = OpenRouterSupervisor::with_base_url("test-key", base_url).expect("provider");
         let request = LlmChatRequest {
             model: "openrouter/mock-model".to_owned(),
+            tools: Vec::new(),
             messages: vec![LlmMessage {
                 role: LlmRole::User,
                 content: "Trigger failure".to_owned(),
                 name: None,
+                tool_calls: Vec::new(),
+                tool_call_id: None,
             }],
+            tool_choice: None,
             temperature: None,
             max_output_tokens: None,
         };
@@ -966,11 +1085,15 @@ mod tests {
         let provider = OpenRouterSupervisor::with_base_url("test-key", base_url).expect("provider");
         let request = LlmChatRequest {
             model: "openrouter/mock-model".to_owned(),
+            tools: Vec::new(),
             messages: vec![LlmMessage {
                 role: LlmRole::User,
                 content: "Trigger retry guidance".to_owned(),
                 name: None,
+                tool_calls: Vec::new(),
+                tool_call_id: None,
             }],
+            tool_choice: None,
             temperature: None,
             max_output_tokens: None,
         };
@@ -999,11 +1122,15 @@ mod tests {
         let provider = OpenRouterSupervisor::with_base_url("test-key", base_url).expect("provider");
         let request = LlmChatRequest {
             model: "openrouter/mock-model".to_owned(),
+            tools: Vec::new(),
             messages: vec![LlmMessage {
                 role: LlmRole::User,
                 content: "Trigger retry guidance".to_owned(),
                 name: None,
+                tool_calls: Vec::new(),
+                tool_call_id: None,
             }],
+            tool_choice: None,
             temperature: None,
             max_output_tokens: None,
         };
@@ -1036,11 +1163,15 @@ mod tests {
         let provider = OpenRouterSupervisor::with_base_url("test-key", base_url).expect("provider");
         let request = LlmChatRequest {
             model: "openrouter/mock-model".to_owned(),
+            tools: Vec::new(),
             messages: vec![LlmMessage {
                 role: LlmRole::User,
                 content: "stop on done".to_owned(),
                 name: None,
+                tool_calls: Vec::new(),
+                tool_call_id: None,
             }],
+            tool_choice: None,
             temperature: None,
             max_output_tokens: None,
         };
