@@ -10,12 +10,13 @@ use orchestrator_core::{
     CoreError, EventStore, LlmChatRequest, LlmFinishReason, LlmProvider, LlmResponseStream,
     LlmResponseSubscription, LlmStreamChunk, LlmTokenUsage, NewEventEnvelope,
     OrchestrationEventPayload, PullRequestRef, RepositoryRef, RetrievalScope, RuntimeMappingRecord,
-    SqliteEventStore,
+    SqliteEventStore, UrlOpener,
     SupervisorQueryArgs, SupervisorQueryCancellationSource, SupervisorQueryCancelledPayload,
     SupervisorQueryChunkPayload, SupervisorQueryContextArgs, SupervisorQueryFinishedPayload,
     SupervisorQueryKind, SupervisorQueryStartedPayload, UntypedCommandInvocation, WorkItemId,
     WorkerSessionId, DOMAIN_EVENT_SCHEMA_VERSION,
 };
+use orchestrator_github::default_system_url_opener;
 use orchestrator_supervisor::{
     build_freeform_messages, build_inferred_template_messages,
     build_template_messages_with_variables, infer_template_from_query, SupervisorQueryEngine,
@@ -36,7 +37,7 @@ const SUPPORTED_RUNTIME_COMMAND_IDS: [&str; 3] = [
 ];
 
 const GITHUB_OPEN_REVIEW_TABS_ACK: &str =
-    "github.open_review_tabs command accepted. This action is not yet wired to a tab launcher.";
+    "github.open_review_tabs command accepted. This action opens the PR review URL and is idempotent when re-run.";
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct ActiveSupervisorQueryKey {
@@ -347,6 +348,14 @@ fn parse_pull_request_repository(url: &str) -> Result<(String, String), CoreErro
 #[cfg(test)]
 mod tests {
     use super::*;
+    use orchestrator_core::test_support::TestDbPath;
+    use orchestrator_core::{
+        ArtifactCreatedPayload, ArtifactId, ArtifactKind, ArtifactRecord, BackendKind, RuntimeMappingRecord,
+        SessionRecord, TicketId, TicketProvider, TicketRecord, WorkItemId, WorktreeId,
+        WorktreeRecord, WorkerSessionStatus, WorkerSessionId,
+    };
+    use serde_json::json;
+    use std::sync::Mutex;
 
     #[test]
     fn parse_pull_request_number_supports_query_and_fragment_suffix() {
@@ -385,6 +394,338 @@ mod tests {
         assert_eq!(name, "acme/repo");
         assert_eq!(id, "acme/repo");
     }
+
+    struct MockUrlOpener {
+        calls: Mutex<Vec<String>>,
+    }
+
+    impl MockUrlOpener {
+        fn calls(&self) -> Vec<String> {
+            self.calls.lock().expect("lock calls").clone()
+        }
+    }
+
+    impl Default for MockUrlOpener {
+        fn default() -> Self {
+            Self {
+                calls: Mutex::new(Vec::new()),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl UrlOpener for MockUrlOpener {
+        async fn open_url(&self, url: &str) -> Result<(), CoreError> {
+            self.calls
+                .lock()
+                .expect("lock calls")
+                .push(url.to_owned());
+            Ok(())
+        }
+    }
+
+    struct FailingUrlOpener;
+
+    #[async_trait::async_trait]
+    impl UrlOpener for FailingUrlOpener {
+        async fn open_url(&self, _url: &str) -> Result<(), CoreError> {
+            Err(CoreError::DependencyUnavailable(
+                "open failed intentionally".to_owned(),
+            ))
+        }
+    }
+
+    fn seed_runtime_mapping(
+        store: &mut SqliteEventStore,
+        work_item_id: &WorkItemId,
+        session_id: &str,
+    ) -> Result<(), CoreError> {
+        let ticket = TicketRecord {
+            ticket_id: TicketId::from_provider_uuid(
+                TicketProvider::Linear,
+                format!("provider-{}", work_item_id.as_str()),
+            ),
+            provider: TicketProvider::Linear,
+            provider_ticket_id: format!("provider-{}", work_item_id.as_str()),
+            identifier: format!("ORCH-{}", work_item_id.as_str()),
+            title: "Open review test".to_owned(),
+            state: "In Progress".to_owned(),
+            updated_at: "2026-02-16T11:00:00Z".to_owned(),
+        };
+
+        let worktree_path = std::path::PathBuf::from(format!("/workspace/{}", work_item_id.as_str()));
+        let runtime = RuntimeMappingRecord {
+            ticket,
+            work_item_id: work_item_id.clone(),
+            worktree: WorktreeRecord {
+                worktree_id: WorktreeId::new(format!("wt-{}", work_item_id.as_str())),
+                work_item_id: work_item_id.clone(),
+                path: worktree_path.to_string_lossy().to_string(),
+                branch: "feature/open-review-tabs".to_owned(),
+                base_branch: "main".to_owned(),
+                created_at: "2026-02-16T11:00:00Z".to_owned(),
+            },
+            session: SessionRecord {
+                session_id: WorkerSessionId::new(session_id),
+                work_item_id: work_item_id.clone(),
+                backend_kind: BackendKind::OpenCode,
+                workdir: worktree_path.to_string_lossy().to_string(),
+                model: Some("gpt-5".to_owned()),
+                status: WorkerSessionStatus::Running,
+                created_at: "2026-02-16T11:00:00Z".to_owned(),
+                updated_at: "2026-02-16T11:01:00Z".to_owned(),
+            },
+        };
+        store.upsert_runtime_mapping(&runtime)?;
+        Ok(())
+    }
+
+    fn seed_runtime_mapping_with_pr_artifact(
+        store: &mut SqliteEventStore,
+        work_item_id: &WorkItemId,
+        session_id: &str,
+        artifact_id: &str,
+        pr_url: &str,
+    ) -> Result<(), CoreError> {
+        seed_runtime_mapping(store, work_item_id, session_id)?;
+        let artifact = ArtifactRecord {
+            artifact_id: ArtifactId::new(artifact_id),
+            work_item_id: work_item_id.clone(),
+            kind: ArtifactKind::PR,
+            metadata: json!({"type": "pull_request"}),
+            storage_ref: pr_url.to_owned(),
+            created_at: "2026-02-16T11:01:00Z".to_owned(),
+        };
+        store.create_artifact(&artifact)?;
+        let event = OrchestrationEventPayload::ArtifactCreated(ArtifactCreatedPayload {
+            artifact_id: artifact.artifact_id.clone(),
+            work_item_id: work_item_id.clone(),
+            kind: ArtifactKind::PR,
+            label: "Pull request".to_owned(),
+            uri: pr_url.to_owned(),
+        });
+        store.append_event(
+            NewEventEnvelope {
+                event_id: format!("evt-pr-artifact-{}", artifact_id),
+                occurred_at: "2026-02-16T11:02:00Z".to_owned(),
+                work_item_id: Some(work_item_id.clone()),
+                session_id: Some(WorkerSessionId::new(session_id)),
+                payload: event,
+                schema_version: DOMAIN_EVENT_SCHEMA_VERSION,
+            },
+            &[artifact.artifact_id.clone()],
+        )?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn execute_github_open_review_tabs_opens_pr_url_for_session_context() {
+        let temp_db = TestDbPath::new("app-runtime-command-open-review-tabs-session");
+        let work_item_id = WorkItemId::new("wi-open-review-tabs-session");
+        let mut store = SqliteEventStore::open(temp_db.path()).expect("open store");
+        seed_runtime_mapping_with_pr_artifact(
+            &mut store,
+            &work_item_id,
+            "sess-open-review-tabs-session",
+            "artifact-pr-review-session",
+            "https://github.com/acme/repo/pull/123",
+        )
+        .expect("seed mapping");
+
+        let opener = MockUrlOpener::default();
+        let (stream_id, mut stream) = execute_github_open_review_tabs_with_opener(
+            temp_db.path().to_str().expect("path"),
+            SupervisorCommandContext {
+                selected_work_item_id: None,
+                selected_session_id: Some("sess-open-review-tabs-session".to_owned()),
+                scope: None,
+            },
+            &opener,
+        )
+        .await
+        .expect("open review tabs");
+
+        assert!(stream_id.starts_with("runtime-"));
+        let first_chunk = stream
+            .next_chunk()
+            .await
+            .expect("read runtime chunk")
+            .expect("expected runtime message");
+        assert_eq!(first_chunk.finish_reason, Some(LlmFinishReason::Stop));
+        assert!(first_chunk.delta.contains("github.open_review_tabs"));
+        assert!(first_chunk.delta.contains("https://github.com/acme/repo/pull/123"));
+        assert!(
+            stream
+                .next_chunk()
+                .await
+                .expect("read runtime close")
+                .is_none()
+        );
+        assert_eq!(opener.calls(), vec!["https://github.com/acme/repo/pull/123".to_owned()]);
+    }
+
+    #[tokio::test]
+    async fn execute_github_open_review_tabs_opens_pr_url_for_work_item_context() {
+        let temp_db = TestDbPath::new("app-runtime-command-open-review-tabs-work-item");
+        let work_item_id = WorkItemId::new("wi-open-review-tabs-work-item");
+        let mut store = SqliteEventStore::open(temp_db.path()).expect("open store");
+        seed_runtime_mapping_with_pr_artifact(
+            &mut store,
+            &work_item_id,
+            "sess-open-review-tabs-work-item",
+            "artifact-pr-review-work-item",
+            "https://github.com/acme/repo/pull/124",
+        )
+        .expect("seed mapping");
+
+        let opener = MockUrlOpener::default();
+        let (stream_id, mut stream) = execute_github_open_review_tabs_with_opener(
+            temp_db.path().to_str().expect("path"),
+            SupervisorCommandContext {
+                selected_work_item_id: Some(work_item_id.as_str().to_owned()),
+                selected_session_id: None,
+                scope: None,
+            },
+            &opener,
+        )
+        .await
+        .expect("open review tabs");
+
+        assert!(stream_id.starts_with("runtime-"));
+        let first_chunk = stream
+            .next_chunk()
+            .await
+            .expect("read runtime chunk")
+            .expect("expected runtime message");
+        assert_eq!(first_chunk.finish_reason, Some(LlmFinishReason::Stop));
+        assert!(first_chunk.delta.contains("https://github.com/acme/repo/pull/124"));
+        assert_eq!(opener.calls(), vec!["https://github.com/acme/repo/pull/124".to_owned()]);
+    }
+
+    #[tokio::test]
+    async fn execute_github_open_review_tabs_reopens_url_per_invocation() {
+        let temp_db = TestDbPath::new("app-runtime-command-open-review-tabs-reopen");
+        let work_item_id = WorkItemId::new("wi-open-review-tabs-reopen");
+        let mut store = SqliteEventStore::open(temp_db.path()).expect("open store");
+        seed_runtime_mapping_with_pr_artifact(
+            &mut store,
+            &work_item_id,
+            "sess-open-review-tabs-reopen",
+            "artifact-pr-review-reopen",
+            "https://github.com/acme/repo/pull/125",
+        )
+        .expect("seed mapping");
+
+        let opener = MockUrlOpener::default();
+        let context = SupervisorCommandContext {
+            selected_work_item_id: Some(work_item_id.as_str().to_owned()),
+            selected_session_id: None,
+            scope: None,
+        };
+        let event_store_path = temp_db.path().to_str().expect("path").to_owned();
+
+        let _ = execute_github_open_review_tabs_with_opener(&event_store_path, context.clone(), &opener)
+            .await
+            .expect("first invocation");
+        let _ = execute_github_open_review_tabs_with_opener(&event_store_path, context.clone(), &opener)
+            .await
+            .expect("second invocation");
+
+        assert_eq!(
+            opener.calls(),
+            vec![
+                "https://github.com/acme/repo/pull/125".to_owned(),
+                "https://github.com/acme/repo/pull/125".to_owned()
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn execute_github_open_review_tabs_rejects_missing_context() {
+        let temp_db = TestDbPath::new("app-runtime-command-open-review-tabs-missing-context");
+        let opener = MockUrlOpener::default();
+
+        let err = match execute_github_open_review_tabs_with_opener(
+            temp_db.path().to_str().expect("path"),
+            SupervisorCommandContext::default(),
+            &opener,
+        )
+        .await
+        {
+            Ok(_) => panic!("missing context should fail"),
+            Err(err) => err,
+        };
+
+        let message = err.to_string();
+        assert!(message.contains(command_ids::GITHUB_OPEN_REVIEW_TABS));
+        assert!(message.contains("requires an active runtime session or selected work item context"));
+        assert!(opener.calls().is_empty());
+    }
+
+    #[tokio::test]
+    async fn execute_github_open_review_tabs_rejects_missing_pr_artifact() {
+        let temp_db = TestDbPath::new("app-runtime-command-open-review-tabs-missing-pr");
+        let mut store = SqliteEventStore::open(temp_db.path()).expect("open store");
+        let work_item_id = WorkItemId::new("wi-open-review-tabs-missing-pr");
+        seed_runtime_mapping(&mut store, &work_item_id, "sess-open-review-tabs-missing-pr")
+            .expect("seed mapping");
+
+        let opener = MockUrlOpener::default();
+        let err = match execute_github_open_review_tabs_with_opener(
+            temp_db.path().to_str().expect("path"),
+            SupervisorCommandContext {
+                selected_work_item_id: Some(work_item_id.as_str().to_owned()),
+                selected_session_id: None,
+                scope: None,
+            },
+            &opener,
+        )
+        .await
+        {
+            Ok(_) => panic!("missing artifact should fail"),
+            Err(err) => err,
+        };
+
+        let message = err.to_string();
+        assert!(message.contains(command_ids::GITHUB_OPEN_REVIEW_TABS));
+        assert!(message.contains("could not resolve a PR artifact"));
+        assert!(opener.calls().is_empty());
+    }
+
+    #[tokio::test]
+    async fn execute_github_open_review_tabs_propagates_opener_errors() {
+        let temp_db = TestDbPath::new("app-runtime-command-open-review-tabs-opener-error");
+        let work_item_id = WorkItemId::new("wi-open-review-tabs-opener-error");
+        let mut store = SqliteEventStore::open(temp_db.path()).expect("open store");
+        seed_runtime_mapping_with_pr_artifact(
+            &mut store,
+            &work_item_id,
+            "sess-open-review-tabs-opener-error",
+            "artifact-pr-review-opener-error",
+            "https://github.com/acme/repo/pull/126",
+        )
+        .expect("seed mapping");
+
+        let opener = FailingUrlOpener;
+        let err = match execute_github_open_review_tabs_with_opener(
+            temp_db.path().to_str().expect("path"),
+            SupervisorCommandContext {
+                selected_work_item_id: Some(work_item_id.as_str().to_owned()),
+                selected_session_id: None,
+                scope: None,
+            },
+            &opener,
+        )
+        .await
+        {
+            Ok(_) => panic!("opener failure should fail"),
+            Err(err) => err,
+        };
+
+        let message = err.to_string();
+        assert!(message.contains("open failed intentionally"));
+        assert!(message.contains(command_ids::GITHUB_OPEN_REVIEW_TABS));
+    }
 }
 
 fn normalize_pull_request_url(url: &str) -> &str {
@@ -397,6 +738,18 @@ fn resolve_runtime_mapping_for_context(
     store: &SqliteEventStore,
     context: &SupervisorCommandContext,
 ) -> Result<RuntimeMappingRecord, CoreError> {
+    resolve_runtime_mapping_for_context_with_command(
+        store,
+        context,
+        command_ids::WORKFLOW_APPROVE_PR_READY,
+    )
+}
+
+fn resolve_runtime_mapping_for_context_with_command(
+    store: &SqliteEventStore,
+    context: &SupervisorCommandContext,
+    command_id: &str,
+) -> Result<RuntimeMappingRecord, CoreError> {
     let mappings = store.list_runtime_mappings()?;
 
     if let Some(session_id) = context.selected_session_id.as_deref() {
@@ -408,7 +761,7 @@ fn resolve_runtime_mapping_for_context(
         }
 
         return Err(CoreError::Configuration(format!(
-            "workflow.approve_pr_ready could not resolve runtime mapping for selected session '{session_id}'"
+            "{command_id} could not resolve runtime mapping for selected session '{session_id}'"
         )));
     }
 
@@ -421,18 +774,33 @@ fn resolve_runtime_mapping_for_context(
         }
 
         return Err(CoreError::Configuration(format!(
-            "workflow.approve_pr_ready could not resolve runtime mapping for selected work item '{work_item_id}'"
+            "{command_id} could not resolve runtime mapping for selected work item '{work_item_id}'"
         )));
     }
 
     Err(CoreError::Configuration(
-        "workflow.approve_pr_ready requires an active runtime session or selected work item context".to_owned(),
+        format!(
+            "{command_id} requires an active runtime session or selected work item context"
+        )
+        .to_owned(),
     ))
 }
 
 fn resolve_pull_request_for_mapping(
     store: &SqliteEventStore,
     mapping: &RuntimeMappingRecord,
+) -> Result<PullRequestRef, CoreError> {
+    resolve_pull_request_for_mapping_with_command(
+        store,
+        mapping,
+        command_ids::WORKFLOW_APPROVE_PR_READY,
+    )
+}
+
+fn resolve_pull_request_for_mapping_with_command(
+    store: &SqliteEventStore,
+    mapping: &RuntimeMappingRecord,
+    command_id: &str,
 ) -> Result<PullRequestRef, CoreError> {
     let events = store.read_event_with_artifacts(&mapping.work_item_id)?;
     let mut candidate_parse_error: Option<CoreError> = None;
@@ -480,14 +848,13 @@ fn resolve_pull_request_for_mapping(
 
     if let Some(candidate_error) = candidate_parse_error {
         return Err(CoreError::Configuration(format!(
-            "workflow.approve_pr_ready could not resolve a usable PR artifact for work item '{}': {}",
+            "{command_id} could not resolve a usable PR artifact for work item '{}': {candidate_error}",
             mapping.work_item_id.as_str(),
-            candidate_error
         )));
     }
 
     Err(CoreError::Configuration(format!(
-        "workflow.approve_pr_ready could not resolve a PR artifact for work item '{}'",
+        "{command_id} could not resolve a PR artifact for work item '{}'",
         mapping.work_item_id.as_str()
     )))
 }
@@ -865,6 +1232,43 @@ where
     Ok((stream_id, Box::new(stream)))
 }
 
+async fn execute_github_open_review_tabs_with_opener(
+    event_store_path: &str,
+    context: SupervisorCommandContext,
+    url_opener: &impl UrlOpener,
+) -> Result<(String, LlmResponseStream), CoreError> {
+    let store = open_event_store(event_store_path)?;
+    let runtime = resolve_runtime_mapping_for_context_with_command(
+        &store,
+        &context,
+        command_ids::GITHUB_OPEN_REVIEW_TABS,
+    )?;
+    let pr = resolve_pull_request_for_mapping_with_command(
+        &store,
+        &runtime,
+        command_ids::GITHUB_OPEN_REVIEW_TABS,
+    )?;
+
+    let command_id = command_ids::GITHUB_OPEN_REVIEW_TABS;
+    UrlOpener::open_url(url_opener, pr.url.as_str())
+        .await
+        .map_err(|error| {
+            CoreError::DependencyUnavailable(format!(
+                "{command_id} failed to open PR URL '{}': {error}",
+                pr.url
+            ))
+        })?;
+    runtime_command_response(&format!("{GITHUB_OPEN_REVIEW_TABS_ACK} {}", pr.url))
+}
+
+async fn execute_github_open_review_tabs(
+    event_store_path: &str,
+    context: SupervisorCommandContext,
+) -> Result<(String, LlmResponseStream), CoreError> {
+    let opener = default_system_url_opener()?;
+    execute_github_open_review_tabs_with_opener(event_store_path, context, &opener).await
+}
+
 pub(crate) async fn dispatch_supervisor_runtime_command<P>(
     supervisor: &P,
     code_host: &impl CodeHostProvider,
@@ -883,9 +1287,9 @@ where
         Command::WorkflowApprovePrReady => {
             execute_workflow_approve_pr_ready(code_host, event_store_path, context).await
         }
-        Command::GithubOpenReviewTabs => runtime_command_response(
-            GITHUB_OPEN_REVIEW_TABS_ACK,
-        ),
+        Command::GithubOpenReviewTabs => {
+            execute_github_open_review_tabs(event_store_path, context).await
+        }
         command => Err(invalid_supervisor_runtime_usage(command.id())),
     }
 }
