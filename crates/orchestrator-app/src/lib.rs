@@ -1114,6 +1114,158 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn supervisor_query_dispatch_auto_resolves_blocking_intent_to_template() {
+        let temp_db = TestDbPath::new("app-supervisor-query-freeform-blocking-template");
+        let supervisor = QueryingSupervisor::with_chunks(vec![LlmStreamChunk {
+            delta: String::new(),
+            finish_reason: Some(LlmFinishReason::Stop),
+            usage: None,
+            rate_limit: None,
+        }]);
+
+        let app = App {
+            config: AppConfig {
+                workspace: "/workspace".to_owned(),
+                event_store_path: temp_db.path().to_string_lossy().to_string(),
+            },
+            supervisor: supervisor.clone(),
+            github: Healthy,
+        };
+
+        let _ = app
+            .dispatch_supervisor_command(
+                freeform_query_invocation_with_context(
+                    "What is blocking this ticket?",
+                    Some(SupervisorQueryContextArgs {
+                        selected_work_item_id: Some("wi-from-command".to_owned()),
+                        selected_session_id: None,
+                        scope: None,
+                    }),
+                ),
+                SupervisorCommandContext::default(),
+            )
+            .await
+            .expect("dispatch should stream");
+
+        let requests = supervisor.requests();
+        assert_eq!(requests.len(), 1);
+        assert!(requests[0].messages[1]
+            .content
+            .contains("Template: What is blocking (what_is_blocking)"));
+        assert!(requests[0].messages[1]
+            .content
+            .contains("Template variables:"));
+        assert!(requests[0].messages[1]
+            .content
+            .contains("- operator_question=What is blocking this ticket?"));
+        assert!(requests[0].messages[1].content.contains("Context pack:"));
+        assert!(!requests[0].messages[1]
+            .content
+            .contains("Operator question:"));
+    }
+
+    #[tokio::test]
+    async fn supervisor_query_dispatch_auto_resolves_status_and_planning_intents_to_templates() {
+        let temp_db = TestDbPath::new("app-supervisor-query-freeform-intent-templates");
+
+        let cases = [
+            (
+                "What's the status right now?",
+                "Template: Ticket status (ticket_status)",
+            ),
+            (
+                "What should we do next to unblock this?",
+                "Template: Next actions (next_actions)",
+            ),
+        ];
+
+        for (query, expected_template) in cases {
+            let supervisor = QueryingSupervisor::with_chunks(vec![LlmStreamChunk {
+                delta: String::new(),
+                finish_reason: Some(LlmFinishReason::Stop),
+                usage: None,
+                rate_limit: None,
+            }]);
+
+            let app = App {
+                config: AppConfig {
+                    workspace: "/workspace".to_owned(),
+                    event_store_path: temp_db.path().to_string_lossy().to_string(),
+                },
+                supervisor: supervisor.clone(),
+                github: Healthy,
+            };
+
+            let _ = app
+                .dispatch_supervisor_command(
+                    freeform_query_invocation_with_context(
+                        query,
+                        Some(SupervisorQueryContextArgs {
+                            selected_work_item_id: Some("wi-from-command".to_owned()),
+                            selected_session_id: None,
+                            scope: None,
+                        }),
+                    ),
+                    SupervisorCommandContext::default(),
+                )
+                .await
+                .expect("dispatch should stream");
+
+            let requests = supervisor.requests();
+            assert_eq!(requests.len(), 1);
+            assert!(requests[0].messages[1].content.contains(expected_template));
+            assert!(requests[0].messages[1]
+                .content
+                .contains("- operator_question="));
+            assert!(!requests[0].messages[1]
+                .content
+                .contains("Operator question:"));
+        }
+    }
+
+    #[tokio::test]
+    async fn supervisor_query_dispatch_preserves_freeform_for_unmatched_questions() {
+        let temp_db = TestDbPath::new("app-supervisor-query-freeform-fallback");
+        let supervisor = QueryingSupervisor::with_chunks(vec![LlmStreamChunk {
+            delta: String::new(),
+            finish_reason: Some(LlmFinishReason::Stop),
+            usage: None,
+            rate_limit: None,
+        }]);
+
+        let app = App {
+            config: AppConfig {
+                workspace: "/workspace".to_owned(),
+                event_store_path: temp_db.path().to_string_lossy().to_string(),
+            },
+            supervisor: supervisor.clone(),
+            github: Healthy,
+        };
+
+        let _ = app
+            .dispatch_supervisor_command(
+                freeform_query_invocation_with_context(
+                    "Compare AP-101 and AP-102 delivery risk by owner.",
+                    Some(SupervisorQueryContextArgs {
+                        selected_work_item_id: Some("wi-from-command".to_owned()),
+                        selected_session_id: None,
+                        scope: None,
+                    }),
+                ),
+                SupervisorCommandContext::default(),
+            )
+            .await
+            .expect("dispatch should stream");
+
+        let requests = supervisor.requests();
+        assert_eq!(requests.len(), 1);
+        assert!(requests[0].messages[1]
+            .content
+            .contains("Operator question:\nCompare AP-101 and AP-102 delivery risk by owner."));
+        assert!(!requests[0].messages[1].content.contains("Template:"));
+    }
+
+    #[tokio::test]
     async fn supervisor_query_dispatch_rejects_unknown_template_with_guidance() {
         let temp_db = TestDbPath::new("app-supervisor-query-template-error");
         let app = App {

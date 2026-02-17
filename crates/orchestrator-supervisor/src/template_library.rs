@@ -11,6 +11,10 @@ pub const SUPERVISOR_TEMPLATE_WHAT_CHANGED: &str = "what_changed";
 pub const SUPERVISOR_TEMPLATE_WHAT_NEEDS_ME: &str = "what_needs_me";
 pub const SUPERVISOR_TEMPLATE_RISK_ASSESSMENT: &str = "risk_assessment";
 pub const SUPERVISOR_TEMPLATE_RECOMMENDED_RESPONSE: &str = "recommended_response";
+pub const SUPERVISOR_TEMPLATE_TICKET_STATUS: &str = "ticket_status";
+pub const SUPERVISOR_TEMPLATE_WHAT_IS_BLOCKING: &str = "what_is_blocking";
+pub const SUPERVISOR_TEMPLATE_NEXT_ACTIONS: &str = "next_actions";
+pub const SUPERVISOR_TEMPLATE_VARIABLE_OPERATOR_QUESTION: &str = "operator_question";
 
 const SUPERVISOR_SYSTEM_PROMPT: &str = concat!(
     "You are the orchestrator supervisor.\n",
@@ -19,12 +23,15 @@ const SUPERVISOR_SYSTEM_PROMPT: &str = concat!(
     "Keep responses terse and operationally actionable."
 );
 
-const ALL_TEMPLATES: [SupervisorTemplate; 5] = [
+const ALL_TEMPLATES: [SupervisorTemplate; 8] = [
     SupervisorTemplate::CurrentActivity,
     SupervisorTemplate::WhatChanged,
     SupervisorTemplate::WhatNeedsMe,
     SupervisorTemplate::RiskAssessment,
     SupervisorTemplate::RecommendedResponse,
+    SupervisorTemplate::TicketStatus,
+    SupervisorTemplate::WhatIsBlocking,
+    SupervisorTemplate::NextActions,
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -34,6 +41,9 @@ pub enum SupervisorTemplate {
     WhatNeedsMe,
     RiskAssessment,
     RecommendedResponse,
+    TicketStatus,
+    WhatIsBlocking,
+    NextActions,
 }
 
 impl SupervisorTemplate {
@@ -48,6 +58,9 @@ impl SupervisorTemplate {
             Self::WhatNeedsMe => SUPERVISOR_TEMPLATE_WHAT_NEEDS_ME,
             Self::RiskAssessment => SUPERVISOR_TEMPLATE_RISK_ASSESSMENT,
             Self::RecommendedResponse => SUPERVISOR_TEMPLATE_RECOMMENDED_RESPONSE,
+            Self::TicketStatus => SUPERVISOR_TEMPLATE_TICKET_STATUS,
+            Self::WhatIsBlocking => SUPERVISOR_TEMPLATE_WHAT_IS_BLOCKING,
+            Self::NextActions => SUPERVISOR_TEMPLATE_NEXT_ACTIONS,
         }
     }
 
@@ -58,6 +71,9 @@ impl SupervisorTemplate {
             Self::WhatNeedsMe => "What needs me",
             Self::RiskAssessment => "Risk assessment",
             Self::RecommendedResponse => "Recommended response",
+            Self::TicketStatus => "Ticket status",
+            Self::WhatIsBlocking => "What is blocking",
+            Self::NextActions => "Next actions",
         }
     }
 
@@ -69,6 +85,11 @@ impl SupervisorTemplate {
             "whatneedsme" => Ok(Self::WhatNeedsMe),
             "riskassessment" => Ok(Self::RiskAssessment),
             "recommendedresponse" => Ok(Self::RecommendedResponse),
+            "ticketstatus" | "statuscurrentticket" | "statusticket" | "issuestatus" => {
+                Ok(Self::TicketStatus)
+            }
+            "whatisblocking" | "blockers" | "whyblocked" => Ok(Self::WhatIsBlocking),
+            "nextactions" | "nextsteps" => Ok(Self::NextActions),
             _ => Err(CoreError::InvalidCommandArgs {
                 command_id: command_ids::SUPERVISOR_QUERY.to_owned(),
                 reason: format!(
@@ -98,6 +119,15 @@ impl SupervisorTemplate {
             }
             Self::RecommendedResponse => {
                 "Draft the next operator response that best unblocks safe progress."
+            }
+            Self::TicketStatus => {
+                "Summarize overall ticket delivery status, ownership, and progress."
+            }
+            Self::WhatIsBlocking => {
+                "Identify concrete blockers preventing forward progress right now."
+            }
+            Self::NextActions => {
+                "Produce a prioritized near-term plan with clear owners and sequencing."
             }
         }
     }
@@ -142,8 +172,62 @@ impl SupervisorTemplate {
                 "Fallback:\n",
                 "- One safer alternative if assumptions are wrong."
             ),
+            Self::TicketStatus => concat!(
+                "Ticket status:\n",
+                "- One sentence summary with ticket identifier, state, and current momentum.\n",
+                "Progress:\n",
+                "- Up to 4 bullets with completed/in-flight work tied to evidence.\n",
+                "Risk and blockers:\n",
+                "- Bullets for blockers or risks; use `None` when clear.\n",
+                "Owner handoff:\n",
+                "- One line naming who should act next and why."
+            ),
+            Self::WhatIsBlocking => concat!(
+                "What is blocking:\n",
+                "- Ordered bullets for active blockers with evidence references.\n",
+                "Dependency owner:\n",
+                "- One line per blocker naming owner/team dependency.\n",
+                "Unblock plan:\n",
+                "- Immediate next step for each blocker; use `None` if unblocked."
+            ),
+            Self::NextActions => concat!(
+                "Next actions:\n",
+                "- Up to 5 prioritized actions in order.\n",
+                "Owners:\n",
+                "- For each action, assign `worker`, `operator`, or `external`.\n",
+                "First checkpoint:\n",
+                "- One immediate checkpoint expected after action #1."
+            ),
         }
     }
+}
+
+pub fn infer_template_from_query(raw_query: &str) -> Option<SupervisorTemplate> {
+    let query = raw_query.trim();
+    if query.is_empty() {
+        return None;
+    }
+
+    if let Ok(template) = SupervisorTemplate::resolve(query) {
+        return Some(template);
+    }
+
+    let normalized = normalize_intent_query(query);
+    if normalized.is_empty() {
+        return None;
+    }
+
+    if matches_blocking_intent(normalized.as_str()) {
+        return Some(SupervisorTemplate::WhatIsBlocking);
+    }
+    if matches_next_actions_intent(normalized.as_str()) {
+        return Some(SupervisorTemplate::NextActions);
+    }
+    if matches_ticket_status_intent(normalized.as_str()) {
+        return Some(SupervisorTemplate::TicketStatus);
+    }
+
+    None
 }
 
 pub fn supervisor_template_catalog() -> &'static [SupervisorTemplate] {
@@ -155,6 +239,23 @@ pub fn build_template_messages(
     context: &BoundedContextPack,
 ) -> Result<Vec<LlmMessage>, CoreError> {
     build_template_messages_with_variables(raw_template, &BTreeMap::new(), context)
+}
+
+pub fn build_inferred_template_messages(
+    template: SupervisorTemplate,
+    raw_query: &str,
+    context: &BoundedContextPack,
+) -> Result<Vec<LlmMessage>, CoreError> {
+    let mut variables = BTreeMap::new();
+    let question = raw_query.trim();
+    if !question.is_empty() {
+        variables.insert(
+            SUPERVISOR_TEMPLATE_VARIABLE_OPERATOR_QUESTION.to_owned(),
+            question.to_owned(),
+        );
+    }
+
+    build_template_messages_with_variables(template.key(), &variables, context)
 }
 
 pub fn build_template_messages_with_variables(
@@ -433,6 +534,63 @@ fn normalize_template_key(raw: &str) -> String {
         .collect()
 }
 
+fn normalize_intent_query(raw: &str) -> String {
+    let mut normalized = String::new();
+    let mut last_was_space = false;
+
+    for ch in raw.trim().chars() {
+        if ch.is_ascii_alphanumeric() {
+            normalized.push(ch.to_ascii_lowercase());
+            last_was_space = false;
+            continue;
+        }
+
+        if !last_was_space {
+            normalized.push(' ');
+            last_was_space = true;
+        }
+    }
+
+    normalized.trim().to_owned()
+}
+
+fn contains_phrase(normalized: &str, phrase: &str) -> bool {
+    let haystack = format!(" {normalized} ");
+    let needle = format!(" {} ", phrase.trim().to_ascii_lowercase());
+    haystack.contains(needle.as_str())
+}
+
+fn matches_ticket_status_intent(normalized: &str) -> bool {
+    matches!(normalized, "status")
+        || contains_phrase(normalized, "what is the status")
+        || contains_phrase(normalized, "what s the status")
+        || contains_phrase(normalized, "ticket status")
+        || contains_phrase(normalized, "issue status")
+        || contains_phrase(normalized, "work item status")
+        || contains_phrase(normalized, "status update")
+        || contains_phrase(normalized, "current status")
+}
+
+fn matches_blocking_intent(normalized: &str) -> bool {
+    contains_phrase(normalized, "what is blocking")
+        || contains_phrase(normalized, "what s blocking")
+        || contains_phrase(normalized, "blocked by")
+        || contains_phrase(normalized, "why blocked")
+        || contains_phrase(normalized, "current blockers")
+        || contains_phrase(normalized, "blocking issues")
+        || contains_phrase(normalized, "blockers")
+}
+
+fn matches_next_actions_intent(normalized: &str) -> bool {
+    contains_phrase(normalized, "next actions")
+        || contains_phrase(normalized, "next action")
+        || contains_phrase(normalized, "next steps")
+        || contains_phrase(normalized, "what next")
+        || contains_phrase(normalized, "what should i do next")
+        || contains_phrase(normalized, "what should we do next")
+        || contains_phrase(normalized, "plan next")
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
@@ -460,10 +618,13 @@ mod tests {
                 SUPERVISOR_TEMPLATE_WHAT_NEEDS_ME,
                 SUPERVISOR_TEMPLATE_RISK_ASSESSMENT,
                 SUPERVISOR_TEMPLATE_RECOMMENDED_RESPONSE,
+                SUPERVISOR_TEMPLATE_TICKET_STATUS,
+                SUPERVISOR_TEMPLATE_WHAT_IS_BLOCKING,
+                SUPERVISOR_TEMPLATE_NEXT_ACTIONS,
             ]
         );
         assert_eq!(catalog[0].title(), "Current activity");
-        assert_eq!(catalog[4].title(), "Recommended response");
+        assert_eq!(catalog[7].title(), "Next actions");
     }
 
     #[test]
@@ -491,6 +652,18 @@ mod tests {
         assert_eq!(
             SupervisorTemplate::resolve("What needs me").expect("resolve title"),
             SupervisorTemplate::WhatNeedsMe
+        );
+        assert_eq!(
+            SupervisorTemplate::resolve("ticket_status").expect("resolve ticket status"),
+            SupervisorTemplate::TicketStatus
+        );
+        assert_eq!(
+            SupervisorTemplate::resolve("what-is-blocking").expect("resolve blocker template"),
+            SupervisorTemplate::WhatIsBlocking
+        );
+        assert_eq!(
+            SupervisorTemplate::resolve("Next actions").expect("resolve planning template"),
+            SupervisorTemplate::NextActions
         );
     }
 
@@ -521,6 +694,42 @@ mod tests {
     }
 
     #[test]
+    fn infer_template_from_query_maps_common_status_and_planning_intents() {
+        assert_eq!(
+            infer_template_from_query("status"),
+            Some(SupervisorTemplate::CurrentActivity)
+        );
+        assert_eq!(
+            infer_template_from_query("ticket_status"),
+            Some(SupervisorTemplate::TicketStatus)
+        );
+        assert_eq!(
+            infer_template_from_query("What's the status right now?"),
+            Some(SupervisorTemplate::TicketStatus)
+        );
+        assert_eq!(
+            infer_template_from_query("What is blocking this ticket right now?"),
+            Some(SupervisorTemplate::WhatIsBlocking)
+        );
+        assert_eq!(
+            infer_template_from_query("What should we do next?"),
+            Some(SupervisorTemplate::NextActions)
+        );
+        assert_eq!(
+            infer_template_from_query("status_current_session"),
+            Some(SupervisorTemplate::CurrentActivity)
+        );
+    }
+
+    #[test]
+    fn infer_template_from_query_preserves_fallback_for_arbitrary_questions() {
+        assert_eq!(
+            infer_template_from_query("Compare AP-101 and AP-102 risk profile."),
+            None
+        );
+    }
+
+    #[test]
     fn build_template_messages_with_variables_lists_sorted_template_variables() {
         let context = sample_context_pack();
         let variables = BTreeMap::from([
@@ -535,6 +744,41 @@ mod tests {
         assert!(messages[1].content.contains("Template variables:"));
         assert!(messages[1].content.contains("- channel=review"));
         assert!(messages[1].content.contains("- ticket=AP-129"));
+    }
+
+    #[test]
+    fn build_inferred_template_messages_preserves_operator_question_as_variable() {
+        let context = sample_context_pack();
+        let messages = build_inferred_template_messages(
+            SupervisorTemplate::WhatIsBlocking,
+            "What is blocking this ticket right now?",
+            &context,
+        )
+        .expect("inferred template messages");
+
+        assert_eq!(messages.len(), 2);
+        assert!(messages[1]
+            .content
+            .contains("Template: What is blocking (what_is_blocking)"));
+        assert!(messages[1].content.contains("Template variables:"));
+        assert!(messages[1]
+            .content
+            .contains("- operator_question=What is blocking this ticket right now?"));
+    }
+
+    #[test]
+    fn build_ticket_status_template_messages_include_status_contract_and_ticket_metadata() {
+        let context = sample_context_pack();
+        let messages = build_template_messages("ticket_status", &context).expect("messages");
+
+        assert_eq!(messages.len(), 2);
+        assert!(messages[1]
+            .content
+            .contains("Template: Ticket status (ticket_status)"));
+        assert!(messages[1].content.contains("Ticket status:"));
+        assert!(messages[1].content.contains("Owner handoff:"));
+        assert!(messages[1].content.contains("ticket_id: AP-129"));
+        assert!(messages[1].content.contains("state: In Progress"));
     }
 
     #[test]

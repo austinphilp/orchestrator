@@ -20,10 +20,13 @@ pub use query_engine::{
     TicketStatusContext, TicketStatusTransition,
 };
 pub use template_library::{
-    build_freeform_messages, build_template_messages, build_template_messages_with_variables,
-    supervisor_template_catalog, SupervisorTemplate, SUPERVISOR_TEMPLATE_CURRENT_ACTIVITY,
+    build_freeform_messages, build_inferred_template_messages, build_template_messages,
+    build_template_messages_with_variables, infer_template_from_query, supervisor_template_catalog,
+    SupervisorTemplate, SUPERVISOR_TEMPLATE_CURRENT_ACTIVITY, SUPERVISOR_TEMPLATE_NEXT_ACTIONS,
     SUPERVISOR_TEMPLATE_RECOMMENDED_RESPONSE, SUPERVISOR_TEMPLATE_RISK_ASSESSMENT,
-    SUPERVISOR_TEMPLATE_WHAT_CHANGED, SUPERVISOR_TEMPLATE_WHAT_NEEDS_ME,
+    SUPERVISOR_TEMPLATE_TICKET_STATUS, SUPERVISOR_TEMPLATE_VARIABLE_OPERATOR_QUESTION,
+    SUPERVISOR_TEMPLATE_WHAT_CHANGED, SUPERVISOR_TEMPLATE_WHAT_IS_BLOCKING,
+    SUPERVISOR_TEMPLATE_WHAT_NEEDS_ME,
 };
 
 const OPENROUTER_API_BASE: &str = "https://openrouter.ai/api/v1";
