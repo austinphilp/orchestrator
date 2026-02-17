@@ -1,19 +1,24 @@
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
 use backend_opencode::{OpenCodeBackend, OpenCodeBackendConfig};
 use orchestrator_core::{
-    normalize_backend_event, ArtifactKind, BackendEventNormalizationContext, InboxItemKind,
-    OrchestrationEventPayload, SqliteEventStore, TicketId, TicketProvider, TicketRecord,
-    TicketWorkItemMapping, WorkItemId, WorkerSessionId,
+    attention_inbox_snapshot, normalize_backend_event, rebuild_projection, ArtifactKind,
+    AttentionBatchKind, AttentionEngineConfig, BackendEventNormalizationContext, InboxItemKind,
+    OrchestrationEventPayload, ProjectionState, SqliteEventStore, TicketId, TicketProvider,
+    TicketRecord, TicketWorkItemMapping, WorkItemId, WorkerSessionId,
 };
 use orchestrator_runtime::{
-    BackendBlockedEvent, BackendDoneEvent, BackendEvent, PtyRenderPolicy, RuntimeSessionId,
-    SessionLifecycle, SpawnSpec, TerminalSize, WorkerBackend, WorkerEventStream,
+    BackendBlockedEvent, BackendCheckpointEvent, BackendDoneEvent, BackendEvent,
+    ManagedSessionStatus, PtyRenderPolicy, RuntimeSessionId, SessionLifecycle, SessionVisibility,
+    SpawnSpec, TerminalSize, WorkerBackend, WorkerEventStream, WorkerManager, WorkerManagerConfig,
+    WorkerManagerEventSubscription,
 };
-use tokio::time::timeout;
+use tokio::time::{sleep, timeout};
 
-const TEST_TIMEOUT: Duration = Duration::from_secs(5);
+const TEST_TIMEOUT: Duration = Duration::from_secs(8);
+const TEST_EVENT_TIMESTAMP: &str = "2026-02-16T12:00:00Z";
 
 #[cfg(unix)]
 fn shell_program() -> &'static str {
@@ -63,6 +68,22 @@ fn malformed_fixture_script() -> &'static str {
     "echo @@checkpoint {\"stage\":\"investigating\",\"detail\":\"malformed fixture replay\",\"files\":[\"src/parser.rs\"]} && echo @@needs_input {\"id\":\"broken\",\"question\":\"missing brace\" && echo @@artifact {\"kind\":1,\"url\":\"https://github.com/example/orchestrator/pull/999\"} && echo @@blocked {\"reason\":\"malformed fixture blocked\",\"hint\":\"inspect parser fallback\",\"log_ref\":\"artifact://logs/malformed-fixture\"} && echo @@done {\"summary\":\"malformed fixture replay complete\"}"
 }
 
+#[cfg(unix)]
+fn background_fixture_script() -> &'static str {
+    r#"printf '@@checkpoint {"stage":"implementing","detail":"bg-step-1","files":["src/runtime.rs"]}\n';
+sleep 1;
+printf '@@needs_input {"id":"bg-choice","question":"bg-step-2","options":["yes","no"],"default":"yes"}\n';
+sleep 1;
+printf '@@blocked {"reason":"bg-step-3","hint":"inspect background worker","log_ref":"artifact://logs/background-flow"}\n';
+sleep 1;
+printf '@@done {"summary":"bg-finish"}\n'"#
+}
+
+#[cfg(windows)]
+fn background_fixture_script() -> &'static str {
+    "echo @@checkpoint {\"stage\":\"implementing\",\"detail\":\"bg-step-1\",\"files\":[\"src/runtime.rs\"]} && ping -n 2 127.0.0.1 >nul && echo @@needs_input {\"id\":\"bg-choice\",\"question\":\"bg-step-2\",\"options\":[\"yes\",\"no\"],\"default\":\"yes\"} && ping -n 2 127.0.0.1 >nul && echo @@blocked {\"reason\":\"bg-step-3\",\"hint\":\"inspect background worker\",\"log_ref\":\"artifact://logs/background-flow\"} && ping -n 2 127.0.0.1 >nul && echo @@done {\"summary\":\"bg-finish\"}"
+}
+
 fn test_backend(script: &str) -> OpenCodeBackend {
     OpenCodeBackend::new(OpenCodeBackendConfig {
         binary: PathBuf::from(shell_program()),
@@ -107,16 +128,50 @@ async fn collect_until_terminal_event(mut stream: WorkerEventStream) -> Vec<Back
     .expect("timed out collecting backend events")
 }
 
-fn setup_store(work_item_id: &WorkItemId) -> SqliteEventStore {
+async fn collect_global_events_until_terminal(
+    subscription: &mut WorkerManagerEventSubscription,
+    session_id: &RuntimeSessionId,
+) -> Vec<BackendEvent> {
+    timeout(TEST_TIMEOUT, async {
+        let mut events = Vec::new();
+        loop {
+            match subscription
+                .next_event()
+                .await
+                .expect("read worker-manager event")
+            {
+                Some(manager_event) => {
+                    if &manager_event.session_id != session_id {
+                        continue;
+                    }
+                    let terminal = matches!(
+                        manager_event.event,
+                        BackendEvent::Done(_) | BackendEvent::Crashed(_)
+                    );
+                    events.push(manager_event.event);
+                    if terminal {
+                        return events;
+                    }
+                }
+                None => return events,
+            }
+        }
+    })
+    .await
+    .expect("timed out collecting runtime events")
+}
+
+fn setup_store(work_item_id: &WorkItemId, ticket_number: &str) -> SqliteEventStore {
+    let ticket_identifier = format!("AP-{ticket_number}");
     let store = SqliteEventStore::in_memory().expect("create in-memory event store");
     let ticket = TicketRecord {
-        ticket_id: TicketId::from_provider_uuid(TicketProvider::Linear, "118"),
+        ticket_id: TicketId::from_provider_uuid(TicketProvider::Linear, ticket_number),
         provider: TicketProvider::Linear,
-        provider_ticket_id: "118".to_owned(),
-        identifier: "AP-118".to_owned(),
-        title: "Fake PTY integration tests".to_owned(),
+        provider_ticket_id: ticket_number.to_owned(),
+        identifier: ticket_identifier.clone(),
+        title: format!("{ticket_identifier} fake PTY integration fixture"),
         state: "in_progress".to_owned(),
-        updated_at: "2026-02-16T12:00:00Z".to_owned(),
+        updated_at: TEST_EVENT_TIMESTAMP.to_owned(),
     };
     store.upsert_ticket(&ticket).expect("upsert ticket");
     store
@@ -137,7 +192,7 @@ fn persist_normalized_events(
     for (index, backend_event) in backend_events.iter().enumerate() {
         let normalized = normalize_backend_event(
             &BackendEventNormalizationContext::new(
-                "2026-02-16T12:00:00Z",
+                TEST_EVENT_TIMESTAMP,
                 work_item_id.clone(),
                 session_id.clone(),
                 index as u64 + 1,
@@ -169,6 +224,69 @@ fn collect_raw_output(events: &[BackendEvent]) -> String {
         })
         .collect::<Vec<_>>()
         .join("")
+}
+
+fn non_output_events(events: &[BackendEvent]) -> Vec<&BackendEvent> {
+    events
+        .iter()
+        .filter(|event| !matches!(event, BackendEvent::Output(_)))
+        .collect()
+}
+
+fn assert_decide_or_unblock_attention_counts(
+    projection: &ProjectionState,
+    expected_needs_decision: usize,
+    expected_blocked: usize,
+    expected_unresolved: usize,
+) {
+    assert_eq!(
+        projection
+            .inbox_items
+            .values()
+            .filter(|item| item.kind == InboxItemKind::NeedsDecision)
+            .count(),
+        expected_needs_decision
+    );
+    assert_eq!(
+        projection
+            .inbox_items
+            .values()
+            .filter(|item| item.kind == InboxItemKind::Blocked)
+            .count(),
+        expected_blocked
+    );
+
+    let attention = attention_inbox_snapshot(projection, &AttentionEngineConfig::default(), &[]);
+    let decide_or_unblock_batch = attention
+        .batch_surfaces
+        .iter()
+        .find(|batch| batch.kind == AttentionBatchKind::DecideOrUnblock)
+        .expect("decide/unblock batch");
+    assert_eq!(
+        decide_or_unblock_batch.unresolved_count,
+        expected_unresolved
+    );
+}
+
+async fn snapshot_until_contains(
+    manager: &WorkerManager,
+    session_id: &RuntimeSessionId,
+    needle: &str,
+) {
+    timeout(TEST_TIMEOUT, async {
+        loop {
+            let snapshot = manager
+                .snapshot(session_id)
+                .await
+                .expect("capture background snapshot");
+            if snapshot.lines.iter().any(|line| line.contains(needle)) {
+                return;
+            }
+            sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("timed out waiting for background snapshot content");
 }
 
 #[tokio::test]
@@ -216,7 +334,7 @@ async fn fake_pty_nominal_fixture_round_trips_from_backend_stream_to_persisted_d
         }) if summary == "nominal fixture complete"
     )));
 
-    let mut store = setup_store(&work_item_id);
+    let mut store = setup_store(&work_item_id, "118");
     persist_normalized_events(&mut store, &work_item_id, &session_id, &events);
 
     let stored = store
@@ -308,6 +426,19 @@ async fn fake_pty_nominal_fixture_round_trips_from_backend_stream_to_persisted_d
         pr_artifact.storage_ref,
         "https://github.com/example/orchestrator/pull/118"
     );
+
+    let projection = rebuild_projection(
+        &store
+            .read_events_for_work_item(&work_item_id)
+            .expect("read events for projection"),
+    );
+    assert_eq!(projection.events.len(), stored.len());
+    let work_item_projection = projection
+        .work_items
+        .get(&work_item_id)
+        .expect("work item projection should exist");
+    assert_eq!(work_item_projection.inbox_items.len(), 3);
+    assert_decide_or_unblock_attention_counts(&projection, 1, 1, 2);
 }
 
 #[tokio::test]
@@ -361,7 +492,7 @@ async fn fake_pty_malformed_fixture_ignores_invalid_tags_but_persists_valid_foll
         }) if summary == "malformed fixture replay complete"
     )));
 
-    let mut store = setup_store(&work_item_id);
+    let mut store = setup_store(&work_item_id, "118");
     persist_normalized_events(&mut store, &work_item_id, &session_id, &events);
 
     let stored = store
@@ -402,4 +533,82 @@ async fn fake_pty_malformed_fixture_ignores_invalid_tags_but_persists_valid_foll
         blocked_artifact.storage_ref,
         "artifact://logs/malformed-fixture"
     );
+}
+
+#[tokio::test]
+async fn fake_pty_background_session_continues_through_runtime_to_inbox_and_attention() {
+    let work_item_id = WorkItemId::new("wi-ap-137-background");
+    let runtime_session_id = RuntimeSessionId::new("sess-ap-137-background");
+    let worker_session_id = WorkerSessionId::new(runtime_session_id.as_str());
+    let backend: Arc<dyn WorkerBackend> = Arc::new(test_backend(background_fixture_script()));
+    let manager = WorkerManager::with_config(
+        backend,
+        WorkerManagerConfig {
+            session_event_buffer: 1_024,
+            global_event_buffer: 4_096,
+            checkpoint_prompt_interval: None,
+            background_snapshot_interval: Duration::from_millis(80),
+            ..WorkerManagerConfig::default()
+        },
+    );
+    let mut global_events = manager.subscribe_all();
+    manager
+        .spawn(spawn_spec(runtime_session_id.as_str()))
+        .await
+        .expect("spawn runtime-managed background session");
+
+    let session = manager
+        .list_sessions()
+        .await
+        .into_iter()
+        .find(|session| session.session_id == runtime_session_id)
+        .expect("session summary should exist");
+    assert_eq!(session.visibility, SessionVisibility::Background);
+
+    snapshot_until_contains(&manager, &runtime_session_id, "bg-step-1").await;
+    snapshot_until_contains(&manager, &runtime_session_id, "bg-step-2").await;
+
+    let events =
+        collect_global_events_until_terminal(&mut global_events, &runtime_session_id).await;
+    let structured = non_output_events(&events);
+    assert_eq!(
+        structured.len(),
+        4,
+        "background fixture should emit exactly checkpoint -> needs-input -> blocked -> done"
+    );
+    assert!(matches!(
+        structured[0],
+        BackendEvent::Checkpoint(BackendCheckpointEvent { detail: Some(detail), .. }) if detail == "bg-step-1"
+    ));
+    assert!(matches!(
+        structured[1],
+        BackendEvent::NeedsInput(payload) if payload.prompt_id == "bg-choice"
+    ));
+    assert!(matches!(
+        structured[2],
+        BackendEvent::Blocked(BackendBlockedEvent { reason, .. }) if reason == "bg-step-3"
+    ));
+    assert!(matches!(
+        structured[3],
+        BackendEvent::Done(BackendDoneEvent {
+            summary: Some(summary)
+        }) if summary == "bg-finish"
+    ));
+    assert_eq!(
+        manager
+            .session_status(&runtime_session_id)
+            .await
+            .expect("session status"),
+        ManagedSessionStatus::Done
+    );
+
+    let mut store = setup_store(&work_item_id, "137");
+    persist_normalized_events(&mut store, &work_item_id, &worker_session_id, &events);
+
+    let projection = rebuild_projection(
+        &store
+            .read_events_for_work_item(&work_item_id)
+            .expect("read persisted runtime events"),
+    );
+    assert_decide_or_unblock_attention_counts(&projection, 1, 1, 2);
 }
