@@ -1,8 +1,10 @@
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
+use std::process::Command as SyncCommand;
 use std::ffi::OsString;
 use std::path::{Component, Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
+use std::sync::{Mutex, OnceLock};
 
 use async_trait::async_trait;
 use orchestrator_runtime::{
@@ -22,11 +24,22 @@ const DEFAULT_OUTPUT_BUFFER: usize = 256;
 const DEFAULT_HEALTH_CHECK_TIMEOUT: Duration = Duration::from_secs(3);
 const DEFAULT_PROTOCOL_GUIDANCE: &str =
     "Emit @@checkpoint/@@needs_input/@@blocked/@@artifact/@@done lines whenever relevant.";
+const SESSION_EXPORT_HELP_MARKERS: &[&str] = &[
+    "session-export",
+    "session_export",
+    "session export",
+];
+const DIFF_PROVIDER_HELP_MARKERS: &[&str] = &[
+    "diff-provider",
+    "diff_provider",
+    "diff provider",
+];
 const TAG_CHECKPOINT: &str = "@@checkpoint";
 const TAG_NEEDS_INPUT: &str = "@@needs_input";
 const TAG_BLOCKED: &str = "@@blocked";
 const TAG_ARTIFACT: &str = "@@artifact";
 const TAG_DONE: &str = "@@done";
+const OPTIONAL_CAPABILITY_HELP_ARGS: [&str; 2] = ["--help", "-h"];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OpenCodeBackendConfig {
@@ -61,15 +74,18 @@ impl Default for OpenCodeBackendConfig {
 pub struct OpenCodeBackend {
     config: OpenCodeBackendConfig,
     pty_manager: PtyManager,
+    backend_capabilities: BackendCapabilities,
 }
 
 impl OpenCodeBackend {
     pub fn new(config: OpenCodeBackendConfig) -> Self {
         let pty_manager =
             PtyManager::with_render_policy(config.output_buffer, config.render_policy);
+        let backend_capabilities = detect_optional_capabilities(&config.binary);
         Self {
             config,
             pty_manager,
+            backend_capabilities,
         }
     }
 
@@ -156,6 +172,86 @@ impl OpenCodeBackend {
 
         Ok(())
     }
+}
+
+fn detect_optional_capabilities(binary: &Path) -> BackendCapabilities {
+    static CAPABILITIES_BY_BINARY: OnceLock<Mutex<HashMap<PathBuf, BackendCapabilities>>> =
+        OnceLock::new();
+    let cache = CAPABILITIES_BY_BINARY.get_or_init(Default::default);
+
+    if let Ok(cache) = cache.lock() {
+        if let Some(capabilities) = cache.get(binary) {
+            return capabilities.clone();
+        }
+    }
+
+    let mut capabilities = BackendCapabilities {
+        structured_events: true,
+        session_export: false,
+        diff_provider: false,
+        supports_background: true,
+    };
+
+    let help_text = match query_binary_help_text(binary) {
+        Some(text) => text,
+        None => return capabilities,
+    };
+
+    let features = parse_optional_features_from_help(&help_text);
+    capabilities.session_export = features.0;
+    capabilities.diff_provider = features.1;
+
+    if let Ok(mut cache) = cache.lock() {
+        cache.insert(binary.to_path_buf(), capabilities.clone());
+    }
+
+    capabilities
+}
+
+fn query_binary_help_text(binary: &Path) -> Option<String> {
+    if validate_command_binary_path(binary, false).is_err() {
+        return None;
+    }
+
+    for arg in OPTIONAL_CAPABILITY_HELP_ARGS {
+        let output = SyncCommand::new(binary)
+            .arg(arg)
+            .output()
+            .ok()
+            .and_then(|result| {
+                if result.stdout.is_empty() && result.stderr.is_empty() {
+                    None
+                } else {
+                    Some(result)
+                }
+            })?;
+
+        let combined = String::from_utf8_lossy(&output.stdout)
+            .into_owned()
+            .chars()
+            .chain(String::from_utf8_lossy(&output.stderr).chars())
+            .collect::<String>();
+        if !combined.trim().is_empty() {
+            return Some(combined);
+        }
+    }
+
+    None
+}
+
+fn parse_optional_features_from_help(help_text: &str) -> (bool, bool) {
+    let normalized = help_text.to_ascii_lowercase();
+
+    let has_marker = |markers: &[&str]| {
+        markers
+            .iter()
+            .any(|marker| normalized.contains(*marker))
+    };
+
+    (
+        has_marker(SESSION_EXPORT_HELP_MARKERS),
+        has_marker(DIFF_PROVIDER_HELP_MARKERS),
+    )
 }
 
 #[async_trait]
@@ -279,12 +375,7 @@ impl WorkerBackend for OpenCodeBackend {
     }
 
     fn capabilities(&self) -> BackendCapabilities {
-        BackendCapabilities {
-            structured_events: true,
-            session_export: false,
-            diff_provider: false,
-            supports_background: true,
-        }
+        self.backend_capabilities.clone()
     }
 
     async fn health_check(&self) -> RuntimeResult<()> {
@@ -966,6 +1057,16 @@ sleep 1"#
     }
 
     #[cfg(unix)]
+    fn optional_artifact_script() -> &'static str {
+        "printf '@@artifact {\"kind\":\"session_export\",\"id\":\"artifact-export\",\"url\":\"file:///tmp/session-export.json\",\"label\":\"Session export\"}\\n'; printf '@@artifact {\"kind\":\"diff\",\"id\":\"artifact-diff\",\"url\":\"file:///tmp/diff.patch\",\"label\":\"Diff\"}\\n'; printf '@@done {\"summary\":\"complete\"}\\n'; sleep 1"
+    }
+
+    #[cfg(windows)]
+    fn optional_artifact_script() -> &'static str {
+        "echo @@artifact {\"kind\":\"session_export\",\"id\":\"artifact-export\",\"url\":\"file:///tmp/session-export.json\",\"label\":\"Session export\"} && echo @@artifact {\"kind\":\"diff\",\"id\":\"artifact-diff\",\"url\":\"file:///tmp/diff.patch\",\"label\":\"Diff\"} && echo @@done {\"summary\":\"complete\"}"
+    }
+
+    #[cfg(unix)]
     fn unstructured_script() -> &'static str {
         r#"printf 'working on parser cleanup\n';
 printf 'Need your input: should I split module A/B?\n';
@@ -1120,6 +1221,24 @@ sleep 1"#
                 },
             },
             Case {
+                name: "session_export artifact is parsed as dedicated export kind",
+                line: br#"@@artifact {"kind":"session_export","id":"artifact-export","url":"https://example.test/sessions/99","label":"Session export"}"#,
+                expected: Expected::Artifact {
+                    kind: BackendArtifactKind::SessionExport,
+                    artifact_id: Some("artifact-export"),
+                    uri: Some("https://example.test/sessions/99"),
+                },
+            },
+            Case {
+                name: "diff artifact is parsed as dedicated diff kind",
+                line: br#"@@artifact {"kind":"diff","id":"artifact-diff","url":"https://example.test/diff/99","label":"Diff"}"#,
+                expected: Expected::Artifact {
+                    kind: BackendArtifactKind::Diff,
+                    artifact_id: Some("artifact-diff"),
+                    uri: Some("https://example.test/diff/99"),
+                },
+            },
+            Case {
                 name: "needs_input accepts prompt aliases",
                 line: br#"@@needs_input {"prompt_id":"ask-1","prompt":"Choose path?","default_option":"A"}"#,
                 expected: Expected::NeedsInput {
@@ -1257,6 +1376,45 @@ sleep 1"#
                 ),
             }
         }
+    }
+
+    #[test]
+    fn optional_feature_detection_from_help_text_parses_available_markers() {
+        let help_text = "Usage: opencode --session-export and --diff-provider\nSupports workspace diff-provider output";
+
+        let (has_session_export, has_diff_provider) = parse_optional_features_from_help(help_text);
+
+        assert!(has_session_export);
+        assert!(has_diff_provider);
+    }
+
+    #[test]
+    fn optional_feature_detection_from_help_text_falls_back_when_markers_are_missing() {
+        let help_text = "Usage: opencode --help\nNo optional features available in this build.\n";
+
+        let (has_session_export, has_diff_provider) = parse_optional_features_from_help(help_text);
+
+        assert!(!has_session_export);
+        assert!(!has_diff_provider);
+    }
+
+    #[test]
+    fn optional_feature_detection_from_help_text_is_case_insensitive_and_punctuation_tolerant() {
+        let help_text =
+            "Usage: opencode\n- --SESSION_EXPORT controls workspace export output.\n- --Diff-Provider preview.\n";
+
+        let (has_session_export, has_diff_provider) = parse_optional_features_from_help(help_text);
+
+        assert!(has_session_export);
+        assert!(has_diff_provider);
+    }
+
+    #[test]
+    fn optional_feature_detection_falls_back_when_binary_is_not_allowed() {
+        let capabilities = detect_optional_capabilities(Path::new("./bin/opencode"));
+
+        assert!(!capabilities.session_export);
+        assert!(!capabilities.diff_provider);
     }
 
     #[test]
@@ -1686,6 +1844,57 @@ sleep 1"#
         assert!(events.iter().any(|event| matches!(
             event,
             BackendEvent::Done(BackendDoneEvent { summary: Some(value) }) if value == "complete"
+        )));
+    }
+
+    #[tokio::test]
+    async fn subscribe_parses_optional_artifact_payloads() {
+        let backend = test_backend(shell_program(), shell_args(optional_artifact_script()));
+        let handle = backend
+            .spawn(spawn_spec("session-opencode-optional-artifacts"))
+            .await
+            .expect("spawn optional artifact session");
+        let mut stream = backend.subscribe(&handle).await.expect("subscribe optional artifacts");
+
+        let events = timeout(TEST_TIMEOUT, async {
+            let mut events = Vec::new();
+            loop {
+                match stream.next_event().await.expect("read optional artifact event") {
+                    Some(event) => {
+                        let stop = matches!(event, BackendEvent::Done(_));
+                        events.push(event);
+                        if stop {
+                            return events;
+                        }
+                    }
+                    None => return events,
+                }
+            }
+        })
+        .await
+        .expect("collect optional artifact events");
+
+        assert!(events.iter().any(|event| matches!(
+            event,
+            BackendEvent::Artifact(BackendArtifactEvent {
+                kind: BackendArtifactKind::SessionExport,
+                artifact_id: Some(artifact_id),
+                uri: Some(uri),
+                ..
+            }) if artifact_id.as_str() == "artifact-export" && uri == "file:///tmp/session-export.json"
+        )));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            BackendEvent::Artifact(BackendArtifactEvent {
+                kind: BackendArtifactKind::Diff,
+                artifact_id: Some(artifact_id),
+                uri: Some(uri),
+                ..
+            }) if artifact_id.as_str() == "artifact-diff" && uri == "file:///tmp/diff.patch"
+        )));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            BackendEvent::Done(BackendDoneEvent { summary: Some(summary) }) if summary == "complete"
         )));
     }
 
