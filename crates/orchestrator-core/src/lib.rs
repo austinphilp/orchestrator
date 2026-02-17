@@ -11,6 +11,7 @@ mod store;
 pub mod test_support;
 mod ticket_selection;
 mod workflow;
+mod workflow_automation;
 
 pub use adapters::{
     AddTicketCommentRequest, CodeHostKind, CodeHostProvider, CreatePullRequestRequest,
@@ -66,6 +67,11 @@ pub use ticket_selection::{
 pub use workflow::{
     apply_workflow_transition, initial_workflow_state, validate_workflow_transition, WorkflowGuard,
     WorkflowGuardContext, WorkflowTransitionError, WorkflowTransitionReason,
+};
+pub use workflow_automation::{
+    plan_workflow_automation, plan_workflow_automation_with_policy, WorkflowAutomationInboxIntent,
+    WorkflowAutomationPlan, WorkflowAutomationPolicy, WorkflowAutomationStep,
+    WorkflowAutomationTransitionIntent, READY_FOR_REVIEW_INBOX_TITLE,
 };
 
 #[cfg(test)]
