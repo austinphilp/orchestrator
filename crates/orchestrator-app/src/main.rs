@@ -47,6 +47,7 @@ async fn main() -> Result<()> {
 
     let app = Arc::new(App {
         config,
+        ticketing,
         supervisor,
         github,
     });

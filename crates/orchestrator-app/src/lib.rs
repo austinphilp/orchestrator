@@ -2,7 +2,7 @@ use integration_linear::LinearTicketingProvider;
 use orchestrator_core::{
     rebuild_projection, CoreError, EventStore, GithubClient, LlmProvider, ProjectionState,
     CodeHostProvider, SelectedTicketFlowConfig, SelectedTicketFlowResult, SqliteEventStore, Supervisor,
-    TicketSummary, UntypedCommandInvocation, VcsProvider, WorkerBackend,
+    TicketingProvider, TicketSummary, UntypedCommandInvocation, VcsProvider, WorkerBackend,
 };
 use orchestrator_ui::{SupervisorCommandContext, SupervisorCommandDispatcher};
 use serde::{Deserialize, Serialize};
@@ -282,6 +282,7 @@ fn open_event_store(path: &str) -> Result<SqliteEventStore, CoreError> {
 
 pub struct App<S: Supervisor, G: GithubClient> {
     pub config: AppConfig,
+    pub ticketing: Arc<dyn TicketingProvider + Send + Sync>,
     pub supervisor: S,
     pub github: G,
 }
@@ -363,6 +364,7 @@ where
         command_dispatch::dispatch_supervisor_runtime_command(
             &self.supervisor,
             &self.github,
+            &self.ticketing,
             &self.config.event_store_path,
             invocation,
             context,
@@ -386,7 +388,10 @@ mod tests {
     use orchestrator_core::{
         ArtifactCreatedPayload, ArtifactId, ArtifactKind, ArtifactRecord, BackendCapabilities,
         BackendKind, CodeHostKind, Command, CommandRegistry, DOMAIN_EVENT_SCHEMA_VERSION, command_ids,
-        LlmChatRequest,
+        AddTicketCommentRequest, CreateTicketRequest,
+        GetTicketRequest, LlmChatRequest,
+        TicketDetails, TicketingProvider, UpdateTicketDescriptionRequest,
+        UpdateTicketStateRequest,
         LlmFinishReason, LlmProviderKind, LlmResponseStream, LlmResponseSubscription,
         LlmStreamChunk, NewEventEnvelope, OrchestrationEventPayload, RuntimeMappingRecord,
         RuntimeResult, SessionHandle, SessionRecord, SpawnSpec,
@@ -1066,6 +1071,73 @@ mod tests {
         remove_temp_path(&home);
     }
 
+    #[derive(Debug)]
+    struct MockTicketingProvider;
+
+    impl MockTicketingProvider {
+        fn service() -> Arc<dyn TicketingProvider + Send + Sync> {
+            Arc::new(Self)
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl TicketingProvider for MockTicketingProvider {
+        fn provider(&self) -> TicketProvider {
+            TicketProvider::Linear
+        }
+
+        async fn health_check(&self) -> Result<(), CoreError> {
+            Ok(())
+        }
+
+        async fn list_tickets(
+            &self,
+            _query: TicketQuery,
+        ) -> Result<Vec<TicketSummary>, CoreError> {
+            Ok(Vec::new())
+        }
+
+        async fn create_ticket(
+            &self,
+            _request: CreateTicketRequest,
+        ) -> Result<TicketSummary, CoreError> {
+            Err(CoreError::DependencyUnavailable(
+                "mock ticketing provider does not implement create_ticket in tests".to_owned(),
+            ))
+        }
+
+        async fn update_ticket_state(
+            &self,
+            _request: UpdateTicketStateRequest,
+        ) -> Result<(), CoreError> {
+            Err(CoreError::DependencyUnavailable(
+                "mock ticketing provider does not implement update_ticket_state in tests".to_owned(),
+            ))
+        }
+
+        async fn get_ticket(
+            &self,
+            _request: GetTicketRequest,
+        ) -> Result<TicketDetails, CoreError> {
+            Err(CoreError::DependencyUnavailable(
+                "mock ticketing provider does not implement get_ticket in tests".to_owned(),
+            ))
+        }
+
+        async fn update_ticket_description(
+            &self,
+            _request: UpdateTicketDescriptionRequest,
+        ) -> Result<(), CoreError> {
+            Err(CoreError::DependencyUnavailable(
+                "mock ticketing provider does not implement update_ticket_description in tests".to_owned(),
+            ))
+        }
+
+        async fn add_comment(&self, _request: AddTicketCommentRequest) -> Result<(), CoreError> {
+            Ok(())
+        }
+    }
+
     #[tokio::test]
     async fn startup_composition_succeeds_with_mock_adapters() {
         let temp_db = TestDbPath::new("app-startup-test");
@@ -1077,6 +1149,7 @@ mod tests {
             ticketing_provider: "linear".to_owned(),
             harness_provider: "codex".to_owned(),
             },
+            ticketing: MockTicketingProvider::service(),
             supervisor: Healthy,
             github: Healthy,
         };
@@ -1223,6 +1296,7 @@ mod tests {
             ticketing_provider: "linear".to_owned(),
             harness_provider: "codex".to_owned(),
             },
+            ticketing: MockTicketingProvider::service(),
             supervisor: Healthy,
             github: Healthy,
         };
@@ -1282,6 +1356,7 @@ mod tests {
                 ticketing_provider: "linear".to_owned(),
                 harness_provider: "codex".to_owned(),
             },
+            ticketing: MockTicketingProvider::service(),
             supervisor: Healthy,
             github: Healthy,
         };
@@ -1305,6 +1380,7 @@ mod tests {
                 ticketing_provider: "shortcut".to_owned(),
                 harness_provider: "codex".to_owned(),
             },
+            ticketing: MockTicketingProvider::service(),
             supervisor: Healthy,
             github: Healthy,
         };
@@ -1319,12 +1395,14 @@ mod tests {
         let supervisor = QueryingSupervisor::with_chunks(vec![
             LlmStreamChunk {
                 delta: "Current activity: worker is implementing AP-180".to_owned(),
+                tool_calls: Vec::new(),
                 finish_reason: None,
                 usage: None,
                 rate_limit: None,
             },
             LlmStreamChunk {
                 delta: String::new(),
+                tool_calls: Vec::new(),
                 finish_reason: Some(LlmFinishReason::Stop),
                 usage: None,
                 rate_limit: None,
@@ -1338,6 +1416,7 @@ mod tests {
             ticketing_provider: "linear".to_owned(),
             harness_provider: "codex".to_owned(),
             },
+            ticketing: MockTicketingProvider::service(),
             supervisor: supervisor.clone(),
             github: Healthy,
         };
@@ -1387,12 +1466,14 @@ mod tests {
         let supervisor = QueryingSupervisor::with_chunks(vec![
             LlmStreamChunk {
                 delta: "Global summary: inbox has two approvals pending.".to_owned(),
+                tool_calls: Vec::new(),
                 finish_reason: None,
                 usage: None,
                 rate_limit: None,
             },
             LlmStreamChunk {
                 delta: String::new(),
+                tool_calls: Vec::new(),
                 finish_reason: Some(LlmFinishReason::Stop),
                 usage: Some(orchestrator_core::LlmTokenUsage {
                     input_tokens: 18,
@@ -1410,6 +1491,7 @@ mod tests {
             ticketing_provider: "linear".to_owned(),
             harness_provider: "codex".to_owned(),
             },
+            ticketing: MockTicketingProvider::service(),
             supervisor: supervisor.clone(),
             github: Healthy,
         };
@@ -1469,12 +1551,14 @@ mod tests {
         let supervisor = QueryingSupervisor::with_chunks(vec![
             LlmStreamChunk {
                 delta: "Current activity: reviewing build output.".to_owned(),
+                tool_calls: Vec::new(),
                 finish_reason: None,
                 usage: None,
                 rate_limit: None,
             },
             LlmStreamChunk {
                 delta: String::new(),
+                tool_calls: Vec::new(),
                 finish_reason: Some(LlmFinishReason::Stop),
                 usage: Some(orchestrator_core::LlmTokenUsage {
                     input_tokens: 64,
@@ -1492,6 +1576,7 @@ mod tests {
             ticketing_provider: "linear".to_owned(),
             harness_provider: "codex".to_owned(),
             },
+            ticketing: MockTicketingProvider::service(),
             supervisor: supervisor.clone(),
             github: Healthy,
         };
@@ -1565,6 +1650,7 @@ mod tests {
         let temp_db = TestDbPath::new("app-supervisor-query-command-context");
         let supervisor = QueryingSupervisor::with_chunks(vec![LlmStreamChunk {
             delta: String::new(),
+            tool_calls: Vec::new(),
             finish_reason: Some(LlmFinishReason::Stop),
             usage: None,
             rate_limit: None,
@@ -1577,6 +1663,7 @@ mod tests {
             ticketing_provider: "linear".to_owned(),
             harness_provider: "codex".to_owned(),
             },
+            ticketing: MockTicketingProvider::service(),
             supervisor: supervisor.clone(),
             github: Healthy,
         };
@@ -1613,6 +1700,7 @@ mod tests {
         let temp_db = TestDbPath::new("app-supervisor-query-partial-context-overlay");
         let supervisor = QueryingSupervisor::with_chunks(vec![LlmStreamChunk {
             delta: String::new(),
+            tool_calls: Vec::new(),
             finish_reason: Some(LlmFinishReason::Stop),
             usage: None,
             rate_limit: None,
@@ -1625,6 +1713,7 @@ mod tests {
             ticketing_provider: "linear".to_owned(),
             harness_provider: "codex".to_owned(),
             },
+            ticketing: MockTicketingProvider::service(),
             supervisor: supervisor.clone(),
             github: Healthy,
         };
@@ -1662,10 +1751,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn supervisor_query_dispatch_auto_resolves_blocking_intent_to_template() {
+    async fn supervisor_query_dispatch_auto_resolves_blocking_intent_as_freeform() {
         let temp_db = TestDbPath::new("app-supervisor-query-freeform-blocking-template");
         let supervisor = QueryingSupervisor::with_chunks(vec![LlmStreamChunk {
             delta: String::new(),
+            tool_calls: Vec::new(),
             finish_reason: Some(LlmFinishReason::Stop),
             usage: None,
             rate_limit: None,
@@ -1678,6 +1768,7 @@ mod tests {
             ticketing_provider: "linear".to_owned(),
             harness_provider: "codex".to_owned(),
             },
+            ticketing: MockTicketingProvider::service(),
             supervisor: supervisor.clone(),
             github: Healthy,
         };
@@ -1701,49 +1792,42 @@ mod tests {
         assert_eq!(requests.len(), 1);
         assert!(requests[0].messages[1]
             .content
-            .contains("Template: What is blocking (what_is_blocking)"));
+            .contains("Operator question:"));
         assert!(requests[0].messages[1]
             .content
-            .contains("Template variables:"));
-        assert!(requests[0].messages[1]
-            .content
-            .contains("- operator_question=What is blocking this ticket?"));
+            .contains("What is blocking this ticket?"));
         assert!(requests[0].messages[1].content.contains("Context pack:"));
         assert!(!requests[0].messages[1]
             .content
-            .contains("Operator question:"));
+            .contains("Template:"));
     }
 
     #[tokio::test]
-    async fn supervisor_query_dispatch_auto_resolves_status_and_planning_intents_to_templates() {
+    async fn supervisor_query_dispatch_auto_resolves_status_and_planning_intents_as_freeform() {
         let temp_db = TestDbPath::new("app-supervisor-query-freeform-intent-templates");
 
         let cases = [
-            (
-                "What's the status right now?",
-                "Template: Ticket status (ticket_status)",
-            ),
-            (
-                "What should we do next to unblock this?",
-                "Template: Next actions (next_actions)",
-            ),
+            "What's the status right now?",
+            "What should we do next to unblock this?",
         ];
 
-        for (query, expected_template) in cases {
+        for query in cases {
             let supervisor = QueryingSupervisor::with_chunks(vec![LlmStreamChunk {
                 delta: String::new(),
+                tool_calls: Vec::new(),
                 finish_reason: Some(LlmFinishReason::Stop),
                 usage: None,
                 rate_limit: None,
             }]);
 
             let app = App {
-                config: AppConfig {
-                    workspace: "/workspace".to_owned(),
-                    event_store_path: temp_db.path().to_string_lossy().to_string(),
+            config: AppConfig {
+                workspace: "/workspace".to_owned(),
+                event_store_path: temp_db.path().to_string_lossy().to_string(),
             ticketing_provider: "linear".to_owned(),
             harness_provider: "codex".to_owned(),
             },
+            ticketing: MockTicketingProvider::service(),
             supervisor: supervisor.clone(),
                 github: Healthy,
             };
@@ -1765,13 +1849,8 @@ mod tests {
 
             let requests = supervisor.requests();
             assert_eq!(requests.len(), 1);
-            assert!(requests[0].messages[1].content.contains(expected_template));
-            assert!(requests[0].messages[1]
-                .content
-                .contains("- operator_question="));
-            assert!(!requests[0].messages[1]
-                .content
-                .contains("Operator question:"));
+            assert!(requests[0].messages[1].content.contains(query));
+            assert!(!requests[0].messages[1].content.contains("Template:"));
         }
     }
 
@@ -1780,6 +1859,7 @@ mod tests {
         let temp_db = TestDbPath::new("app-supervisor-query-freeform-fallback");
         let supervisor = QueryingSupervisor::with_chunks(vec![LlmStreamChunk {
             delta: String::new(),
+            tool_calls: Vec::new(),
             finish_reason: Some(LlmFinishReason::Stop),
             usage: None,
             rate_limit: None,
@@ -1792,6 +1872,7 @@ mod tests {
             ticketing_provider: "linear".to_owned(),
             harness_provider: "codex".to_owned(),
             },
+            ticketing: MockTicketingProvider::service(),
             supervisor: supervisor.clone(),
             github: Healthy,
         };
@@ -1829,6 +1910,7 @@ mod tests {
             ticketing_provider: "linear".to_owned(),
             harness_provider: "codex".to_owned(),
             },
+            ticketing: MockTicketingProvider::service(),
             supervisor: QueryingSupervisor::default(),
             github: Healthy,
         };
@@ -1864,6 +1946,7 @@ mod tests {
             ticketing_provider: "linear".to_owned(),
             harness_provider: "codex".to_owned(),
             },
+            ticketing: MockTicketingProvider::service(),
             supervisor: QueryingSupervisor::default(),
             github: Healthy,
         };
@@ -1892,6 +1975,7 @@ mod tests {
         let temp_db = TestDbPath::new("app-supervisor-query-command-context-precedence");
         let supervisor = QueryingSupervisor::with_chunks(vec![LlmStreamChunk {
             delta: String::new(),
+            tool_calls: Vec::new(),
             finish_reason: Some(LlmFinishReason::Stop),
             usage: None,
             rate_limit: None,
@@ -1903,6 +1987,7 @@ mod tests {
             ticketing_provider: "linear".to_owned(),
             harness_provider: "codex".to_owned(),
             },
+            ticketing: MockTicketingProvider::service(),
             supervisor: supervisor.clone(),
             github: Healthy,
         };
@@ -1955,6 +2040,7 @@ mod tests {
             ticketing_provider: "linear".to_owned(),
             harness_provider: "codex".to_owned(),
             },
+            ticketing: MockTicketingProvider::service(),
             supervisor: QueryingSupervisor::default(),
             github: Healthy,
         };
@@ -1997,6 +2083,7 @@ mod tests {
             ticketing_provider: "linear".to_owned(),
             harness_provider: "codex".to_owned(),
             },
+            ticketing: MockTicketingProvider::service(),
             supervisor: QueryingSupervisor::default(),
             github: host.clone(),
         };
@@ -2056,6 +2143,7 @@ mod tests {
             ticketing_provider: "linear".to_owned(),
             harness_provider: "codex".to_owned(),
             },
+            ticketing: MockTicketingProvider::service(),
             supervisor: QueryingSupervisor::default(),
             github: Healthy,
         };
@@ -2102,6 +2190,7 @@ mod tests {
             ticketing_provider: "linear".to_owned(),
             harness_provider: "codex".to_owned(),
             },
+            ticketing: MockTicketingProvider::service(),
             supervisor: QueryingSupervisor::default(),
             github: host.clone(),
         };
@@ -2163,6 +2252,7 @@ mod tests {
             ticketing_provider: "linear".to_owned(),
             harness_provider: "codex".to_owned(),
             },
+            ticketing: MockTicketingProvider::service(),
             supervisor: QueryingSupervisor::default(),
             github: host.clone(),
         };
@@ -2211,6 +2301,7 @@ mod tests {
             ticketing_provider: "linear".to_owned(),
             harness_provider: "codex".to_owned(),
             },
+            ticketing: MockTicketingProvider::service(),
             supervisor: QueryingSupervisor::default(),
             github: Healthy,
         };
@@ -2241,6 +2332,7 @@ mod tests {
             ticketing_provider: "linear".to_owned(),
             harness_provider: "codex".to_owned(),
             },
+            ticketing: MockTicketingProvider::service(),
             supervisor: QueryingSupervisor::default(),
             github: Healthy,
         };
@@ -2286,6 +2378,7 @@ mod tests {
             ticketing_provider: "linear".to_owned(),
             harness_provider: "codex".to_owned(),
             },
+            ticketing: MockTicketingProvider::service(),
             supervisor: supervisor.clone(),
             github: Healthy,
         };
@@ -2305,6 +2398,7 @@ mod tests {
         let temp_db = TestDbPath::new("app-supervisor-query-user-cancel-record");
         let supervisor = QueryingSupervisor::with_chunks(vec![LlmStreamChunk {
             delta: String::new(),
+            tool_calls: Vec::new(),
             finish_reason: Some(LlmFinishReason::Cancelled),
             usage: None,
             rate_limit: None,
@@ -2316,6 +2410,7 @@ mod tests {
             ticketing_provider: "linear".to_owned(),
             harness_provider: "codex".to_owned(),
             },
+            ticketing: MockTicketingProvider::service(),
             supervisor: supervisor.clone(),
             github: Healthy,
         };
@@ -2370,6 +2465,7 @@ mod tests {
         let temp_db = TestDbPath::new("app-supervisor-query-user-cancel-deduped");
         let supervisor = QueryingSupervisor::with_chunks(vec![LlmStreamChunk {
             delta: String::new(),
+            tool_calls: Vec::new(),
             finish_reason: Some(LlmFinishReason::Cancelled),
             usage: None,
             rate_limit: None,
@@ -2381,6 +2477,7 @@ mod tests {
             ticketing_provider: "linear".to_owned(),
             harness_provider: "codex".to_owned(),
             },
+            ticketing: MockTicketingProvider::service(),
             supervisor: supervisor.clone(),
             github: Healthy,
         };
@@ -2431,6 +2528,7 @@ mod tests {
         let temp_db = TestDbPath::new("app-supervisor-query-stream-id-reuse");
         let supervisor = QueryingSupervisor::with_chunks(vec![LlmStreamChunk {
             delta: String::new(),
+            tool_calls: Vec::new(),
             finish_reason: Some(LlmFinishReason::Cancelled),
             usage: None,
             rate_limit: None,
@@ -2442,6 +2540,7 @@ mod tests {
             ticketing_provider: "linear".to_owned(),
             harness_provider: "codex".to_owned(),
             },
+            ticketing: MockTicketingProvider::service(),
             supervisor: supervisor.clone(),
             github: Healthy,
         };

@@ -1,7 +1,8 @@
 use async_trait::async_trait;
 use orchestrator_core::{
-    AddTicketCommentRequest, CoreError, CreateTicketRequest, TicketAttachment, TicketId,
-    TicketProvider, TicketQuery, TicketSummary, TicketingProvider, UpdateTicketStateRequest,
+    AddTicketCommentRequest, CoreError, CreateTicketRequest, GetTicketRequest, TicketAttachment,
+    TicketDetails, TicketId, TicketProvider, TicketQuery, TicketSummary, TicketingProvider,
+    UpdateTicketDescriptionRequest, UpdateTicketStateRequest,
 };
 use reqwest::{header, Client};
 use serde::de::DeserializeOwned;
@@ -341,6 +342,16 @@ impl TicketingProvider for ShortcutTicketingProvider {
         Ok(ticket_summary_from_story(created))
     }
 
+    async fn get_ticket(&self, request: GetTicketRequest) -> Result<TicketDetails, CoreError> {
+        let issue_id = shortcut_provider_ticket_id(&request.ticket_id)?;
+        let response = self.client.get(self.endpoint(&format!("stories/{issue_id}")));
+        let story = parse_shortcut_story(self.request_json(response).await?)?;
+        Ok(TicketDetails {
+            summary: ticket_summary_from_story(story.clone()),
+            description: story.description,
+        })
+    }
+
     async fn update_ticket_state(
         &self,
         request: UpdateTicketStateRequest,
@@ -358,6 +369,24 @@ impl TicketingProvider for ShortcutTicketingProvider {
             .client
             .put(self.endpoint(&format!("stories/{issue_id}")))
             .json(&json!({ "workflowStateId": workflow_state_id }));
+        self.request_status_only(request).await
+    }
+
+    async fn update_ticket_description(
+        &self,
+        request: UpdateTicketDescriptionRequest,
+    ) -> Result<(), CoreError> {
+        let issue_id = shortcut_provider_ticket_id(&request.ticket_id)?;
+        let description = request.description.trim();
+        if description.is_empty() {
+            return Err(CoreError::Configuration(
+                "Shortcut ticket description updates require non-empty text.".to_owned(),
+            ));
+        }
+        let request = self
+            .client
+            .put(self.endpoint(&format!("stories/{issue_id}")))
+            .json(&json!({ "description": description }));
         self.request_status_only(request).await
     }
 
@@ -407,6 +436,30 @@ fn extract_list<T: DeserializeOwned>(payload: Value, key: &str) -> Result<Vec<T>
     Err(CoreError::DependencyUnavailable(format!(
         "Shortcut response does not contain a list for '{key}'."
     )))
+}
+
+fn parse_shortcut_story(payload: Value) -> Result<ShortcutStory, CoreError> {
+    if let Ok(story) = serde_json::from_value::<ShortcutStory>(payload.clone()) {
+        return Ok(story);
+    }
+    let mut wrapper = payload;
+    if let Some(story) = wrapper.get_mut("story").and_then(Value::take) {
+        serde_json::from_value::<ShortcutStory>(story).map_err(|error| {
+            CoreError::DependencyUnavailable(format!(
+                "Shortcut story payload decode failed: {error}"
+            ))
+        })
+    } else if let Some(story) = wrapper.get_mut("data").and_then(|value| value.get_mut("story")) {
+        serde_json::from_value::<ShortcutStory>(story.take()).map_err(|error| {
+            CoreError::DependencyUnavailable(format!(
+                "Shortcut story payload decode failed: {error}"
+            ))
+        })
+    } else {
+        Err(CoreError::DependencyUnavailable(
+            "Shortcut response does not contain a story payload.".to_owned(),
+        ))
+    }
 }
 
 fn compose_shortcut_comment_body(
@@ -526,6 +579,8 @@ fn ticket_summary_from_story(story: ShortcutStory) -> TicketSummary {
 #[serde(rename_all = "camelCase")]
 struct ShortcutStory {
     pub id: Option<String>,
+    #[serde(default)]
+    pub description: Option<String>,
     #[serde(default)]
     pub name: Option<String>,
     #[serde(default)]
