@@ -1,3 +1,4 @@
+use integration_linear::LinearTicketingProvider;
 use orchestrator_core::{
     rebuild_projection, CoreError, EventStore, GithubClient, LlmProvider, ProjectionState,
     CodeHostProvider, SelectedTicketFlowConfig, SelectedTicketFlowResult, SqliteEventStore, Supervisor,
@@ -300,6 +301,26 @@ impl<S: Supervisor, G: GithubClient> App<S, G> {
         })
     }
 
+    pub async fn start_linear_polling(
+        &self,
+        linear_ticketing_provider: Option<&LinearTicketingProvider>,
+    ) -> Result<(), CoreError> {
+        if let Some(provider) = linear_ticketing_provider {
+            provider.start_polling().await?;
+        }
+        Ok(())
+    }
+
+    pub async fn stop_linear_polling(
+        &self,
+        linear_ticketing_provider: Option<&LinearTicketingProvider>,
+    ) -> Result<(), CoreError> {
+        if let Some(provider) = linear_ticketing_provider {
+            provider.stop_polling().await?;
+        }
+        Ok(())
+    }
+
     pub async fn start_or_resume_selected_ticket(
         &self,
         selected_ticket: &TicketSummary,
@@ -376,8 +397,56 @@ mod tests {
     use serde_json::json;
     use std::collections::{BTreeMap, VecDeque};
     use std::path::{Path, PathBuf};
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+    #[derive(Debug)]
+    struct StubLinearTransport {
+        responses: std::sync::Mutex<VecDeque<serde_json::Value>>,
+        call_count: AtomicUsize,
+    }
+
+    impl StubLinearTransport {
+        fn new(responses: Vec<serde_json::Value>) -> Self {
+            Self {
+                responses: std::sync::Mutex::new(VecDeque::from(responses)),
+                call_count: AtomicUsize::new(0),
+            }
+        }
+
+        fn call_count(&self) -> usize {
+            self.call_count.load(Ordering::SeqCst)
+        }
+
+        fn linear_empty_issue_payload() -> serde_json::Value {
+            json!({
+                "viewer": {
+                    "id": "viewer-1",
+                },
+                "issues": {
+                    "nodes": []
+                },
+            })
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl integration_linear::GraphqlTransport for StubLinearTransport {
+        async fn execute(
+            &self,
+            _request: integration_linear::GraphqlRequest,
+        ) -> Result<serde_json::Value, CoreError> {
+            self.call_count.fetch_add(1, Ordering::SeqCst);
+            let mut responses = self
+                .responses
+                .lock()
+                .expect("linear polling transport response lock");
+            responses.pop_front().ok_or_else(|| {
+                CoreError::DependencyUnavailable("No stub Linear response available".to_owned())
+            })
+        }
+    }
 
     fn unique_temp_path(prefix: &str) -> PathBuf {
         let now = SystemTime::now()
@@ -1192,6 +1261,56 @@ mod tests {
         );
         assert_eq!(vcs.create_calls.lock().expect("lock").len(), 1);
         assert_eq!(backend.spawn_calls.lock().expect("lock").len(), 1);
+    }
+
+    #[tokio::test]
+    async fn app_start_and_stop_linear_polling_lifecycle() {
+        let temp_db = TestDbPath::new("app-linear-polling-lifecycle");
+        let transport = Arc::new(StubLinearTransport::new(vec![
+            StubLinearTransport::linear_empty_issue_payload(),
+        ]));
+        let transport_trait: Arc<dyn integration_linear::GraphqlTransport> = transport.clone();
+        let mut linear_config = integration_linear::LinearConfig::default();
+        linear_config.poll_interval = Duration::from_secs(3600);
+        let linear_ticketing =
+            Arc::new(LinearTicketingProvider::with_transport(linear_config, transport_trait));
+
+        let app = App {
+            config: AppConfig {
+                workspace: "/workspace".to_owned(),
+                event_store_path: temp_db.path().to_string_lossy().to_string(),
+                ticketing_provider: "linear".to_owned(),
+                harness_provider: "codex".to_owned(),
+            },
+            supervisor: Healthy,
+            github: Healthy,
+        };
+
+        app.start_linear_polling(Some(&linear_ticketing))
+            .await
+            .expect("start polling");
+        app.stop_linear_polling(Some(&linear_ticketing))
+            .await
+            .expect("stop polling");
+        assert_eq!(transport.call_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn app_linear_polling_lifecycle_is_noop_without_linear_provider() {
+        let temp_db = TestDbPath::new("app-linear-polling-noop");
+        let app = App {
+            config: AppConfig {
+                workspace: "/workspace".to_owned(),
+                event_store_path: temp_db.path().to_string_lossy().to_string(),
+                ticketing_provider: "shortcut".to_owned(),
+                harness_provider: "codex".to_owned(),
+            },
+            supervisor: Healthy,
+            github: Healthy,
+        };
+
+        app.start_linear_polling(None).await.expect("start polling noop");
+        app.stop_linear_polling(None).await.expect("stop polling noop");
     }
 
     #[tokio::test]
