@@ -2,7 +2,7 @@ use std::collections::{BTreeSet, HashSet, VecDeque};
 use std::ffi::OsString;
 use std::fs;
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 
 use orchestrator_core::{
@@ -12,6 +12,9 @@ use orchestrator_core::{
 
 const ENV_GIT_BIN: &str = "ORCHESTRATOR_GIT_BIN";
 const ENV_ALLOW_DELETE_UNMERGED_BRANCHES: &str = "ORCHESTRATOR_GIT_ALLOW_DELETE_UNMERGED_BRANCHES";
+const ENV_ALLOW_DESTRUCTIVE_AUTOMATION: &str = "ORCHESTRATOR_GIT_ALLOW_DESTRUCTIVE_AUTOMATION";
+const ENV_ALLOW_FORCE_PUSH: &str = "ORCHESTRATOR_GIT_ALLOW_FORCE_PUSH";
+const ENV_ALLOW_UNSAFE_COMMAND_PATHS: &str = "ORCHESTRATOR_ALLOW_UNSAFE_COMMAND_PATHS";
 const DEFAULT_BASE_BRANCH: &str = "main";
 const WORKTREE_BRANCH_TEMPLATE: &str = "ap/{issue-key}-{slug}";
 const WORKTREE_BRANCH_PREFIX: &str = "ap/";
@@ -32,7 +35,10 @@ impl CommandRunner for ProcessCommandRunner {
 pub struct GitCliVcsProvider<R: CommandRunner> {
     runner: R,
     binary: PathBuf,
+    allow_destructive_automation: bool,
+    allow_force_push: bool,
     allow_force_delete_unmerged_branches: bool,
+    allow_unsafe_command_paths: bool,
 }
 
 struct ParsedWorktreeBranch<'a> {
@@ -50,22 +56,29 @@ impl<R: CommandRunner> GitCliVcsProvider<R> {
             )));
         }
 
+        let allow_destructive_automation = read_bool_env(ENV_ALLOW_DESTRUCTIVE_AUTOMATION)?;
+        let allow_force_push = read_bool_env(ENV_ALLOW_FORCE_PUSH)?;
         let allow_force_delete_unmerged_branches =
-            match std::env::var(ENV_ALLOW_DELETE_UNMERGED_BRANCHES) {
-                Ok(value) => parse_bool_env(ENV_ALLOW_DELETE_UNMERGED_BRANCHES, &value)?,
-                Err(std::env::VarError::NotPresent) => false,
-                Err(_) => {
-                    return Err(CoreError::Configuration(
-                        "ORCHESTRATOR_GIT_ALLOW_DELETE_UNMERGED_BRANCHES contained invalid UTF-8"
-                            .to_owned(),
-                    ))
-                }
-            };
+            read_bool_env(ENV_ALLOW_DELETE_UNMERGED_BRANCHES)?;
+        let allow_unsafe_command_paths = read_bool_env(ENV_ALLOW_UNSAFE_COMMAND_PATHS)?;
+        if allow_force_push && !allow_destructive_automation {
+            return Err(CoreError::Configuration(format!(
+                "{ENV_ALLOW_FORCE_PUSH}=true requires {ENV_ALLOW_DESTRUCTIVE_AUTOMATION}=true."
+            )));
+        }
+        if allow_force_delete_unmerged_branches && !allow_destructive_automation {
+            return Err(CoreError::Configuration(format!(
+                "{ENV_ALLOW_DELETE_UNMERGED_BRANCHES}=true requires {ENV_ALLOW_DESTRUCTIVE_AUTOMATION}=true."
+            )));
+        }
 
-        Ok(Self::with_binary(
+        Ok(Self::with_binary_and_safety(
             runner,
             binary,
+            allow_destructive_automation,
+            allow_force_push,
             allow_force_delete_unmerged_branches,
+            allow_unsafe_command_paths,
         ))
     }
 
@@ -74,10 +87,31 @@ impl<R: CommandRunner> GitCliVcsProvider<R> {
         binary: PathBuf,
         allow_force_delete_unmerged_branches: bool,
     ) -> Self {
+        Self::with_binary_and_safety(
+            runner,
+            binary,
+            false,
+            false,
+            allow_force_delete_unmerged_branches,
+            false,
+        )
+    }
+
+    pub fn with_binary_and_safety(
+        runner: R,
+        binary: PathBuf,
+        allow_destructive_automation: bool,
+        allow_force_push: bool,
+        allow_force_delete_unmerged_branches: bool,
+        allow_unsafe_command_paths: bool,
+    ) -> Self {
         Self {
             runner,
             binary,
+            allow_destructive_automation,
+            allow_force_push,
             allow_force_delete_unmerged_branches,
+            allow_unsafe_command_paths,
         }
     }
 
@@ -86,6 +120,13 @@ impl<R: CommandRunner> GitCliVcsProvider<R> {
     }
 
     fn run_git_raw(&self, args: &[OsString]) -> Result<std::process::Output, CoreError> {
+        validate_command_binary_path(&self.binary, ENV_GIT_BIN, self.allow_unsafe_command_paths)?;
+        Self::validate_git_command_safety(
+            args,
+            self.allow_destructive_automation,
+            self.allow_force_push,
+        )?;
+
         let program = self
             .binary
             .to_str()
@@ -135,6 +176,68 @@ impl<R: CommandRunner> GitCliVcsProvider<R> {
             "Git command failed (`{} {rendered_args}`): {detail}",
             self.binary.display()
         ))
+    }
+
+    fn validate_git_command_safety(
+        args: &[OsString],
+        allow_destructive_automation: bool,
+        allow_force_push: bool,
+    ) -> Result<(), CoreError> {
+        let Some(push_args) = Self::push_subcommand_args(args) else {
+            return Ok(());
+        };
+
+        if !Self::contains_force_push_flag(push_args) {
+            return Ok(());
+        }
+
+        if !allow_destructive_automation {
+            return Err(CoreError::Configuration(format!(
+                "Refusing to run force-push via git automation by default. Set {ENV_ALLOW_DESTRUCTIVE_AUTOMATION}=true and {ENV_ALLOW_FORCE_PUSH}=true to explicitly allow this destructive path."
+            )));
+        }
+
+        if !allow_force_push {
+            return Err(CoreError::Configuration(format!(
+                "Refusing to run force-push via git automation by default. Set {ENV_ALLOW_FORCE_PUSH}=true to explicitly allow this destructive path."
+            )));
+        }
+
+        Ok(())
+    }
+
+    fn push_subcommand_args(args: &[OsString]) -> Option<&[OsString]> {
+        let index = args
+            .iter()
+            .position(|arg| arg.to_string_lossy().eq_ignore_ascii_case("push"))?;
+        Some(&args[index + 1..])
+    }
+
+    fn contains_force_push_flag(args: &[OsString]) -> bool {
+        args.iter()
+            .take_while(|arg| arg.to_string_lossy() != "--")
+            .any(|arg| {
+                let normalized = arg.to_string_lossy().to_ascii_lowercase();
+                if normalized == "--force" || normalized.starts_with("--force=") {
+                    return true;
+                }
+                if normalized == "--force-with-lease"
+                    || normalized.starts_with("--force-with-lease=")
+                {
+                    return true;
+                }
+                if normalized == "--force-if-includes"
+                    || normalized.starts_with("--force-if-includes=")
+                {
+                    return true;
+                }
+
+                if normalized.starts_with('-') && !normalized.starts_with("--") {
+                    return normalized[1..].chars().any(|flag| flag == 'f');
+                }
+
+                false
+            })
     }
 
     fn discover_repositories_under_root(&self, root: &Path) -> Result<Vec<PathBuf>, CoreError> {
@@ -431,6 +534,23 @@ impl<R: CommandRunner> GitCliVcsProvider<R> {
         Ok(branch.to_owned())
     }
 
+    fn ensure_destructive_delete_allowed(
+        &self,
+        request: &DeleteWorktreeRequest,
+    ) -> Result<(), CoreError> {
+        if !request.delete_branch && !request.delete_directory {
+            return Ok(());
+        }
+
+        if self.allow_destructive_automation {
+            return Ok(());
+        }
+
+        Err(CoreError::Configuration(format!(
+            "Refusing destructive worktree cleanup (delete_branch/delete_directory) by default. Set {ENV_ALLOW_DESTRUCTIVE_AUTOMATION}=true to explicitly allow it."
+        )))
+    }
+
     fn normalize_base_branch(base_branch: &str) -> String {
         if base_branch.is_empty() {
             DEFAULT_BASE_BRANCH.to_owned()
@@ -623,6 +743,36 @@ fn parse_bool_env(name: &str, value: &str) -> Result<bool, CoreError> {
     }
 }
 
+fn read_bool_env(name: &str) -> Result<bool, CoreError> {
+    match std::env::var(name) {
+        Ok(value) => parse_bool_env(name, &value),
+        Err(std::env::VarError::NotPresent) => Ok(false),
+        Err(std::env::VarError::NotUnicode(_)) => Err(CoreError::Configuration(format!(
+            "{name} contained invalid UTF-8"
+        ))),
+    }
+}
+
+fn is_bare_command_name(path: &Path) -> bool {
+    let mut components = path.components();
+    matches!(components.next(), Some(Component::Normal(_))) && components.next().is_none()
+}
+
+fn validate_command_binary_path(
+    binary: &Path,
+    env_name: &str,
+    allow_unsafe_command_paths: bool,
+) -> Result<(), CoreError> {
+    if allow_unsafe_command_paths || is_bare_command_name(binary) {
+        return Ok(());
+    }
+
+    Err(CoreError::Configuration(format!(
+        "{env_name} resolves to '{}' which is treated as an unsafe command path by default. Use a bare command name or set {ENV_ALLOW_UNSAFE_COMMAND_PATHS}=true to allow explicit paths.",
+        binary.display()
+    )))
+}
+
 #[async_trait::async_trait]
 impl<R: CommandRunner> VcsProvider for GitCliVcsProvider<R> {
     async fn health_check(&self) -> Result<(), CoreError> {
@@ -672,6 +822,7 @@ impl<R: CommandRunner> VcsProvider for GitCliVcsProvider<R> {
     }
 
     async fn delete_worktree(&self, request: DeleteWorktreeRequest) -> Result<(), CoreError> {
+        self.ensure_destructive_delete_allowed(&request)?;
         let branch = Self::validate_worktree_delete_request(&request)?;
         if request.delete_directory {
             Self::validate_directory_cleanup_target(
@@ -1068,9 +1219,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn delete_worktree_rejects_destructive_cleanup_when_not_explicitly_enabled() {
+        let runner = StubRunner::with_results(Vec::new());
+        let provider = GitCliVcsProvider::with_binary(runner, PathBuf::from("git"), false);
+        let request = DeleteWorktreeRequest {
+            worktree: sample_worktree_summary(PathBuf::from("/tmp/orchestrator/repo")),
+            delete_branch: true,
+            delete_directory: true,
+        };
+
+        let err = provider
+            .delete_worktree(request)
+            .await
+            .expect_err("destructive cleanup should be blocked by default");
+        assert!(err
+            .to_string()
+            .contains("ORCHESTRATOR_GIT_ALLOW_DESTRUCTIVE_AUTOMATION"));
+        assert!(provider.runner.calls.lock().expect("lock").is_empty());
+    }
+
+    #[tokio::test]
     async fn delete_worktree_uses_safe_branch_delete_by_default() {
         let runner = StubRunner::with_results(vec![Ok(success_output()), Ok(success_output())]);
-        let provider = GitCliVcsProvider::with_binary(runner, PathBuf::from("git"), false);
+        let provider = GitCliVcsProvider::with_binary_and_safety(
+            runner,
+            PathBuf::from("git"),
+            true,
+            false,
+            false,
+            false,
+        );
 
         let request = DeleteWorktreeRequest {
             worktree: sample_worktree_summary(PathBuf::from("/tmp/orchestrator/repo")),
@@ -1098,7 +1276,14 @@ mod tests {
     #[tokio::test]
     async fn delete_worktree_can_force_delete_branch_when_configured() {
         let runner = StubRunner::with_results(vec![Ok(success_output()), Ok(success_output())]);
-        let provider = GitCliVcsProvider::with_binary(runner, PathBuf::from("git"), true);
+        let provider = GitCliVcsProvider::with_binary_and_safety(
+            runner,
+            PathBuf::from("git"),
+            true,
+            false,
+            true,
+            false,
+        );
 
         let request = DeleteWorktreeRequest {
             worktree: sample_worktree_summary(PathBuf::from("/tmp/orchestrator/repo")),
@@ -1127,7 +1312,14 @@ mod tests {
     async fn delete_worktree_refuses_to_delete_repository_root_directory() {
         let repository_root = TempDir::new("repo-root");
         let runner = StubRunner::with_results(Vec::new());
-        let provider = GitCliVcsProvider::with_binary(runner, PathBuf::from("git"), false);
+        let provider = GitCliVcsProvider::with_binary_and_safety(
+            runner,
+            PathBuf::from("git"),
+            true,
+            false,
+            false,
+            false,
+        );
 
         let request = DeleteWorktreeRequest {
             worktree: WorktreeSummary {
@@ -1154,7 +1346,14 @@ mod tests {
     #[tokio::test]
     async fn delete_worktree_refuses_to_delete_non_managed_branch() {
         let runner = StubRunner::with_results(Vec::new());
-        let provider = GitCliVcsProvider::with_binary(runner, PathBuf::from("git"), false);
+        let provider = GitCliVcsProvider::with_binary_and_safety(
+            runner,
+            PathBuf::from("git"),
+            true,
+            false,
+            false,
+            false,
+        );
 
         let request = DeleteWorktreeRequest {
             worktree: WorktreeSummary {
@@ -1181,7 +1380,14 @@ mod tests {
     #[tokio::test]
     async fn delete_worktree_refuses_to_delete_default_base_branch_when_base_branch_is_blank() {
         let runner = StubRunner::with_results(Vec::new());
-        let provider = GitCliVcsProvider::with_binary(runner, PathBuf::from("git"), false);
+        let provider = GitCliVcsProvider::with_binary_and_safety(
+            runner,
+            PathBuf::from("git"),
+            true,
+            false,
+            false,
+            false,
+        );
 
         let request = DeleteWorktreeRequest {
             worktree: WorktreeSummary {
@@ -1262,5 +1468,93 @@ mod tests {
         let err = GitCliVcsProvider::<ProcessCommandRunner>::parse_ahead_behind(b"behind\t2\n")
             .expect_err("expected parse error");
         assert!(err.to_string().contains("invalid `behind`"));
+    }
+
+    #[test]
+    fn force_push_is_rejected_by_default() {
+        let args = vec![OsString::from("push"), OsString::from("--force-with-lease")];
+        let err = GitCliVcsProvider::<ProcessCommandRunner>::validate_git_command_safety(
+            &args, true, false,
+        )
+        .expect_err("force push should be rejected by default");
+        assert!(err
+            .to_string()
+            .contains("ORCHESTRATOR_GIT_ALLOW_FORCE_PUSH"));
+    }
+
+    #[test]
+    fn force_push_with_combined_short_flags_is_rejected_by_default() {
+        let args = vec![
+            OsString::from("push"),
+            OsString::from("-fu"),
+            OsString::from("origin"),
+            OsString::from("main"),
+        ];
+        let err = GitCliVcsProvider::<ProcessCommandRunner>::validate_git_command_safety(
+            &args, true, false,
+        )
+        .expect_err("combined short force flag should be rejected by default");
+        assert!(err
+            .to_string()
+            .contains("ORCHESTRATOR_GIT_ALLOW_FORCE_PUSH"));
+    }
+
+    #[test]
+    fn force_push_with_parameterized_force_with_lease_is_rejected_by_default() {
+        let args = vec![
+            OsString::from("push"),
+            OsString::from("--force-with-lease=main"),
+            OsString::from("origin"),
+            OsString::from("main"),
+        ];
+        let err = GitCliVcsProvider::<ProcessCommandRunner>::validate_git_command_safety(
+            &args, true, false,
+        )
+        .expect_err("parameterized force-with-lease should be rejected by default");
+        assert!(err
+            .to_string()
+            .contains("ORCHESTRATOR_GIT_ALLOW_FORCE_PUSH"));
+    }
+
+    #[test]
+    fn force_push_requires_global_destructive_opt_in_even_when_force_push_flag_is_enabled() {
+        let args = vec![OsString::from("push"), OsString::from("--force")];
+        let err = GitCliVcsProvider::<ProcessCommandRunner>::validate_git_command_safety(
+            &args, false, true,
+        )
+        .expect_err("force push should require global destructive opt-in");
+        assert!(err
+            .to_string()
+            .contains("ORCHESTRATOR_GIT_ALLOW_DESTRUCTIVE_AUTOMATION"));
+        assert!(err
+            .to_string()
+            .contains("ORCHESTRATOR_GIT_ALLOW_FORCE_PUSH"));
+    }
+
+    #[test]
+    fn force_push_is_allowed_only_when_all_destructive_opt_ins_are_enabled() {
+        let args = vec![
+            OsString::from("push"),
+            OsString::from("--force-if-includes"),
+            OsString::from("origin"),
+            OsString::from("main"),
+        ];
+        GitCliVcsProvider::<ProcessCommandRunner>::validate_git_command_safety(&args, true, true)
+            .expect("force push should be allowed when all opt-ins are enabled");
+    }
+
+    #[test]
+    fn command_path_guard_rejects_non_bare_binary_by_default() {
+        let err = validate_command_binary_path(Path::new("./bin/git"), ENV_GIT_BIN, false)
+            .expect_err("relative command paths should be blocked by default");
+        assert!(err
+            .to_string()
+            .contains("ORCHESTRATOR_ALLOW_UNSAFE_COMMAND_PATHS"));
+    }
+
+    #[test]
+    fn command_path_guard_accepts_non_bare_binary_when_explicitly_enabled() {
+        validate_command_binary_path(Path::new("./bin/git"), ENV_GIT_BIN, true)
+            .expect("unsafe command path opt-in should pass");
     }
 }

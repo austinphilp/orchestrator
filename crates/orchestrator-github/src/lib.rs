@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 use std::ffi::OsString;
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 
 use orchestrator_core::{
@@ -11,6 +11,7 @@ use orchestrator_core::{
 use serde::Deserialize;
 
 const ENV_GH_BIN: &str = "ORCHESTRATOR_GH_BIN";
+const ENV_ALLOW_UNSAFE_COMMAND_PATHS: &str = "ORCHESTRATOR_ALLOW_UNSAFE_COMMAND_PATHS";
 const DEFAULT_REVIEW_QUEUE_LIMIT: &str = "100";
 
 pub trait CommandRunner: Send + Sync {
@@ -167,6 +168,7 @@ impl<R: CommandRunner> UrlOpener for SystemUrlOpener<R> {
 pub struct GhCliClient<R: CommandRunner> {
     runner: R,
     binary: PathBuf,
+    allow_unsafe_command_paths: bool,
 }
 
 impl<R: CommandRunner> GhCliClient<R> {
@@ -180,7 +182,12 @@ impl<R: CommandRunner> GhCliClient<R> {
             )));
         }
 
-        Ok(Self { runner, binary })
+        let allow_unsafe_command_paths = read_bool_env(ENV_ALLOW_UNSAFE_COMMAND_PATHS)?;
+        Ok(Self {
+            runner,
+            binary,
+            allow_unsafe_command_paths,
+        })
     }
 
     pub fn health_check_args() -> Vec<OsString> {
@@ -258,6 +265,7 @@ impl<R: CommandRunner> GhCliClient<R> {
         args: &[OsString],
         cwd: Option<&Path>,
     ) -> Result<std::process::Output, CoreError> {
+        validate_command_binary_path(&self.binary, ENV_GH_BIN, self.allow_unsafe_command_paths)?;
         let program = self
             .binary
             .to_str()
@@ -455,6 +463,46 @@ impl<R: CommandRunner> GhCliClient<R> {
     }
 }
 
+fn parse_bool_env(name: &str, value: &str) -> Result<bool, CoreError> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" => Ok(true),
+        "0" | "false" | "no" | "off" => Ok(false),
+        _ => Err(CoreError::Configuration(format!(
+            "{name} must be a boolean (true/false)."
+        ))),
+    }
+}
+
+fn read_bool_env(name: &str) -> Result<bool, CoreError> {
+    match std::env::var(name) {
+        Ok(value) => parse_bool_env(name, &value),
+        Err(std::env::VarError::NotPresent) => Ok(false),
+        Err(std::env::VarError::NotUnicode(_)) => Err(CoreError::Configuration(format!(
+            "{name} contained invalid UTF-8"
+        ))),
+    }
+}
+
+fn is_bare_command_name(path: &Path) -> bool {
+    let mut components = path.components();
+    matches!(components.next(), Some(Component::Normal(_))) && components.next().is_none()
+}
+
+fn validate_command_binary_path(
+    binary: &Path,
+    env_name: &str,
+    allow_unsafe_command_paths: bool,
+) -> Result<(), CoreError> {
+    if allow_unsafe_command_paths || is_bare_command_name(binary) {
+        return Ok(());
+    }
+
+    Err(CoreError::Configuration(format!(
+        "{env_name} resolves to '{}' which is treated as an unsafe command path by default. Use a bare command name or set {ENV_ALLOW_UNSAFE_COMMAND_PATHS}=true to allow explicit paths.",
+        binary.display()
+    )))
+}
+
 #[async_trait::async_trait]
 impl<R: CommandRunner> GithubClient for GhCliClient<R> {
     async fn health_check(&self) -> Result<(), CoreError> {
@@ -622,7 +670,7 @@ mod tests {
     use super::*;
     use orchestrator_core::{CodeHostProvider, CreatePullRequestRequest, UrlOpener};
     use std::collections::VecDeque;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
     use std::sync::Mutex;
 
     struct StubRunner {
@@ -1126,5 +1174,20 @@ mod tests {
         assert_eq!(queue.len(), 1);
         assert_eq!(queue[0].reference.repository.id, "octo/docs");
         assert!(queue[0].is_draft);
+    }
+
+    #[test]
+    fn command_path_guard_rejects_non_bare_binary_by_default() {
+        let err = validate_command_binary_path(Path::new("./bin/gh"), ENV_GH_BIN, false)
+            .expect_err("relative command paths should be blocked by default");
+        assert!(err
+            .to_string()
+            .contains("ORCHESTRATOR_ALLOW_UNSAFE_COMMAND_PATHS"));
+    }
+
+    #[test]
+    fn command_path_guard_accepts_non_bare_binary_when_explicitly_enabled() {
+        validate_command_binary_path(Path::new("./bin/gh"), ENV_GH_BIN, true)
+            .expect("unsafe command path opt-in should pass");
     }
 }

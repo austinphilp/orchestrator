@@ -1,6 +1,6 @@
 use std::collections::VecDeque;
 use std::ffi::OsString;
-use std::path::PathBuf;
+use std::path::{Component, Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
 
@@ -17,6 +17,7 @@ use tokio::process::Command;
 use tokio::time::timeout;
 
 const DEFAULT_OPENCODE_BINARY: &str = "opencode";
+const ENV_ALLOW_UNSAFE_COMMAND_PATHS: &str = "ORCHESTRATOR_ALLOW_UNSAFE_COMMAND_PATHS";
 const DEFAULT_OUTPUT_BUFFER: usize = 256;
 const DEFAULT_HEALTH_CHECK_TIMEOUT: Duration = Duration::from_secs(3);
 const DEFAULT_PROTOCOL_GUIDANCE: &str =
@@ -160,6 +161,7 @@ impl OpenCodeBackend {
 #[async_trait]
 impl orchestrator_runtime::SessionLifecycle for OpenCodeBackend {
     async fn spawn(&self, spec: SpawnSpec) -> RuntimeResult<SessionHandle> {
+        validate_command_binary_path(&self.config.binary, false)?;
         let session_id = spec.session_id.clone();
         let instruction_prelude = self.composed_instruction_prelude(&spec);
         let pty_spec = PtySpawnSpec {
@@ -226,6 +228,50 @@ fn compose_instruction_prelude(
     }
 }
 
+fn parse_bool_env(name: &str, value: &str) -> RuntimeResult<bool> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" => Ok(true),
+        "0" | "false" | "no" | "off" => Ok(false),
+        _ => Err(RuntimeError::Configuration(format!(
+            "{name} must be a boolean (true/false)."
+        ))),
+    }
+}
+
+fn read_bool_env(name: &str) -> RuntimeResult<bool> {
+    match std::env::var(name) {
+        Ok(value) => parse_bool_env(name, &value),
+        Err(std::env::VarError::NotPresent) => Ok(false),
+        Err(std::env::VarError::NotUnicode(_)) => Err(RuntimeError::Configuration(format!(
+            "{name} contained invalid UTF-8"
+        ))),
+    }
+}
+
+fn is_bare_command_name(path: &Path) -> bool {
+    let mut components = path.components();
+    matches!(components.next(), Some(Component::Normal(_))) && components.next().is_none()
+}
+
+fn validate_command_binary_path(
+    binary: &Path,
+    allow_unsafe_command_paths: bool,
+) -> RuntimeResult<()> {
+    let allow_unsafe = if allow_unsafe_command_paths {
+        true
+    } else {
+        read_bool_env(ENV_ALLOW_UNSAFE_COMMAND_PATHS)?
+    };
+    if allow_unsafe || is_bare_command_name(binary) {
+        return Ok(());
+    }
+
+    Err(RuntimeError::Configuration(format!(
+        "OpenCode binary path '{}' is treated as unsafe by default. Use a bare command name or set {ENV_ALLOW_UNSAFE_COMMAND_PATHS}=true to allow explicit paths.",
+        binary.display()
+    )))
+}
+
 #[async_trait]
 impl WorkerBackend for OpenCodeBackend {
     fn kind(&self) -> BackendKind {
@@ -242,6 +288,7 @@ impl WorkerBackend for OpenCodeBackend {
     }
 
     async fn health_check(&self) -> RuntimeResult<()> {
+        validate_command_binary_path(&self.config.binary, false)?;
         let args = [OsString::from("--version")];
         self.health_check_command(&args).await
     }
@@ -1552,5 +1599,20 @@ sleep 1"#
         assert!(output.contains("prelude2:Implement AP-115 and run tests."));
 
         backend.kill(&handle).await.expect("kill session");
+    }
+
+    #[test]
+    fn command_path_guard_rejects_non_bare_binary_by_default() {
+        let err = validate_command_binary_path(Path::new("./bin/opencode"), false)
+            .expect_err("relative command paths should be blocked by default");
+        assert!(err
+            .to_string()
+            .contains("ORCHESTRATOR_ALLOW_UNSAFE_COMMAND_PATHS"));
+    }
+
+    #[test]
+    fn command_path_guard_accepts_non_bare_binary_when_explicitly_enabled() {
+        validate_command_binary_path(Path::new("./bin/opencode"), true)
+            .expect("unsafe command path opt-in should pass");
     }
 }
