@@ -1,6 +1,6 @@
 use orchestrator_core::{
     rebuild_projection, CoreError, EventStore, GithubClient, LlmProvider, ProjectionState,
-    SelectedTicketFlowConfig, SelectedTicketFlowResult, SqliteEventStore, Supervisor,
+    CodeHostProvider, SelectedTicketFlowConfig, SelectedTicketFlowResult, SqliteEventStore, Supervisor,
     TicketSummary, UntypedCommandInvocation, VcsProvider, WorkerBackend,
 };
 use orchestrator_ui::{SupervisorCommandContext, SupervisorCommandDispatcher};
@@ -332,7 +332,7 @@ fn supervisor_model_from_env() -> String {
 impl<S, G> SupervisorCommandDispatcher for App<S, G>
 where
     S: Supervisor + LlmProvider + Send + Sync,
-    G: GithubClient + Send + Sync,
+    G: GithubClient + CodeHostProvider + Send + Sync,
 {
     async fn dispatch_supervisor_command(
         &self,
@@ -341,6 +341,7 @@ where
     ) -> Result<(String, orchestrator_core::LlmResponseStream), CoreError> {
         command_dispatch::dispatch_supervisor_runtime_command(
             &self.supervisor,
+            &self.github,
             &self.config.event_store_path,
             invocation,
             context,
@@ -362,12 +363,17 @@ mod tests {
     use super::*;
     use orchestrator_core::test_support::{with_env_var, with_env_vars, TestDbPath};
     use orchestrator_core::{
-        BackendCapabilities, BackendKind, Command, CommandRegistry, LlmChatRequest,
+        ArtifactCreatedPayload, ArtifactId, ArtifactKind, ArtifactRecord, BackendCapabilities,
+        BackendKind, CodeHostKind, Command, CommandRegistry, DOMAIN_EVENT_SCHEMA_VERSION,
+        LlmChatRequest,
         LlmFinishReason, LlmProviderKind, LlmResponseStream, LlmResponseSubscription,
-        LlmStreamChunk, OrchestrationEventPayload, RuntimeResult, SessionHandle, SpawnSpec,
-        SupervisorQueryArgs, SupervisorQueryCancellationSource, SupervisorQueryContextArgs,
-        TerminalSnapshot, TicketId, TicketProvider, TicketSummary, WorktreeStatus,
+        LlmStreamChunk, NewEventEnvelope, OrchestrationEventPayload, RuntimeMappingRecord,
+        RuntimeResult, SessionHandle, SessionRecord, SpawnSpec,
+        SupervisorQueryArgs, SupervisorQueryCancellationSource, SupervisorQueryContextArgs, TerminalSnapshot,
+        TicketId, TicketProvider, TicketSummary, WorkerSessionId, WorkItemId, WorktreeId,
+        WorktreeRecord, WorkerSessionStatus, WorktreeStatus,
     };
+    use serde_json::json;
     use std::collections::{BTreeMap, VecDeque};
     use std::path::{Path, PathBuf};
     use std::sync::{Arc, Mutex};
@@ -442,6 +448,47 @@ mod tests {
     impl GithubClient for Healthy {
         async fn health_check(&self) -> Result<(), CoreError> {
             Ok(())
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl CodeHostProvider for Healthy {
+        fn kind(&self) -> CodeHostKind {
+            CodeHostKind::Github
+        }
+
+        async fn health_check(&self) -> Result<(), CoreError> {
+            Ok(())
+        }
+
+        async fn create_draft_pull_request(
+            &self,
+            _request: orchestrator_core::CreatePullRequestRequest,
+        ) -> Result<orchestrator_core::PullRequestSummary, CoreError> {
+            Err(CoreError::DependencyUnavailable(
+                "healthy mock does not create pull requests in unit tests".to_owned(),
+            ))
+        }
+
+        async fn mark_ready_for_review(
+            &self,
+            _pr: &orchestrator_core::PullRequestRef,
+        ) -> Result<(), CoreError> {
+            Ok(())
+        }
+
+        async fn request_reviewers(
+            &self,
+            _pr: &orchestrator_core::PullRequestRef,
+            _reviewers: orchestrator_core::ReviewerRequest,
+        ) -> Result<(), CoreError> {
+            Ok(())
+        }
+
+        async fn list_waiting_for_my_review(
+            &self,
+        ) -> Result<Vec<orchestrator_core::PullRequestSummary>, CoreError> {
+            Ok(Vec::new())
         }
     }
 
@@ -520,6 +567,88 @@ mod tests {
         }
     }
 
+    #[derive(Clone, Default)]
+    struct MockCodeHost {
+        ready_calls: Arc<Mutex<Vec<orchestrator_core::PullRequestRef>>>,
+        ready_error: Arc<Mutex<Option<String>>>,
+    }
+
+    impl MockCodeHost {
+        fn with_error(message: &str) -> Self {
+            Self {
+                ready_calls: Arc::new(Mutex::new(Vec::new())),
+                ready_error: Arc::new(Mutex::new(Some(message.to_owned()))),
+            }
+        }
+
+        fn ready_calls(&self) -> Vec<orchestrator_core::PullRequestRef> {
+            self.ready_calls.lock().expect("ready calls lock").clone()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl CodeHostProvider for MockCodeHost {
+        fn kind(&self) -> CodeHostKind {
+            CodeHostKind::Github
+        }
+
+        async fn health_check(&self) -> Result<(), CoreError> {
+            Ok(())
+        }
+
+        async fn create_draft_pull_request(
+            &self,
+            request: orchestrator_core::CreatePullRequestRequest,
+        ) -> Result<orchestrator_core::PullRequestSummary, CoreError> {
+            Ok(orchestrator_core::PullRequestSummary {
+                reference: orchestrator_core::PullRequestRef {
+                    repository: request.repository,
+                    number: 1,
+                    url: "https://github.com/example/placeholder/pull/1".to_owned(),
+                },
+                title: "placeholder".to_owned(),
+                is_draft: true,
+            })
+        }
+
+        async fn mark_ready_for_review(
+            &self,
+            pr: &orchestrator_core::PullRequestRef,
+        ) -> Result<(), CoreError> {
+            self.ready_calls
+                .lock()
+                .expect("ready calls lock")
+                .push(pr.clone());
+
+            let maybe_error = self.ready_error.lock().expect("ready error lock").clone();
+            match maybe_error {
+                Some(message) => Err(CoreError::DependencyUnavailable(message)),
+                None => Ok(()),
+            }
+        }
+
+        async fn request_reviewers(
+            &self,
+            _pr: &orchestrator_core::PullRequestRef,
+            _reviewers: orchestrator_core::ReviewerRequest,
+        ) -> Result<(), CoreError> {
+            Ok(())
+        }
+
+        async fn list_waiting_for_my_review(
+            &self,
+        ) -> Result<Vec<orchestrator_core::PullRequestSummary>, CoreError> {
+            Ok(Vec::new())
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl GithubClient for MockCodeHost {
+        async fn health_check(&self) -> Result<(), CoreError> {
+            Ok(())
+        }
+    }
+
     fn template_query_invocation(template: &str) -> UntypedCommandInvocation {
         CommandRegistry::default()
             .to_untyped_invocation(&Command::SupervisorQuery(SupervisorQueryArgs::Template {
@@ -558,6 +687,86 @@ mod tests {
     fn read_events(path: &std::path::Path) -> Vec<orchestrator_core::StoredEventEnvelope> {
         let store = SqliteEventStore::open(path).expect("open event store");
         store.read_ordered().expect("read ordered events")
+    }
+
+    fn seed_runtime_mapping_with_pr_artifact(
+        store: &mut SqliteEventStore,
+        work_item_id: &WorkItemId,
+        session_id: &str,
+        artifact_id: &str,
+        pr_url: &str,
+    ) -> Result<(), CoreError> {
+        let ticket = orchestrator_core::TicketRecord {
+            ticket_id: TicketId::from_provider_uuid(
+                TicketProvider::Linear,
+                format!("provider-{}", work_item_id.as_str()),
+            ),
+            provider: TicketProvider::Linear,
+            provider_ticket_id: format!("provider-{}", work_item_id.as_str()),
+            identifier: format!("ORCH-{}", work_item_id.as_str()),
+            title: "Workflow ready test".to_owned(),
+            state: "In Progress".to_owned(),
+            updated_at: "2026-02-16T11:00:00Z".to_owned(),
+        };
+        let worktree_path = PathBuf::from(format!(
+            "/workspace/{}",
+            work_item_id.as_str()
+        ));
+        let runtime = RuntimeMappingRecord {
+            ticket,
+            work_item_id: work_item_id.clone(),
+            worktree: WorktreeRecord {
+                worktree_id: WorktreeId::new(format!("wt-{}", work_item_id.as_str())),
+                work_item_id: work_item_id.clone(),
+                path: worktree_path.to_string_lossy().to_string(),
+                branch: "feature/approve-test".to_owned(),
+                base_branch: "main".to_owned(),
+                created_at: "2026-02-16T11:00:00Z".to_owned(),
+            },
+            session: SessionRecord {
+                session_id: WorkerSessionId::new(session_id),
+                work_item_id: work_item_id.clone(),
+                backend_kind: BackendKind::OpenCode,
+                workdir: worktree_path.to_string_lossy().to_string(),
+                model: Some("gpt-5".to_owned()),
+                status: WorkerSessionStatus::Running,
+                created_at: "2026-02-16T11:00:00Z".to_owned(),
+                updated_at: "2026-02-16T11:01:00Z".to_owned(),
+            },
+        };
+
+        store.upsert_runtime_mapping(&runtime)?;
+
+        let artifact = ArtifactRecord {
+            artifact_id: ArtifactId::new(artifact_id),
+            work_item_id: work_item_id.clone(),
+            kind: ArtifactKind::PR,
+            metadata: json!({"type": "pull_request"}),
+            storage_ref: pr_url.to_owned(),
+            created_at: "2026-02-16T11:01:00Z".to_owned(),
+        };
+        store.create_artifact(&artifact)?;
+        store.append_event(
+            NewEventEnvelope {
+                event_id: format!("evt-pr-artifact-{}", artifact_id),
+                occurred_at: "2026-02-16T11:02:00Z".to_owned(),
+                work_item_id: Some(work_item_id.clone()),
+                session_id: Some(WorkerSessionId::new(session_id)),
+                payload: OrchestrationEventPayload::ArtifactCreated(
+                    ArtifactCreatedPayload {
+                        artifact_id: artifact.artifact_id.clone(),
+                        work_item_id: work_item_id.clone(),
+                        kind: ArtifactKind::PR,
+                        label: "Pull request".to_owned(),
+                        uri: pr_url.to_owned(),
+                    },
+                ),
+                schema_version: DOMAIN_EVENT_SCHEMA_VERSION,
+            },
+            &[artifact.artifact_id.clone()],
+        )?;
+
+        Ok(())
     }
 
     #[test]
@@ -1650,6 +1859,77 @@ mod tests {
     #[tokio::test]
     async fn supervisor_runtime_dispatch_supports_workflow_approve_pr_ready() {
         let temp_db = TestDbPath::new("app-runtime-command-approve-pr-ready");
+        let work_item_id = WorkItemId::new("wi-approve-success");
+        let mut store = SqliteEventStore::open(temp_db.path()).expect("open store");
+        let pr_url = "https://github.com/acme/repo/pull/321";
+        seed_runtime_mapping_with_pr_artifact(
+            &mut store,
+            &work_item_id,
+            "sess-approve-success",
+            "artifact-pr-approve-success",
+            pr_url,
+        )
+        .expect("seed runtime mapping");
+        let host = MockCodeHost::default();
+        let app = App {
+            config: AppConfig {
+                workspace: "/workspace".to_owned(),
+                event_store_path: temp_db.path().to_string_lossy().to_string(),
+            ticketing_provider: "linear".to_owned(),
+            harness_provider: "codex".to_owned(),
+            },
+            supervisor: QueryingSupervisor::default(),
+            github: host.clone(),
+        };
+        let invocation = CommandRegistry::default()
+            .to_untyped_invocation(&Command::WorkflowApprovePrReady)
+            .expect("serialize workflow.approve_pr_ready");
+
+        let (stream_id, mut stream) = app
+            .dispatch_supervisor_command(
+                invocation,
+                SupervisorCommandContext {
+                    selected_work_item_id: Some(work_item_id.as_str().to_owned()),
+                    selected_session_id: None,
+                    scope: None,
+                },
+            )
+            .await
+            .expect("approve_pr_ready should be supported at runtime");
+        assert!(stream_id.starts_with("runtime-"));
+
+        let first_chunk = stream
+            .next_chunk()
+            .await
+            .expect("read runtime chunk")
+            .expect("expected one chunk");
+        assert_eq!(first_chunk.finish_reason, Some(LlmFinishReason::Stop));
+        assert!(
+            first_chunk
+                .delta
+                .contains("workflow.approve_pr_ready command completed for PR #321"),
+            "runtime command should return a completion message"
+        );
+        assert!(
+            stream
+                .next_chunk()
+                .await
+                .expect("stream close")
+                .is_none(),
+            "runtime command stream should terminate after acknowledgement"
+        );
+
+        let calls = host.ready_calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].number, 321);
+        assert_eq!(calls[0].url, pr_url);
+        assert_eq!(calls[0].repository.name, "acme/repo");
+        assert_eq!(calls[0].repository.id, "acme/repo");
+    }
+
+    #[tokio::test]
+    async fn supervisor_runtime_dispatch_workflow_approve_pr_ready_requires_context() {
+        let temp_db = TestDbPath::new("app-runtime-command-approve-pr-ready-missing-context");
         let app = App {
             config: AppConfig {
                 workspace: "/workspace".to_owned(),
@@ -1664,11 +1944,124 @@ mod tests {
             .to_untyped_invocation(&Command::WorkflowApprovePrReady)
             .expect("serialize workflow.approve_pr_ready");
 
-        let (stream_id, mut stream) = app
-            .dispatch_supervisor_command(invocation, SupervisorCommandContext::default())
+        let err = match app
+            .dispatch_supervisor_command(
+                invocation,
+                SupervisorCommandContext::default(),
+            )
             .await
-            .expect("approve_pr_ready should be supported at runtime");
-        assert!(stream_id.starts_with("runtime-"));
+        {
+            Ok(_) => panic!("approve_pr_ready should fail without context"),
+            Err(err) => err,
+        };
+
+        assert!(err.to_string().contains(
+            "requires an active runtime session or selected work item context"
+        ));
+    }
+
+    #[tokio::test]
+    async fn supervisor_runtime_dispatch_workflow_approve_pr_ready_propagates_host_errors() {
+        let temp_db = TestDbPath::new("app-runtime-command-approve-pr-ready-host-error");
+        let work_item_id = WorkItemId::new("wi-approve-error");
+        let mut store = SqliteEventStore::open(temp_db.path()).expect("open store");
+        let pr_url = "https://github.com/acme/repo/pull/512";
+        seed_runtime_mapping_with_pr_artifact(
+            &mut store,
+            &work_item_id,
+            "sess-approve-error",
+            "artifact-pr-approve-error",
+            pr_url,
+        )
+        .expect("seed runtime mapping");
+
+        let host = MockCodeHost::with_error("github API unavailable");
+        let app = App {
+            config: AppConfig {
+                workspace: "/workspace".to_owned(),
+                event_store_path: temp_db.path().to_string_lossy().to_string(),
+            ticketing_provider: "linear".to_owned(),
+            harness_provider: "codex".to_owned(),
+            },
+            supervisor: QueryingSupervisor::default(),
+            github: host.clone(),
+        };
+        let invocation = CommandRegistry::default()
+            .to_untyped_invocation(&Command::WorkflowApprovePrReady)
+            .expect("serialize workflow.approve_pr_ready");
+
+        let err = match app
+            .dispatch_supervisor_command(
+                invocation,
+                SupervisorCommandContext {
+                    selected_work_item_id: Some(work_item_id.as_str().to_owned()),
+                    selected_session_id: None,
+                    scope: None,
+                },
+            )
+            .await
+        {
+            Ok(_) => panic!("approve_pr_ready should fail when host returns an error"),
+            Err(err) => err,
+        };
+
+        let message = err.to_string();
+        assert!(message.contains("workflow.approve_pr_ready failed for PR #512"));
+        assert!(message.contains("github API unavailable"));
+
+        let calls = host.ready_calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].number, 512);
+    }
+
+    #[tokio::test]
+    async fn supervisor_runtime_dispatch_workflow_approve_pr_ready_skips_invalid_pr_artifact_urls() {
+        let temp_db = TestDbPath::new("app-runtime-command-approve-pr-ready-invalid-url");
+        let work_item_id = WorkItemId::new("wi-approve-invalid-url");
+        let mut store = SqliteEventStore::open(temp_db.path()).expect("open store");
+        seed_runtime_mapping_with_pr_artifact(
+            &mut store,
+            &work_item_id,
+            "sess-approve-invalid-url",
+            "artifact-pr-approve-valid-1",
+            "https://github.com/acme/repo/pull/777",
+        )
+        .expect("seed valid runtime mapping");
+        seed_runtime_mapping_with_pr_artifact(
+            &mut store,
+            &work_item_id,
+            "sess-approve-invalid-url",
+            "artifact-pr-approve-invalid-1",
+            "https://github.com/acme/repo/compare/777",
+        )
+        .expect("seed invalid runtime mapping");
+
+        let host = MockCodeHost::default();
+        let app = App {
+            config: AppConfig {
+                workspace: "/workspace".to_owned(),
+                event_store_path: temp_db.path().to_string_lossy().to_string(),
+            ticketing_provider: "linear".to_owned(),
+            harness_provider: "codex".to_owned(),
+            },
+            supervisor: QueryingSupervisor::default(),
+            github: host.clone(),
+        };
+        let invocation = CommandRegistry::default()
+            .to_untyped_invocation(&Command::WorkflowApprovePrReady)
+            .expect("serialize workflow.approve_pr_ready");
+
+        let (_stream_id, mut stream) = app
+            .dispatch_supervisor_command(
+                invocation,
+                SupervisorCommandContext {
+                    selected_work_item_id: Some(work_item_id.as_str().to_owned()),
+                    selected_session_id: None,
+                    scope: None,
+                },
+            )
+            .await
+            .expect("approve_pr_ready should skip bad PR artifact");
 
         let first_chunk = stream
             .next_chunk()
@@ -1679,17 +2072,14 @@ mod tests {
         assert!(
             first_chunk
                 .delta
-                .contains("workflow.approve_pr_ready command accepted"),
-            "runtime command should return a non-empty acknowledgement"
+                .contains("workflow.approve_pr_ready command completed for PR #777"),
+            "runtime command should use valid PR fallback artifact"
         );
-        assert!(
-            stream
-                .next_chunk()
-                .await
-                .expect("stream close")
-                .is_none(),
-            "runtime command stream should terminate after acknowledgement"
-        );
+
+        let calls = host.ready_calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].number, 777);
+        assert_eq!(calls[0].url, "https://github.com/acme/repo/pull/777");
     }
 
     #[tokio::test]

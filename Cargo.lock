@@ -903,6 +903,7 @@ dependencies = [
  "orchestrator-supervisor",
  "orchestrator-ui",
  "serde",
+ "serde_json",
  "tokio",
  "toml",
  "tracing",
