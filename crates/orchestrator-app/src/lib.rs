@@ -327,6 +327,10 @@ where
     }
 
     async fn cancel_supervisor_command(&self, stream_id: &str) -> Result<(), CoreError> {
+        command_dispatch::record_user_initiated_supervisor_cancel(
+            &self.config.event_store_path,
+            stream_id,
+        );
         self.supervisor.cancel_stream(stream_id).await
     }
 }
@@ -338,9 +342,9 @@ mod tests {
     use orchestrator_core::{
         BackendCapabilities, BackendKind, Command, CommandRegistry, LlmChatRequest,
         LlmFinishReason, LlmProviderKind, LlmResponseStream, LlmResponseSubscription,
-        LlmStreamChunk, RuntimeResult, SessionHandle, SpawnSpec, SupervisorQueryArgs,
-        SupervisorQueryContextArgs, TerminalSnapshot, TicketId, TicketProvider, TicketSummary,
-        WorktreeStatus,
+        LlmStreamChunk, OrchestrationEventPayload, RuntimeResult, SessionHandle, SpawnSpec,
+        SupervisorQueryArgs, SupervisorQueryCancellationSource, SupervisorQueryContextArgs,
+        TerminalSnapshot, TicketId, TicketProvider, TicketSummary, WorktreeStatus,
     };
     use std::collections::{BTreeMap, VecDeque};
     use std::path::{Path, PathBuf};
@@ -527,6 +531,11 @@ mod tests {
                 context,
             }))
             .expect("serialize freeform supervisor.query")
+    }
+
+    fn read_events(path: &std::path::Path) -> Vec<orchestrator_core::StoredEventEnvelope> {
+        let store = SqliteEventStore::open(path).expect("open event store");
+        store.read_ordered().expect("read ordered events")
     }
 
     #[test]
@@ -1017,6 +1026,101 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn supervisor_query_dispatch_persists_lifecycle_events() {
+        let temp_db = TestDbPath::new("app-supervisor-query-lifecycle");
+        let supervisor = QueryingSupervisor::with_chunks(vec![
+            LlmStreamChunk {
+                delta: "Current activity: reviewing build output.".to_owned(),
+                finish_reason: None,
+                usage: None,
+                rate_limit: None,
+            },
+            LlmStreamChunk {
+                delta: String::new(),
+                finish_reason: Some(LlmFinishReason::Stop),
+                usage: Some(orchestrator_core::LlmTokenUsage {
+                    input_tokens: 64,
+                    output_tokens: 19,
+                    total_tokens: 83,
+                }),
+                rate_limit: None,
+            },
+        ]);
+
+        let app = App {
+            config: AppConfig {
+                workspace: "/workspace".to_owned(),
+                event_store_path: temp_db.path().to_string_lossy().to_string(),
+            },
+            supervisor: supervisor.clone(),
+            github: Healthy,
+        };
+
+        let (_stream_id, mut stream) = app
+            .dispatch_supervisor_command(
+                template_query_invocation("status_current_session"),
+                SupervisorCommandContext {
+                    selected_work_item_id: Some("wi-query".to_owned()),
+                    selected_session_id: Some("sess-query".to_owned()),
+                    scope: Some("session:sess-query".to_owned()),
+                },
+            )
+            .await
+            .expect("dispatch should stream");
+
+        while stream
+            .next_chunk()
+            .await
+            .expect("poll lifecycle stream")
+            .is_some()
+        {}
+
+        let events = read_events(temp_db.path());
+        let started_count = events
+            .iter()
+            .filter(|event| {
+                matches!(
+                    event.payload,
+                    OrchestrationEventPayload::SupervisorQueryStarted(_)
+                )
+            })
+            .count();
+        let chunk_count = events
+            .iter()
+            .filter(|event| {
+                matches!(
+                    event.payload,
+                    OrchestrationEventPayload::SupervisorQueryChunk(_)
+                )
+            })
+            .count();
+        let finished = events.iter().find_map(|event| match &event.payload {
+            OrchestrationEventPayload::SupervisorQueryFinished(payload) => Some(payload.clone()),
+            _ => None,
+        });
+
+        assert_eq!(started_count, 1);
+        assert_eq!(chunk_count, 2);
+        let finished = finished.expect("finished lifecycle event");
+        assert_eq!(finished.finish_reason, LlmFinishReason::Stop);
+        assert_eq!(finished.chunk_count, 2);
+        assert_eq!(finished.usage.map(|usage| usage.total_tokens), Some(83));
+        assert!(
+            events.iter().any(|event| {
+                event
+                    .work_item_id
+                    .as_ref()
+                    .is_some_and(|id| id.as_str() == "wi-query")
+                    && matches!(
+                        event.payload,
+                        OrchestrationEventPayload::SupervisorQueryStarted(_)
+                    )
+            }),
+            "lifecycle events should carry work item identity for projection views"
+        );
+    }
+
+    #[tokio::test]
     async fn supervisor_query_dispatch_uses_invocation_context_when_present() {
         let temp_db = TestDbPath::new("app-supervisor-query-command-context");
         let supervisor = QueryingSupervisor::with_chunks(vec![LlmStreamChunk {
@@ -1434,5 +1538,203 @@ mod tests {
             supervisor.cancelled_streams(),
             vec!["stream-cancel-7".to_owned()]
         );
+    }
+
+    #[tokio::test]
+    async fn supervisor_query_cancel_records_user_initiated_cancellation() {
+        let temp_db = TestDbPath::new("app-supervisor-query-user-cancel-record");
+        let supervisor = QueryingSupervisor::with_chunks(vec![LlmStreamChunk {
+            delta: String::new(),
+            finish_reason: Some(LlmFinishReason::Cancelled),
+            usage: None,
+            rate_limit: None,
+        }]);
+        let app = App {
+            config: AppConfig {
+                workspace: "/workspace".to_owned(),
+                event_store_path: temp_db.path().to_string_lossy().to_string(),
+            },
+            supervisor: supervisor.clone(),
+            github: Healthy,
+        };
+
+        let (stream_id, mut stream) = app
+            .dispatch_supervisor_command(
+                template_query_invocation("status"),
+                SupervisorCommandContext {
+                    selected_work_item_id: Some("wi-query".to_owned()),
+                    selected_session_id: Some("sess-query".to_owned()),
+                    scope: Some("session:sess-query".to_owned()),
+                },
+            )
+            .await
+            .expect("dispatch should stream");
+
+        app.cancel_supervisor_command(stream_id.as_str())
+            .await
+            .expect("cancel should succeed");
+
+        while stream
+            .next_chunk()
+            .await
+            .expect("poll cancelled stream")
+            .is_some()
+        {}
+
+        let events = read_events(temp_db.path());
+        let saw_user_cancelled = events.iter().any(|event| {
+            matches!(
+                &event.payload,
+                OrchestrationEventPayload::SupervisorQueryCancelled(payload)
+                    if payload.source == SupervisorQueryCancellationSource::UserInitiated
+            )
+        });
+        let saw_finished_user_cancelled = events.iter().any(|event| {
+            matches!(
+                &event.payload,
+                OrchestrationEventPayload::SupervisorQueryFinished(payload)
+                    if payload.finish_reason == LlmFinishReason::Cancelled
+                        && payload.cancellation_source
+                            == Some(SupervisorQueryCancellationSource::UserInitiated)
+            )
+        });
+
+        assert!(saw_user_cancelled);
+        assert!(saw_finished_user_cancelled);
+    }
+
+    #[tokio::test]
+    async fn supervisor_query_cancel_records_single_user_cancel_event_for_retries() {
+        let temp_db = TestDbPath::new("app-supervisor-query-user-cancel-deduped");
+        let supervisor = QueryingSupervisor::with_chunks(vec![LlmStreamChunk {
+            delta: String::new(),
+            finish_reason: Some(LlmFinishReason::Cancelled),
+            usage: None,
+            rate_limit: None,
+        }]);
+        let app = App {
+            config: AppConfig {
+                workspace: "/workspace".to_owned(),
+                event_store_path: temp_db.path().to_string_lossy().to_string(),
+            },
+            supervisor: supervisor.clone(),
+            github: Healthy,
+        };
+
+        let (stream_id, mut stream) = app
+            .dispatch_supervisor_command(
+                template_query_invocation("status"),
+                SupervisorCommandContext {
+                    selected_work_item_id: Some("wi-query".to_owned()),
+                    selected_session_id: Some("sess-query".to_owned()),
+                    scope: Some("session:sess-query".to_owned()),
+                },
+            )
+            .await
+            .expect("dispatch should stream");
+
+        app.cancel_supervisor_command(stream_id.as_str())
+            .await
+            .expect("first cancel should succeed");
+        app.cancel_supervisor_command(stream_id.as_str())
+            .await
+            .expect("second cancel should succeed");
+
+        while stream
+            .next_chunk()
+            .await
+            .expect("poll cancelled stream")
+            .is_some()
+        {}
+
+        let events = read_events(temp_db.path());
+        let user_cancelled_count = events
+            .iter()
+            .filter(|event| {
+                matches!(
+                    &event.payload,
+                    OrchestrationEventPayload::SupervisorQueryCancelled(payload)
+                        if payload.source == SupervisorQueryCancellationSource::UserInitiated
+                )
+            })
+            .count();
+
+        assert_eq!(user_cancelled_count, 1);
+    }
+
+    #[tokio::test]
+    async fn supervisor_query_cancel_targets_latest_active_query_when_stream_ids_repeat() {
+        let temp_db = TestDbPath::new("app-supervisor-query-stream-id-reuse");
+        let supervisor = QueryingSupervisor::with_chunks(vec![LlmStreamChunk {
+            delta: String::new(),
+            finish_reason: Some(LlmFinishReason::Cancelled),
+            usage: None,
+            rate_limit: None,
+        }]);
+        let app = App {
+            config: AppConfig {
+                workspace: "/workspace".to_owned(),
+                event_store_path: temp_db.path().to_string_lossy().to_string(),
+            },
+            supervisor: supervisor.clone(),
+            github: Healthy,
+        };
+
+        let (_stream_id_first, mut stream_first) = app
+            .dispatch_supervisor_command(
+                template_query_invocation("status"),
+                SupervisorCommandContext {
+                    selected_work_item_id: Some("wi-first".to_owned()),
+                    selected_session_id: Some("sess-first".to_owned()),
+                    scope: Some("session:sess-first".to_owned()),
+                },
+            )
+            .await
+            .expect("first dispatch should stream");
+
+        let (stream_id_second, mut stream_second) = app
+            .dispatch_supervisor_command(
+                template_query_invocation("status"),
+                SupervisorCommandContext {
+                    selected_work_item_id: Some("wi-second".to_owned()),
+                    selected_session_id: Some("sess-second".to_owned()),
+                    scope: Some("session:sess-second".to_owned()),
+                },
+            )
+            .await
+            .expect("second dispatch should stream");
+
+        while stream_first
+            .next_chunk()
+            .await
+            .expect("poll first stream")
+            .is_some()
+        {}
+
+        app.cancel_supervisor_command(stream_id_second.as_str())
+            .await
+            .expect("cancel should target second active stream");
+
+        while stream_second
+            .next_chunk()
+            .await
+            .expect("poll second stream")
+            .is_some()
+        {}
+
+        let events = read_events(temp_db.path());
+        let saw_second_user_cancel = events.iter().any(|event| {
+            event
+                .work_item_id
+                .as_ref()
+                .is_some_and(|id| id.as_str() == "wi-second")
+                && matches!(
+                    &event.payload,
+                    OrchestrationEventPayload::SupervisorQueryCancelled(payload)
+                        if payload.source == SupervisorQueryCancellationSource::UserInitiated
+                )
+        });
+
+        assert!(saw_second_user_cancel);
     }
 }

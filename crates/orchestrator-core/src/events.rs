@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 
+use crate::adapters::{LlmFinishReason, LlmTokenUsage};
 use crate::identifiers::{
     ArtifactId, InboxItemId, ProjectId, TicketId, WorkItemId, WorkerSessionId, WorktreeId,
 };
@@ -22,6 +23,10 @@ pub enum OrchestrationEventType {
     InboxItemCreated,
     InboxItemResolved,
     UserResponded,
+    SupervisorQueryStarted,
+    SupervisorQueryChunk,
+    SupervisorQueryCancelled,
+    SupervisorQueryFinished,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -140,6 +145,72 @@ pub struct UserRespondedPayload {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SupervisorQueryKind {
+    Template,
+    Freeform,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SupervisorQueryCancellationSource {
+    UserInitiated,
+    Runtime,
+    Unknown,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SupervisorQueryStartedPayload {
+    pub query_id: String,
+    pub stream_id: String,
+    pub scope: String,
+    pub started_at: String,
+    pub kind: SupervisorQueryKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub template: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub query: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SupervisorQueryChunkPayload {
+    pub query_id: String,
+    pub stream_id: String,
+    pub chunk_index: u32,
+    pub observed_at: String,
+    pub delta_chars: u32,
+    pub cumulative_output_chars: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<LlmTokenUsage>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finish_reason: Option<LlmFinishReason>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SupervisorQueryCancelledPayload {
+    pub query_id: String,
+    pub stream_id: String,
+    pub cancelled_at: String,
+    pub source: SupervisorQueryCancellationSource,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SupervisorQueryFinishedPayload {
+    pub query_id: String,
+    pub stream_id: String,
+    pub started_at: String,
+    pub finished_at: String,
+    pub duration_ms: u64,
+    pub finish_reason: LlmFinishReason,
+    pub chunk_count: u32,
+    pub output_chars: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<LlmTokenUsage>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cancellation_source: Option<SupervisorQueryCancellationSource>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
 pub enum OrchestrationEventPayload {
     TicketSynced(TicketSyncedPayload),
@@ -156,6 +227,10 @@ pub enum OrchestrationEventPayload {
     InboxItemCreated(InboxItemCreatedPayload),
     InboxItemResolved(InboxItemResolvedPayload),
     UserResponded(UserRespondedPayload),
+    SupervisorQueryStarted(SupervisorQueryStartedPayload),
+    SupervisorQueryChunk(SupervisorQueryChunkPayload),
+    SupervisorQueryCancelled(SupervisorQueryCancelledPayload),
+    SupervisorQueryFinished(SupervisorQueryFinishedPayload),
 }
 
 impl OrchestrationEventPayload {
@@ -175,6 +250,10 @@ impl OrchestrationEventPayload {
             Self::InboxItemCreated(_) => OrchestrationEventType::InboxItemCreated,
             Self::InboxItemResolved(_) => OrchestrationEventType::InboxItemResolved,
             Self::UserResponded(_) => OrchestrationEventType::UserResponded,
+            Self::SupervisorQueryStarted(_) => OrchestrationEventType::SupervisorQueryStarted,
+            Self::SupervisorQueryChunk(_) => OrchestrationEventType::SupervisorQueryChunk,
+            Self::SupervisorQueryCancelled(_) => OrchestrationEventType::SupervisorQueryCancelled,
+            Self::SupervisorQueryFinished(_) => OrchestrationEventType::SupervisorQueryFinished,
         }
     }
 }

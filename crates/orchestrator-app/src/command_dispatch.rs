@@ -1,15 +1,130 @@
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{SystemTime, UNIX_EPOCH};
+
 use orchestrator_core::{
-    command_ids, resolve_supervisor_query_scope, Command, CommandRegistry, CoreError,
-    LlmChatRequest, LlmProvider, LlmResponseStream, SupervisorQueryArgs,
-    SupervisorQueryContextArgs, UntypedCommandInvocation,
+    command_ids, resolve_supervisor_query_scope, Command, CommandRegistry, CoreError, EventStore,
+    LlmChatRequest, LlmFinishReason, LlmProvider, LlmResponseStream, LlmResponseSubscription,
+    LlmStreamChunk, LlmTokenUsage, NewEventEnvelope, OrchestrationEventPayload, RetrievalScope,
+    SupervisorQueryArgs, SupervisorQueryCancellationSource, SupervisorQueryCancelledPayload,
+    SupervisorQueryChunkPayload, SupervisorQueryContextArgs, SupervisorQueryFinishedPayload,
+    SupervisorQueryKind, SupervisorQueryStartedPayload, UntypedCommandInvocation, WorkItemId,
+    WorkerSessionId, DOMAIN_EVENT_SCHEMA_VERSION,
 };
 use orchestrator_supervisor::{
     build_freeform_messages, build_inferred_template_messages,
     build_template_messages_with_variables, infer_template_from_query, SupervisorQueryEngine,
 };
 use orchestrator_ui::SupervisorCommandContext;
+use tracing::warn;
 
 use crate::{open_event_store, supervisor_model_from_env};
+
+static SUPERVISOR_QUERY_EVENT_COUNTER: AtomicU64 = AtomicU64::new(1);
+static SUPERVISOR_QUERY_ID_COUNTER: AtomicU64 = AtomicU64::new(1);
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct ActiveSupervisorQueryKey {
+    event_store_path: String,
+    stream_id: String,
+}
+
+#[derive(Debug, Clone)]
+struct ActiveSupervisorQueryState {
+    query_id: String,
+    work_item_id: Option<WorkItemId>,
+    session_id: Option<WorkerSessionId>,
+    cancellation_requested_by_user: Arc<AtomicBool>,
+}
+
+fn active_supervisor_queries(
+) -> &'static Mutex<HashMap<ActiveSupervisorQueryKey, ActiveSupervisorQueryState>> {
+    static ACTIVE: OnceLock<Mutex<HashMap<ActiveSupervisorQueryKey, ActiveSupervisorQueryState>>> =
+        OnceLock::new();
+    ACTIVE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn active_query_key(event_store_path: &str, stream_id: &str) -> ActiveSupervisorQueryKey {
+    ActiveSupervisorQueryKey {
+        event_store_path: event_store_path.to_owned(),
+        stream_id: stream_id.to_owned(),
+    }
+}
+
+fn register_active_supervisor_query(
+    event_store_path: &str,
+    stream_id: &str,
+    state: ActiveSupervisorQueryState,
+) {
+    let key = active_query_key(event_store_path, stream_id);
+    let mut active = active_supervisor_queries()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    active.insert(key, state);
+}
+
+fn remove_active_supervisor_query_for_query(
+    event_store_path: &str,
+    stream_id: &str,
+    query_id: &str,
+) -> Option<ActiveSupervisorQueryState> {
+    let key = active_query_key(event_store_path, stream_id);
+    let mut active = active_supervisor_queries()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let is_matching_query = active
+        .get(&key)
+        .is_some_and(|state| state.query_id.as_str() == query_id);
+    if !is_matching_query {
+        return None;
+    }
+    active.remove(&key)
+}
+
+fn mark_user_cancellation_requested(
+    event_store_path: &str,
+    stream_id: &str,
+) -> Option<ActiveSupervisorQueryState> {
+    let key = active_query_key(event_store_path, stream_id);
+    let active = active_supervisor_queries()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let state = active.get(&key)?.clone();
+    if state
+        .cancellation_requested_by_user
+        .swap(true, Ordering::Relaxed)
+    {
+        return None;
+    }
+
+    Some(state)
+}
+
+fn now_timestamp() -> String {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default();
+    format!("{}.{:09}Z", now.as_secs(), now.subsec_nanos())
+}
+
+fn next_event_id(prefix: &str) -> String {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let count = SUPERVISOR_QUERY_EVENT_COUNTER.fetch_add(1, Ordering::Relaxed);
+    format!("evt-{prefix}-{now}-{count}")
+}
+
+fn next_supervisor_query_id() -> String {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let count = SUPERVISOR_QUERY_ID_COUNTER.fetch_add(1, Ordering::Relaxed);
+    format!("supq-{now}-{count}")
+}
 
 fn invalid_supervisor_query_usage(reason: impl Into<String>) -> CoreError {
     CoreError::InvalidCommandArgs {
@@ -67,6 +182,314 @@ fn args_context(args: &SupervisorQueryArgs) -> Option<SupervisorQueryContextArgs
     }
 }
 
+fn scope_label(scope: &RetrievalScope) -> String {
+    match scope {
+        RetrievalScope::Global => "global".to_owned(),
+        RetrievalScope::WorkItem(work_item_id) => format!("work_item:{}", work_item_id.as_str()),
+        RetrievalScope::Session(session_id) => format!("session:{}", session_id.as_str()),
+    }
+}
+
+fn event_scope_identifiers(
+    scope: &RetrievalScope,
+    context: &SupervisorCommandContext,
+) -> (Option<WorkItemId>, Option<WorkerSessionId>) {
+    let context_work_item_id = context
+        .selected_work_item_id
+        .as_ref()
+        .map(|id| WorkItemId::from(id.clone()));
+    let context_session_id = context
+        .selected_session_id
+        .as_ref()
+        .map(|id| WorkerSessionId::from(id.clone()));
+
+    match scope {
+        RetrievalScope::Global => (None, None),
+        RetrievalScope::WorkItem(work_item_id) => (Some(work_item_id.clone()), context_session_id),
+        RetrievalScope::Session(session_id) => (context_work_item_id, Some(session_id.clone())),
+    }
+}
+
+fn query_kind(args: &SupervisorQueryArgs) -> SupervisorQueryKind {
+    match args {
+        SupervisorQueryArgs::Template { .. } => SupervisorQueryKind::Template,
+        SupervisorQueryArgs::Freeform { .. } => SupervisorQueryKind::Freeform,
+    }
+}
+
+fn query_template(args: &SupervisorQueryArgs) -> Option<String> {
+    match args {
+        SupervisorQueryArgs::Template { template, .. } => Some(template.clone()),
+        SupervisorQueryArgs::Freeform { query, .. } => {
+            infer_template_from_query(query.as_str()).map(|template| template.key().to_owned())
+        }
+    }
+}
+
+fn query_text(args: &SupervisorQueryArgs) -> Option<String> {
+    match args {
+        SupervisorQueryArgs::Template { .. } => None,
+        SupervisorQueryArgs::Freeform { query, .. } => Some(query.clone()),
+    }
+}
+
+fn append_supervisor_event(
+    event_store_path: &str,
+    event_id: String,
+    occurred_at: String,
+    work_item_id: Option<WorkItemId>,
+    session_id: Option<WorkerSessionId>,
+    payload: OrchestrationEventPayload,
+) -> Result<(), CoreError> {
+    let mut store = open_event_store(event_store_path)?;
+    store.append(NewEventEnvelope {
+        event_id,
+        occurred_at,
+        work_item_id,
+        session_id,
+        payload,
+        schema_version: DOMAIN_EVENT_SCHEMA_VERSION,
+    })?;
+    Ok(())
+}
+
+fn append_supervisor_event_best_effort(
+    event_store_path: &str,
+    event_id: String,
+    occurred_at: String,
+    work_item_id: Option<WorkItemId>,
+    session_id: Option<WorkerSessionId>,
+    payload: OrchestrationEventPayload,
+) {
+    if let Err(error) = append_supervisor_event(
+        event_store_path,
+        event_id,
+        occurred_at,
+        work_item_id,
+        session_id,
+        payload,
+    ) {
+        warn!(
+            event_store_path,
+            "failed to append supervisor lifecycle event: {error}"
+        );
+    }
+}
+
+struct SupervisorLifecycleRecordingStream {
+    event_store_path: String,
+    work_item_id: Option<WorkItemId>,
+    session_id: Option<WorkerSessionId>,
+    query_id: String,
+    stream_id: String,
+    started_at: String,
+    started_time: SystemTime,
+    cancellation_requested_by_user: Arc<AtomicBool>,
+    chunk_count: u32,
+    output_chars: u32,
+    latest_usage: Option<LlmTokenUsage>,
+    finished: bool,
+    inner: LlmResponseStream,
+}
+
+impl SupervisorLifecycleRecordingStream {
+    fn new(
+        event_store_path: String,
+        work_item_id: Option<WorkItemId>,
+        session_id: Option<WorkerSessionId>,
+        query_id: String,
+        stream_id: String,
+        started_at: String,
+        started_time: SystemTime,
+        cancellation_requested_by_user: Arc<AtomicBool>,
+        inner: LlmResponseStream,
+    ) -> Self {
+        Self {
+            event_store_path,
+            work_item_id,
+            session_id,
+            query_id,
+            stream_id,
+            started_at,
+            started_time,
+            cancellation_requested_by_user,
+            chunk_count: 0,
+            output_chars: 0,
+            latest_usage: None,
+            finished: false,
+            inner,
+        }
+    }
+
+    fn observe_chunk(&mut self, chunk: &LlmStreamChunk) {
+        let delta_chars = u32::try_from(chunk.delta.chars().count()).unwrap_or(u32::MAX);
+        self.chunk_count = self.chunk_count.saturating_add(1);
+        self.output_chars = self.output_chars.saturating_add(delta_chars);
+        if let Some(usage) = chunk.usage.as_ref() {
+            self.latest_usage = Some(usage.clone());
+        }
+
+        let observed_at = now_timestamp();
+        append_supervisor_event_best_effort(
+            self.event_store_path.as_str(),
+            next_event_id("supervisor-query-chunk"),
+            observed_at.clone(),
+            self.work_item_id.clone(),
+            self.session_id.clone(),
+            OrchestrationEventPayload::SupervisorQueryChunk(SupervisorQueryChunkPayload {
+                query_id: self.query_id.clone(),
+                stream_id: self.stream_id.clone(),
+                chunk_index: self.chunk_count,
+                observed_at,
+                delta_chars,
+                cumulative_output_chars: self.output_chars,
+                usage: chunk.usage.clone(),
+                finish_reason: chunk.finish_reason.clone(),
+            }),
+        );
+    }
+
+    fn finalize(
+        &mut self,
+        reason: LlmFinishReason,
+        usage: Option<LlmTokenUsage>,
+        error: Option<String>,
+    ) {
+        if self.finished {
+            return;
+        }
+
+        self.finished = true;
+        let finished_at = now_timestamp();
+        let duration_ms = SystemTime::now()
+            .duration_since(self.started_time)
+            .unwrap_or_default()
+            .as_millis();
+        let duration_ms = u64::try_from(duration_ms).unwrap_or(u64::MAX);
+        let final_usage = usage.or_else(|| self.latest_usage.clone());
+
+        let cancellation_source = if reason == LlmFinishReason::Cancelled {
+            if self.cancellation_requested_by_user.load(Ordering::Relaxed) {
+                Some(SupervisorQueryCancellationSource::UserInitiated)
+            } else {
+                Some(SupervisorQueryCancellationSource::Runtime)
+            }
+        } else {
+            None
+        };
+
+        append_supervisor_event_best_effort(
+            self.event_store_path.as_str(),
+            next_event_id("supervisor-query-finished"),
+            finished_at.clone(),
+            self.work_item_id.clone(),
+            self.session_id.clone(),
+            OrchestrationEventPayload::SupervisorQueryFinished(SupervisorQueryFinishedPayload {
+                query_id: self.query_id.clone(),
+                stream_id: self.stream_id.clone(),
+                started_at: self.started_at.clone(),
+                finished_at,
+                duration_ms,
+                finish_reason: reason,
+                chunk_count: self.chunk_count,
+                output_chars: self.output_chars,
+                usage: final_usage,
+                error,
+                cancellation_source,
+            }),
+        );
+
+        let _ = remove_active_supervisor_query_for_query(
+            self.event_store_path.as_str(),
+            self.stream_id.as_str(),
+            self.query_id.as_str(),
+        );
+    }
+}
+
+impl Drop for SupervisorLifecycleRecordingStream {
+    fn drop(&mut self) {
+        if self.finished {
+            return;
+        }
+
+        let source = if self.cancellation_requested_by_user.load(Ordering::Relaxed) {
+            SupervisorQueryCancellationSource::UserInitiated
+        } else {
+            SupervisorQueryCancellationSource::Runtime
+        };
+
+        self.finalize(
+            LlmFinishReason::Cancelled,
+            None,
+            Some("supervisor stream dropped before terminal chunk".to_owned()),
+        );
+
+        if source == SupervisorQueryCancellationSource::Runtime {
+            let cancelled_at = now_timestamp();
+            append_supervisor_event_best_effort(
+                self.event_store_path.as_str(),
+                next_event_id("supervisor-query-cancelled"),
+                cancelled_at.clone(),
+                self.work_item_id.clone(),
+                self.session_id.clone(),
+                OrchestrationEventPayload::SupervisorQueryCancelled(
+                    SupervisorQueryCancelledPayload {
+                        query_id: self.query_id.clone(),
+                        stream_id: self.stream_id.clone(),
+                        cancelled_at,
+                        source,
+                    },
+                ),
+            );
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl LlmResponseSubscription for SupervisorLifecycleRecordingStream {
+    async fn next_chunk(&mut self) -> Result<Option<LlmStreamChunk>, CoreError> {
+        match self.inner.next_chunk().await {
+            Ok(Some(chunk)) => {
+                self.observe_chunk(&chunk);
+                if let Some(reason) = chunk.finish_reason.clone() {
+                    self.finalize(reason, chunk.usage.clone(), None);
+                }
+                Ok(Some(chunk))
+            }
+            Ok(None) => {
+                self.finalize(LlmFinishReason::Stop, None, None);
+                Ok(None)
+            }
+            Err(error) => {
+                self.finalize(LlmFinishReason::Error, None, Some(error.to_string()));
+                Err(error)
+            }
+        }
+    }
+}
+
+pub(crate) fn record_user_initiated_supervisor_cancel(event_store_path: &str, stream_id: &str) {
+    let Some(state) = mark_user_cancellation_requested(event_store_path, stream_id) else {
+        return;
+    };
+
+    let cancelled_at = now_timestamp();
+    append_supervisor_event_best_effort(
+        event_store_path,
+        next_event_id("supervisor-query-cancelled"),
+        cancelled_at.clone(),
+        state.work_item_id,
+        state.session_id,
+        OrchestrationEventPayload::SupervisorQueryCancelled(SupervisorQueryCancelledPayload {
+            query_id: state.query_id,
+            stream_id: stream_id.to_owned(),
+            cancelled_at,
+            source: SupervisorQueryCancellationSource::UserInitiated,
+        }),
+    );
+}
+
 async fn execute_supervisor_query<P>(
     supervisor: &P,
     event_store_path: &str,
@@ -80,13 +503,14 @@ where
     let scope = resolve_supervisor_query_scope(&context)?;
     let store = open_event_store(event_store_path)?;
     let query_engine = SupervisorQueryEngine::default();
-    let context_pack = query_engine.build_context_pack_with_filters(&store, scope, &context)?;
-    let messages = match args {
+    let context_pack =
+        query_engine.build_context_pack_with_filters(&store, scope.clone(), &context)?;
+    let messages = match &args {
         SupervisorQueryArgs::Template {
             template,
             variables,
             ..
-        } => build_template_messages_with_variables(template.as_str(), &variables, &context_pack)?,
+        } => build_template_messages_with_variables(template.as_str(), variables, &context_pack)?,
         SupervisorQueryArgs::Freeform { query, .. } => {
             if let Some(template) = infer_template_from_query(query.as_str()) {
                 build_inferred_template_messages(template, query.as_str(), &context_pack)?
@@ -96,14 +520,62 @@ where
         }
     };
 
-    supervisor
+    let (stream_id, stream) = supervisor
         .stream_chat(LlmChatRequest {
             model: supervisor_model_from_env(),
             messages,
             temperature: Some(0.2),
             max_output_tokens: Some(700),
         })
-        .await
+        .await?;
+
+    let query_id = next_supervisor_query_id();
+    let started_at = now_timestamp();
+    let started_time = SystemTime::now();
+    let (work_item_id, session_id) = event_scope_identifiers(&scope, &context);
+    let cancellation_requested_by_user = Arc::new(AtomicBool::new(false));
+
+    append_supervisor_event(
+        event_store_path,
+        next_event_id("supervisor-query-started"),
+        started_at.clone(),
+        work_item_id.clone(),
+        session_id.clone(),
+        OrchestrationEventPayload::SupervisorQueryStarted(SupervisorQueryStartedPayload {
+            query_id: query_id.clone(),
+            stream_id: stream_id.clone(),
+            scope: scope_label(&scope),
+            started_at: started_at.clone(),
+            kind: query_kind(&args),
+            template: query_template(&args),
+            query: query_text(&args),
+        }),
+    )?;
+
+    register_active_supervisor_query(
+        event_store_path,
+        stream_id.as_str(),
+        ActiveSupervisorQueryState {
+            query_id: query_id.clone(),
+            work_item_id: work_item_id.clone(),
+            session_id: session_id.clone(),
+            cancellation_requested_by_user: cancellation_requested_by_user.clone(),
+        },
+    );
+
+    let stream = SupervisorLifecycleRecordingStream::new(
+        event_store_path.to_owned(),
+        work_item_id,
+        session_id,
+        query_id,
+        stream_id.clone(),
+        started_at,
+        started_time,
+        cancellation_requested_by_user,
+        stream,
+    );
+
+    Ok((stream_id, Box::new(stream)))
 }
 
 pub(crate) async fn dispatch_supervisor_runtime_command<P>(

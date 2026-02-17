@@ -518,6 +518,10 @@ fn render_event_type(event_type: &OrchestrationEventType) -> &'static str {
         OrchestrationEventType::InboxItemCreated => "inbox_item_created",
         OrchestrationEventType::InboxItemResolved => "inbox_item_resolved",
         OrchestrationEventType::UserResponded => "user_responded",
+        OrchestrationEventType::SupervisorQueryStarted => "supervisor_query_started",
+        OrchestrationEventType::SupervisorQueryChunk => "supervisor_query_chunk",
+        OrchestrationEventType::SupervisorQueryCancelled => "supervisor_query_cancelled",
+        OrchestrationEventType::SupervisorQueryFinished => "supervisor_query_finished",
     }
 }
 
