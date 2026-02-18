@@ -36,3 +36,10 @@
 - `ORCHESTRATOR_INSTRUCTION_PRELUDE` (backend-opencode): optional instruction prelude injected into child process env.
 - `ORCHESTRATOR_TICKET_PICKER_PRIORITY_STATES` (orchestrator-ui): optional comma-separated ticket state ordering.
 - `ORCHESTRATOR_UPDATE_GOLDENS` (orchestrator-ui): optional test helper toggle for golden snapshot updates.
+
+## Development Policy
+
+- Backward compatibility and legacy support are not required unless explicitly requested for a given change.
+- Clean code, simplification, and removal of unused code blocks take priority over preserving compatibility.
+- Before making any backwards-incompatible change, notify the user explicitly; otherwise, breaking changes are acceptable.
+- Before handing off work, always verify the app is buildable, tests pass, and there are no compiler warnings.

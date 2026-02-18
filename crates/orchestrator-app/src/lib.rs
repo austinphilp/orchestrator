@@ -1,4 +1,6 @@
 use integration_linear::LinearTicketingProvider;
+use std::path::PathBuf;
+use std::sync::Arc;
 use orchestrator_core::{
     rebuild_projection, CoreError, EventStore, GithubClient, LlmProvider, ProjectionState,
     CodeHostProvider, SelectedTicketFlowConfig, SelectedTicketFlowResult, SqliteEventStore, Supervisor,
@@ -325,6 +327,7 @@ impl<S: Supervisor, G: GithubClient> App<S, G> {
     pub async fn start_or_resume_selected_ticket(
         &self,
         selected_ticket: &TicketSummary,
+        repository_override: Option<PathBuf>,
         vcs: &dyn VcsProvider,
         worker_backend: &dyn WorkerBackend,
     ) -> Result<SelectedTicketFlowResult, CoreError> {
@@ -335,6 +338,7 @@ impl<S: Supervisor, G: GithubClient> App<S, G> {
             &mut store,
             selected_ticket,
             &flow_config,
+            repository_override,
             vcs,
             worker_backend,
         )
@@ -364,7 +368,7 @@ where
         command_dispatch::dispatch_supervisor_runtime_command(
             &self.supervisor,
             &self.github,
-            &self.ticketing,
+            self.ticketing.as_ref(),
             &self.config.event_store_path,
             invocation,
             context,
@@ -388,8 +392,8 @@ mod tests {
     use orchestrator_core::{
         ArtifactCreatedPayload, ArtifactId, ArtifactKind, ArtifactRecord, BackendCapabilities,
         BackendKind, CodeHostKind, Command, CommandRegistry, DOMAIN_EVENT_SCHEMA_VERSION, command_ids,
-        AddTicketCommentRequest, CreateTicketRequest,
-        GetTicketRequest, LlmChatRequest,
+        AddTicketCommentRequest, CreateTicketRequest, GetTicketRequest,
+        LlmChatRequest, LlmRole, LlmToolCall, TicketQuery,
         TicketDetails, TicketingProvider, UpdateTicketDescriptionRequest,
         UpdateTicketStateRequest,
         LlmFinishReason, LlmProviderKind, LlmResponseStream, LlmResponseSubscription,
@@ -570,15 +574,19 @@ mod tests {
     struct QueryingSupervisor {
         requests: Arc<Mutex<Vec<LlmChatRequest>>>,
         cancelled_streams: Arc<Mutex<Vec<String>>>,
-        stream_chunks: Arc<Vec<LlmStreamChunk>>,
+        stream_chunks: Arc<Mutex<VecDeque<Vec<LlmStreamChunk>>>>,
     }
 
     impl QueryingSupervisor {
         fn with_chunks(stream_chunks: Vec<LlmStreamChunk>) -> Self {
+            Self::with_chunk_sequences(vec![stream_chunks])
+        }
+
+        fn with_chunk_sequences(stream_chunk_sequences: Vec<Vec<LlmStreamChunk>>) -> Self {
             Self {
                 requests: Arc::new(Mutex::new(Vec::new())),
                 cancelled_streams: Arc::new(Mutex::new(Vec::new())),
-                stream_chunks: Arc::new(stream_chunks),
+                stream_chunks: Arc::new(Mutex::new(VecDeque::from(stream_chunk_sequences))),
             }
         }
 
@@ -624,10 +632,16 @@ mod tests {
             request: LlmChatRequest,
         ) -> Result<(String, LlmResponseStream), CoreError> {
             self.requests.lock().expect("request lock").push(request);
+                let chunks = {
+                    let mut sequences = self.stream_chunks.lock().expect("stream chunk lock");
+                    sequences
+                        .pop_front()
+                        .unwrap_or_else(Vec::new)
+                };
             Ok((
                 "test-stream-1".to_owned(),
                 Box::new(TestLlmStream {
-                    chunks: self.stream_chunks.iter().cloned().collect(),
+                    chunks: chunks.into(),
                 }),
             ))
         }
@@ -1138,6 +1152,200 @@ mod tests {
         }
     }
 
+    #[derive(Debug)]
+    struct ScriptedTicketingProvider {
+        provider: TicketProvider,
+        list_tickets_calls: Arc<Mutex<Vec<TicketQuery>>>,
+        get_ticket_calls: Arc<Mutex<Vec<TicketId>>>,
+        update_ticket_state_calls: Arc<Mutex<Vec<(TicketId, String)>>>,
+        update_ticket_description_calls: Arc<Mutex<Vec<(TicketId, String)>>>,
+        add_comment_calls: Arc<Mutex<Vec<(TicketId, String)>>>,
+        list_tickets_result: Mutex<Option<Result<Vec<TicketSummary>, CoreError>>>,
+        get_ticket_result: Mutex<Option<Result<TicketDetails, CoreError>>>,
+        update_ticket_state_result: Mutex<Option<Result<(), CoreError>>>,
+        update_ticket_description_result: Mutex<Option<Result<(), CoreError>>>,
+        add_comment_result: Mutex<Option<Result<(), CoreError>>>,
+    }
+
+    impl Default for ScriptedTicketingProvider {
+        fn default() -> Self {
+            Self::new(TicketProvider::Linear)
+        }
+    }
+
+    impl ScriptedTicketingProvider {
+        fn new(provider: TicketProvider) -> Self {
+            Self {
+                provider,
+                list_tickets_calls: Arc::new(Mutex::new(Vec::new())),
+                get_ticket_calls: Arc::new(Mutex::new(Vec::new())),
+                update_ticket_state_calls: Arc::new(Mutex::new(Vec::new())),
+                update_ticket_description_calls: Arc::new(Mutex::new(Vec::new())),
+                add_comment_calls: Arc::new(Mutex::new(Vec::new())),
+                list_tickets_result: Mutex::new(Some(Ok(Vec::new()))),
+                get_ticket_result: Mutex::new(Some(Ok(TicketDetails {
+                    summary: TicketSummary {
+                        ticket_id: TicketId::from("linear:missing"),
+                        identifier: "MISSING".to_owned(),
+                        title: "Missing".to_owned(),
+                        project: Some("Missing".to_owned()),
+                        state: "Unknown".to_owned(),
+                        url: "https://linear.app/missing".to_owned(),
+                        assignee: None,
+                        priority: None,
+                        labels: Vec::new(),
+                        updated_at: "1970-01-01T00:00:00Z".to_owned(),
+                    },
+                    description: None,
+                }))),
+                update_ticket_state_result: Mutex::new(Some(Ok(()))),
+                update_ticket_description_result: Mutex::new(Some(Ok(()))),
+                add_comment_result: Mutex::new(Some(Ok(()))),
+            }
+        }
+
+        fn with_list_tickets_result(
+            &self,
+            tickets: Vec<TicketSummary>,
+        ) -> &Self {
+            *self
+                .list_tickets_result
+                .lock()
+                .expect("list result lock") = Some(Ok(tickets));
+            self
+        }
+
+        fn with_update_state_result(&self, result: Result<(), CoreError>) -> &Self {
+            *self
+                .update_ticket_state_result
+                .lock()
+                .expect("update state lock") = Some(result);
+            self
+        }
+
+        fn list_tickets_calls(&self) -> Vec<TicketQuery> {
+            self.list_tickets_calls
+                .lock()
+                .expect("list calls lock")
+                .clone()
+        }
+
+        fn update_ticket_state_calls(&self) -> Vec<(TicketId, String)> {
+            self.update_ticket_state_calls
+                .lock()
+                .expect("state calls lock")
+                .clone()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl TicketingProvider for ScriptedTicketingProvider {
+        fn provider(&self) -> TicketProvider {
+            self.provider.clone()
+        }
+
+        async fn health_check(&self) -> Result<(), CoreError> {
+            Ok(())
+        }
+
+        async fn list_tickets(
+            &self,
+            query: TicketQuery,
+        ) -> Result<Vec<TicketSummary>, CoreError> {
+            self.list_tickets_calls
+                .lock()
+                .expect("record list call lock")
+                .push(query);
+            self.list_tickets_result
+                .lock()
+                .expect("list result lock")
+                .take()
+                .unwrap_or_else(|| Ok(Vec::new()))
+        }
+
+        async fn create_ticket(
+            &self,
+            _request: CreateTicketRequest,
+        ) -> Result<TicketSummary, CoreError> {
+            Err(CoreError::DependencyUnavailable(
+                "scripted mock ticketing provider does not implement create_ticket in tests".to_owned(),
+            ))
+        }
+
+        async fn update_ticket_state(
+            &self,
+            request: UpdateTicketStateRequest,
+        ) -> Result<(), CoreError> {
+            self.update_ticket_state_calls
+                .lock()
+                .expect("record state call lock")
+                .push((request.ticket_id, request.state));
+            self.update_ticket_state_result
+                .lock()
+                .expect("update state lock")
+                .take()
+                .unwrap_or_else(|| Ok(()))
+        }
+
+        async fn get_ticket(
+            &self,
+            request: GetTicketRequest,
+        ) -> Result<TicketDetails, CoreError> {
+            self.get_ticket_calls
+                .lock()
+                .expect("record get call lock")
+                .push(request.ticket_id);
+            self.get_ticket_result
+                .lock()
+                .expect("get result lock")
+                .take()
+                .unwrap_or_else(|| {
+                    Ok(TicketDetails {
+                        summary: TicketSummary {
+                            ticket_id: TicketId::from("linear:missing"),
+                            identifier: "MISSING".to_owned(),
+                            title: "Missing".to_owned(),
+                            project: Some("Missing".to_owned()),
+                            state: "Unknown".to_owned(),
+                            url: "https://linear.app/missing".to_owned(),
+                            assignee: None,
+                            priority: None,
+                            labels: Vec::new(),
+                            updated_at: "1970-01-01T00:00:00Z".to_owned(),
+                        },
+                        description: None,
+                    })
+                })
+        }
+
+        async fn update_ticket_description(
+            &self,
+            request: UpdateTicketDescriptionRequest,
+        ) -> Result<(), CoreError> {
+            self.update_ticket_description_calls
+                .lock()
+                .expect("record description call lock")
+                .push((request.ticket_id, request.description));
+            self.update_ticket_description_result
+                .lock()
+                .expect("description result lock")
+                .take()
+                .unwrap_or_else(|| Ok(()))
+        }
+
+        async fn add_comment(&self, request: AddTicketCommentRequest) -> Result<(), CoreError> {
+            self.add_comment_calls
+                .lock()
+                .expect("record comment call lock")
+                .push((request.ticket_id, request.comment));
+            self.add_comment_result
+                .lock()
+                .expect("comment result lock")
+                .take()
+                .unwrap_or_else(|| Ok(()))
+        }
+    }
+
     #[tokio::test]
     async fn startup_composition_succeeds_with_mock_adapters() {
         let temp_db = TestDbPath::new("app-startup-test");
@@ -1325,7 +1533,12 @@ mod tests {
         };
 
         let result = app
-            .start_or_resume_selected_ticket(&ticket, &vcs, &backend)
+            .start_or_resume_selected_ticket(
+                &ticket,
+                Some(vcs.repository.root.clone()),
+                &vcs,
+                &backend,
+            )
             .await
             .expect("start selected ticket");
 
@@ -1433,7 +1646,7 @@ mod tests {
             .await
             .expect("dispatch should stream");
 
-        assert_eq!(stream_id, "test-stream-1");
+        assert!(stream_id.starts_with("runtime-"));
 
         let first = stream
             .next_chunk()
@@ -1458,6 +1671,205 @@ mod tests {
         assert!(requests[0].messages[1]
             .content
             .contains("Ticket status fallback:"));
+    }
+
+    #[tokio::test]
+    async fn supervisor_query_dispatch_executes_list_tickets_tool() {
+        let temp_db = TestDbPath::new("app-supervisor-query-list-tickets-tool");
+        let ticketing = {
+            let ticketing = ScriptedTicketingProvider::new(TicketProvider::Linear);
+            ticketing.with_list_tickets_result(vec![
+                TicketSummary {
+                    ticket_id: TicketId::from("linear:issue-101"),
+                    identifier: "ISSUE-101".to_owned(),
+                    title: "Validate tool calls".to_owned(),
+                    project: Some("Orchestrator".to_owned()),
+                    state: "In Review".to_owned(),
+                    url: "https://linear.app/example/issue/ISSUE-101".to_owned(),
+                    assignee: Some("owner".to_owned()),
+                    priority: Some(1),
+                    labels: vec!["orchestrator".to_owned()],
+                    updated_at: "2026-02-16T11:00:00Z".to_owned(),
+                },
+            ]);
+            Arc::new(ticketing)
+        };
+
+        let supervisor = QueryingSupervisor::with_chunk_sequences(vec![
+            vec![LlmStreamChunk {
+                delta: String::new(),
+                tool_calls: vec![LlmToolCall {
+                    id: "call_list_tickets_1".to_owned(),
+                    name: "list_tickets".to_owned(),
+                    arguments: serde_json::json!({
+                        "assigned_to_me": true,
+                        "states": ["In Review", "Blocked"],
+                        "search": "tool",
+                        "limit": 1,
+                    })
+                    .to_string(),
+                }],
+                finish_reason: Some(LlmFinishReason::ToolCall),
+                usage: None,
+                rate_limit: None,
+            }],
+            vec![LlmStreamChunk {
+                delta: "There are matching tickets.".to_owned(),
+                tool_calls: Vec::new(),
+                finish_reason: Some(LlmFinishReason::Stop),
+                usage: None,
+                rate_limit: None,
+            }],
+        ]);
+
+        let app = App {
+            config: AppConfig {
+                workspace: "/workspace".to_owned(),
+                event_store_path: temp_db.path().to_string_lossy().to_string(),
+                ticketing_provider: "linear".to_owned(),
+                harness_provider: "codex".to_owned(),
+            },
+            ticketing: ticketing.clone(),
+            supervisor: supervisor.clone(),
+            github: Healthy,
+        };
+
+        let (_stream_id, mut stream) = app
+            .dispatch_supervisor_command(
+                freeform_query_invocation_with_context(
+                    "list open blocking tickets",
+                    Some(SupervisorQueryContextArgs {
+                        selected_work_item_id: Some("wi-query".to_owned()),
+                        selected_session_id: None,
+                        scope: Some("work_item:wi-query".to_owned()),
+                    }),
+                ),
+                SupervisorCommandContext {
+                    selected_work_item_id: Some("wi-query".to_owned()),
+                    selected_session_id: None,
+                    scope: Some("work_item:wi-query".to_owned()),
+                },
+            )
+            .await
+            .expect("dispatch should stream");
+
+        let mut chunk_payloads = Vec::new();
+        while let Some(chunk) = stream.next_chunk().await.expect("tool stream poll") {
+            chunk_payloads.push(chunk.delta);
+        }
+
+        assert!(chunk_payloads.iter().any(|chunk| chunk.contains("[tool-call] list_tickets")));
+        assert!(chunk_payloads
+            .iter()
+            .any(|chunk| chunk.contains("[tool-result] list_tickets")));
+        assert!(chunk_payloads
+            .iter()
+            .any(|chunk| chunk.contains("There are matching tickets.")));
+
+        let requests = supervisor.requests();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[1].tools.len(), 5);
+        assert!(requests[1]
+            .tools
+            .iter()
+            .any(|tool| tool.function.name == "list_tickets"));
+        assert!(requests[1]
+            .messages
+            .iter()
+            .any(|message| message.role == LlmRole::Tool && message.name.as_deref() == Some("list_tickets")));
+
+        let list_calls = ticketing.list_tickets_calls();
+        assert_eq!(list_calls.len(), 1);
+        assert_eq!(list_calls[0].assigned_to_me, true);
+        assert_eq!(list_calls[0].states, vec!["In Review".to_owned(), "Blocked".to_owned()]);
+        assert_eq!(list_calls[0].search, Some("tool".to_owned()));
+        assert_eq!(list_calls[0].limit, Some(1));
+    }
+
+    #[tokio::test]
+    async fn supervisor_query_dispatch_executes_update_ticket_state_tool() {
+        let temp_db = TestDbPath::new("app-supervisor-query-update-state-tool");
+        let ticketing = Arc::new(ScriptedTicketingProvider::new(TicketProvider::Linear));
+        ticketing.with_update_state_result(Ok(()));
+
+        let supervisor = QueryingSupervisor::with_chunk_sequences(vec![
+            vec![LlmStreamChunk {
+                delta: String::new(),
+                tool_calls: vec![LlmToolCall {
+                    id: "call_update_state_1".to_owned(),
+                    name: "update_ticket_state".to_owned(),
+                    arguments: serde_json::json!({
+                        "ticket_id": "linear:issue-202",
+                        "state": "In Review",
+                    })
+                    .to_string(),
+                }],
+                finish_reason: Some(LlmFinishReason::ToolCall),
+                usage: None,
+                rate_limit: None,
+            }],
+            vec![LlmStreamChunk {
+                delta: "Status updated successfully.".to_owned(),
+                tool_calls: Vec::new(),
+                finish_reason: Some(LlmFinishReason::Stop),
+                usage: None,
+                rate_limit: None,
+            }],
+        ]);
+
+        let app = App {
+            config: AppConfig {
+                workspace: "/workspace".to_owned(),
+                event_store_path: temp_db.path().to_string_lossy().to_string(),
+                ticketing_provider: "linear".to_owned(),
+                harness_provider: "codex".to_owned(),
+            },
+            ticketing: ticketing.clone(),
+            supervisor: supervisor.clone(),
+            github: Healthy,
+        };
+
+        let (_stream_id, mut stream) = app
+            .dispatch_supervisor_command(
+                freeform_query_invocation_with_context(
+                    "mark ticket as in review",
+                    Some(SupervisorQueryContextArgs {
+                        selected_work_item_id: Some("wi-query".to_owned()),
+                        selected_session_id: None,
+                        scope: Some("work_item:wi-query".to_owned()),
+                    }),
+                ),
+                SupervisorCommandContext {
+                    selected_work_item_id: Some("wi-query".to_owned()),
+                    selected_session_id: None,
+                    scope: Some("work_item:wi-query".to_owned()),
+                },
+            )
+            .await
+            .expect("dispatch should stream");
+
+        let mut chunk_payloads = Vec::new();
+        while let Some(chunk) = stream.next_chunk().await.expect("tool stream poll") {
+            chunk_payloads.push(chunk.delta);
+        }
+
+        assert!(chunk_payloads
+            .iter()
+            .any(|chunk| chunk.contains("[tool-result] update_ticket_state")));
+        assert!(chunk_payloads
+            .iter()
+            .any(|chunk| chunk.contains("Status updated successfully.")));
+
+        let calls = ticketing.update_ticket_state_calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0.as_str(), "linear:issue-202");
+        assert_eq!(calls[0].1, "In Review");
+        let requests = supervisor.requests();
+        assert_eq!(requests.len(), 2);
+        assert!(requests[1]
+            .messages
+            .iter()
+            .any(|message| message.role == LlmRole::Tool && message.name.as_deref() == Some("update_ticket_state")));
     }
 
     #[tokio::test]

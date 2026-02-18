@@ -9,7 +9,7 @@ use crate::events::{NewEventEnvelope, OrchestrationEventPayload, StoredEventEnve
 use crate::identifiers::{ArtifactId, TicketId, TicketProvider, WorkItemId, WorkerSessionId};
 use crate::status::{ArtifactKind, WorkerSessionStatus};
 
-const CURRENT_SCHEMA_VERSION: u32 = 3;
+const CURRENT_SCHEMA_VERSION: u32 = 4;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RetrievalScope {
@@ -33,6 +33,13 @@ pub struct TicketRecord {
 pub struct TicketWorkItemMapping {
     pub ticket_id: TicketId,
     pub work_item_id: WorkItemId,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProjectRepositoryMappingRecord {
+    pub provider: TicketProvider,
+    pub project_id: crate::identifiers::ProjectId,
+    pub repository_path: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -638,6 +645,56 @@ impl SqliteEventStore {
             .map_err(|err| CoreError::Persistence(err.to_string()))
     }
 
+    pub fn upsert_project_repository_mapping(
+        &self,
+        mapping: &ProjectRepositoryMappingRecord,
+    ) -> Result<(), CoreError> {
+        let repository_path = mapping.repository_path.trim().to_owned();
+        if repository_path.is_empty() {
+            return Err(CoreError::Configuration(
+                "project repository path cannot be empty".to_owned(),
+            ));
+        }
+
+        self.conn
+            .execute(
+                "
+                INSERT INTO project_repositories (provider, project_id, repository_path)
+                VALUES (?1, ?2, ?3)
+                ON CONFLICT(provider, project_id) DO UPDATE SET
+                    repository_path = excluded.repository_path
+                ",
+                params![
+                    provider_to_str(&mapping.provider),
+                    mapping.project_id.as_str(),
+                    repository_path,
+                ],
+            )
+            .map_err(|err| CoreError::Persistence(err.to_string()))?;
+
+        Ok(())
+    }
+
+    pub fn find_project_repository_mapping(
+        &self,
+        provider: &TicketProvider,
+        project_id: &crate::identifiers::ProjectId,
+    ) -> Result<Option<String>, CoreError> {
+        self.conn
+            .query_row(
+                "
+                SELECT repository_path
+                FROM project_repositories
+                WHERE provider = ?1
+                  AND project_id = ?2
+                ",
+                params![provider_to_str(provider), project_id.as_str()],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(|err| CoreError::Persistence(err.to_string()))
+    }
+
     pub fn find_work_item_by_ticket(
         &self,
         provider: &TicketProvider,
@@ -857,6 +914,13 @@ impl SqliteEventStore {
                     FOREIGN KEY(artifact_id) REFERENCES artifacts(artifact_id)
                 );
 
+                CREATE TABLE IF NOT EXISTS project_repositories (
+                    provider TEXT NOT NULL,
+                    project_id TEXT NOT NULL,
+                    repository_path TEXT NOT NULL,
+                    PRIMARY KEY (provider, project_id)
+                );
+
                 CREATE INDEX IF NOT EXISTS idx_events_work_item_sequence ON events(work_item_id, sequence ASC);
                 CREATE INDEX IF NOT EXISTS idx_events_session ON events(session_id, sequence DESC);
                 CREATE INDEX IF NOT EXISTS idx_tickets_provider_lookup ON tickets(provider, provider_ticket_id);
@@ -994,11 +1058,23 @@ impl SqliteEventStore {
                     ",
                 )
                 .map_err(|err| CoreError::Persistence(err.to_string())),
-            3 => tx
+                3 => tx
+                    .execute_batch(
+                        "
+                        CREATE UNIQUE INDEX IF NOT EXISTS idx_worktrees_path_unique ON worktrees(path);
+                        CREATE UNIQUE INDEX IF NOT EXISTS idx_sessions_workdir_unique ON sessions(workdir);
+                        ",
+                    )
+                    .map_err(|err| CoreError::Persistence(err.to_string())),
+            4 => tx
                 .execute_batch(
                     "
-                    CREATE UNIQUE INDEX IF NOT EXISTS idx_worktrees_path_unique ON worktrees(path);
-                    CREATE UNIQUE INDEX IF NOT EXISTS idx_sessions_workdir_unique ON sessions(workdir);
+                    CREATE TABLE IF NOT EXISTS project_repositories (
+                        provider TEXT NOT NULL,
+                        project_id TEXT NOT NULL,
+                        repository_path TEXT NOT NULL,
+                        PRIMARY KEY (provider, project_id)
+                    );
                     ",
                 )
                 .map_err(|err| CoreError::Persistence(err.to_string())),

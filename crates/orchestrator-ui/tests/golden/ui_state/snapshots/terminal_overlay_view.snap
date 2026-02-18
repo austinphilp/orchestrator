@@ -17,7 +17,9 @@ Stack: FocusCard(inbox-terminal) > Terminal(sess-terminal)
 Session: sess-terminal
 Status: Running
 Latest checkpoint: artifact-terminal-checkpoint
-PTY embedding lands in a later ticket.
+
+Terminal output:
+No terminal snapshot available yet.
 
 [which-key]
 v  (Artifact inspectors)

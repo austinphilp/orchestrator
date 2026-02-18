@@ -442,15 +442,14 @@ fn parse_shortcut_story(payload: Value) -> Result<ShortcutStory, CoreError> {
     if let Ok(story) = serde_json::from_value::<ShortcutStory>(payload.clone()) {
         return Ok(story);
     }
-    let mut wrapper = payload;
-    if let Some(story) = wrapper.get_mut("story").and_then(Value::take) {
-        serde_json::from_value::<ShortcutStory>(story).map_err(|error| {
+    if let Some(story) = payload.get("story") {
+        serde_json::from_value::<ShortcutStory>(story.clone()).map_err(|error| {
             CoreError::DependencyUnavailable(format!(
                 "Shortcut story payload decode failed: {error}"
             ))
         })
-    } else if let Some(story) = wrapper.get_mut("data").and_then(|value| value.get_mut("story")) {
-        serde_json::from_value::<ShortcutStory>(story.take()).map_err(|error| {
+    } else if let Some(story) = payload.get("data").and_then(|value| value.get("story")) {
+        serde_json::from_value::<ShortcutStory>(story.clone()).map_err(|error| {
             CoreError::DependencyUnavailable(format!(
                 "Shortcut story payload decode failed: {error}"
             ))
@@ -575,7 +574,7 @@ fn ticket_summary_from_story(story: ShortcutStory) -> TicketSummary {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 struct ShortcutStory {
     pub id: Option<String>,
@@ -601,13 +600,13 @@ struct ShortcutStory {
     pub priority: Option<i32>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 struct ShortcutProject {
     pub name: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 struct ShortcutOwner {
     pub name: Option<String>,
@@ -615,13 +614,13 @@ struct ShortcutOwner {
     pub profile_url: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 struct ShortcutLabel {
     pub name: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 struct ShortcutWorkflowState {
     pub id: String,

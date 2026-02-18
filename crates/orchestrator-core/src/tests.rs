@@ -392,7 +392,7 @@ fn initialization_creates_required_schema_and_version() {
     let db = unique_db("init");
 
     let store = SqliteEventStore::open(db.path()).expect("open store");
-    assert_eq!(store.schema_version().expect("schema version"), 3);
+    assert_eq!(store.schema_version().expect("schema version"), 4);
 
     let conn = rusqlite::Connection::open(db.path()).expect("open sqlite for inspection");
     let tables = [
@@ -404,6 +404,7 @@ fn initialization_creates_required_schema_and_version() {
         "artifacts",
         "events",
         "event_artifact_refs",
+        "project_repositories",
     ];
     for table in tables {
         let exists: Option<i64> = conn
@@ -445,7 +446,7 @@ fn initialization_creates_required_schema_and_version() {
             row.get(0)
         })
         .expect("count migrations");
-    assert_eq!(applied_migrations, 3);
+    assert_eq!(applied_migrations, 4);
 
     drop(store);
 }
@@ -455,11 +456,11 @@ fn startup_is_idempotent_and_does_not_duplicate_migrations() {
     let db = unique_db("idempotent");
 
     let first = SqliteEventStore::open(db.path()).expect("first open");
-    assert_eq!(first.schema_version().expect("schema version"), 3);
+    assert_eq!(first.schema_version().expect("schema version"), 4);
     drop(first);
 
     let second = SqliteEventStore::open(db.path()).expect("second open");
-    assert_eq!(second.schema_version().expect("schema version"), 3);
+    assert_eq!(second.schema_version().expect("schema version"), 4);
     drop(second);
 
     let conn = rusqlite::Connection::open(db.path()).expect("open sqlite for inspection");
@@ -468,7 +469,7 @@ fn startup_is_idempotent_and_does_not_duplicate_migrations() {
             row.get(0)
         })
         .expect("count migrations");
-    assert_eq!(migration_count, 3);
+    assert_eq!(migration_count, 4);
 }
 
 #[test]
@@ -509,7 +510,7 @@ fn startup_adopts_legacy_events_schema_without_recreating_events_table() {
     drop(conn);
 
     let store = SqliteEventStore::open(db.path()).expect("open store");
-    assert_eq!(store.schema_version().expect("schema version"), 3);
+    assert_eq!(store.schema_version().expect("schema version"), 4);
 
     let events = store.read_ordered().expect("read ordered");
     assert_eq!(events.len(), 1);
@@ -525,6 +526,7 @@ fn startup_adopts_legacy_events_schema_without_recreating_events_table() {
         "sessions",
         "artifacts",
         "event_artifact_refs",
+        "project_repositories",
     ];
     for table in tables {
         let exists: Option<i64> = conn
@@ -1182,7 +1184,7 @@ fn migration_from_schema_v1_adds_runtime_mapping_tables() {
     drop(conn);
 
     let store = SqliteEventStore::open(db.path()).expect("open and migrate");
-    assert_eq!(store.schema_version().expect("schema version"), 3);
+    assert_eq!(store.schema_version().expect("schema version"), 4);
     drop(store);
 
     let conn = rusqlite::Connection::open(db.path()).expect("open sqlite for inspection");
@@ -1204,7 +1206,7 @@ fn migration_from_schema_v1_adds_runtime_mapping_tables() {
             row.get(0)
         })
         .expect("count migrations");
-    assert_eq!(migration_count, 3);
+    assert_eq!(migration_count, 4);
 
     let indexes = ["idx_worktrees_path_unique", "idx_sessions_workdir_unique"];
     for index in indexes {
@@ -1667,6 +1669,7 @@ fn multi_table_event_write_is_transactional() {
 #[test]
 fn forward_compat_schema_guard_returns_typed_error() {
     let db = unique_db("forward-compat");
+    let future_schema_version: u32 = 999;
 
     let conn = rusqlite::Connection::open(db.path()).expect("open sqlite");
     conn.execute_batch(
@@ -1675,7 +1678,7 @@ fn forward_compat_schema_guard_returns_typed_error() {
             version INTEGER PRIMARY KEY,
             applied_at TEXT NOT NULL
         );
-        INSERT INTO schema_migrations (version, applied_at) VALUES (4, '2026-02-16T00:00:00Z');
+        INSERT INTO schema_migrations (version, applied_at) VALUES (999, '2026-02-16T00:00:00Z');
         ",
     )
     .expect("seed future migration");
@@ -1687,8 +1690,8 @@ fn forward_compat_schema_guard_returns_typed_error() {
     };
     match err {
         CoreError::UnsupportedSchemaVersion { supported, found } => {
-            assert_eq!(supported, 3);
-            assert_eq!(found, 4);
+            assert_eq!(found, future_schema_version);
+            assert!(supported < future_schema_version);
         }
         other => panic!("unexpected error variant: {other:?}"),
     }

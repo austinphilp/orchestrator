@@ -47,7 +47,7 @@ async fn main() -> Result<()> {
 
     let app = Arc::new(App {
         config,
-        ticketing,
+        ticketing: ticketing.clone(),
         supervisor,
         github,
     });
@@ -55,14 +55,15 @@ async fn main() -> Result<()> {
         Arc::clone(&app),
         ticketing,
         vcs,
-        worker_backend,
+        worker_backend.clone(),
     ));
 
     let state = app.startup_state().await?;
     let supervisor_dispatcher: Arc<dyn orchestrator_ui::SupervisorCommandDispatcher> = app.clone();
     let mut ui = Ui::init()?
         .with_supervisor_command_dispatcher(supervisor_dispatcher)
-        .with_ticket_picker_provider(ticket_picker_provider);
+        .with_ticket_picker_provider(ticket_picker_provider)
+        .with_worker_backend(worker_backend.clone());
     app.start_linear_polling(linear_ticketing.as_deref()).await?;
     match ui.run(&state.status, &state.projection) {
         Ok(()) => {
