@@ -1,20 +1,13 @@
-use std::path::PathBuf;
-
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-mod pty_manager;
-mod terminal_emulator;
 mod worker_manager;
-
-pub use pty_manager::{
-    PtyManager, PtyOutputSubscription, PtyRenderPolicy, PtySpawnSpec, TerminalSize,
-};
 pub use worker_manager::{
     ManagedSessionStatus, ManagedSessionSummary, SessionEventSubscription, SessionVisibility,
     WorkerManager, WorkerManagerConfig, WorkerManagerEvent, WorkerManagerEventSubscription,
 };
+use std::path::PathBuf;
 
 macro_rules! runtime_string_id {
     ($name:ident) => {
@@ -171,15 +164,6 @@ pub enum BackendEvent {
     Crashed(BackendCrashedEvent),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TerminalSnapshot {
-    pub cols: u16,
-    pub rows: u16,
-    pub cursor_col: u16,
-    pub cursor_row: u16,
-    pub lines: Vec<String>,
-}
-
 #[async_trait]
 pub trait WorkerEventSubscription: Send {
     async fn next_event(&mut self) -> RuntimeResult<Option<BackendEvent>>;
@@ -202,7 +186,9 @@ pub trait WorkerBackend: SessionLifecycle + Send + Sync {
 
     async fn health_check(&self) -> RuntimeResult<()>;
     async fn subscribe(&self, session: &SessionHandle) -> RuntimeResult<WorkerEventStream>;
-    async fn snapshot(&self, session: &SessionHandle) -> RuntimeResult<TerminalSnapshot>;
+    async fn harness_session_id(&self, _session: &SessionHandle) -> RuntimeResult<Option<String>> {
+        Ok(None)
+    }
 }
 
 #[cfg(test)]

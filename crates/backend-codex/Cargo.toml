@@ -5,7 +5,11 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
-backend-opencode = { path = "../backend-opencode" }
 async-trait.workspace = true
 orchestrator-runtime = { path = "../orchestrator-runtime" }
+serde_json.workspace = true
+tokio = { workspace = true, features = ["io-util", "process", "sync", "time"] }
+tracing.workspace = true
 
+[dev-dependencies]
+tokio.workspace = true

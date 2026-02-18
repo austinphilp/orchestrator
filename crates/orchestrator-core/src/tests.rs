@@ -392,7 +392,7 @@ fn initialization_creates_required_schema_and_version() {
     let db = unique_db("init");
 
     let store = SqliteEventStore::open(db.path()).expect("open store");
-    assert_eq!(store.schema_version().expect("schema version"), 4);
+    assert_eq!(store.schema_version().expect("schema version"), 5);
 
     let conn = rusqlite::Connection::open(db.path()).expect("open sqlite for inspection");
     let tables = [
@@ -405,6 +405,7 @@ fn initialization_creates_required_schema_and_version() {
         "events",
         "event_artifact_refs",
         "project_repositories",
+        "harness_session_bindings",
     ];
     for table in tables {
         let exists: Option<i64> = conn
@@ -446,7 +447,7 @@ fn initialization_creates_required_schema_and_version() {
             row.get(0)
         })
         .expect("count migrations");
-    assert_eq!(applied_migrations, 4);
+    assert_eq!(applied_migrations, 5);
 
     drop(store);
 }
@@ -456,11 +457,11 @@ fn startup_is_idempotent_and_does_not_duplicate_migrations() {
     let db = unique_db("idempotent");
 
     let first = SqliteEventStore::open(db.path()).expect("first open");
-    assert_eq!(first.schema_version().expect("schema version"), 4);
+    assert_eq!(first.schema_version().expect("schema version"), 5);
     drop(first);
 
     let second = SqliteEventStore::open(db.path()).expect("second open");
-    assert_eq!(second.schema_version().expect("schema version"), 4);
+    assert_eq!(second.schema_version().expect("schema version"), 5);
     drop(second);
 
     let conn = rusqlite::Connection::open(db.path()).expect("open sqlite for inspection");
@@ -469,7 +470,7 @@ fn startup_is_idempotent_and_does_not_duplicate_migrations() {
             row.get(0)
         })
         .expect("count migrations");
-    assert_eq!(migration_count, 4);
+    assert_eq!(migration_count, 5);
 }
 
 #[test]
@@ -510,7 +511,7 @@ fn startup_adopts_legacy_events_schema_without_recreating_events_table() {
     drop(conn);
 
     let store = SqliteEventStore::open(db.path()).expect("open store");
-    assert_eq!(store.schema_version().expect("schema version"), 4);
+    assert_eq!(store.schema_version().expect("schema version"), 5);
 
     let events = store.read_ordered().expect("read ordered");
     assert_eq!(events.len(), 1);
@@ -527,6 +528,7 @@ fn startup_adopts_legacy_events_schema_without_recreating_events_table() {
         "artifacts",
         "event_artifact_refs",
         "project_repositories",
+        "harness_session_bindings",
     ];
     for table in tables {
         let exists: Option<i64> = conn
@@ -1184,11 +1186,11 @@ fn migration_from_schema_v1_adds_runtime_mapping_tables() {
     drop(conn);
 
     let store = SqliteEventStore::open(db.path()).expect("open and migrate");
-    assert_eq!(store.schema_version().expect("schema version"), 4);
+    assert_eq!(store.schema_version().expect("schema version"), 5);
     drop(store);
 
     let conn = rusqlite::Connection::open(db.path()).expect("open sqlite for inspection");
-    let tables = ["worktrees", "sessions"];
+    let tables = ["worktrees", "sessions", "project_repositories", "harness_session_bindings"];
     for table in tables {
         let exists: Option<i64> = conn
             .query_row(
@@ -1206,7 +1208,7 @@ fn migration_from_schema_v1_adds_runtime_mapping_tables() {
             row.get(0)
         })
         .expect("count migrations");
-    assert_eq!(migration_count, 4);
+    assert_eq!(migration_count, 5);
 
     let indexes = ["idx_worktrees_path_unique", "idx_sessions_workdir_unique"];
     for index in indexes {

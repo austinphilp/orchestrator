@@ -28,12 +28,17 @@
 - `ORCHESTRATOR_ALLOW_UNSAFE_COMMAND_PATHS` (orchestrator-github, integration-git, backend-opencode): optional safety override boolean.
 - `ORCHESTRATOR_TICKETING_PROVIDER` (orchestrator-app): optional ticketing provider override (`linear` or `shortcut`; default `linear`).
 - `ORCHESTRATOR_HARNESS_PROVIDER` (orchestrator-app): optional harness/backend provider override (`opencode` or `codex`; default `codex`).
+- `ORCHESTRATOR_HARNESS_SESSION_ID` (orchestrator-core, backend-codex): optional harness thread/session identifier used to resume Codex sessions; automatically set from persisted runtime mappings and not typically configured manually.
 - `ORCHESTRATOR_SHORTCUT_API_KEY` (integration-shortcut): required for Shortcut ticketing.
 - `ORCHESTRATOR_SHORTCUT_API_URL` (integration-shortcut): optional API endpoint override (defaults to `https://api.app.shortcut.com/api/v3`).
 - `ORCHESTRATOR_SHORTCUT_FETCH_LIMIT` (integration-shortcut): optional fetch cap for Shortcut ticket sync.
 - `ORCHESTRATOR_CODEX_BIN` (backend-codex): optional path to `codex` binary.
 - `ORCHESTRATOR_OPENCODE_BIN` (backend-opencode): optional path to opencode binary.
-- `ORCHESTRATOR_INSTRUCTION_PRELUDE` (backend-opencode): optional instruction prelude injected into child process env.
+- `ORCHESTRATOR_OPENCODE_SERVER_BASE_URL` (backend-opencode): optional base URL override for OpenCode harness server (defaults to managed local server at `http://127.0.0.1:8787`).
+- `ORCHESTRATOR_CODEX_SERVER_BASE_URL` (backend-codex): deprecated/unsupported. Codex uses JSON-RPC app-server over stdio; setting this now causes a configuration error.
+- `ORCHESTRATOR_HARNESS_SERVER_STARTUP_TIMEOUT_SECS` (backend-opencode, backend-codex): optional startup health-check timeout in seconds for managed harness server processes.
+- `ORCHESTRATOR_HARNESS_LOG_RAW_EVENTS` (backend-opencode, backend-codex): optional boolean toggle to emit raw harness event payload lines to tracing logs.
+- `ORCHESTRATOR_HARNESS_LOG_NORMALIZED_EVENTS` (backend-opencode, backend-codex): optional boolean toggle to emit normalized `BackendEvent` payloads to tracing logs.
 - `ORCHESTRATOR_TICKET_PICKER_PRIORITY_STATES` (orchestrator-ui): optional comma-separated ticket state ordering.
 - `ORCHESTRATOR_UPDATE_GOLDENS` (orchestrator-ui): optional test helper toggle for golden snapshot updates.
 
@@ -43,3 +48,10 @@
 - Clean code, simplification, and removal of unused code blocks take priority over preserving compatibility.
 - Before making any backwards-incompatible change, notify the user explicitly; otherwise, breaking changes are acceptable.
 - Before handing off work, always verify the app is buildable, tests pass, and there are no compiler warnings.
+
+## Codex App-Server Protocol Notes
+
+- The Codex app-server protocol is JSON-RPC, not REST.
+- Supported transports are stdio and WebSocket.
+- Do not implement Codex session lifecycle against REST paths like `/v1/sessions` for app-server mode.
+- If a Codex session/create call returns HTML (for example Swagger docs), treat it as a wrong endpoint/protocol configuration issue.

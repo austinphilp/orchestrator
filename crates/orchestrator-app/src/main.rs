@@ -5,14 +5,19 @@ use integration_git::{GitCliVcsProvider, ProcessCommandRunner as GitProcessComma
 use integration_linear::LinearTicketingProvider;
 use integration_shortcut::ShortcutTicketingProvider;
 use orchestrator_app::{App, AppConfig, AppTicketPickerProvider};
-use orchestrator_core::{CoreError, TicketingProvider, WorkerBackend};
+use orchestrator_core::{
+    BackendKind, CoreError, SpawnSpec, SqliteEventStore, TicketProvider, TicketRecord,
+    TicketingProvider, WorkerBackend,
+};
 use orchestrator_github::{GhCliClient, ProcessCommandRunner as GhProcessCommandRunner};
 use orchestrator_supervisor::OpenRouterSupervisor;
 use orchestrator_ui::Ui;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 const ENV_TICKETING_PROVIDER: &str = "ORCHESTRATOR_TICKETING_PROVIDER";
 const ENV_HARNESS_PROVIDER: &str = "ORCHESTRATOR_HARNESS_PROVIDER";
+const ENV_HARNESS_SESSION_ID: &str = "ORCHESTRATOR_HARNESS_SESSION_ID";
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -59,6 +64,7 @@ async fn main() -> Result<()> {
     ));
 
     let state = app.startup_state().await?;
+    rehydrate_inflight_sessions(&app.config.event_store_path, worker_backend.as_ref()).await?;
     let supervisor_dispatcher: Arc<dyn orchestrator_ui::SupervisorCommandDispatcher> = app.clone();
     let mut ui = Ui::init()?
         .with_supervisor_command_dispatcher(supervisor_dispatcher)
@@ -210,4 +216,81 @@ fn build_harness_provider(provider: &str) -> Result<Arc<dyn WorkerBackend + Send
             "Unknown harness provider '{other}'. Expected 'opencode' or 'codex'."
         ))),
     }
+}
+
+async fn rehydrate_inflight_sessions(
+    event_store_path: &str,
+    worker_backend: &dyn WorkerBackend,
+) -> Result<(), CoreError> {
+    let store = SqliteEventStore::open(event_store_path)?;
+    let mappings = store.list_inflight_runtime_mappings()?;
+    let active_backend_kind = worker_backend.kind();
+
+    for mapping in mappings {
+        if mapping.session.backend_kind != active_backend_kind {
+            continue;
+        }
+
+        let mut environment = Vec::new();
+        if mapping.session.backend_kind == BackendKind::Codex {
+            if let Some(harness_session_id) = store.find_harness_session_binding(
+                &mapping.session.session_id,
+                &mapping.session.backend_kind,
+            )? {
+                environment.push((ENV_HARNESS_SESSION_ID.to_owned(), harness_session_id));
+            }
+        }
+
+        let instruction = resume_instruction_from_ticket(&mapping.ticket);
+        let spawn_result = worker_backend
+            .spawn(SpawnSpec {
+                session_id: mapping.session.session_id.clone().into(),
+                workdir: PathBuf::from(mapping.session.workdir.as_str()),
+                model: mapping.session.model.clone(),
+                instruction_prelude: Some(instruction),
+                environment,
+            })
+            .await;
+
+        match spawn_result {
+            Ok(handle) => {
+                if let Ok(Some(harness_session_id)) =
+                    worker_backend.harness_session_id(&handle).await
+                {
+                    if let Err(error) = store.upsert_harness_session_binding(
+                        &mapping.session.session_id,
+                        &mapping.session.backend_kind,
+                        harness_session_id.as_str(),
+                    ) {
+                        tracing::warn!(
+                            session_id = mapping.session.session_id.as_str(),
+                            error = %error,
+                            "failed to persist harness session binding during startup rehydrate"
+                        );
+                    }
+                }
+            }
+            Err(error) => {
+                tracing::warn!(
+                    session_id = mapping.session.session_id.as_str(),
+                    backend = ?mapping.session.backend_kind,
+                    error = %error,
+                    "failed to rehydrate inflight session on startup"
+                );
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn resume_instruction_from_ticket(ticket: &TicketRecord) -> String {
+    let provider_name = match ticket.provider {
+        TicketProvider::Linear => "linear",
+        TicketProvider::Shortcut => "shortcut",
+    };
+    format!(
+        "Ticket provider: {provider_name}. Resume work on {}: {} in Planning mode. Reconcile the current state, refresh the plan, and wait for an explicit workflow transition command before implementation. For ticket operations, use the {provider_name} ticketing integration/skill.",
+        ticket.identifier, ticket.title
+    )
 }

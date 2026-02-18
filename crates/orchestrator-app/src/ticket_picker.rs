@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use std::path::PathBuf;
 use orchestrator_core::{
     CoreError, GithubClient, ProjectionState, SelectedTicketFlowResult, Supervisor, TicketQuery,
-    TicketSummary, TicketingProvider, VcsProvider, WorkerBackend,
+    TicketSummary, TicketingProvider, VcsProvider, WorkerBackend, WorkerSessionId,
 };
 use orchestrator_ui::TicketPickerProvider;
 
@@ -106,6 +106,21 @@ where
 
     async fn reload_projection(&self) -> Result<ProjectionState, CoreError> {
         self.app.startup_state().await.map(|state| state.projection)
+    }
+
+    async fn mark_session_crashed(
+        &self,
+        session_id: WorkerSessionId,
+        reason: String,
+    ) -> Result<(), CoreError> {
+        let app = self.app.clone();
+        tokio::task::spawn_blocking(move || app.mark_session_crashed(&session_id, reason.as_str()))
+            .await
+            .map_err(|error| {
+                CoreError::Configuration(format!(
+                    "ticket picker task failed while marking session crashed: {error}"
+                ))
+            })?
     }
 }
 

@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use tokio::sync::{broadcast, RwLock};
@@ -8,13 +8,12 @@ use tokio::task::JoinHandle;
 
 use crate::{
     BackendCapabilities, BackendCrashedEvent, BackendDoneEvent, BackendEvent, BackendKind,
-    RuntimeError, RuntimeResult, RuntimeSessionId, SessionHandle, SpawnSpec, TerminalSnapshot,
+    RuntimeError, RuntimeResult, RuntimeSessionId, SessionHandle, SpawnSpec,
     WorkerBackend, WorkerEventStream,
 };
 
 const DEFAULT_SESSION_EVENT_BUFFER: usize = 256;
 const DEFAULT_GLOBAL_EVENT_BUFFER: usize = 1_024;
-const DEFAULT_BACKGROUND_SNAPSHOT_INTERVAL_MS: u64 = 250;
 const DEFAULT_CHECKPOINT_PROMPT_INTERVAL_SECS: u64 = 120;
 const DEFAULT_CHECKPOINT_PROMPT_MESSAGE: &str = "Emit a checkpoint now.";
 
@@ -22,7 +21,6 @@ const DEFAULT_CHECKPOINT_PROMPT_MESSAGE: &str = "Emit a checkpoint now.";
 pub struct WorkerManagerConfig {
     pub session_event_buffer: usize,
     pub global_event_buffer: usize,
-    pub background_snapshot_interval: Duration,
     pub checkpoint_prompt_interval: Option<Duration>,
     pub checkpoint_prompt_message: String,
 }
@@ -32,9 +30,6 @@ impl Default for WorkerManagerConfig {
         Self {
             session_event_buffer: DEFAULT_SESSION_EVENT_BUFFER,
             global_event_buffer: DEFAULT_GLOBAL_EVENT_BUFFER,
-            background_snapshot_interval: Duration::from_millis(
-                DEFAULT_BACKGROUND_SNAPSHOT_INTERVAL_MS,
-            ),
             checkpoint_prompt_interval: Some(Duration::from_secs(
                 DEFAULT_CHECKPOINT_PROMPT_INTERVAL_SECS,
             )),
@@ -80,11 +75,6 @@ pub struct WorkerManagerEventSubscription {
     receiver: broadcast::Receiver<WorkerManagerEvent>,
 }
 
-struct CachedSnapshot {
-    snapshot: TerminalSnapshot,
-    captured_at: Instant,
-}
-
 struct ManagedSession {
     handle: SessionHandle,
     status: ManagedSessionStatus,
@@ -92,7 +82,6 @@ struct ManagedSession {
     event_tx: Option<broadcast::Sender<BackendEvent>>,
     event_task: Option<JoinHandle<()>>,
     checkpoint_task: Option<JoinHandle<()>>,
-    last_snapshot: Option<CachedSnapshot>,
 }
 
 enum SessionEntry {
@@ -180,7 +169,6 @@ impl WorkerManager {
                     event_tx: Some(event_tx.clone()),
                     event_task: None,
                     checkpoint_task: None,
-                    last_snapshot: None,
                 },
             )
             .await
@@ -276,59 +264,6 @@ impl WorkerManager {
     ) -> RuntimeResult<()> {
         let handle = self.running_session_handle(session_id).await?;
         self.backend.resize(&handle, cols, rows).await
-    }
-
-    pub async fn snapshot(&self, session_id: &RuntimeSessionId) -> RuntimeResult<TerminalSnapshot> {
-        let handle = {
-            let sessions = self.sessions.read().await;
-            match sessions.get(session_id) {
-                Some(SessionEntry::Starting) => {
-                    return Err(RuntimeError::Process(format!(
-                        "worker session is still starting: {}",
-                        session_id.as_str()
-                    )))
-                }
-                Some(SessionEntry::Managed(session))
-                    if session.status != ManagedSessionStatus::Running =>
-                {
-                    if let Some(cache) = &session.last_snapshot {
-                        return Ok(cache.snapshot.clone());
-                    }
-                    return Err(RuntimeError::Process(format!(
-                        "worker session is not running: {} ({:?})",
-                        session_id.as_str(),
-                        session.status
-                    )));
-                }
-                Some(SessionEntry::Managed(session)) => {
-                    if session.visibility == SessionVisibility::Background {
-                        if let Some(cache) = &session.last_snapshot {
-                            if cache.captured_at.elapsed()
-                                < self.config.background_snapshot_interval
-                            {
-                                return Ok(cache.snapshot.clone());
-                            }
-                        }
-                    }
-                    session.handle.clone()
-                }
-                None => {
-                    return Err(RuntimeError::SessionNotFound(
-                        session_id.as_str().to_owned(),
-                    ))
-                }
-            }
-        };
-
-        let snapshot = self.backend.snapshot(&handle).await?;
-        let mut sessions = self.sessions.write().await;
-        if let Some(SessionEntry::Managed(session)) = sessions.get_mut(session_id) {
-            session.last_snapshot = Some(CachedSnapshot {
-                snapshot: snapshot.clone(),
-                captured_at: Instant::now(),
-            });
-        }
-        Ok(snapshot)
     }
 
     pub async fn subscribe(
@@ -723,7 +658,6 @@ mod tests {
     struct MockSession {
         event_tx: Option<mpsc::UnboundedSender<StreamMessage>>,
         event_rx: Option<mpsc::UnboundedReceiver<StreamMessage>>,
-        snapshot_calls: usize,
         resize_calls: Vec<(u16, u16)>,
         sent_input: Vec<Vec<u8>>,
         killed: bool,
@@ -779,15 +713,6 @@ mod tests {
             session.event_tx = None;
         }
 
-        fn snapshot_calls(&self, session_id: &RuntimeSessionId) -> usize {
-            let state = self.state.lock().expect("lock backend state");
-            state
-                .sessions
-                .get(session_id)
-                .expect("session exists")
-                .snapshot_calls
-        }
-
         fn resize_calls(&self, session_id: &RuntimeSessionId) -> Vec<(u16, u16)> {
             let state = self.state.lock().expect("lock backend state");
             state
@@ -836,7 +761,6 @@ mod tests {
                 MockSession {
                     event_tx: Some(event_tx),
                     event_rx: Some(event_rx),
-                    snapshot_calls: 0,
                     resize_calls: Vec::new(),
                     sent_input: Vec::new(),
                     killed: false,
@@ -910,23 +834,6 @@ mod tests {
             })?;
 
             Ok(Box::new(MockEventStream { receiver }))
-        }
-
-        async fn snapshot(&self, session: &SessionHandle) -> RuntimeResult<TerminalSnapshot> {
-            let mut state = self.state.lock().expect("lock backend state");
-            let session = state.sessions.get_mut(&session.session_id).ok_or_else(|| {
-                RuntimeError::SessionNotFound(session.session_id.as_str().to_owned())
-            })?;
-            session.snapshot_calls += 1;
-
-            let line = format!("snapshot-{}", session.snapshot_calls);
-            Ok(TerminalSnapshot {
-                cols: 80,
-                rows: 24,
-                cursor_col: line.len() as u16,
-                cursor_row: 0,
-                lines: vec![line],
-            })
         }
     }
 
@@ -1028,28 +935,6 @@ mod tests {
         })
         .await
         .expect("stable checkpoint prompt window timeout");
-    }
-
-    async fn wait_for_background_snapshot_refresh(
-        manager: &WorkerManager,
-        backend: &MockBackend,
-        session_id: &RuntimeSessionId,
-        minimum_snapshot_calls: usize,
-    ) -> TerminalSnapshot {
-        timeout(TEST_TIMEOUT, async {
-            loop {
-                let snapshot = manager
-                    .snapshot(session_id)
-                    .await
-                    .expect("capture background snapshot");
-                if backend.snapshot_calls(session_id) >= minimum_snapshot_calls {
-                    return snapshot;
-                }
-                sleep(Duration::from_millis(10)).await;
-            }
-        })
-        .await
-        .expect("background snapshot refresh timeout")
     }
 
     fn make_manager(backend: Arc<MockBackend>, config: WorkerManagerConfig) -> WorkerManager {
@@ -1301,56 +1186,6 @@ mod tests {
             global_ids,
             HashSet::from([session_a.as_str().to_owned(), session_b.as_str().to_owned()])
         );
-    }
-
-    #[tokio::test]
-    async fn worker_manager_throttles_background_snapshots() {
-        let backend = Arc::new(MockBackend::default());
-        let manager = make_manager(
-            Arc::clone(&backend),
-            WorkerManagerConfig {
-                session_event_buffer: 32,
-                global_event_buffer: 64,
-                background_snapshot_interval: Duration::from_millis(150),
-                checkpoint_prompt_interval: Some(Duration::from_secs(120)),
-                checkpoint_prompt_message: DEFAULT_CHECKPOINT_PROMPT_MESSAGE.to_owned(),
-            },
-        );
-        let spec = spawn_spec("wm-background-snapshots");
-        let session_id = spec.session_id.clone();
-
-        manager.spawn(spec).await.expect("spawn session");
-        manager
-            .set_session_visibility(&session_id, SessionVisibility::Background)
-            .await
-            .expect("set background visibility");
-
-        let first = manager.snapshot(&session_id).await.expect("first snapshot");
-        let second = manager
-            .snapshot(&session_id)
-            .await
-            .expect("second snapshot");
-        assert_eq!(first, second);
-        assert_eq!(backend.snapshot_calls(&session_id), 1);
-
-        let third = wait_for_background_snapshot_refresh(&manager, &backend, &session_id, 2).await;
-        assert_ne!(third.lines, first.lines);
-        assert_eq!(backend.snapshot_calls(&session_id), 2);
-
-        manager
-            .set_session_visibility(&session_id, SessionVisibility::Focused)
-            .await
-            .expect("focus session");
-        let focused_one = manager
-            .snapshot(&session_id)
-            .await
-            .expect("focused snapshot one");
-        let focused_two = manager
-            .snapshot(&session_id)
-            .await
-            .expect("focused snapshot two");
-        assert_ne!(focused_one.lines, focused_two.lines);
-        assert_eq!(backend.snapshot_calls(&session_id), 4);
     }
 
     #[tokio::test]

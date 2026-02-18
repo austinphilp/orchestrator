@@ -1,10 +1,13 @@
 use integration_linear::LinearTicketingProvider;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 use orchestrator_core::{
     rebuild_projection, CoreError, EventStore, GithubClient, LlmProvider, ProjectionState,
-    CodeHostProvider, SelectedTicketFlowConfig, SelectedTicketFlowResult, SqliteEventStore, Supervisor,
+    CodeHostProvider, NewEventEnvelope, OrchestrationEventPayload, SelectedTicketFlowConfig,
+    SelectedTicketFlowResult, SessionCrashedPayload, SqliteEventStore, Supervisor,
     TicketingProvider, TicketSummary, UntypedCommandInvocation, VcsProvider, WorkerBackend,
+    WorkerSessionId, WorkerSessionStatus, DOMAIN_EVENT_SCHEMA_VERSION,
 };
 use orchestrator_ui::{SupervisorCommandContext, SupervisorCommandDispatcher};
 use serde::{Deserialize, Serialize};
@@ -344,6 +347,63 @@ impl<S: Supervisor, G: GithubClient> App<S, G> {
         )
         .await
     }
+
+    pub fn mark_session_crashed(
+        &self,
+        session_id: &WorkerSessionId,
+        reason: &str,
+    ) -> Result<(), CoreError> {
+        let mut store = open_event_store(&self.config.event_store_path)?;
+        let mapping = store.find_runtime_mapping_by_session_id(session_id)?;
+        if let Some(mut mapping) = mapping {
+            mapping.session.status = WorkerSessionStatus::Crashed;
+            mapping.session.updated_at = now_timestamp();
+            store.upsert_runtime_mapping(&mapping)?;
+            store.delete_harness_session_binding(
+                &mapping.session.session_id,
+                &mapping.session.backend_kind,
+            )?;
+
+            store.append(NewEventEnvelope {
+                event_id: format!("evt-session-crashed-{}", now_nanos()),
+                occurred_at: now_timestamp(),
+                work_item_id: Some(mapping.work_item_id.clone()),
+                session_id: Some(session_id.clone()),
+                payload: OrchestrationEventPayload::SessionCrashed(SessionCrashedPayload {
+                    session_id: session_id.clone(),
+                    reason: reason.to_owned(),
+                }),
+                schema_version: DOMAIN_EVENT_SCHEMA_VERSION,
+            })?;
+        } else {
+            store.append(NewEventEnvelope {
+                event_id: format!("evt-session-crashed-{}", now_nanos()),
+                occurred_at: now_timestamp(),
+                work_item_id: None,
+                session_id: Some(session_id.clone()),
+                payload: OrchestrationEventPayload::SessionCrashed(SessionCrashedPayload {
+                    session_id: session_id.clone(),
+                    reason: reason.to_owned(),
+                }),
+                schema_version: DOMAIN_EVENT_SCHEMA_VERSION,
+            })?;
+        }
+        Ok(())
+    }
+}
+
+fn now_timestamp() -> String {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default();
+    format!("{}.{:09}Z", now.as_secs(), now.subsec_nanos())
+}
+
+fn now_nanos() -> u128 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos()
 }
 
 fn supervisor_model_from_env() -> String {
@@ -399,7 +459,7 @@ mod tests {
         LlmFinishReason, LlmProviderKind, LlmResponseStream, LlmResponseSubscription,
         LlmStreamChunk, NewEventEnvelope, OrchestrationEventPayload, RuntimeMappingRecord,
         RuntimeResult, SessionHandle, SessionRecord, SpawnSpec,
-        SupervisorQueryArgs, SupervisorQueryCancellationSource, SupervisorQueryContextArgs, TerminalSnapshot,
+        SupervisorQueryArgs, SupervisorQueryCancellationSource, SupervisorQueryContextArgs,
         TicketId, TicketProvider, TicketSummary, WorkerSessionId, WorkItemId, WorktreeId,
         WorktreeRecord, WorkerSessionStatus, WorktreeStatus,
     };
@@ -1483,15 +1543,6 @@ mod tests {
             Ok(Box::new(EmptyStream))
         }
 
-        async fn snapshot(&self, _session: &SessionHandle) -> RuntimeResult<TerminalSnapshot> {
-            Ok(TerminalSnapshot {
-                cols: 80,
-                rows: 24,
-                cursor_col: 0,
-                cursor_row: 0,
-                lines: Vec::new(),
-            })
-        }
     }
 
     #[tokio::test]

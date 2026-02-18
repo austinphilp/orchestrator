@@ -9,7 +9,7 @@ use crate::events::{NewEventEnvelope, OrchestrationEventPayload, StoredEventEnve
 use crate::identifiers::{ArtifactId, TicketId, TicketProvider, WorkItemId, WorkerSessionId};
 use crate::status::{ArtifactKind, WorkerSessionStatus};
 
-const CURRENT_SCHEMA_VERSION: u32 = 4;
+const CURRENT_SCHEMA_VERSION: u32 = 5;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RetrievalScope {
@@ -403,6 +403,78 @@ impl SqliteEventStore {
             .map_err(|err| CoreError::Persistence(err.to_string()))
     }
 
+    pub fn upsert_harness_session_binding(
+        &self,
+        session_id: &WorkerSessionId,
+        backend_kind: &BackendKind,
+        harness_session_id: &str,
+    ) -> Result<(), CoreError> {
+        let harness_session_id = harness_session_id.trim();
+        if harness_session_id.is_empty() {
+            return Err(CoreError::Configuration(
+                "harness session id cannot be empty".to_owned(),
+            ));
+        }
+
+        self.conn
+            .execute(
+                "
+                INSERT INTO harness_session_bindings (
+                    session_id, backend_kind, harness_session_id, updated_at
+                ) VALUES (?1, ?2, ?3, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+                ON CONFLICT(session_id, backend_kind) DO UPDATE SET
+                    harness_session_id = excluded.harness_session_id,
+                    updated_at = excluded.updated_at
+                ",
+                params![
+                    session_id.as_str(),
+                    backend_kind_to_json(backend_kind)?,
+                    harness_session_id
+                ],
+            )
+            .map_err(|err| CoreError::Persistence(err.to_string()))?;
+
+        Ok(())
+    }
+
+    pub fn find_harness_session_binding(
+        &self,
+        session_id: &WorkerSessionId,
+        backend_kind: &BackendKind,
+    ) -> Result<Option<String>, CoreError> {
+        self.conn
+            .query_row(
+                "
+                SELECT harness_session_id
+                FROM harness_session_bindings
+                WHERE session_id = ?1
+                  AND backend_kind = ?2
+                ",
+                params![session_id.as_str(), backend_kind_to_json(backend_kind)?],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(|err| CoreError::Persistence(err.to_string()))
+    }
+
+    pub fn delete_harness_session_binding(
+        &self,
+        session_id: &WorkerSessionId,
+        backend_kind: &BackendKind,
+    ) -> Result<(), CoreError> {
+        self.conn
+            .execute(
+                "
+                DELETE FROM harness_session_bindings
+                WHERE session_id = ?1
+                  AND backend_kind = ?2
+                ",
+                params![session_id.as_str(), backend_kind_to_json(backend_kind)?],
+            )
+            .map_err(|err| CoreError::Persistence(err.to_string()))?;
+        Ok(())
+    }
+
     pub fn upsert_runtime_mapping(
         &mut self,
         mapping: &RuntimeMappingRecord,
@@ -490,6 +562,49 @@ impl SqliteEventStore {
                 LIMIT 1
                 ",
                 params![provider_to_str(provider), provider_ticket_id],
+                Self::map_runtime_mapping_row,
+            )
+            .optional()
+            .map_err(|err| CoreError::Persistence(err.to_string()))
+    }
+
+    pub fn find_runtime_mapping_by_session_id(
+        &self,
+        session_id: &WorkerSessionId,
+    ) -> Result<Option<RuntimeMappingRecord>, CoreError> {
+        self.conn
+            .query_row(
+                "
+                SELECT
+                    t.ticket_id,
+                    t.provider,
+                    t.provider_ticket_id,
+                    t.identifier,
+                    t.title,
+                    t.state,
+                    t.updated_at,
+                    wi.work_item_id,
+                    wt.worktree_id,
+                    wt.path,
+                    wt.branch,
+                    wt.base_branch,
+                    wt.created_at,
+                    s.session_id,
+                    s.backend_kind,
+                    s.workdir,
+                    s.model,
+                    s.status,
+                    s.created_at,
+                    s.updated_at
+                FROM work_items wi
+                JOIN tickets t ON t.ticket_id = wi.ticket_id
+                JOIN worktrees wt ON wt.work_item_id = wi.work_item_id
+                JOIN sessions s ON s.work_item_id = wi.work_item_id
+                WHERE s.session_id = ?1
+                ORDER BY s.updated_at DESC, wi.work_item_id ASC
+                LIMIT 1
+                ",
+                params![session_id.as_str()],
                 Self::map_runtime_mapping_row,
             )
             .optional()
@@ -921,6 +1036,15 @@ impl SqliteEventStore {
                     PRIMARY KEY (provider, project_id)
                 );
 
+                CREATE TABLE IF NOT EXISTS harness_session_bindings (
+                    session_id TEXT NOT NULL,
+                    backend_kind TEXT NOT NULL,
+                    harness_session_id TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY (session_id, backend_kind),
+                    FOREIGN KEY(session_id) REFERENCES sessions(session_id)
+                );
+
                 CREATE INDEX IF NOT EXISTS idx_events_work_item_sequence ON events(work_item_id, sequence ASC);
                 CREATE INDEX IF NOT EXISTS idx_events_session ON events(session_id, sequence DESC);
                 CREATE INDEX IF NOT EXISTS idx_tickets_provider_lookup ON tickets(provider, provider_ticket_id);
@@ -1074,6 +1198,20 @@ impl SqliteEventStore {
                         project_id TEXT NOT NULL,
                         repository_path TEXT NOT NULL,
                         PRIMARY KEY (provider, project_id)
+                    );
+                    ",
+                )
+                .map_err(|err| CoreError::Persistence(err.to_string())),
+            5 => tx
+                .execute_batch(
+                    "
+                    CREATE TABLE IF NOT EXISTS harness_session_bindings (
+                        session_id TEXT NOT NULL,
+                        backend_kind TEXT NOT NULL,
+                        harness_session_id TEXT NOT NULL,
+                        updated_at TEXT NOT NULL,
+                        PRIMARY KEY (session_id, backend_kind),
+                        FOREIGN KEY(session_id) REFERENCES sessions(session_id)
                     );
                     ",
                 )
