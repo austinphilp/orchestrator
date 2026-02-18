@@ -1,10 +1,12 @@
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{HashMap, HashSet};
 use std::io::{self, Stdout};
+use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
-use std::time::Duration;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use crossterm::cursor::{SetCursorStyle, Show};
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
@@ -14,9 +16,13 @@ use orchestrator_core::{
     AttentionEngineConfig, AttentionPriorityBand, Command, CommandRegistry, CoreError, InboxItemId,
     InboxItemKind, LlmChatRequest, LlmFinishReason, LlmMessage, LlmProvider, LlmRateLimitState,
     LlmResponseStream, LlmRole, LlmTokenUsage, OrchestrationEventPayload, ProjectionState,
+    SessionProjection,
     SelectedTicketFlowResult, SupervisorQueryArgs, SupervisorQueryContextArgs, TicketId,
-    TicketSummary, UntypedCommandInvocation, WorkItemId, WorkerSessionId, WorkerSessionStatus,
-    WorkflowState,
+    TicketSummary, UntypedCommandInvocation, ProjectId, WorkItemId, WorkerSessionId,
+    WorkerSessionStatus, WorkflowState,
+};
+use orchestrator_runtime::{
+    RuntimeError, RuntimeSessionId, SessionHandle, SpawnSpec, TerminalSnapshot, WorkerBackend,
 };
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Layout, Rect};
@@ -34,6 +40,7 @@ pub use keymap::{
 };
 
 const TICKET_PICKER_EVENT_CHANNEL_CAPACITY: usize = 32;
+const TERMINAL_SNAPSHOT_EVENT_CHANNEL_CAPACITY: usize = 32;
 const TICKET_PICKER_PRIORITY_STATES_ENV: &str = "ORCHESTRATOR_TICKET_PICKER_PRIORITY_STATES";
 const TICKET_PICKER_PRIORITY_STATES_DEFAULT: &[&str] =
     &["In Progress", "Final Approval", "Todo", "Backlog"];
@@ -44,6 +51,7 @@ pub trait TicketPickerProvider: Send + Sync {
     async fn start_or_resume_ticket(
         &self,
         ticket: TicketSummary,
+        repository_override: Option<PathBuf>,
     ) -> Result<SelectedTicketFlowResult, CoreError>;
     async fn reload_projection(&self) -> Result<ProjectionState, CoreError>;
 }
@@ -250,12 +258,13 @@ impl UiState {
     }
 }
 
-pub fn project_ui_state(
+pub(crate) fn project_ui_state(
     status: &str,
     domain: &ProjectionState,
     view_stack: &ViewStack,
     preferred_selected_inbox: Option<usize>,
     preferred_selected_inbox_item_id: Option<&InboxItemId>,
+    terminal_view_state: Option<&TerminalViewState>,
 ) -> UiState {
     let attention_snapshot =
         attention_inbox_snapshot(domain, &AttentionEngineConfig::default(), &[]);
@@ -304,7 +313,7 @@ pub fn project_ui_state(
         .cloned()
         .unwrap_or(CenterView::InboxView);
     let center_pane =
-        project_center_pane(&active_center, &inbox_rows, &inbox_batch_surfaces, domain);
+        project_center_pane(&active_center, &inbox_rows, &inbox_batch_surfaces, domain, terminal_view_state);
 
     UiState {
         status: status.to_owned(),
@@ -345,6 +354,7 @@ fn project_center_pane(
     inbox_rows: &[UiInboxRow],
     inbox_batch_surfaces: &[UiBatchSurface],
     domain: &ProjectionState,
+    terminal_view_state: Option<&TerminalViewState>,
 ) -> CenterPaneState {
     match active_center {
         CenterView::InboxView => {
@@ -381,7 +391,9 @@ fn project_center_pane(
             project_focus_card_pane(inbox_item_id, inbox_rows, domain)
         }
         CenterView::TerminalView { session_id } => {
-            let lines = if let Some(session) = domain.sessions.get(session_id) {
+            let mut lines = Vec::new();
+
+            if let Some(session) = domain.sessions.get(session_id) {
                 let status = session
                     .status
                     .as_ref()
@@ -392,18 +404,31 @@ fn project_center_pane(
                     .as_ref()
                     .map(|entry| entry.as_str().to_owned())
                     .unwrap_or_else(|| "none".to_owned());
-                vec![
-                    format!("Session: {}", session_id.as_str()),
-                    format!("Status: {status}"),
-                    format!("Latest checkpoint: {checkpoint}"),
-                    "PTY embedding lands in a later ticket.".to_owned(),
-                ]
+                lines.push(format!("Session: {}", session_id.as_str()));
+                lines.push(format!("Status: {status}"));
+                lines.push(format!("Latest checkpoint: {checkpoint}"));
             } else {
-                vec![
-                    format!("Session: {}", session_id.as_str()),
-                    "Session state is unavailable in current projection.".to_owned(),
-                ]
-            };
+                lines.push(format!("Session: {}", session_id.as_str()));
+                lines.push("Session state is unavailable in current projection.".to_owned());
+            }
+
+            lines.push(String::new());
+            lines.push("Terminal output:".to_owned());
+            match terminal_view_state {
+                Some(terminal_state) => {
+                    if let Some(error) = terminal_state.error.as_deref() {
+                        lines.push(format!("Error: {}", compact_focus_card_text(error)));
+                    }
+                    if terminal_state.lines.is_empty() {
+                        lines.push("No terminal snapshot available yet.".to_owned());
+                    } else {
+                        lines.extend(terminal_state.lines.iter().cloned());
+                    }
+                }
+                None => {
+                    lines.push("No terminal snapshot available yet.".to_owned());
+                }
+            }
 
             CenterPaneState {
                 title: format!("Terminal {}", session_id.as_str()),
@@ -436,6 +461,7 @@ const SUPERVISOR_STREAM_RENDER_LINE_LIMIT: usize = 80;
 const SUPERVISOR_STREAM_HIGH_COST_TOTAL_TOKENS: u32 = 900;
 const SUPERVISOR_STREAM_LOW_TOKEN_HEADROOM: u32 = 120;
 const DEFAULT_SUPERVISOR_MODEL: &str = "openai/gpt-4o-mini";
+const TERMINAL_SNAPSHOT_REFRESH_INTERVAL_MILLIS: u64 = 120;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SupervisorStreamLifecycle {
@@ -485,6 +511,24 @@ impl SupervisorResponseState {
             Self::HighCost => "high-cost",
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+struct TerminalViewState {
+    lines: Vec<String>,
+    error: Option<String>,
+}
+
+#[derive(Debug)]
+enum TerminalSessionEvent {
+    Snapshot {
+        session_id: WorkerSessionId,
+        snapshot: TerminalSnapshot,
+    },
+    SnapshotFailed {
+        session_id: WorkerSessionId,
+        error: RuntimeError,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1749,6 +1793,10 @@ struct TicketPickerOverlayState {
     project_groups: Vec<TicketProjectGroup>,
     ticket_rows: Vec<TicketPickerRowRef>,
     selected_row_index: Option<usize>,
+    repository_prompt_ticket: Option<TicketSummary>,
+    repository_prompt_project_id: Option<String>,
+    repository_prompt_input: String,
+    repository_prompt_missing_mapping: bool,
 }
 
 impl TicketPickerOverlayState {
@@ -1784,6 +1832,10 @@ impl TicketPickerOverlayState {
         self.visible = true;
         self.loading = true;
         self.error = None;
+        self.repository_prompt_ticket = None;
+        self.repository_prompt_project_id = None;
+        self.repository_prompt_input.clear();
+        self.repository_prompt_missing_mapping = true;
     }
 
     fn close(&mut self) {
@@ -1791,6 +1843,37 @@ impl TicketPickerOverlayState {
         self.loading = false;
         self.starting_ticket_id = None;
         self.error = None;
+        self.repository_prompt_ticket = None;
+        self.repository_prompt_project_id = None;
+        self.repository_prompt_input.clear();
+        self.repository_prompt_missing_mapping = true;
+    }
+
+    fn has_repository_prompt(&self) -> bool {
+        self.repository_prompt_ticket.is_some()
+    }
+
+    fn start_repository_prompt(
+        &mut self,
+        ticket: TicketSummary,
+        project_id: String,
+        repository_path_hint: Option<String>,
+    ) {
+        self.repository_prompt_ticket = Some(ticket);
+        self.repository_prompt_project_id = Some(project_id);
+        if let Some(repository_path_hint) = repository_path_hint {
+            self.repository_prompt_input = repository_path_hint;
+            self.repository_prompt_missing_mapping = false;
+        } else {
+            self.repository_prompt_missing_mapping = true;
+        }
+    }
+
+    fn cancel_repository_prompt(&mut self) {
+        self.repository_prompt_ticket = None;
+        self.repository_prompt_project_id = None;
+        self.repository_prompt_input.clear();
+        self.repository_prompt_missing_mapping = true;
     }
 
     fn apply_tickets(&mut self, tickets: Vec<TicketSummary>, priority_states: &[String]) {
@@ -1930,6 +2013,12 @@ enum TicketPickerEvent {
     TicketStartFailed {
         message: String,
     },
+    TicketStartRequiresRepository {
+        ticket: TicketSummary,
+        project_id: String,
+        repository_path_hint: Option<String>,
+        message: String,
+    },
 }
 
 struct UiShellState {
@@ -1955,12 +2044,19 @@ struct UiShellState {
     ticket_picker_receiver: Option<mpsc::Receiver<TicketPickerEvent>>,
     ticket_picker_overlay: TicketPickerOverlayState,
     ticket_picker_priority_states: Vec<String>,
+    worker_backend: Option<Arc<dyn WorkerBackend>>,
+    selected_session_index: Option<usize>,
+    terminal_snapshot_sender: Option<mpsc::Sender<TerminalSessionEvent>>,
+    terminal_snapshot_receiver: Option<mpsc::Receiver<TerminalSessionEvent>>,
+    terminal_snapshot_states: HashMap<WorkerSessionId, TerminalViewState>,
+    terminal_snapshot_inflight: Option<WorkerSessionId>,
+    terminal_snapshot_last_requested_at: Option<Instant>,
 }
 
 impl UiShellState {
     #[cfg(test)]
     fn new(status: String, domain: ProjectionState) -> Self {
-        Self::new_with_integrations(status, domain, None, None, None)
+        Self::new_with_integrations(status, domain, None, None, None, None)
     }
     #[cfg(test)]
     fn new_with_supervisor(
@@ -1968,7 +2064,14 @@ impl UiShellState {
         domain: ProjectionState,
         supervisor_provider: Option<Arc<dyn LlmProvider>>,
     ) -> Self {
-        Self::new_with_integrations(status, domain, supervisor_provider, None, None)
+        Self::new_with_integrations(
+            status,
+            domain,
+            supervisor_provider,
+            None,
+            None,
+            None,
+        )
     }
 
     fn new_with_integrations(
@@ -1977,6 +2080,7 @@ impl UiShellState {
         supervisor_provider: Option<Arc<dyn LlmProvider>>,
         supervisor_command_dispatcher: Option<Arc<dyn SupervisorCommandDispatcher>>,
         ticket_picker_provider: Option<Arc<dyn TicketPickerProvider>>,
+        worker_backend: Option<Arc<dyn WorkerBackend>>,
     ) -> Self {
         let (ticket_picker_sender, ticket_picker_receiver) = if ticket_picker_provider.is_some() {
             let (sender, receiver) = mpsc::channel(TICKET_PICKER_EVENT_CHANNEL_CAPACITY);
@@ -1984,6 +2088,14 @@ impl UiShellState {
         } else {
             (None, None)
         };
+        let (terminal_snapshot_sender, terminal_snapshot_receiver) =
+            if worker_backend.is_some() {
+                let (sender, receiver) =
+                    mpsc::channel(TERMINAL_SNAPSHOT_EVENT_CHANNEL_CAPACITY);
+                (Some(sender), Some(receiver))
+            } else {
+                (None, None)
+            };
 
         Self {
             base_status: status,
@@ -2008,17 +2120,28 @@ impl UiShellState {
             ticket_picker_receiver,
             ticket_picker_overlay: TicketPickerOverlayState::default(),
             ticket_picker_priority_states: ticket_picker_priority_states_from_env(),
+            worker_backend,
+            selected_session_index: None,
+            terminal_snapshot_sender,
+            terminal_snapshot_receiver,
+            terminal_snapshot_states: HashMap::new(),
+            terminal_snapshot_inflight: None,
+            terminal_snapshot_last_requested_at: None,
         }
     }
 
     fn ui_state(&self) -> UiState {
         let status = self.status_text();
+        let terminal_view_state = self
+            .active_terminal_session_id()
+            .and_then(|session_id| self.terminal_snapshot_states.get(session_id));
         let mut ui_state = project_ui_state(
             status.as_str(),
             &self.domain,
             &self.view_stack,
             self.selected_inbox_index,
             self.selected_inbox_item_id.as_ref(),
+            terminal_view_state,
         );
         self.append_global_supervisor_chat_state(&mut ui_state);
         self.append_live_supervisor_chat(&mut ui_state);
@@ -2034,6 +2157,9 @@ impl UiShellState {
 
     fn move_selection(&mut self, delta: isize) {
         let ui_state = self.ui_state();
+        if ui_state.selected_inbox_item_id.is_none() && self.move_session_selection(delta) {
+            return;
+        }
         if ui_state.inbox_rows.is_empty() {
             self.selected_inbox_index = None;
             self.selected_inbox_item_id = None;
@@ -2049,6 +2175,9 @@ impl UiShellState {
     fn jump_to_first_item(&mut self) {
         let ui_state = self.ui_state();
         if ui_state.inbox_rows.is_empty() {
+            if self.move_to_first_session() {
+                return;
+            }
             self.set_selection(None, &ui_state.inbox_rows);
             return;
         }
@@ -2058,6 +2187,9 @@ impl UiShellState {
     fn jump_to_last_item(&mut self) {
         let ui_state = self.ui_state();
         if ui_state.inbox_rows.is_empty() {
+            if self.move_to_last_session() {
+                return;
+            }
             self.set_selection(None, &ui_state.inbox_rows);
             return;
         }
@@ -2114,12 +2246,276 @@ impl UiShellState {
 
     fn open_terminal_for_selected(&mut self) {
         let ui_state = self.ui_state();
+        let selected_inbox_item_id = ui_state.selected_inbox_item_id.clone();
+        let has_selected_inbox_item = selected_inbox_item_id.is_some();
         if let (Some(inbox_item_id), Some(session_id)) = (
-            ui_state.selected_inbox_item_id,
+            selected_inbox_item_id.as_ref(),
             ui_state.selected_session_id,
         ) {
-            self.open_focus_and_push_center(inbox_item_id, CenterView::TerminalView { session_id });
+            self.open_focus_and_push_center(
+                inbox_item_id.clone(),
+                CenterView::TerminalView { session_id },
+            );
+            return;
         }
+
+        if let Some(session_id) = self.selected_session_id_for_panel() {
+            if let Some(inbox_item_id) = self.inbox_item_id_for_session(&session_id) {
+                self.open_focus_and_push_center(
+                    inbox_item_id,
+                    CenterView::TerminalView { session_id },
+                );
+                return;
+            }
+            let _ = self.view_stack.push_center(CenterView::TerminalView { session_id });
+            return;
+        }
+
+        match self.spawn_manual_terminal_session() {
+            Ok(Some(session_id)) => {
+                if let Some(inbox_item_id) = selected_inbox_item_id {
+                    self.open_focus_and_push_center(
+                        inbox_item_id,
+                        CenterView::TerminalView { session_id },
+                    );
+                } else {
+                    let _ = self.view_stack.push_center(CenterView::TerminalView { session_id });
+                }
+            }
+            Ok(None) => {
+                if has_selected_inbox_item {
+                    self.status_warning = Some(
+                        "terminal unavailable: selected inbox item has no active session"
+                            .to_owned(),
+                    );
+                } else {
+                    self.status_warning =
+                        Some("terminal unavailable: no open session is currently selected".to_owned());
+                }
+            }
+            Err(error) => {
+                self.status_warning = Some(format!("terminal unavailable: {error}"));
+            }
+        }
+    }
+
+    fn spawn_manual_terminal_session(&mut self) -> Result<Option<WorkerSessionId>, String> {
+        let Some(backend) = self.worker_backend.clone() else {
+            return Ok(None);
+        };
+
+        let workdir = std::env::current_dir().unwrap_or_else(|_| std::env::temp_dir());
+        let session_id = WorkerSessionId::new(format!(
+            "manual-{nanos}",
+            nanos = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|since_epoch| since_epoch.as_nanos())
+                .unwrap_or(0)
+        ));
+        let spec = SpawnSpec {
+            session_id: session_id.clone().into(),
+            workdir,
+            model: None,
+            instruction_prelude: None,
+            environment: Vec::new(),
+        };
+
+        let spawn_thread = std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(|error| format!("terminal spawn runtime unavailable: {error}"))?;
+
+            runtime
+                .block_on(async move { backend.spawn(spec).await })
+                .map_err(|error| error.to_string())
+        });
+        let handle = spawn_thread
+            .join()
+            .map_err(|_| "terminal spawn worker thread panicked".to_owned())?
+            .map_err(|error| format!("terminal spawn failed: {error}"))?;
+
+        if handle.session_id.as_str() != session_id.as_str() {
+            return Err(format!(
+                "worker backend returned unexpected session id: expected '{expected}', got '{actual}'",
+                expected = session_id.as_str(),
+                actual = handle.session_id.as_str()
+            ));
+        }
+
+        Ok(Some(session_id))
+    }
+
+    fn selected_session_id_for_terminal_action(&self) -> Option<WorkerSessionId> {
+        self.active_terminal_session_id()
+            .cloned()
+            .or_else(|| self.selected_session_id_for_panel())
+    }
+
+    fn kill_selected_session(&mut self) {
+        let Some(session_id) = self.selected_session_id_for_terminal_action() else {
+            self.status_warning =
+                Some("terminal kill unavailable: no terminal session is currently selected".to_owned());
+            return;
+        };
+
+        let Some(backend) = self.worker_backend.clone() else {
+            self.status_warning =
+                Some("terminal kill unavailable: no worker backend configured".to_owned());
+            return;
+        };
+        let Some(handle) = self.terminal_session_handle(&session_id) else {
+            self.status_warning =
+                Some("terminal kill unavailable: cannot resolve backend session handle".to_owned());
+            return;
+        };
+
+        if let Some(session) = self.domain.sessions.get_mut(&session_id) {
+            session.status = Some(WorkerSessionStatus::Crashed);
+        }
+        self.terminal_snapshot_states.remove(&session_id);
+        if self.terminal_snapshot_inflight.as_ref() == Some(&session_id) {
+            self.terminal_snapshot_inflight = None;
+            self.terminal_snapshot_last_requested_at = None;
+        }
+        if self.active_terminal_session_id() == Some(&session_id) {
+            let _ = self.view_stack.pop_center();
+        }
+
+        let kill_target = session_id;
+        let kill_backend = backend;
+        let kill_handle = handle;
+        match TokioHandle::try_current() {
+            Ok(runtime) => {
+                let session_id = kill_target.as_str().to_owned();
+                runtime.spawn(async move {
+                    let _ = kill_backend.kill(&kill_handle).await;
+                });
+                self.status_warning = Some(format!("sending terminal kill for session {session_id}"));
+            }
+            Err(_) => {
+                let backend = kill_backend.clone();
+                let handle = kill_handle.clone();
+                let spawn_result = std::thread::Builder::new()
+                    .name("orchestrator-terminal-kill".to_owned())
+                    .spawn(move || {
+                        let runtime = tokio::runtime::Builder::new_current_thread()
+                            .enable_all()
+                            .build();
+                        if let Ok(runtime) = runtime {
+                            runtime.block_on(async move {
+                                let _ = backend.kill(&handle).await;
+                            });
+                        }
+                    });
+
+                match spawn_result {
+                    Ok(_) => {
+                        self.status_warning = Some(format!(
+                            "sending terminal kill for session {}",
+                            kill_target.as_str()
+                        ));
+                    }
+                    Err(error) => {
+                        self.status_warning = Some(format!(
+                            "terminal kill unavailable: cannot spawn kill worker thread: {error}"
+                        ));
+                    }
+                }
+            }
+        }
+    }
+
+    fn session_panel_rows(&self) -> Vec<(WorkerSessionId, String, String)> {
+        session_panel_rows(&self.domain)
+    }
+
+    fn session_ids_for_navigation(&self) -> Vec<WorkerSessionId> {
+        self.session_panel_rows()
+            .into_iter()
+            .map(|(session_id, _repo, _line)| session_id)
+            .collect()
+    }
+
+    fn selected_session_id_for_panel(&self) -> Option<WorkerSessionId> {
+        let session_ids = self.session_ids_for_navigation();
+        if session_ids.is_empty() {
+            return None;
+        }
+        let index = self.selected_session_index.unwrap_or(0).min(session_ids.len() - 1);
+        session_ids.get(index).cloned()
+    }
+
+    fn move_session_selection(&mut self, delta: isize) -> bool {
+        let session_ids = self.session_ids_for_navigation();
+        let len = session_ids.len();
+        if len == 0 {
+            self.selected_session_index = None;
+            return false;
+        }
+
+        let mut index = self.selected_session_index.unwrap_or(0);
+        if index >= len {
+            index = len - 1;
+        }
+        let next = (index as isize + delta).rem_euclid(len as isize) as usize;
+        self.selected_session_index = Some(next);
+        true
+    }
+
+    fn move_to_first_session(&mut self) -> bool {
+        if self.session_ids_for_navigation().is_empty() {
+            self.selected_session_index = None;
+            false
+        } else {
+            self.selected_session_index = Some(0);
+            true
+        }
+    }
+
+    fn move_to_last_session(&mut self) -> bool {
+        let len = self.session_ids_for_navigation().len();
+        if len == 0 {
+            self.selected_session_index = None;
+            false
+        } else {
+            self.selected_session_index = Some(len - 1);
+            true
+        }
+    }
+
+    fn inbox_item_id_for_session(&self, session_id: &WorkerSessionId) -> Option<InboxItemId> {
+        self.domain
+            .work_items
+            .values()
+            .find_map(|work_item| {
+                if work_item.session_id.as_ref() == Some(session_id) {
+                    work_item.inbox_items.first().cloned()
+                } else {
+                    None
+                }
+            })
+            .and_then(|inbox_item_id| {
+                self.domain
+                    .inbox_items
+                    .get(&inbox_item_id)
+                    .cloned()
+                    .map(|_| inbox_item_id)
+            })
+    }
+
+    fn active_terminal_session_id(&self) -> Option<&WorkerSessionId> {
+        match self.view_stack.active_center() {
+            Some(CenterView::TerminalView { session_id }) => Some(session_id),
+            _ => None,
+        }
+    }
+
+    fn terminal_session_handle(&self, session_id: &WorkerSessionId) -> Option<SessionHandle> {
+        Some(SessionHandle {
+            session_id: RuntimeSessionId::from(session_id.clone()),
+            backend: self.worker_backend.as_ref()?.kind(),
+        })
     }
 
     fn open_inspector_for_selected(&mut self, inspector: ArtifactInspectorKind) {
@@ -2244,10 +2640,60 @@ impl UiShellState {
         if self.ticket_picker_overlay.starting_ticket_id.is_some() {
             return;
         }
+        self.spawn_ticket_picker_start_with_override(ticket, None);
+    }
 
+    fn start_selected_ticket_from_picker_with_override(
+        &mut self,
+        ticket: TicketSummary,
+        repository_override: Option<PathBuf>,
+    ) {
+        if self.ticket_picker_overlay.starting_ticket_id.is_some() {
+            return;
+        }
         self.ticket_picker_overlay.error = None;
         self.ticket_picker_overlay.starting_ticket_id = Some(ticket.ticket_id.clone());
-        self.spawn_ticket_picker_start(ticket);
+        self.spawn_ticket_picker_start_with_override(ticket, repository_override);
+    }
+
+    fn submit_ticket_picker_repository_prompt(&mut self) {
+        if !self.ticket_picker_overlay.visible {
+            return;
+        }
+        let Some(ticket) = self
+            .ticket_picker_overlay
+            .repository_prompt_ticket
+            .as_ref()
+            .cloned()
+        else {
+            return;
+        };
+        let repository_path = self.ticket_picker_overlay.repository_prompt_input.trim();
+        if repository_path.is_empty() {
+            self.ticket_picker_overlay.error = Some("repository path cannot be empty".to_owned());
+            return;
+        }
+        let Some(repository_path) = expand_tilde_path(repository_path) else {
+            self.ticket_picker_overlay
+                .error = Some("could not expand repository path: HOME is not set".to_owned());
+            return;
+        };
+        self.start_selected_ticket_from_picker_with_override(
+            ticket,
+            Some(repository_path),
+        );
+    }
+
+    fn cancel_ticket_picker_repository_prompt(&mut self) {
+        self.ticket_picker_overlay.cancel_repository_prompt();
+    }
+
+    fn append_repository_prompt_char(&mut self, ch: char) {
+        self.ticket_picker_overlay.repository_prompt_input.push(ch);
+    }
+
+    fn pop_repository_prompt_char(&mut self) {
+        self.ticket_picker_overlay.repository_prompt_input.pop();
     }
 
     fn spawn_ticket_picker_load(&mut self) {
@@ -2280,7 +2726,11 @@ impl UiShellState {
         }
     }
 
-    fn spawn_ticket_picker_start(&mut self, ticket: TicketSummary) {
+    fn spawn_ticket_picker_start_with_override(
+        &mut self,
+        ticket: TicketSummary,
+        repository_override: Option<PathBuf>,
+    ) {
         let Some(provider) = self.ticket_picker_provider.clone() else {
             self.ticket_picker_overlay.starting_ticket_id = None;
             self.ticket_picker_overlay.error =
@@ -2297,7 +2747,13 @@ impl UiShellState {
         match TokioHandle::try_current() {
             Ok(handle) => {
                 handle.spawn(async move {
-                    run_ticket_picker_start_task(provider, ticket, sender).await;
+                    run_ticket_picker_start_task(
+                        provider,
+                        ticket,
+                        repository_override,
+                        sender,
+                    )
+                    .await;
                 });
             }
             Err(_) => {
@@ -2310,6 +2766,183 @@ impl UiShellState {
 
     fn tick_ticket_picker(&mut self) {
         self.poll_ticket_picker_events();
+    }
+
+    fn tick_terminal_view(&mut self) {
+        self.poll_terminal_session_events();
+        self.tick_terminal_snapshot_request();
+    }
+
+    fn poll_terminal_session_events(&mut self) {
+        let mut events = Vec::new();
+
+        {
+            let Some(receiver) = self.terminal_snapshot_receiver.as_mut() else {
+                return;
+            };
+
+            loop {
+                match receiver.try_recv() {
+                    Ok(event) => events.push(event),
+                    Err(TryRecvError::Empty) => break,
+                    Err(TryRecvError::Disconnected) => {
+                        self.status_warning =
+                            Some("terminal snapshot channel closed unexpectedly".to_owned());
+                        break;
+                    }
+                }
+            }
+        }
+
+        for event in events {
+            if let Some(session_id) = terminal_session_event_session_id(&event) {
+                if self.terminal_snapshot_inflight.as_ref() == Some(&session_id) {
+                    self.terminal_snapshot_inflight = None;
+                }
+            }
+
+            match event {
+                TerminalSessionEvent::Snapshot { session_id, snapshot } => {
+                    let view = self.terminal_snapshot_states.entry(session_id).or_default();
+                    view.error = None;
+                    view.lines = snapshot.lines;
+                }
+                TerminalSessionEvent::SnapshotFailed { session_id, error } => {
+                    let session_id_for_view = session_id.clone();
+                    let view = self
+                        .terminal_snapshot_states
+                        .entry(session_id_for_view)
+                        .or_default();
+                    view.error = Some(error.to_string());
+                    view.lines.clear();
+                    if let RuntimeError::SessionNotFound(_) = error {
+                        self.recover_terminal_session_on_not_found(&session_id);
+                    }
+                }
+            }
+        }
+    }
+
+    fn tick_terminal_snapshot_request(&mut self) {
+        let Some(session_id) = self.active_terminal_session_id().cloned() else {
+            return;
+        };
+
+        if self
+            .terminal_snapshot_inflight
+            .as_ref()
+            .is_some_and(|active| *active != session_id)
+        {
+            self.terminal_snapshot_inflight = None;
+        }
+        if self.terminal_snapshot_inflight.is_some() {
+            return;
+        }
+
+        if let Some(last_request) = self.terminal_snapshot_last_requested_at {
+            if last_request.elapsed()
+                < Duration::from_millis(TERMINAL_SNAPSHOT_REFRESH_INTERVAL_MILLIS)
+            {
+                return;
+            }
+        }
+        self.spawn_terminal_snapshot_request(session_id);
+    }
+
+    fn spawn_terminal_snapshot_request(&mut self, session_id: WorkerSessionId) {
+        let Some(backend) = self.worker_backend.clone() else {
+            return;
+        };
+        let Some(sender) = self.terminal_snapshot_sender.clone() else {
+            self.status_warning =
+                Some("terminal snapshot channel unavailable".to_owned());
+            return;
+        };
+        let Some(handle) = self.terminal_session_handle(&session_id) else {
+            self.status_warning = Some(
+                "terminal snapshot unavailable: cannot build session handle".to_owned(),
+            );
+            return;
+        };
+
+        self.terminal_snapshot_inflight = Some(session_id.clone());
+        self.terminal_snapshot_last_requested_at = Some(Instant::now());
+
+        match TokioHandle::try_current() {
+            Ok(runtime) => {
+                runtime.spawn(async move {
+                let event = match backend.snapshot(&handle).await {
+                        Ok(snapshot) => TerminalSessionEvent::Snapshot {
+                            session_id,
+                            snapshot,
+                        },
+                        Err(error) => TerminalSessionEvent::SnapshotFailed {
+                            session_id,
+                            error,
+                        },
+                    };
+                    let _ = sender.send(event).await;
+                });
+            }
+            Err(_) => {
+                self.terminal_snapshot_inflight = None;
+                self.terminal_snapshot_last_requested_at = None;
+                self.status_warning =
+                    Some("terminal snapshot unavailable: tokio runtime unavailable".to_owned());
+            }
+        }
+    }
+
+    fn recover_terminal_session_on_not_found(&mut self, session_id: &WorkerSessionId) {
+        if self.terminal_session_event_is_stale(session_id) {
+            return;
+        }
+
+        match self.spawn_manual_terminal_session() {
+            Ok(Some(new_session_id)) => {
+                let focus_session = self
+                    .inbox_item_id_for_session(session_id)
+                    .or_else(|| self.ui_state().selected_inbox_item_id.clone());
+
+                if let Some(inbox_item_id) = focus_session {
+                    self.open_focus_and_push_center(
+                        inbox_item_id,
+                        CenterView::TerminalView {
+                            session_id: new_session_id,
+                        },
+                    );
+                } else {
+                    let _ = self.view_stack.pop_center();
+                    let _ = self.view_stack.push_center(CenterView::TerminalView {
+                        session_id: new_session_id,
+                    });
+                }
+                self.status_warning = Some(format!(
+                    "terminal session {} was not found; opened a fresh terminal",
+                    session_id.as_str()
+                ));
+            }
+            Ok(None) => {
+                self.status_warning = Some(
+                    "terminal session unavailable: cannot spawn replacement terminal".to_owned(),
+                );
+            }
+            Err(error) => {
+                self.status_warning =
+                    Some(format!("terminal replacement failed: {error}"));
+            }
+        }
+    }
+
+    fn terminal_session_event_is_stale(&self, session_id: &WorkerSessionId) -> bool {
+        if !self.is_terminal_view_active() {
+            return true;
+        }
+
+        match self.active_terminal_session_id() {
+            Some(active_session_id) => active_session_id != session_id,
+            None => true,
+        }
     }
 
     fn poll_ticket_picker_events(&mut self) {
@@ -2360,6 +2993,7 @@ impl UiShellState {
                 warning,
             } => {
                 self.ticket_picker_overlay.starting_ticket_id = None;
+                self.ticket_picker_overlay.cancel_repository_prompt();
                 self.ticket_picker_overlay.error = None;
                 if let Some(projection) = projection {
                     self.domain = projection;
@@ -2375,8 +3009,23 @@ impl UiShellState {
                     ));
                 }
             }
+            TicketPickerEvent::TicketStartRequiresRepository {
+                ticket,
+                project_id,
+                repository_path_hint,
+                message,
+            } => {
+                self.ticket_picker_overlay.starting_ticket_id = None;
+                self.ticket_picker_overlay.start_repository_prompt(
+                    ticket,
+                    project_id,
+                    repository_path_hint,
+                );
+                self.ticket_picker_overlay.error = Some(message);
+            }
             TicketPickerEvent::TicketStartFailed { message } => {
                 self.ticket_picker_overlay.starting_ticket_id = None;
+                self.ticket_picker_overlay.cancel_repository_prompt();
                 self.ticket_picker_overlay.error = Some(message.clone());
                 self.status_warning = Some(format!(
                     "ticket picker start warning: {}",
@@ -2462,6 +3111,7 @@ impl UiShellState {
             &self.view_stack,
             self.selected_inbox_index,
             self.selected_inbox_item_id.as_ref(),
+            None,
         );
         let Some(selected_row) = ui_state
             .selected_inbox_index
@@ -3044,7 +3694,57 @@ impl UiShellState {
     }
 
     fn forward_terminal_key(&mut self, _key: KeyEvent) {
-        // Raw PTY input wiring is introduced in later terminal embedding tickets.
+        if !self.is_terminal_view_active() {
+            return;
+        }
+
+        let bytes = terminal_key_input_bytes(&_key);
+        if bytes.is_empty() {
+            return;
+        }
+
+        let Some(session_id) = self.active_terminal_session_id().cloned() else {
+            self.status_warning = Some(
+                "terminal input unavailable: no active terminal session selected".to_owned(),
+            );
+            return;
+        };
+        let Some(backend) = self.worker_backend.clone() else {
+            self.status_warning =
+                Some("terminal input unavailable: no worker backend configured".to_owned());
+            return;
+        };
+        let Some(handle) = self.terminal_session_handle(&session_id) else {
+            self.status_warning = Some(
+                "terminal input unavailable: cannot resolve backend session handle".to_owned(),
+            );
+            return;
+        };
+
+        match TokioHandle::try_current() {
+            Ok(runtime) => {
+                runtime.spawn(async move {
+                    let _ = backend.send_input(&handle, bytes.as_slice()).await;
+                });
+                self.request_terminal_snapshot_refresh(&session_id);
+                self.tick_terminal_snapshot_request();
+            }
+            Err(_) => {
+                self.status_warning = Some("terminal input unavailable: tokio runtime unavailable".to_owned());
+            }
+        }
+    }
+
+    fn request_terminal_snapshot_refresh(&mut self, session_id: &WorkerSessionId) {
+        if self.terminal_snapshot_inflight.as_ref() == Some(session_id) {
+            return;
+        }
+
+        self.terminal_snapshot_last_requested_at = Some(
+            Instant::now()
+                .checked_sub(Duration::from_millis(TERMINAL_SNAPSHOT_REFRESH_INTERVAL_MILLIS))
+                .unwrap_or(Instant::now()),
+        );
     }
 
     fn is_terminal_view_active(&self) -> bool {
@@ -3232,15 +3932,51 @@ async fn run_ticket_picker_load_task(
 async fn run_ticket_picker_start_task(
     provider: Arc<dyn TicketPickerProvider>,
     ticket: TicketSummary,
+    repository_override: Option<PathBuf>,
     sender: mpsc::Sender<TicketPickerEvent>,
 ) {
-    if let Err(error) = provider.start_or_resume_ticket(ticket).await {
-        let _ = sender
-            .send(TicketPickerEvent::TicketStartFailed {
-                message: error.to_string(),
-            })
-            .await;
-        return;
+    let started_ticket = ticket.clone();
+
+    if let Err(error) = provider
+        .start_or_resume_ticket(ticket, repository_override)
+        .await
+    {
+        match &error {
+            CoreError::MissingProjectRepositoryMapping { project, .. } => {
+                let _ = sender
+                    .send(TicketPickerEvent::TicketStartRequiresRepository {
+                        ticket: started_ticket,
+                        project_id: project.clone(),
+                        repository_path_hint: None,
+                        message: error.to_string(),
+                    })
+                    .await;
+                return;
+            }
+            CoreError::InvalidMappedRepository {
+                project,
+                repository_path,
+                ..
+            } => {
+                let _ = sender
+                    .send(TicketPickerEvent::TicketStartRequiresRepository {
+                        ticket: started_ticket,
+                        project_id: project.clone(),
+                        repository_path_hint: Some(repository_path.clone()),
+                        message: error.to_string(),
+                    })
+                    .await;
+                return;
+            }
+            error => {
+                let _ = sender
+                    .send(TicketPickerEvent::TicketStartFailed {
+                        message: error.to_string(),
+                    })
+                    .await;
+                return;
+            }
+        }
     }
 
     let mut warning = Vec::new();
@@ -3268,214 +4004,33 @@ async fn run_ticket_picker_start_task(
         .await;
 }
 
-pub struct Ui {
-    terminal: Terminal<CrosstermBackend<Stdout>>,
-    supervisor_provider: Option<Arc<dyn LlmProvider>>,
-    supervisor_command_dispatcher: Option<Arc<dyn SupervisorCommandDispatcher>>,
-    ticket_picker_provider: Option<Arc<dyn TicketPickerProvider>>,
+fn expand_tilde_path(raw: &str) -> Option<PathBuf> {
+    if raw == "~" {
+        return resolve_shell_home().map(PathBuf::from);
+    }
+
+    if let Some(suffix) = raw.strip_prefix("~/") {
+        return resolve_shell_home().map(|home| PathBuf::from(home).join(suffix));
+    }
+
+    if let Some(suffix) = raw.strip_prefix("~\\") {
+        return resolve_shell_home().map(|home| PathBuf::from(home).join(suffix));
+    }
+
+    Some(PathBuf::from(raw))
 }
 
-impl Ui {
-    pub fn init() -> io::Result<Self> {
-        enable_raw_mode()?;
-        let mut stdout = io::stdout();
-        stdout.execute(EnterAlternateScreen)?;
-        let backend = CrosstermBackend::new(stdout);
-        let terminal = Terminal::new(backend)?;
-        Ok(Self {
-            terminal,
-            supervisor_provider: None,
-            supervisor_command_dispatcher: None,
-            ticket_picker_provider: None,
+fn resolve_shell_home() -> Option<String> {
+    std::env::var("HOME")
+        .ok()
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+        .or_else(|| {
+            std::env::var("USERPROFILE")
+                .ok()
+                .map(|value| value.trim().to_owned())
+                .filter(|value| !value.is_empty())
         })
-    }
-
-    pub fn with_supervisor_provider(mut self, provider: Arc<dyn LlmProvider>) -> Self {
-        self.supervisor_provider = Some(provider);
-        self
-    }
-
-    pub fn with_supervisor_command_dispatcher(
-        mut self,
-        dispatcher: Arc<dyn SupervisorCommandDispatcher>,
-    ) -> Self {
-        self.supervisor_command_dispatcher = Some(dispatcher);
-        self
-    }
-
-    pub fn with_ticket_picker_provider(mut self, provider: Arc<dyn TicketPickerProvider>) -> Self {
-        self.ticket_picker_provider = Some(provider);
-        self
-    }
-
-    pub fn run(&mut self, status: &str, projection: &ProjectionState) -> io::Result<()> {
-        let mut shell_state = UiShellState::new_with_integrations(
-            status.to_owned(),
-            projection.clone(),
-            self.supervisor_provider.clone(),
-            self.supervisor_command_dispatcher.clone(),
-            self.ticket_picker_provider.clone(),
-        );
-        loop {
-            shell_state.tick_supervisor_stream();
-            shell_state.tick_ticket_picker();
-            let ui_state = shell_state.ui_state();
-            self.terminal.draw(|frame| {
-                let area = frame.area();
-                let layout = Layout::vertical([Constraint::Min(1), Constraint::Length(3)]);
-                let [main, footer] = layout.areas(area);
-                let main_layout =
-                    Layout::horizontal([Constraint::Percentage(35), Constraint::Percentage(65)]);
-                let [inbox_area, center_area] = main_layout.areas(main);
-
-                let inbox_text = render_inbox_panel(&ui_state);
-                frame.render_widget(
-                    Paragraph::new(inbox_text)
-                        .block(Block::default().title("inbox").borders(Borders::ALL)),
-                    inbox_area,
-                );
-
-                let center_text = render_center_panel(&ui_state);
-                frame.render_widget(
-                    Paragraph::new(center_text).block(
-                        Block::default()
-                            .title(ui_state.center_pane.title.as_str())
-                            .borders(Borders::ALL),
-                    ),
-                    center_area,
-                );
-
-                let footer_text = format!(
-                    "status: {} | mode: {} | {}",
-                    ui_state.status,
-                    shell_state.mode.label(),
-                    mode_help(shell_state.mode)
-                );
-                frame.render_widget(
-                    Paragraph::new(footer_text)
-                        .block(Block::default().title("shell").borders(Borders::ALL)),
-                    footer,
-                );
-
-                if let Some(which_key) = shell_state.which_key_overlay.as_ref() {
-                    render_which_key_overlay(frame, center_area, which_key);
-                }
-                if shell_state.ticket_picker_overlay.visible {
-                    render_ticket_picker_overlay(frame, main, &shell_state.ticket_picker_overlay);
-                }
-            })?;
-
-            if event::poll(Duration::from_millis(250))? {
-                if let Event::Key(key) = event::read()? {
-                    if key.kind == KeyEventKind::Press && handle_key_press(&mut shell_state, key) {
-                        break;
-                    }
-                }
-            }
-        }
-
-        Ok(())
-    }
-}
-
-impl Drop for Ui {
-    fn drop(&mut self) {
-        let _ = disable_raw_mode();
-        let _ = io::stdout().execute(LeaveAlternateScreen);
-    }
-}
-
-fn render_inbox_panel(ui_state: &UiState) -> String {
-    if ui_state.inbox_rows.is_empty() {
-        return "No inbox items.".to_owned();
-    }
-
-    let mut lines = Vec::new();
-
-    let batch_lane_summary = ui_state
-        .inbox_batch_surfaces
-        .iter()
-        .filter(|surface| surface.total_count > 0)
-        .map(|surface| {
-            format!(
-                "[{}] {} {}",
-                surface.kind.hotkey(),
-                surface.kind.label(),
-                surface.unresolved_count
-            )
-        })
-        .collect::<Vec<_>>();
-    if !batch_lane_summary.is_empty() {
-        lines.push(format!("Batch lanes: {}", batch_lane_summary.join(" | ")));
-        lines.push(String::new());
-    }
-
-    let mut active_band = None;
-    for (index, row) in ui_state.inbox_rows.iter().enumerate() {
-        if active_band != Some(row.priority_band) {
-            if active_band.is_some() {
-                lines.push(String::new());
-            }
-            lines.push(format!("{}:", row.priority_band.label()));
-            active_band = Some(row.priority_band);
-        }
-
-        let selected = if Some(index) == ui_state.selected_inbox_index {
-            ">"
-        } else {
-            " "
-        };
-        let resolved = if row.resolved { "x" } else { " " };
-        lines.push(format!(
-            "{selected} [{resolved}] {:?}: {}",
-            row.kind, row.title
-        ));
-    }
-
-    lines.join("\n")
-}
-
-fn render_center_panel(ui_state: &UiState) -> String {
-    let mut lines = Vec::with_capacity(ui_state.center_pane.lines.len() + 2);
-    lines.push(format!("Stack: {}", ui_state.center_stack_label()));
-    lines.push(String::new());
-    lines.extend(ui_state.center_pane.lines.iter().cloned());
-    lines.join("\n")
-}
-
-fn render_ticket_picker_overlay(
-    frame: &mut ratatui::Frame<'_>,
-    anchor_area: Rect,
-    overlay: &TicketPickerOverlayState,
-) {
-    let content = render_ticket_picker_overlay_text(overlay);
-    let Some(popup) = ticket_picker_popup(anchor_area) else {
-        return;
-    };
-
-    frame.render_widget(Clear, popup);
-    frame.render_widget(
-        Paragraph::new(content).block(Block::default().title("start ticket").borders(Borders::ALL)),
-        popup,
-    );
-}
-
-fn ticket_picker_popup(anchor_area: Rect) -> Option<Rect> {
-    if anchor_area.width < 20 || anchor_area.height < 10 {
-        return None;
-    }
-
-    let width = ((anchor_area.width as f32) * 0.78).round() as u16;
-    let height = ((anchor_area.height as f32) * 0.82).round() as u16;
-    let width = width.clamp(20, anchor_area.width.saturating_sub(2));
-    let height = height.clamp(10, anchor_area.height.saturating_sub(2));
-
-    Some(Rect {
-        x: anchor_area.x + (anchor_area.width.saturating_sub(width)) / 2,
-        y: anchor_area.y + (anchor_area.height.saturating_sub(height)) / 2,
-        width,
-        height,
-    })
 }
 
 fn render_ticket_picker_overlay_text(overlay: &TicketPickerOverlayState) -> String {
@@ -3497,7 +4052,27 @@ fn render_ticket_picker_overlay_text(overlay: &TicketPickerOverlayState) -> Stri
         ));
     }
 
-    lines.push(String::new());
+    if overlay.has_repository_prompt() {
+        lines.push(String::new());
+        let project_id = overlay
+            .repository_prompt_project_id
+            .as_deref()
+            .unwrap_or("selected project");
+        if overlay.repository_prompt_missing_mapping {
+            lines.push(format!(
+                "Repository mapping missing for project '{project_id}'.",
+            ));
+        } else {
+            lines.push(format!(
+                "Repository path could not be resolved for project '{project_id}'.",
+            ));
+        }
+        lines.push(
+            "Enter local repository path, then press Enter. Esc to cancel.".to_owned(),
+        );
+        lines.push(format!("Path: {}", overlay.repository_prompt_input));
+        lines.push(String::new());
+    }
 
     if overlay.project_groups.is_empty() {
         lines.push("No unfinished tickets found.".to_owned());
@@ -3581,6 +4156,477 @@ fn render_ticket_picker_overlay_text(overlay: &TicketPickerOverlayState) -> Stri
     }
 
     lines.join("\n")
+}
+
+fn route_ticket_picker_key(shell_state: &mut UiShellState, key: KeyEvent) -> RoutedInput {
+    if shell_state.ticket_picker_overlay.has_repository_prompt() {
+        return route_ticket_picker_repository_prompt_key(shell_state, key);
+    }
+
+    if is_escape_to_normal(key) {
+        return RoutedInput::Command(UiCommand::CloseTicketPicker);
+    }
+
+    if !key.modifiers.is_empty() {
+        return RoutedInput::Ignore;
+    }
+
+    match key.code {
+        KeyCode::Char('j') | KeyCode::Down => RoutedInput::Command(UiCommand::TicketPickerMoveNext),
+        KeyCode::Char('k') | KeyCode::Up => {
+            RoutedInput::Command(UiCommand::TicketPickerMovePrevious)
+        }
+        KeyCode::Char('h') | KeyCode::Left => {
+            RoutedInput::Command(UiCommand::TicketPickerFoldProject)
+        }
+        KeyCode::Char('l') | KeyCode::Right => {
+            RoutedInput::Command(UiCommand::TicketPickerUnfoldProject)
+        }
+        KeyCode::Enter => RoutedInput::Command(UiCommand::TicketPickerStartSelected),
+        _ => RoutedInput::Ignore,
+    }
+}
+
+fn route_ticket_picker_repository_prompt_key(
+    shell_state: &mut UiShellState,
+    key: KeyEvent,
+) -> RoutedInput {
+    if is_escape_to_normal(key) {
+        shell_state.cancel_ticket_picker_repository_prompt();
+        return RoutedInput::Ignore;
+    }
+
+    if matches!(key.code, KeyCode::Enter) {
+        shell_state.submit_ticket_picker_repository_prompt();
+        return RoutedInput::Ignore;
+    }
+
+    if key.modifiers.is_empty() {
+        match key.code {
+            KeyCode::Backspace | KeyCode::Delete => {
+                shell_state.pop_repository_prompt_char();
+                return RoutedInput::Ignore;
+            }
+            KeyCode::Char(ch) => {
+                shell_state.append_repository_prompt_char(ch);
+                return RoutedInput::Ignore;
+            }
+            _ => {}
+        }
+    }
+
+    RoutedInput::Ignore
+}
+
+pub struct Ui {
+    terminal: Terminal<CrosstermBackend<Stdout>>,
+    supervisor_provider: Option<Arc<dyn LlmProvider>>,
+    supervisor_command_dispatcher: Option<Arc<dyn SupervisorCommandDispatcher>>,
+    ticket_picker_provider: Option<Arc<dyn TicketPickerProvider>>,
+    worker_backend: Option<Arc<dyn WorkerBackend>>,
+}
+
+impl Ui {
+    pub fn init() -> io::Result<Self> {
+        enable_raw_mode()?;
+        let mut stdout = io::stdout();
+        stdout.execute(EnterAlternateScreen)?;
+        let backend = CrosstermBackend::new(stdout);
+        let terminal = Terminal::new(backend)?;
+        Ok(Self {
+            terminal,
+            supervisor_provider: None,
+            supervisor_command_dispatcher: None,
+            ticket_picker_provider: None,
+            worker_backend: None,
+        })
+    }
+
+    pub fn with_supervisor_provider(mut self, provider: Arc<dyn LlmProvider>) -> Self {
+        self.supervisor_provider = Some(provider);
+        self
+    }
+
+    pub fn with_supervisor_command_dispatcher(
+        mut self,
+        dispatcher: Arc<dyn SupervisorCommandDispatcher>,
+    ) -> Self {
+        self.supervisor_command_dispatcher = Some(dispatcher);
+        self
+    }
+
+    pub fn with_ticket_picker_provider(mut self, provider: Arc<dyn TicketPickerProvider>) -> Self {
+        self.ticket_picker_provider = Some(provider);
+        self
+    }
+
+    pub fn with_worker_backend(mut self, backend: Arc<dyn WorkerBackend>) -> Self {
+        self.worker_backend = Some(backend);
+        self
+    }
+
+    pub fn run(&mut self, status: &str, projection: &ProjectionState) -> io::Result<()> {
+        let mut shell_state = UiShellState::new_with_integrations(
+            status.to_owned(),
+            projection.clone(),
+            self.supervisor_provider.clone(),
+            self.supervisor_command_dispatcher.clone(),
+            self.ticket_picker_provider.clone(),
+            self.worker_backend.clone(),
+        );
+        loop {
+            shell_state.tick_supervisor_stream();
+            shell_state.tick_ticket_picker();
+            shell_state.tick_terminal_view();
+            let ui_state = shell_state.ui_state();
+            self.terminal.draw(|frame| {
+                let area = frame.area();
+                let layout = Layout::vertical([Constraint::Min(1), Constraint::Length(3)]);
+                let [main, footer] = layout.areas(area);
+                let main_layout =
+                    Layout::horizontal([Constraint::Percentage(35), Constraint::Percentage(65)]);
+                let [left_area, center_area] = main_layout.areas(main);
+                let left_layout = Layout::vertical([
+                    Constraint::Percentage(45),
+                    Constraint::Percentage(55),
+                ]);
+                let [sessions_area, inbox_area] = left_layout.areas(left_area);
+
+                let sessions_text = render_sessions_panel(
+                    &shell_state.domain,
+                    shell_state.selected_session_id_for_panel().as_ref(),
+                );
+                frame.render_widget(
+                    Paragraph::new(sessions_text)
+                        .block(Block::default().title("sessions").borders(Borders::ALL)),
+                    sessions_area,
+                );
+
+                let inbox_text = render_inbox_panel(&ui_state);
+                frame.render_widget(
+                    Paragraph::new(inbox_text)
+                        .block(Block::default().title("inbox").borders(Borders::ALL)),
+                    inbox_area,
+                );
+
+                let center_text = render_center_panel(&ui_state);
+                frame.render_widget(
+                    Paragraph::new(center_text).block(
+                        Block::default()
+                            .title(ui_state.center_pane.title.as_str())
+                            .borders(Borders::ALL),
+                    ),
+                    center_area,
+                );
+
+                let footer_text = format!(
+                    "status: {} | mode: {} | {}",
+                    ui_state.status,
+                    shell_state.mode.label(),
+                    mode_help(shell_state.mode)
+                );
+                frame.render_widget(
+                    Paragraph::new(footer_text)
+                        .block(Block::default().title("shell").borders(Borders::ALL)),
+                    footer,
+                );
+
+                if let Some(which_key) = shell_state.which_key_overlay.as_ref() {
+                    render_which_key_overlay(frame, center_area, which_key);
+                }
+                if shell_state.ticket_picker_overlay.visible {
+                    render_ticket_picker_overlay(frame, main, &shell_state.ticket_picker_overlay);
+                }
+            })?;
+
+            if shell_state.ticket_picker_overlay.has_repository_prompt() {
+                let _ = io::stdout()
+                    .execute(Show)
+                    .and_then(|stdout| stdout.execute(SetCursorStyle::BlinkingBlock));
+            } else {
+                let _ = io::stdout().execute(SetCursorStyle::DefaultUserShape);
+            }
+
+            if event::poll(Duration::from_millis(250))? {
+                if let Event::Key(key) = event::read()? {
+                    if key.kind == KeyEventKind::Press && handle_key_press(&mut shell_state, key) {
+                        break;
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+}
+
+impl Drop for Ui {
+    fn drop(&mut self) {
+        let _ = disable_raw_mode();
+        let _ = io::stdout().execute(SetCursorStyle::DefaultUserShape);
+        let _ = io::stdout().execute(LeaveAlternateScreen);
+    }
+}
+
+fn render_inbox_panel(ui_state: &UiState) -> String {
+    if ui_state.inbox_rows.is_empty() {
+        return "No inbox items.".to_owned();
+    }
+
+    let mut lines = Vec::new();
+
+    let batch_lane_summary = ui_state
+        .inbox_batch_surfaces
+        .iter()
+        .filter(|surface| surface.total_count > 0)
+        .map(|surface| {
+            format!(
+                "[{}] {} {}",
+                surface.kind.hotkey(),
+                surface.kind.label(),
+                surface.unresolved_count
+            )
+        })
+        .collect::<Vec<_>>();
+    if !batch_lane_summary.is_empty() {
+        lines.push(format!("Batch lanes: {}", batch_lane_summary.join(" | ")));
+        lines.push(String::new());
+    }
+
+    let mut active_band = None;
+    for (index, row) in ui_state.inbox_rows.iter().enumerate() {
+        if active_band != Some(row.priority_band) {
+            if active_band.is_some() {
+                lines.push(String::new());
+            }
+            lines.push(format!("{}:", row.priority_band.label()));
+            active_band = Some(row.priority_band);
+        }
+
+        let selected = if Some(index) == ui_state.selected_inbox_index {
+            ">"
+        } else {
+            " "
+        };
+        let resolved = if row.resolved { "x" } else { " " };
+        lines.push(format!(
+            "{selected} [{resolved}] {:?}: {}",
+            row.kind, row.title
+        ));
+    }
+
+    lines.join("\n")
+}
+
+fn session_panel_rows(domain: &ProjectionState) -> Vec<(WorkerSessionId, String, String)> {
+    let mut work_item_repo = HashMap::new();
+    for event in &domain.events {
+        if let OrchestrationEventPayload::WorktreeCreated(payload) = &event.payload {
+            work_item_repo.insert(
+                payload.work_item_id.clone(),
+                repository_name_from_path(payload.path.as_str()),
+            );
+        }
+    }
+
+    let mut sessions_by_repo: HashMap<String, Vec<(WorkerSessionId, String)>> = HashMap::new();
+    for session in domain.sessions.values() {
+        if !is_open_session_status(session.status.as_ref()) {
+            continue;
+        }
+
+        let repo = repository_label_for_session(session, domain, &work_item_repo);
+        let status = session_status_label(session.status.as_ref());
+        let work_item = session
+            .work_item_id
+            .as_ref()
+                .map(|work_item_id| work_item_id.as_str())
+                .unwrap_or("unknown");
+        let line = format!("  [{}] {} - {}", status, session.id.as_str(), work_item);
+        sessions_by_repo.entry(repo).or_default().push((session.id.clone(), line));
+    }
+
+    if sessions_by_repo.is_empty() {
+        return Vec::new();
+    }
+
+    let mut rows = Vec::new();
+    let mut repos = sessions_by_repo.keys().cloned().collect::<Vec<_>>();
+    repos.sort_unstable();
+    for repo in repos {
+        let mut sessions = sessions_by_repo
+            .remove(&repo)
+            .unwrap_or_default();
+        sessions.sort_unstable_by(|left, right| left.1.cmp(&right.1));
+        for (session_id, line) in sessions {
+            rows.push((session_id, repo.clone(), line));
+        }
+    }
+
+    rows
+}
+
+fn render_sessions_panel(
+    domain: &ProjectionState,
+    selected_session_id: Option<&WorkerSessionId>,
+) -> String {
+    let session_rows = session_panel_rows(domain);
+    if session_rows.is_empty() {
+        return "No open sessions.".to_owned();
+    }
+
+    let mut lines = Vec::new();
+    let mut previous_repo: Option<String> = None;
+    for (session_id, repo, line) in session_rows {
+        let is_selected = selected_session_id == Some(&session_id);
+        let marker = if is_selected { ">" } else { " " };
+        if previous_repo.as_deref() != Some(repo.as_str()) {
+            if previous_repo.is_some() {
+                lines.push(String::new());
+            }
+            lines.push(format!("{repo}:"));
+            previous_repo = Some(repo);
+        }
+        lines.push(format!("{marker}{line}"));
+    }
+
+    lines.join("\n")
+}
+
+fn render_center_panel(ui_state: &UiState) -> String {
+    let mut lines = Vec::with_capacity(ui_state.center_pane.lines.len() + 2);
+    lines.push(format!("Stack: {}", ui_state.center_stack_label()));
+    lines.push(String::new());
+    lines.extend(ui_state.center_pane.lines.iter().cloned());
+    lines.join("\n")
+}
+
+fn repository_name_from_path(path: &str) -> String {
+    std::path::Path::new(path)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map_or_else(|| "unknown-repo".to_owned(), ToOwned::to_owned)
+}
+
+fn repository_label_for_session(
+    session: &SessionProjection,
+    domain: &ProjectionState,
+    work_item_repo: &HashMap<WorkItemId, String>,
+) -> String {
+    session
+        .work_item_id
+        .as_ref()
+        .and_then(|work_item_id| work_item_repo.get(work_item_id).cloned())
+        .or_else(|| {
+            session
+                .work_item_id
+                .as_ref()
+                .and_then(|work_item_id| domain.work_items.get(work_item_id))
+                .and_then(|work_item| work_item.project_id.as_ref())
+                .map(|project_id: &ProjectId| project_id.as_str().to_owned())
+        })
+        .unwrap_or_else(|| "unknown-repo".to_owned())
+}
+
+fn is_open_session_status(status: Option<&WorkerSessionStatus>) -> bool {
+    !matches!(
+        status,
+        Some(WorkerSessionStatus::Done) | Some(WorkerSessionStatus::Crashed)
+    )
+}
+
+fn session_status_label(status: Option<&WorkerSessionStatus>) -> &'static str {
+    match status {
+        Some(WorkerSessionStatus::Running) => "running",
+        Some(WorkerSessionStatus::WaitingForUser) => "waiting",
+        Some(WorkerSessionStatus::Blocked) => "blocked",
+        Some(WorkerSessionStatus::Done) => "done",
+        Some(WorkerSessionStatus::Crashed) => "crashed",
+        None => "unknown",
+    }
+}
+
+fn render_ticket_picker_overlay(
+    frame: &mut ratatui::Frame<'_>,
+    anchor_area: Rect,
+    overlay: &TicketPickerOverlayState,
+) {
+    let content = render_ticket_picker_overlay_text(overlay);
+    let Some(popup) = ticket_picker_popup(anchor_area) else {
+        return;
+    };
+    if let Some((cursor_x, cursor_y)) = ticket_picker_repository_prompt_cursor(popup, overlay) {
+        frame.set_cursor_position((cursor_x, cursor_y));
+    }
+
+    frame.render_widget(Clear, popup);
+    frame.render_widget(
+        Paragraph::new(content).block(Block::default().title("start ticket").borders(Borders::ALL)),
+        popup,
+    );
+}
+
+fn ticket_picker_repository_prompt_cursor(popup: Rect, overlay: &TicketPickerOverlayState) -> Option<(u16, u16)> {
+    if !overlay.has_repository_prompt() {
+        return None;
+    }
+
+    let mut line_index = 1usize;
+    if overlay.loading {
+        line_index += 1;
+    }
+    if overlay.starting_ticket_id.is_some() {
+        line_index += 1;
+    }
+    if overlay.error.is_some() {
+        line_index += 1;
+    }
+
+    // Blank spacer
+    line_index += 1;
+    // Repository project info line
+    line_index += 1;
+    // Prompt guidance line
+    line_index += 1;
+    // Cursor line is the repository path input line.
+
+    let inner_height = popup.height.saturating_sub(2);
+    if line_index >= usize::from(inner_height) {
+        return None;
+    }
+
+    let prefix_len = "Path: ".chars().count();
+    let input_len = overlay.repository_prompt_input.chars().count();
+    let cursor_offset = prefix_len + input_len;
+
+    let inner_width = popup.width.saturating_sub(2);
+    let max_offset = inner_width.saturating_sub(1);
+    let cursor_offset = cursor_offset.min(usize::from(max_offset));
+
+    let cursor_x = popup.x.saturating_add(1).saturating_add(u16::try_from(cursor_offset).ok()?);
+    let cursor_y = popup.y
+        .saturating_add(1)
+        .saturating_add(u16::try_from(line_index).ok()?);
+
+    Some((cursor_x, cursor_y))
+}
+
+fn ticket_picker_popup(anchor_area: Rect) -> Option<Rect> {
+    if anchor_area.width < 20 || anchor_area.height < 10 {
+        return None;
+    }
+
+    let width = ((anchor_area.width as f32) * 0.78).round() as u16;
+    let height = ((anchor_area.height as f32) * 0.82).round() as u16;
+    let width = width.clamp(20, anchor_area.width.saturating_sub(2));
+    let height = height.clamp(10, anchor_area.height.saturating_sub(2));
+
+    Some(Rect {
+        x: anchor_area.x + (anchor_area.width.saturating_sub(width)) / 2,
+        y: anchor_area.y + (anchor_area.height.saturating_sub(height)) / 2,
+        width,
+        height,
+    })
 }
 
 fn render_which_key_overlay(
@@ -3824,11 +4870,12 @@ enum UiCommand {
     TicketPickerUnfoldProject,
     TicketPickerStartSelected,
     OpenFocusCard,
+    KillSelectedSession,
     MinimizeCenterView,
 }
 
 impl UiCommand {
-    const ALL: [Self; 29] = [
+    const ALL: [Self; 30] = [
         Self::EnterNormalMode,
         Self::EnterInsertMode,
         Self::ToggleGlobalSupervisorChat,
@@ -3857,6 +4904,7 @@ impl UiCommand {
         Self::TicketPickerUnfoldProject,
         Self::TicketPickerStartSelected,
         Self::OpenFocusCard,
+        Self::KillSelectedSession,
         Self::MinimizeCenterView,
     ];
 
@@ -3890,6 +4938,7 @@ impl UiCommand {
             Self::TicketPickerUnfoldProject => "ui.ticket_picker.unfold_project",
             Self::TicketPickerStartSelected => "ui.ticket_picker.start_selected",
             Self::OpenFocusCard => "ui.open_focus_card_for_selected",
+            Self::KillSelectedSession => "ui.terminal.kill_selected_session",
             Self::MinimizeCenterView => "ui.center.pop",
         }
     }
@@ -3924,6 +4973,7 @@ impl UiCommand {
             Self::TicketPickerUnfoldProject => "Unfold selected project in ticket picker",
             Self::TicketPickerStartSelected => "Start selected ticket",
             Self::OpenFocusCard => "Open focus card for selected item",
+            Self::KillSelectedSession => "Kill selected terminal session",
             Self::MinimizeCenterView => "Minimize active center view",
         }
     }
@@ -3978,6 +5028,7 @@ fn default_keymap_config() -> KeymapConfig {
                     binding(&["c"], UiCommand::ToggleGlobalSupervisorChat),
                     binding(&["enter"], UiCommand::OpenFocusCard),
                     binding(&["t"], UiCommand::OpenTerminalForSelected),
+                    binding(&["x"], UiCommand::KillSelectedSession),
                     binding(&["backspace"], UiCommand::MinimizeCenterView),
                     binding(&["i"], UiCommand::EnterInsertMode),
                     binding(&["z", "1"], UiCommand::JumpBatchDecideOrUnblock),
@@ -4039,10 +5090,111 @@ enum RoutedInput {
 fn mode_help(mode: UiMode) -> &'static str {
     match mode {
         UiMode::Normal => {
-            "j/k: select | Tab/S-Tab: batch cycle | 1-4 or z{1-4}: batch jump | g/G: first/last | s: start ticket | c: supervisor chat | Enter: focus | t: terminal | v{d/t/p/c}: inspectors | i: insert | q: quit"
+            "j/k: select | Tab/S-Tab: batch cycle | 1-4 or z{1-4}: batch jump | g/G: first/last | s: start ticket | c: supervisor chat | Enter: focus | t: terminal | x: kill selected session | v{d/t/p/c}: inspectors | i: insert | q: quit"
         }
         UiMode::Insert => "Insert input active | Esc/Ctrl-[: Normal",
         UiMode::Terminal => "Terminal pass-through active | Esc or Ctrl-\\ Ctrl-n: Normal",
+    }
+}
+
+fn terminal_key_input_bytes(key: &KeyEvent) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    let alt_prefix = key.modifiers.contains(KeyModifiers::ALT);
+    let control = key.modifiers.contains(KeyModifiers::CONTROL);
+
+    let mut key_bytes = match key.code {
+        KeyCode::Enter => b"\n".to_vec(),
+        KeyCode::Backspace => vec![0x7f],
+        KeyCode::Tab => b"\t".to_vec(),
+        KeyCode::Esc => vec![0x1b],
+        KeyCode::Insert => b"\x1b[2~".to_vec(),
+        KeyCode::Delete => b"\x1b[3~".to_vec(),
+        KeyCode::Up => b"\x1b[A".to_vec(),
+        KeyCode::Down => b"\x1b[B".to_vec(),
+        KeyCode::Right => b"\x1b[C".to_vec(),
+        KeyCode::Left => b"\x1b[D".to_vec(),
+        KeyCode::Home => b"\x1b[H".to_vec(),
+        KeyCode::End => b"\x1b[F".to_vec(),
+        KeyCode::PageUp => b"\x1b[5~".to_vec(),
+        KeyCode::PageDown => b"\x1b[6~".to_vec(),
+        KeyCode::Char(ch) => {
+            if control {
+                control_key_input_byte(ch).map(|byte| vec![byte]).unwrap_or_else(|| {
+                    ch.to_string().as_bytes().to_vec()
+                })
+            } else {
+                ch.to_string().as_bytes().to_vec()
+            }
+        }
+        KeyCode::Null => Vec::new(),
+        KeyCode::F(index) => match index {
+            1 => b"\x1bOP".to_vec(),
+            2 => b"\x1bOQ".to_vec(),
+            3 => b"\x1bOR".to_vec(),
+            4 => b"\x1bOS".to_vec(),
+            5 => b"\x1b[15~".to_vec(),
+            6 => b"\x1b[17~".to_vec(),
+            7 => b"\x1b[18~".to_vec(),
+            8 => b"\x1b[19~".to_vec(),
+            9 => b"\x1b[20~".to_vec(),
+            10 => b"\x1b[21~".to_vec(),
+            11 => b"\x1b[23~".to_vec(),
+            12 => b"\x1b[24~".to_vec(),
+            _ => Vec::new(),
+        },
+        _ => Vec::new(),
+    };
+
+    if key_bytes.is_empty() {
+        return Vec::new();
+    }
+
+    if alt_prefix {
+        bytes.push(0x1b);
+    }
+    bytes.extend(key_bytes.drain(..));
+    if control
+        && matches!(
+            key.code,
+            KeyCode::Backspace | KeyCode::Tab | KeyCode::Enter | KeyCode::Esc
+        )
+    {
+        return bytes;
+    }
+    bytes
+}
+
+fn control_key_input_byte(ch: char) -> Option<u8> {
+    if !ch.is_ascii() {
+        return None;
+    }
+    let normalized = ch.to_ascii_uppercase() as u8;
+    if normalized == b' ' {
+        return Some(0x00);
+    }
+    if normalized == b'@' {
+        return Some(0x00);
+    }
+    if matches!(normalized, b'[' | b'\\' | b']' | b'^' | b'_') {
+        return Some(match normalized {
+            b'[' => 0x1b,
+            b'\\' => 0x1c,
+            b']' => 0x1d,
+            b'^' => 0x1e,
+            b'_' => 0x1f,
+            _ => 0x00,
+        });
+    }
+    if normalized.is_ascii_alphabetic() {
+        return Some(normalized - b'A' + 1);
+    }
+    None
+}
+
+fn terminal_session_event_session_id(event: &TerminalSessionEvent) -> Option<&WorkerSessionId> {
+    match event {
+        TerminalSessionEvent::Snapshot { session_id, .. } => Some(session_id),
+        TerminalSessionEvent::SnapshotFailed { session_id, .. } => Some(session_id),
     }
 }
 
@@ -4102,31 +5254,6 @@ fn route_key_press(shell_state: &mut UiShellState, key: KeyEvent) -> RoutedInput
                 RoutedInput::Command(UiCommand::EnterNormalMode)
             }
         }
-    }
-}
-
-fn route_ticket_picker_key(_shell_state: &mut UiShellState, key: KeyEvent) -> RoutedInput {
-    if is_escape_to_normal(key) {
-        return RoutedInput::Command(UiCommand::CloseTicketPicker);
-    }
-
-    if !key.modifiers.is_empty() {
-        return RoutedInput::Ignore;
-    }
-
-    match key.code {
-        KeyCode::Char('j') | KeyCode::Down => RoutedInput::Command(UiCommand::TicketPickerMoveNext),
-        KeyCode::Char('k') | KeyCode::Up => {
-            RoutedInput::Command(UiCommand::TicketPickerMovePrevious)
-        }
-        KeyCode::Char('h') | KeyCode::Left => {
-            RoutedInput::Command(UiCommand::TicketPickerFoldProject)
-        }
-        KeyCode::Char('l') | KeyCode::Right => {
-            RoutedInput::Command(UiCommand::TicketPickerUnfoldProject)
-        }
-        KeyCode::Enter => RoutedInput::Command(UiCommand::TicketPickerStartSelected),
-        _ => RoutedInput::Ignore,
     }
 }
 
@@ -4286,6 +5413,10 @@ fn dispatch_command(shell_state: &mut UiShellState, command: UiCommand) -> bool 
             shell_state.open_focus_card_for_selected();
             false
         }
+        UiCommand::KillSelectedSession => {
+            shell_state.kill_selected_session();
+            false
+        }
         UiCommand::MinimizeCenterView => {
             if shell_state.is_global_supervisor_chat_active() {
                 shell_state.close_global_supervisor_chat();
@@ -4332,6 +5463,10 @@ mod tests {
         OrchestrationEventPayload, OrchestrationEventType, SessionBlockedPayload,
         SessionCheckpointPayload, SessionNeedsInputPayload, SessionProjection, StoredEventEnvelope,
         SupervisorQueryFinishedPayload, UserRespondedPayload, WorkItemProjection, WorkflowState,
+    };
+    use orchestrator_runtime::{
+        BackendCapabilities, BackendEvent, BackendKind, RuntimeResult, RuntimeSessionId,
+        SessionHandle, SessionLifecycle, WorkerEventStream,
     };
     use std::collections::VecDeque;
     use std::sync::{Arc, Mutex};
@@ -4481,6 +5616,89 @@ mod tests {
 
     fn ctrl_key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::CONTROL)
+    }
+
+    #[derive(Default, Debug)]
+    struct ManualTerminalBackend {
+        spawned_session_ids: Arc<Mutex<Vec<RuntimeSessionId>>>,
+    }
+
+    impl ManualTerminalBackend {
+        fn spawned_session_ids(&self) -> Vec<RuntimeSessionId> {
+            self.spawned_session_ids
+                .lock()
+                .expect("spawned session IDs lock")
+                .clone()
+        }
+    }
+
+    struct EmptyEventStream;
+
+    #[async_trait]
+    impl orchestrator_runtime::WorkerEventSubscription for EmptyEventStream {
+        async fn next_event(&mut self) -> RuntimeResult<Option<BackendEvent>> {
+            Ok(None)
+        }
+    }
+
+    #[async_trait]
+    impl SessionLifecycle for ManualTerminalBackend {
+        async fn spawn(&self, spec: SpawnSpec) -> RuntimeResult<SessionHandle> {
+            self.spawned_session_ids
+                .lock()
+                .expect("spawned session IDs lock")
+                .push(spec.session_id.clone());
+            Ok(SessionHandle {
+                session_id: spec.session_id,
+                backend: BackendKind::OpenCode,
+            })
+        }
+
+        async fn kill(&self, _session: &SessionHandle) -> RuntimeResult<()> {
+            Ok(())
+        }
+
+        async fn send_input(&self, _session: &SessionHandle, _input: &[u8]) -> RuntimeResult<()> {
+            Ok(())
+        }
+
+        async fn resize(
+            &self,
+            _session: &SessionHandle,
+            _cols: u16,
+            _rows: u16,
+        ) -> RuntimeResult<()> {
+            Ok(())
+        }
+    }
+
+    #[async_trait]
+    impl WorkerBackend for ManualTerminalBackend {
+        fn kind(&self) -> BackendKind {
+            BackendKind::OpenCode
+        }
+
+        fn capabilities(&self) -> BackendCapabilities {
+            BackendCapabilities::default()
+        }
+
+        async fn health_check(&self) -> RuntimeResult<()> {
+            Ok(())
+        }
+
+        async fn subscribe(&self, _session: &SessionHandle) -> RuntimeResult<WorkerEventStream> {
+            Ok(Box::new(EmptyEventStream))
+        }
+
+        async fn snapshot(&self, _session: &SessionHandle) -> RuntimeResult<TerminalSnapshot> {
+            Ok(TerminalSnapshot {
+                cols: 80,
+                rows: 24,
+                cursor_col: 0,
+                cursor_row: 0,
+                lines: vec![],
+            })
+        }
     }
 
     fn sample_projection(with_session: bool) -> ProjectionState {
@@ -5012,7 +6230,7 @@ mod tests {
             inbox_item_id: InboxItemId::new("inbox-1"),
         });
 
-        let ui_state = project_ui_state("ready", &projection, &stack, None, None);
+        let ui_state = project_ui_state("ready", &projection, &stack, None, None, None);
         assert_eq!(ui_state.selected_inbox_index, Some(0));
         assert_eq!(
             ui_state
@@ -5041,7 +6259,7 @@ mod tests {
             inbox_item_id: InboxItemId::new("inbox-focus"),
         });
 
-        let ui_state = project_ui_state("ready", &projection, &stack, None, None);
+        let ui_state = project_ui_state("ready", &projection, &stack, None, None, None);
         let rendered = ui_state.center_pane.lines.join("\n");
 
         assert!(rendered.contains("Why attention is required:"));
@@ -5063,7 +6281,7 @@ mod tests {
             inbox_item_id: InboxItemId::new("inbox-focus-multi"),
         });
 
-        let ui_state = project_ui_state("ready", &projection, &stack, None, None);
+        let ui_state = project_ui_state("ready", &projection, &stack, None, None, None);
         let rendered = ui_state.center_pane.lines.join("\n");
 
         assert!(rendered.contains("Active session question"));
@@ -5078,7 +6296,7 @@ mod tests {
             inbox_item_id: InboxItemId::new("inbox-many-artifacts"),
         });
 
-        let ui_state = project_ui_state("ready", &projection, &stack, None, None);
+        let ui_state = project_ui_state("ready", &projection, &stack, None, None, None);
         let rendered = ui_state.center_pane.lines.join("\n");
         let artifact_evidence_count = ui_state
             .center_pane
@@ -5094,12 +6312,7 @@ mod tests {
     }
 
     #[test]
-    fn open_terminal_pushes_only_with_session_context() {
-        let mut without_session = UiShellState::new("ready".to_owned(), sample_projection(false));
-        let before = without_session.view_stack.center_views().to_vec();
-        without_session.open_terminal_for_selected();
-        assert_eq!(without_session.view_stack.center_views(), before.as_slice());
-
+    fn open_terminal_with_active_session_focuses_terminal() {
         let mut with_session = UiShellState::new("ready".to_owned(), sample_projection(true));
         with_session.open_terminal_for_selected();
         assert_eq!(with_session.view_stack.center_views().len(), 2);
@@ -5114,6 +6327,35 @@ mod tests {
 
         with_session.open_terminal_for_selected();
         assert_eq!(with_session.view_stack.center_views().len(), 2);
+    }
+
+    #[test]
+    fn open_terminal_without_session_opens_manual_terminal_when_backend_available() {
+        let backend = Arc::new(ManualTerminalBackend::default());
+        let mut without_session =
+            UiShellState::new_with_integrations(
+                "ready".to_owned(),
+                sample_projection(false),
+                None,
+                None,
+                None,
+                Some(backend.clone()),
+            );
+
+        without_session.open_terminal_for_selected();
+        assert_eq!(without_session.view_stack.center_views().len(), 2);
+        assert!(matches!(
+            without_session.view_stack.active_center(),
+            Some(CenterView::TerminalView { .. })
+        ));
+        assert_eq!(backend.spawned_session_ids().len(), 1);
+        assert!(matches!(
+            without_session
+                .view_stack
+                .center_views()
+                .first(),
+            Some(CenterView::FocusCardView { inbox_item_id }) if inbox_item_id.as_str() == "inbox-1"
+        ));
     }
 
     #[test]
@@ -5202,6 +6444,7 @@ mod tests {
             &stack(ArtifactInspectorKind::Diff),
             None,
             None,
+            None,
         );
         let diff_rendered = diff_state.center_pane.lines.join("\n");
         assert!(diff_rendered.contains("Diff artifacts:"));
@@ -5211,6 +6454,7 @@ mod tests {
             "ready",
             &projection,
             &stack(ArtifactInspectorKind::Test),
+            None,
             None,
             None,
         );
@@ -5225,6 +6469,7 @@ mod tests {
             &stack(ArtifactInspectorKind::PullRequest),
             None,
             None,
+            None,
         );
         let pr_rendered = pr_state.center_pane.lines.join("\n");
         assert!(pr_rendered.contains("PR artifacts:"));
@@ -5235,6 +6480,7 @@ mod tests {
             "ready",
             &projection,
             &stack(ArtifactInspectorKind::Chat),
+            None,
             None,
             None,
         );
@@ -5282,7 +6528,7 @@ mod tests {
             work_item_id,
             inspector: ArtifactInspectorKind::Chat,
         });
-        let chat_state = project_ui_state("ready", &projection, &stack, None, None);
+        let chat_state = project_ui_state("ready", &projection, &stack, None, None, None);
         let rendered = chat_state.center_pane.lines.join("\n");
 
         assert!(rendered.contains("Latest query metrics: id=supq-1"));
@@ -5674,6 +6920,7 @@ mod tests {
             None,
             Some(dispatcher_dyn),
             None,
+            None,
         );
 
         shell_state.open_chat_inspector_for_selected();
@@ -5742,6 +6989,7 @@ mod tests {
             triage_projection(),
             None,
             Some(dispatcher_dyn),
+            None,
             None,
         );
 
@@ -5898,6 +7146,7 @@ mod tests {
             None,
             Some(dispatcher_dyn),
             None,
+            None,
         );
         shell_state.open_inspector_for_selected(ArtifactInspectorKind::Chat);
         let _sender = attach_supervisor_stream(&mut shell_state, "wi-inspector");
@@ -6013,7 +7262,7 @@ mod tests {
             inspector: ArtifactInspectorKind::Diff,
         });
 
-        let ui_state = project_ui_state("ready", &projection, &stack, None, None);
+        let ui_state = project_ui_state("ready", &projection, &stack, None, None, None);
         let rendered = ui_state.center_pane.lines.join("\n");
         assert!(!rendered.contains("Foreign diff artifact"));
         assert!(!rendered.contains("artifact://diff/wi-foreign"));
@@ -6144,6 +7393,7 @@ mod tests {
             &ViewStack::default(),
             Some(0),
             Some(&inbox_item_b),
+            None,
         );
         assert_eq!(ui_state.selected_inbox_index, Some(1));
         assert_eq!(
@@ -6161,6 +7411,7 @@ mod tests {
             "ready",
             &triage_projection(),
             &ViewStack::default(),
+            None,
             None,
             None,
         );
@@ -6527,6 +7778,10 @@ mod tests {
             command_id(UiCommand::FocusNextInbox),
             command_ids::UI_FOCUS_NEXT_INBOX
         );
+        assert_eq!(
+            command_id(UiCommand::KillSelectedSession),
+            "ui.terminal.kill_selected_session"
+        );
     }
 
     #[test]
@@ -6553,6 +7808,7 @@ mod tests {
             UiCommand::JumpBatchReviewReady,
             UiCommand::JumpBatchFyiDigest,
             UiCommand::OpenFocusCard,
+            UiCommand::KillSelectedSession,
             UiCommand::MinimizeCenterView,
         ];
 

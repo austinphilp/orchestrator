@@ -39,6 +39,7 @@ const TAG_NEEDS_INPUT: &str = "@@needs_input";
 const TAG_BLOCKED: &str = "@@blocked";
 const TAG_ARTIFACT: &str = "@@artifact";
 const TAG_DONE: &str = "@@done";
+const OPENCODE_AUTO_RESUME_ARG: &str = "-c";
 const OPTIONAL_CAPABILITY_HELP_ARGS: [&str; 2] = ["--help", "-h"];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -95,6 +96,11 @@ impl OpenCodeBackend {
 
     fn spawn_args(&self, spec: &SpawnSpec) -> Vec<String> {
         let mut args = self.config.base_args.clone();
+        if is_opencode_binary(&self.config.binary)
+            && !args.iter().any(|arg| arg == OPENCODE_AUTO_RESUME_ARG)
+        {
+            args.push(OPENCODE_AUTO_RESUME_ARG.to_owned());
+        }
         if let (Some(model), Some(model_flag)) = (&spec.model, &self.config.model_flag) {
             args.push(model_flag.clone());
             args.push(model.clone());
@@ -347,6 +353,15 @@ fn read_bool_env(name: &str) -> RuntimeResult<bool> {
 fn is_bare_command_name(path: &Path) -> bool {
     let mut components = path.components();
     matches!(components.next(), Some(Component::Normal(_))) && components.next().is_none()
+}
+
+fn is_opencode_binary(path: &Path) -> bool {
+    let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+
+    let file_name = file_name.trim().to_ascii_lowercase();
+    file_name == "opencode" || file_name == "opencode.exe"
 }
 
 fn validate_command_binary_path(
@@ -2012,6 +2027,77 @@ sleep 1"#
         assert!(output.contains("prelude2:Implement AP-115 and run tests."));
 
         backend.kill(&handle).await.expect("kill session");
+    }
+
+    #[test]
+    fn spawn_args_appends_auto_resume_for_opencode_binary() {
+        let backend = OpenCodeBackend::new(OpenCodeBackendConfig {
+            binary: PathBuf::from("/usr/local/bin/opencode"),
+            base_args: vec!["--foo".to_owned()],
+            model_flag: Some("--model".to_owned()),
+            output_buffer: 128,
+            terminal_size: TerminalSize::default(),
+            render_policy: PtyRenderPolicy::default(),
+            health_check_timeout: Duration::from_secs(1),
+            protocol_guidance: None,
+        });
+        let mut spec = spawn_spec("session-opencode-autoresume");
+        spec.model = Some("opus".to_owned());
+
+        assert_eq!(
+            backend.spawn_args(&spec),
+            vec![
+                "--foo".to_owned(),
+                OPENCODE_AUTO_RESUME_ARG.to_owned(),
+                "--model".to_owned(),
+                "opus".to_owned(),
+            ]
+        );
+    }
+
+    #[test]
+    fn spawn_args_skips_auto_resume_for_non_opencode_binary() {
+        let backend = OpenCodeBackend::new(OpenCodeBackendConfig {
+            binary: PathBuf::from("/usr/local/bin/codex"),
+            base_args: vec!["--foo".to_owned()],
+            model_flag: Some("--model".to_owned()),
+            output_buffer: 128,
+            terminal_size: TerminalSize::default(),
+            render_policy: PtyRenderPolicy::default(),
+            health_check_timeout: Duration::from_secs(1),
+            protocol_guidance: None,
+        });
+        let mut spec = spawn_spec("session-non-opencode");
+        spec.model = Some("opus".to_owned());
+
+        assert_eq!(
+            backend.spawn_args(&spec),
+            vec![
+                "--foo".to_owned(),
+                "--model".to_owned(),
+                "opus".to_owned()
+            ]
+        );
+    }
+
+    #[test]
+    fn spawn_args_preserves_existing_auto_resume_arg() {
+        let backend = OpenCodeBackend::new(OpenCodeBackendConfig {
+            binary: PathBuf::from("opencode.exe"),
+            base_args: vec!["-c".to_owned(), "--foo".to_owned()],
+            model_flag: None,
+            output_buffer: 128,
+            terminal_size: TerminalSize::default(),
+            render_policy: PtyRenderPolicy::default(),
+            health_check_timeout: Duration::from_secs(1),
+            protocol_guidance: None,
+        });
+        let spec = spawn_spec("session-opencode-preserve-autoresume");
+
+        assert_eq!(
+            backend.spawn_args(&spec),
+            vec!["-c".to_owned(), "--foo".to_owned()]
+        );
     }
 
     #[test]

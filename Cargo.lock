@@ -966,6 +966,7 @@ dependencies = [
  "async-trait",
  "crossterm",
  "orchestrator-core",
+ "orchestrator-runtime",
  "ratatui",
  "serde",
  "serde_json",

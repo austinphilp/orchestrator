@@ -1,4 +1,5 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::fs;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -12,6 +13,7 @@ use crate::{
     WorkflowGuardContext, WorkflowState, WorkflowTransitionPayload, WorkflowTransitionReason,
     WorktreeCreatedPayload, WorktreeId, WorktreeRecord,
 };
+use crate::store::ProjectRepositoryMappingRecord;
 
 const DEFAULT_BASE_BRANCH: &str = "main";
 const DEFAULT_PROJECT_ID: &str = "project-default";
@@ -60,12 +62,21 @@ pub async fn start_or_resume_selected_ticket(
     store: &mut SqliteEventStore,
     selected_ticket: &TicketSummary,
     config: &SelectedTicketFlowConfig,
+    repository_override: Option<PathBuf>,
     vcs: &dyn VcsProvider,
     worker_backend: &dyn WorkerBackend,
 ) -> Result<SelectedTicketFlowResult, CoreError> {
     let (provider, provider_ticket_id) =
         parse_ticket_provider_identity(&selected_ticket.ticket_id)?;
     validate_flow_config(config)?;
+    cleanup_completed_session_worktrees(
+        &store
+            .list_runtime_mappings()?
+            .into_iter()
+            .collect::<Vec<_>>(),
+        &config.worktrees_root,
+    );
+    let project_id = selected_ticket_project_id(selected_ticket, &config.project_id);
 
     if let Some(existing_mapping) =
         store.find_runtime_mapping_by_ticket(&provider, provider_ticket_id.as_str())?
@@ -73,6 +84,7 @@ pub async fn start_or_resume_selected_ticket(
         return resume_existing_mapping(
             store,
             selected_ticket,
+            project_id,
             config,
             worker_backend,
             existing_mapping,
@@ -80,19 +92,36 @@ pub async fn start_or_resume_selected_ticket(
         .await;
     }
 
-    start_new_mapping(store, selected_ticket, config, vcs, worker_backend).await
+    start_new_mapping(
+        store,
+        selected_ticket,
+        config,
+        project_id,
+        repository_override,
+        vcs,
+        worker_backend,
+    )
+    .await
 }
 
 async fn start_new_mapping(
     store: &mut SqliteEventStore,
     selected_ticket: &TicketSummary,
     config: &SelectedTicketFlowConfig,
+    project_id: ProjectId,
+    repository_override: Option<PathBuf>,
     vcs: &dyn VcsProvider,
     worker_backend: &dyn WorkerBackend,
 ) -> Result<SelectedTicketFlowResult, CoreError> {
     let (provider, provider_ticket_id) =
         parse_ticket_provider_identity(&selected_ticket.ticket_id)?;
-    let repository = resolve_single_repository(vcs, config).await?;
+    let repository =
+        resolve_repository_for_ticket(store, vcs, &provider, &project_id, repository_override).await?;
+    store.upsert_project_repository_mapping(&ProjectRepositoryMappingRecord {
+        provider: provider.clone(),
+        project_id: project_id.clone(),
+        repository_path: repository.root.to_string_lossy().into_owned(),
+    })?;
     let issue_key = normalize_issue_key(selected_ticket.identifier.as_str())?;
     let title_slug = title_slug(
         selected_ticket.title.as_str(),
@@ -184,7 +213,7 @@ async fn start_new_mapping(
         },
     };
     store.upsert_runtime_mapping(&mapping)?;
-    ensure_lifecycle_events(store, selected_ticket, &mapping, &config.project_id, true)?;
+    ensure_lifecycle_events(store, selected_ticket, &mapping, &project_id, true)?;
 
     Ok(SelectedTicketFlowResult {
         action: SelectedTicketFlowAction::Started,
@@ -195,6 +224,7 @@ async fn start_new_mapping(
 async fn resume_existing_mapping(
     store: &mut SqliteEventStore,
     selected_ticket: &TicketSummary,
+    _project_id: ProjectId,
     config: &SelectedTicketFlowConfig,
     worker_backend: &dyn WorkerBackend,
     existing_mapping: RuntimeMappingRecord,
@@ -512,32 +542,146 @@ fn new_event(
 
 async fn resolve_single_repository(
     vcs: &dyn VcsProvider,
-    config: &SelectedTicketFlowConfig,
+    root: &Path,
+    provider: &TicketProvider,
+    project_id: &ProjectId,
 ) -> Result<RepositoryRef, CoreError> {
-    let repositories = vcs.discover_repositories(&config.repository_roots).await?;
+    let repositories = vcs.discover_repositories(&[root.to_path_buf()]).await?;
     if repositories.is_empty() {
-        return Err(CoreError::Configuration(format!(
-            "No git repositories were discovered under configured roots: {}",
-            config
-                .repository_roots
-                .iter()
-                .map(|root| root.display().to_string())
-                .collect::<Vec<_>>()
-                .join(", ")
-        )));
+        return Err(CoreError::InvalidMappedRepository {
+            provider: ticket_provider_name(provider).to_owned(),
+            project: project_id.as_str().to_owned(),
+            repository_path: root.to_string_lossy().into_owned(),
+            reason: "No git repositories were discovered under mapped path".to_owned(),
+        });
     }
     if repositories.len() > 1 {
-        return Err(CoreError::Configuration(format!(
-            "Multiple repositories were discovered; ticket-selected start/resume requires a single repository context (found: {}).",
-            repositories
-                .iter()
-                .map(|repo| repo.root.display().to_string())
-                .collect::<Vec<_>>()
-                .join(", ")
-        )));
+        return Err(CoreError::InvalidMappedRepository {
+            provider: ticket_provider_name(provider).to_owned(),
+            project: project_id.as_str().to_owned(),
+            repository_path: root.to_string_lossy().into_owned(),
+            reason: format!(
+                "Multiple repositories were discovered; ticket-selected start/resume requires a single repository context (found: {}).",
+                repositories
+                    .iter()
+                    .map(|repo| repo.root.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        });
     }
 
     Ok(repositories[0].clone())
+}
+
+fn selected_ticket_project_id(
+    selected_ticket: &TicketSummary,
+    fallback_project_id: &ProjectId,
+) -> ProjectId {
+    selected_ticket
+        .project
+        .as_deref()
+        .map(|project| project.trim().to_owned())
+        .filter(|project| !project.is_empty())
+        .map(ProjectId::new)
+        .unwrap_or_else(|| fallback_project_id.clone())
+}
+
+fn ticket_provider_name(provider: &TicketProvider) -> &'static str {
+    match provider {
+        TicketProvider::Linear => "linear",
+        TicketProvider::Shortcut => "shortcut",
+    }
+}
+
+fn cleanup_completed_session_worktrees(
+    mappings: &[RuntimeMappingRecord],
+    worktrees_root: &Path,
+) {
+    for mapping in mappings {
+        if mapping.session.status != WorkerSessionStatus::Done {
+            continue;
+        }
+
+        let worktree_path = PathBuf::from(mapping.session.workdir.clone());
+        if !worktree_path.exists() || !worktree_path.starts_with(worktrees_root) {
+            continue;
+        }
+
+        let _ = fs::remove_dir_all(&worktree_path);
+    }
+}
+
+async fn resolve_repository_for_ticket(
+    store: &SqliteEventStore,
+    vcs: &dyn VcsProvider,
+    provider: &TicketProvider,
+    project_id: &ProjectId,
+    repository_override: Option<PathBuf>,
+) -> Result<RepositoryRef, CoreError> {
+    let repository_path = repository_override
+        .or_else(|| {
+            store
+                .find_project_repository_mapping(provider, project_id)
+                .ok()
+                .flatten()
+                .map(PathBuf::from)
+        })
+        .ok_or_else(|| CoreError::MissingProjectRepositoryMapping {
+            provider: ticket_provider_name(provider).to_owned(),
+            project: project_id.as_str().to_owned(),
+        })?;
+    let repository_path = expand_tilde_repository_path(repository_path, project_id.as_str())?;
+
+    resolve_single_repository(vcs, &repository_path, provider, project_id).await
+}
+
+fn expand_tilde_repository_path(
+    path: PathBuf,
+    project_id: &str,
+) -> Result<PathBuf, CoreError> {
+    let raw = path.to_string_lossy();
+    if raw == "~" {
+        return resolve_core_home().map(PathBuf::from).ok_or_else(|| {
+            CoreError::Configuration(format!(
+                "Cannot resolve repository path for project '{project_id}': HOME is not set."
+            ))
+        });
+    }
+    if let Some(suffix) = raw.strip_prefix("~/") {
+        return resolve_core_home().map(PathBuf::from).map(|home| home.join(suffix)).ok_or_else(
+            || {
+                CoreError::Configuration(format!(
+                    "Cannot resolve repository path for project '{project_id}': HOME is not set."
+                ))
+            },
+        );
+    }
+    if let Some(suffix) = raw.strip_prefix("~\\") {
+        return resolve_core_home().map(PathBuf::from).map(|home| home.join(suffix)).ok_or_else(
+            || {
+                CoreError::Configuration(format!(
+                    "Cannot resolve repository path for project '{project_id}': HOME is not set."
+                ))
+            },
+        );
+    }
+
+    Ok(path)
+}
+
+fn resolve_core_home() -> Option<PathBuf> {
+    std::env::var("HOME")
+        .ok()
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+        .or_else(|| {
+            std::env::var("USERPROFILE")
+                .ok()
+                .map(|value| value.trim().to_owned())
+                .filter(|value| !value.is_empty())
+        })
+        .map(PathBuf::from)
 }
 
 fn validate_flow_config(config: &SelectedTicketFlowConfig) -> Result<(), CoreError> {
@@ -988,6 +1132,7 @@ mod tests {
             &mut store,
             &selected_ticket(),
             &config(),
+            Some(PathBuf::from("/workspace/repo")),
             &vcs,
             &backend,
         )
@@ -1071,6 +1216,7 @@ mod tests {
             &mut store,
             &selected_ticket(),
             &config(),
+            Some(PathBuf::from("/workspace/repo")),
             &vcs,
             &backend,
         )
@@ -1101,6 +1247,7 @@ mod tests {
             &mut store,
             &selected_ticket(),
             &config(),
+            Some(PathBuf::from("/workspace/repo")),
             &vcs,
             &backend,
         )
@@ -1122,6 +1269,64 @@ mod tests {
             .find_runtime_mapping_by_ticket(&TicketProvider::Linear, "issue-126")
             .expect("mapping lookup")
             .is_none());
+    }
+
+    #[tokio::test]
+    async fn start_flow_requires_mapping_when_no_repository_override() {
+        let mut store = SqliteEventStore::in_memory().expect("in-memory store");
+        let vcs = StubVcsProvider::with_single_repository("/workspace/repo");
+        let backend = StubWorkerBackend::new(BackendKind::OpenCode);
+
+        let err = start_or_resume_selected_ticket(
+            &mut store,
+            &selected_ticket(),
+            &config(),
+            None,
+            &vcs,
+            &backend,
+        )
+        .await
+        .expect_err("expected mapping prompt error");
+
+        match err {
+            CoreError::MissingProjectRepositoryMapping {
+                provider,
+                project,
+            } => {
+                assert_eq!(provider, "linear");
+                assert_eq!(project, "proj-126");
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn start_flow_uses_mapped_repository_for_project() {
+        let mut store = SqliteEventStore::in_memory().expect("in-memory store");
+        let vcs = StubVcsProvider::with_single_repository("/mapped/repo");
+        let backend = StubWorkerBackend::new(BackendKind::OpenCode);
+        store
+            .upsert_project_repository_mapping(&crate::store::ProjectRepositoryMappingRecord {
+                provider: TicketProvider::Linear,
+                project_id: ProjectId::new("proj-126"),
+                repository_path: "/mapped/repo".to_owned(),
+            })
+            .expect("seed repository mapping");
+
+        let result = start_or_resume_selected_ticket(
+            &mut store,
+            &selected_ticket(),
+            &config(),
+            None,
+            &vcs,
+            &backend,
+        )
+        .await
+        .expect("mapped start succeeds");
+
+        assert_eq!(result.action, SelectedTicketFlowAction::Started);
+        assert_eq!(result.mapping.session.status, WorkerSessionStatus::Running);
+        assert_eq!(backend.spawn_specs.lock().expect("lock").len(), 1);
     }
 
     fn seeded_runtime_mapping(
@@ -1202,6 +1407,7 @@ mod tests {
             &mut store,
             &selected_ticket(),
             &config(),
+            None,
             &vcs,
             &backend,
         )
@@ -1243,6 +1449,7 @@ mod tests {
             &mut store,
             &selected_ticket(),
             &config(),
+            None,
             &vcs,
             &backend,
         )
@@ -1277,6 +1484,7 @@ mod tests {
             &mut store,
             &selected_ticket(),
             &resume_config,
+            None,
             &vcs,
             &backend,
         )
@@ -1306,6 +1514,7 @@ mod tests {
             &mut store,
             &selected_ticket(),
             &config(),
+            None,
             &vcs,
             &backend,
         )
@@ -1338,7 +1547,14 @@ mod tests {
         let vcs = StubVcsProvider::with_single_repository("/workspace/repo");
         let backend = StubWorkerBackend::new(BackendKind::OpenCode);
 
-        start_or_resume_selected_ticket(&mut store, &selected_ticket(), &config(), &vcs, &backend)
+        start_or_resume_selected_ticket(
+            &mut store,
+            &selected_ticket(),
+            &config(),
+            None,
+            &vcs,
+            &backend,
+        )
             .await
             .expect("resume flow succeeds");
 
@@ -1383,7 +1599,14 @@ mod tests {
         let vcs = StubVcsProvider::with_single_repository("/workspace/repo");
         let backend = StubWorkerBackend::new(BackendKind::OpenCode);
 
-        start_or_resume_selected_ticket(&mut store, &selected_ticket(), &config(), &vcs, &backend)
+        start_or_resume_selected_ticket(
+            &mut store,
+            &selected_ticket(),
+            &config(),
+            None,
+            &vcs,
+            &backend,
+        )
             .await
             .expect("resume flow succeeds");
 

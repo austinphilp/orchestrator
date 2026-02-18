@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use std::path::PathBuf;
 use orchestrator_core::{
     CoreError, GithubClient, ProjectionState, SelectedTicketFlowResult, Supervisor, TicketQuery,
     TicketSummary, TicketingProvider, VcsProvider, WorkerBackend,
@@ -11,9 +12,9 @@ use crate::App;
 
 pub struct AppTicketPickerProvider<S, G, V>
 where
-    S: Supervisor,
-    G: GithubClient,
-    V: VcsProvider,
+    S: Supervisor + 'static,
+    G: GithubClient + 'static,
+    V: VcsProvider + 'static,
 {
     app: Arc<App<S, G>>,
     ticketing: Arc<dyn TicketingProvider + Send + Sync>,
@@ -23,9 +24,9 @@ where
 
 impl<S, G, V> AppTicketPickerProvider<S, G, V>
 where
-    S: Supervisor,
-    G: GithubClient,
-    V: VcsProvider,
+    S: Supervisor + 'static,
+    G: GithubClient + 'static,
+    V: VcsProvider + 'static,
 {
     pub fn new(
         app: Arc<App<S, G>>,
@@ -45,9 +46,9 @@ where
 #[async_trait]
 impl<S, G, V> TicketPickerProvider for AppTicketPickerProvider<S, G, V>
 where
-    S: Supervisor + Send + Sync,
-    G: GithubClient + Send + Sync,
-    V: VcsProvider + Send + Sync,
+    S: Supervisor + Send + Sync + 'static,
+    G: GithubClient + Send + Sync + 'static,
+    V: VcsProvider + Send + Sync + 'static,
 {
     async fn list_unfinished_tickets(&self) -> Result<Vec<TicketSummary>, CoreError> {
         let mut tickets = self
@@ -68,14 +69,39 @@ where
     async fn start_or_resume_ticket(
         &self,
         ticket: TicketSummary,
+        repository_override: Option<PathBuf>,
     ) -> Result<SelectedTicketFlowResult, CoreError> {
-        self.app
-            .start_or_resume_selected_ticket(
-                &ticket,
-                self.vcs.as_ref(),
-                self.worker_backend.as_ref(),
-            )
-            .await
+        let app = self.app.clone();
+        let ticket = ticket.clone();
+        let vcs = self.vcs.clone();
+        let worker_backend = self.worker_backend.clone();
+
+        tokio::task::spawn_blocking(move || -> Result<SelectedTicketFlowResult, CoreError> {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(|error| {
+                    CoreError::Configuration(format!(
+                        "failed to initialize ticket picker runtime: {error}"
+                    ))
+                })?;
+
+            runtime.block_on(async {
+                app.start_or_resume_selected_ticket(
+                    &ticket,
+                    repository_override,
+                    vcs.as_ref(),
+                    worker_backend.as_ref(),
+                )
+                .await
+            })
+        })
+        .await
+        .map_err(|error| {
+            CoreError::Configuration(format!(
+                "ticket picker task failed: {error}"
+            ))
+        })?
     }
 
     async fn reload_projection(&self) -> Result<ProjectionState, CoreError> {

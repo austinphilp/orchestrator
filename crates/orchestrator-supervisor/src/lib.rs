@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex};
 use orchestrator_core::{
     CoreError, LlmChatRequest, LlmFinishReason, LlmMessage, LlmProvider, LlmProviderKind,
     LlmRateLimitState, LlmResponseStream, LlmResponseSubscription, LlmRole, LlmStreamChunk,
-    LlmTokenUsage, Supervisor,
+    LlmTokenUsage, LlmToolCall, Supervisor,
 };
 use reqwest::header::HeaderMap;
 use serde_json::{Map, Value};

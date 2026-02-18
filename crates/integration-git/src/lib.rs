@@ -242,10 +242,12 @@ impl<R: CommandRunner> GitCliVcsProvider<R> {
 
     fn discover_repositories_under_root(&self, root: &Path) -> Result<Vec<PathBuf>, CoreError> {
         if !root.exists() {
-            return Err(CoreError::Configuration(format!(
-                "Configured project root '{}' does not exist.",
-                root.display()
-            )));
+            fs::create_dir_all(root).map_err(|error| {
+                CoreError::Configuration(format!(
+                    "Failed to create configured project root '{}': {error}",
+                    root.display()
+                ))
+            })?;
         }
         if !root.is_dir() {
             return Err(CoreError::Configuration(format!(
