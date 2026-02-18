@@ -5,8 +5,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::normalization::DOMAIN_EVENT_SCHEMA_VERSION;
 use crate::{
-    apply_workflow_transition, CoreError, CreateWorktreeRequest, DeleteWorktreeRequest, EventStore,
-    NewEventEnvelope, OrchestrationEventPayload, ProjectId, RepositoryRef, RuntimeError,
+    apply_workflow_transition, BackendKind, CoreError, CreateWorktreeRequest,
+    DeleteWorktreeRequest, EventStore, NewEventEnvelope, OrchestrationEventPayload, ProjectId,
+    RepositoryRef, RuntimeError,
     RuntimeMappingRecord, SessionHandle, SessionRecord, SessionSpawnedPayload, SpawnSpec,
     SqliteEventStore, TicketId, TicketProvider, TicketRecord, TicketSummary, VcsProvider,
     WorkItemCreatedPayload, WorkItemId, WorkerBackend, WorkerSessionId, WorkerSessionStatus,
@@ -21,6 +22,7 @@ const DEFAULT_WORKTREE_SLUG: &str = "ticket";
 const DEFAULT_WORKTREE_TITLE_SLUG_LIMIT: usize = 48;
 const DEFAULT_WORKTREE_DIR: &str = ".orchestrator/worktrees";
 const WORKTREE_BRANCH_PREFIX: &str = "ap/";
+const ENV_HARNESS_SESSION_ID: &str = "ORCHESTRATOR_HARNESS_SESSION_ID";
 
 static EVENT_ID_COUNTER: AtomicU64 = AtomicU64::new(1);
 
@@ -139,7 +141,7 @@ async fn start_new_mapping(
     let base_branch = normalize_base_branch(config.base_branch.as_str());
     let model = config.model.clone();
     let now = now_timestamp();
-    let instruction = start_instruction(selected_ticket);
+    let instruction = start_instruction(&provider, selected_ticket);
 
     let worktree_summary = vcs
         .create_worktree(CreateWorktreeRequest {
@@ -189,6 +191,28 @@ async fn start_new_mapping(
             spawned.session_id.as_str()
         ))));
     }
+    let kickoff_message = start_turn_instruction(&provider, selected_ticket);
+    let mut kickoff_bytes = kickoff_message.as_bytes().to_vec();
+    if !kickoff_bytes.ends_with(b"\n") {
+        kickoff_bytes.push(b'\n');
+    }
+    let kickoff_handle = SessionHandle {
+        session_id: session_id.clone().into(),
+        backend: worker_backend.kind(),
+    };
+    if let Err(send_error) = worker_backend.send_input(&kickoff_handle, &kickoff_bytes).await {
+        let kill_error = worker_backend.kill(&kickoff_handle).await.err();
+        let cleanup_error = vcs
+            .delete_worktree(DeleteWorktreeRequest::non_destructive(
+                worktree_summary.clone(),
+            ))
+            .await
+            .err();
+        return Err(CoreError::Runtime(RuntimeError::Internal(format!(
+            "worker kickoff failed for ticket '{}': send error: {send_error}; kill error: {:?}; worktree cleanup error: {:?}",
+            selected_ticket.identifier, kill_error, cleanup_error
+        ))));
+    }
 
     let mapping = RuntimeMappingRecord {
         ticket: ticket_record_from_summary(selected_ticket, provider, provider_ticket_id, &now),
@@ -213,6 +237,13 @@ async fn start_new_mapping(
         },
     };
     store.upsert_runtime_mapping(&mapping)?;
+    persist_harness_session_binding(
+        store,
+        worker_backend,
+        &mapping.session.session_id,
+        &mapping.session.backend_kind,
+    )
+    .await?;
     ensure_lifecycle_events(store, selected_ticket, &mapping, &project_id, true)?;
 
     Ok(SelectedTicketFlowResult {
@@ -249,7 +280,7 @@ async fn resume_existing_mapping(
         .clone()
         .or(config.model.clone());
 
-    let resume_message = resume_instruction(selected_ticket);
+    let resume_message = resume_instruction(&existing_mapping.ticket.provider, selected_ticket);
     let mut resume_bytes = resume_message.as_bytes().to_vec();
     if !resume_bytes.ends_with(b"\n") {
         resume_bytes.push(b'\n');
@@ -259,6 +290,10 @@ async fn resume_existing_mapping(
         session_id: existing_mapping.session.session_id.clone().into(),
         backend: backend_kind.clone(),
     };
+    let persisted_harness_session_id = store.find_harness_session_binding(
+        &existing_mapping.session.session_id,
+        &existing_mapping.session.backend_kind,
+    )?;
 
     let mut spawned_new_runtime_session = false;
     if existing_mapping.session.status == WorkerSessionStatus::Crashed {
@@ -267,6 +302,7 @@ async fn resume_existing_mapping(
             &existing_mapping,
             resume_model.clone(),
             resume_message,
+            persisted_harness_session_id.as_deref(),
         )
         .await?;
         spawned_new_runtime_session = true;
@@ -279,6 +315,7 @@ async fn resume_existing_mapping(
                     &existing_mapping,
                     resume_model.clone(),
                     resume_message,
+                    persisted_harness_session_id.as_deref(),
                 )
                 .await?;
                 spawned_new_runtime_session = true;
@@ -297,6 +334,13 @@ async fn resume_existing_mapping(
     mapping.session.status = WorkerSessionStatus::Running;
     mapping.session.updated_at = now;
     store.upsert_runtime_mapping(&mapping)?;
+    persist_harness_session_binding(
+        store,
+        worker_backend,
+        &mapping.session.session_id,
+        &mapping.session.backend_kind,
+    )
+    .await?;
     ensure_lifecycle_events(
         store,
         selected_ticket,
@@ -316,14 +360,18 @@ async fn spawn_resume_session(
     mapping: &RuntimeMappingRecord,
     model: Option<String>,
     instruction: String,
+    persisted_harness_session_id: Option<&str>,
 ) -> Result<(), CoreError> {
     let spawned = worker_backend
         .spawn(SpawnSpec {
             session_id: mapping.session.session_id.clone().into(),
             workdir: PathBuf::from(mapping.session.workdir.as_str()),
             model,
-            instruction_prelude: Some(instruction),
-            environment: Vec::new(),
+            instruction_prelude: Some(instruction.clone()),
+            environment: resume_spawn_environment(
+                &mapping.session.backend_kind,
+                persisted_harness_session_id,
+            ),
         })
         .await?;
 
@@ -335,7 +383,70 @@ async fn spawn_resume_session(
         ))));
     }
 
+    let mut resume_bytes = instruction.as_bytes().to_vec();
+    if !resume_bytes.ends_with(b"\n") {
+        resume_bytes.push(b'\n');
+    }
+    let handle = SessionHandle {
+        session_id: mapping.session.session_id.clone().into(),
+        backend: mapping.session.backend_kind.clone(),
+    };
+    worker_backend
+        .send_input(&handle, &resume_bytes)
+        .await
+        .map_err(CoreError::Runtime)?;
+
     Ok(())
+}
+
+async fn persist_harness_session_binding(
+    store: &SqliteEventStore,
+    worker_backend: &dyn WorkerBackend,
+    session_id: &WorkerSessionId,
+    backend_kind: &BackendKind,
+) -> Result<(), CoreError> {
+    let handle = SessionHandle {
+        session_id: session_id.clone().into(),
+        backend: backend_kind.clone(),
+    };
+
+    let harness_session_id = match worker_backend.harness_session_id(&handle).await {
+        Ok(value) => value,
+        Err(RuntimeError::SessionNotFound(_)) => None,
+        Err(error) => return Err(CoreError::Runtime(error)),
+    };
+
+    let Some(harness_session_id) = harness_session_id else {
+        return Ok(());
+    };
+    let harness_session_id = harness_session_id.trim();
+    if harness_session_id.is_empty() {
+        return Ok(());
+    }
+
+    store.upsert_harness_session_binding(session_id, backend_kind, harness_session_id)
+}
+
+fn resume_spawn_environment(
+    backend_kind: &BackendKind,
+    persisted_harness_session_id: Option<&str>,
+) -> Vec<(String, String)> {
+    if *backend_kind != BackendKind::Codex {
+        return Vec::new();
+    }
+
+    let Some(harness_session_id) = persisted_harness_session_id else {
+        return Vec::new();
+    };
+    let harness_session_id = harness_session_id.trim();
+    if harness_session_id.is_empty() {
+        return Vec::new();
+    }
+
+    vec![(
+        ENV_HARNESS_SESSION_ID.to_owned(),
+        harness_session_id.to_owned(),
+    )]
 }
 
 fn ensure_lifecycle_events(
@@ -436,32 +547,15 @@ fn ensure_lifecycle_events(
     }
 
     let guard_context = workflow_guard_context(mapping);
-    let mut current_state = latest_workflow_state.unwrap_or(WorkflowState::New);
+    let current_state = latest_workflow_state.unwrap_or(WorkflowState::New);
 
     if current_state == WorkflowState::New {
-        current_state = append_workflow_transition_event(
+        append_workflow_transition_event(
             store,
             mapping,
             &current_state,
             &WorkflowState::Planning,
             WorkflowTransitionReason::TicketAccepted,
-            &guard_context,
-        )?;
-    }
-
-    if current_state != WorkflowState::Implementing {
-        let reason = resume_to_implementing_reason(&current_state).ok_or_else(|| {
-            CoreError::Configuration(format!(
-                "Cannot automatically transition work item '{}' from '{current_state:?}' to Implementing.",
-                mapping.work_item_id.as_str()
-            ))
-        })?;
-        append_workflow_transition_event(
-            store,
-            mapping,
-            &current_state,
-            &WorkflowState::Implementing,
-            reason,
             &guard_context,
         )?;
     }
@@ -497,21 +591,6 @@ fn append_workflow_transition_event(
     ))?;
 
     Ok(next)
-}
-
-fn resume_to_implementing_reason(from: &WorkflowState) -> Option<WorkflowTransitionReason> {
-    match from {
-        WorkflowState::Planning
-        | WorkflowState::Testing
-        | WorkflowState::PRDrafted
-        | WorkflowState::AwaitingYourReview
-        | WorkflowState::ReadyForReview
-        | WorkflowState::InReview => Some(WorkflowTransitionReason::ImplementationResumed),
-        WorkflowState::Implementing
-        | WorkflowState::New
-        | WorkflowState::Done
-        | WorkflowState::Abandoned => None,
-    }
 }
 
 fn workflow_guard_context(mapping: &RuntimeMappingRecord) -> WorkflowGuardContext {
@@ -840,16 +919,26 @@ fn normalize_base_branch(value: &str) -> String {
     }
 }
 
-fn start_instruction(ticket: &TicketSummary) -> String {
+fn start_instruction(provider: &TicketProvider, ticket: &TicketSummary) -> String {
+    let provider_name = ticket_provider_name(provider);
     format!(
-        "Begin implementation for {}: {}. Continue until the next meaningful checkpoint and report test results.",
+        "Ticket provider: {provider_name}. Begin planning for {}: {}. Stay in planning mode and do not begin implementation until an explicit workflow transition command is provided. For ticket operations, use the {provider_name} ticketing integration/skill.",
         ticket.identifier, ticket.title
     )
 }
 
-fn resume_instruction(ticket: &TicketSummary) -> String {
+fn start_turn_instruction(provider: &TicketProvider, ticket: &TicketSummary) -> String {
+    let provider_name = ticket_provider_name(provider);
     format!(
-        "Resume implementation for {}: {}. Continue from the existing worktree/session context and drive to the next checkpoint.",
+        "Begin work on {}: {} in Planning mode only. Produce a concrete implementation plan and wait for an explicit workflow transition before starting implementation. For ticket operations, use the {provider_name} ticketing integration/skill.",
+        ticket.identifier, ticket.title
+    )
+}
+
+fn resume_instruction(provider: &TicketProvider, ticket: &TicketSummary) -> String {
+    let provider_name = ticket_provider_name(provider);
+    format!(
+        "Ticket provider: {provider_name}. Resume work on {}: {} in Planning mode. Reconcile the current state, refresh the plan, and wait for an explicit workflow transition command before implementation. For ticket operations, use the {provider_name} ticketing integration/skill.",
         ticket.identifier, ticket.title
     )
 }
@@ -903,7 +992,7 @@ mod tests {
 
     use super::*;
     use crate::{
-        BackendCapabilities, BackendKind, RuntimeResult, TerminalSnapshot, WorktreeStatus,
+        BackendCapabilities, BackendKind, RuntimeResult, WorktreeStatus,
     };
 
     struct StubVcsProvider {
@@ -999,6 +1088,7 @@ mod tests {
         spawn_results: Mutex<VecDeque<RuntimeResult<SessionHandle>>>,
         send_inputs: Mutex<Vec<(SessionHandle, Vec<u8>)>>,
         send_input_results: Mutex<VecDeque<Result<(), RuntimeError>>>,
+        harness_session_ids: Mutex<VecDeque<RuntimeResult<Option<String>>>>,
     }
 
     impl StubWorkerBackend {
@@ -1009,6 +1099,7 @@ mod tests {
                 spawn_results: Mutex::new(VecDeque::new()),
                 send_inputs: Mutex::new(Vec::new()),
                 send_input_results: Mutex::new(VecDeque::new()),
+                harness_session_ids: Mutex::new(VecDeque::new()),
             }
         }
 
@@ -1018,6 +1109,13 @@ mod tests {
 
         fn push_send_input_result(&self, result: Result<(), RuntimeError>) {
             self.send_input_results
+                .lock()
+                .expect("lock")
+                .push_back(result);
+        }
+
+        fn push_harness_session_id_result(&self, result: RuntimeResult<Option<String>>) {
+            self.harness_session_ids
                 .lock()
                 .expect("lock")
                 .push_back(result);
@@ -1086,14 +1184,12 @@ mod tests {
             Ok(Box::new(EmptyStream))
         }
 
-        async fn snapshot(&self, _session: &SessionHandle) -> RuntimeResult<TerminalSnapshot> {
-            Ok(TerminalSnapshot {
-                cols: 80,
-                rows: 24,
-                cursor_col: 0,
-                cursor_row: 0,
-                lines: Vec::new(),
-            })
+        async fn harness_session_id(&self, _session: &SessionHandle) -> RuntimeResult<Option<String>> {
+            self.harness_session_ids
+                .lock()
+                .expect("lock")
+                .pop_front()
+                .unwrap_or(Ok(None))
         }
     }
 
@@ -1142,6 +1238,11 @@ mod tests {
         assert_eq!(result.action, SelectedTicketFlowAction::Started);
         assert_eq!(vcs.created.lock().expect("lock").len(), 1);
         assert_eq!(backend.spawn_specs.lock().expect("lock").len(), 1);
+        assert_eq!(backend.send_inputs.lock().expect("lock").len(), 1);
+        assert!(
+            String::from_utf8_lossy(&backend.send_inputs.lock().expect("lock")[0].1)
+                .contains("Begin work on AP-126")
+        );
         assert!(backend
             .spawn_specs
             .lock()
@@ -1150,7 +1251,7 @@ mod tests {
             .expect("spawn spec")
             .instruction_prelude
             .as_deref()
-            .is_some_and(|prelude| prelude.contains("Begin implementation for AP-126")));
+            .is_some_and(|prelude| prelude.contains("Begin planning for AP-126")));
 
         let mapping = store
             .find_runtime_mapping_by_ticket(&TicketProvider::Linear, "issue-126")
@@ -1175,15 +1276,6 @@ mod tests {
             matches!(
                 event.payload,
                 OrchestrationEventPayload::WorkflowTransition(WorkflowTransitionPayload {
-                    to: WorkflowState::Implementing,
-                    ..
-                })
-            )
-        }));
-        assert!(events.iter().any(|event| {
-            matches!(
-                event.payload,
-                OrchestrationEventPayload::WorkflowTransition(WorkflowTransitionPayload {
                     from: WorkflowState::New,
                     to: WorkflowState::Planning,
                     reason: Some(WorkflowTransitionReason::TicketAccepted),
@@ -1191,17 +1283,43 @@ mod tests {
                 })
             )
         }));
-        assert!(events.iter().any(|event| {
+        assert!(!events.iter().any(|event| {
             matches!(
                 event.payload,
                 OrchestrationEventPayload::WorkflowTransition(WorkflowTransitionPayload {
-                    from: WorkflowState::Planning,
                     to: WorkflowState::Implementing,
-                    reason: Some(WorkflowTransitionReason::ImplementationResumed),
                     ..
                 })
             )
         }));
+    }
+
+    #[tokio::test]
+    async fn start_flow_persists_harness_session_binding_when_backend_reports_one() {
+        let mut store = SqliteEventStore::in_memory().expect("in-memory store");
+        let vcs = StubVcsProvider::with_single_repository("/workspace/repo");
+        let backend = StubWorkerBackend::new(BackendKind::Codex);
+        backend.push_harness_session_id_result(Ok(Some("thread-start-126".to_owned())));
+
+        let result = start_or_resume_selected_ticket(
+            &mut store,
+            &selected_ticket(),
+            &config(),
+            Some(PathBuf::from("/workspace/repo")),
+            &vcs,
+            &backend,
+        )
+        .await
+        .expect("start flow succeeds");
+
+        let binding = store
+            .find_harness_session_binding(
+                &result.mapping.session.session_id,
+                &result.mapping.session.backend_kind,
+            )
+            .expect("binding lookup")
+            .expect("binding exists");
+        assert_eq!(binding, "thread-start-126");
     }
 
     #[tokio::test]
@@ -1420,7 +1538,7 @@ mod tests {
         assert_eq!(backend.send_inputs.lock().expect("lock").len(), 1);
         assert!(
             String::from_utf8_lossy(&backend.send_inputs.lock().expect("lock")[0].1)
-                .contains("Resume implementation for AP-126")
+                .contains("Resume work on AP-126")
         );
 
         let updated = store
@@ -1457,7 +1575,7 @@ mod tests {
         .expect("resume with respawn succeeds");
 
         assert_eq!(result.action, SelectedTicketFlowAction::Resumed);
-        assert_eq!(backend.send_inputs.lock().expect("lock").len(), 1);
+        assert_eq!(backend.send_inputs.lock().expect("lock").len(), 2);
         assert_eq!(backend.spawn_specs.lock().expect("lock").len(), 1);
         assert_eq!(
             backend.spawn_specs.lock().expect("lock")[0]
@@ -1465,6 +1583,73 @@ mod tests {
                 .as_str(),
             mapping.session.session_id.as_str()
         );
+    }
+
+    #[tokio::test]
+    async fn resume_respawn_for_codex_uses_persisted_harness_session_id() {
+        let mut store = SqliteEventStore::in_memory().expect("in-memory store");
+        let mapping = RuntimeMappingRecord {
+            ticket: TicketRecord {
+                ticket_id: TicketId::from("linear:issue-126"),
+                provider: TicketProvider::Linear,
+                provider_ticket_id: "issue-126".to_owned(),
+                identifier: "AP-126".to_owned(),
+                title: "Implement ticket selected start resume orchestration flow".to_owned(),
+                state: "In Progress".to_owned(),
+                updated_at: "2026-02-16T09:00:00Z".to_owned(),
+            },
+            work_item_id: WorkItemId::new("wi-linear-issue-126"),
+            worktree: WorktreeRecord {
+                worktree_id: WorktreeId::new("wt-linear-issue-126"),
+                work_item_id: WorkItemId::new("wi-linear-issue-126"),
+                path: "/workspace/.orchestrator/worktrees/ap-126-ticket".to_owned(),
+                branch: "ap/AP-126-ticket".to_owned(),
+                base_branch: "main".to_owned(),
+                created_at: "2026-02-16T09:00:10Z".to_owned(),
+            },
+            session: SessionRecord {
+                session_id: WorkerSessionId::new("sess-linear-issue-126"),
+                work_item_id: WorkItemId::new("wi-linear-issue-126"),
+                backend_kind: BackendKind::Codex,
+                workdir: "/workspace/.orchestrator/worktrees/ap-126-ticket".to_owned(),
+                model: Some("gpt-5-codex".to_owned()),
+                status: WorkerSessionStatus::Running,
+                created_at: "2026-02-16T09:00:20Z".to_owned(),
+                updated_at: "2026-02-16T09:00:30Z".to_owned(),
+            },
+        };
+        store
+            .upsert_runtime_mapping(&mapping)
+            .expect("seed runtime mapping");
+        store
+            .upsert_harness_session_binding(
+                &mapping.session.session_id,
+                &mapping.session.backend_kind,
+                "thread-resume-126",
+            )
+            .expect("seed harness session binding");
+
+        let vcs = StubVcsProvider::with_single_repository("/workspace/repo");
+        let backend = StubWorkerBackend::new(BackendKind::Codex);
+        backend.push_send_input_result(Err(RuntimeError::SessionNotFound(
+            "sess-linear-issue-126".to_owned(),
+        )));
+
+        start_or_resume_selected_ticket(
+            &mut store,
+            &selected_ticket(),
+            &config(),
+            None,
+            &vcs,
+            &backend,
+        )
+        .await
+        .expect("resume with respawn succeeds");
+
+        let environment = &backend.spawn_specs.lock().expect("lock")[0].environment;
+        assert!(environment.iter().any(|(name, value)| {
+            name == ENV_HARNESS_SESSION_ID && value == "thread-resume-126"
+        }));
     }
 
     #[tokio::test]
@@ -1530,7 +1715,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn resume_flow_from_testing_uses_implementation_resumed_reason() {
+    async fn resume_flow_from_testing_does_not_force_implementation_transition() {
         let mut store = SqliteEventStore::in_memory().expect("in-memory store");
         let mapping = seeded_runtime_mapping(
             &mut store,
@@ -1561,28 +1746,17 @@ mod tests {
         let events = store
             .read_events_for_work_item(&mapping.work_item_id)
             .expect("work-item events");
-        let transition_to_implementing = events
-            .iter()
-            .rev()
-            .find_map(|event| match &event.payload {
+        assert!(!events.iter().any(|event| {
+            matches!(
+                &event.payload,
                 OrchestrationEventPayload::WorkflowTransition(payload)
-                    if payload.to == WorkflowState::Implementing =>
-                {
-                    Some(payload.clone())
-                }
-                _ => None,
-            })
-            .expect("transition back to implementing exists");
-
-        assert_eq!(transition_to_implementing.from, WorkflowState::Testing);
-        assert_eq!(
-            transition_to_implementing.reason,
-            Some(WorkflowTransitionReason::ImplementationResumed)
-        );
+                    if payload.to == WorkflowState::Implementing
+            )
+        }));
     }
 
     #[tokio::test]
-    async fn resume_flow_from_awaiting_review_uses_implementation_resumed_reason() {
+    async fn resume_flow_from_awaiting_review_does_not_force_implementation_transition() {
         let mut store = SqliteEventStore::in_memory().expect("in-memory store");
         let mapping = seeded_runtime_mapping(
             &mut store,
@@ -1613,26 +1787,12 @@ mod tests {
         let events = store
             .read_events_for_work_item(&mapping.work_item_id)
             .expect("work-item events");
-        let transition_to_implementing = events
-            .iter()
-            .rev()
-            .find_map(|event| match &event.payload {
+        assert!(!events.iter().any(|event| {
+            matches!(
+                &event.payload,
                 OrchestrationEventPayload::WorkflowTransition(payload)
-                    if payload.to == WorkflowState::Implementing =>
-                {
-                    Some(payload.clone())
-                }
-                _ => None,
-            })
-            .expect("transition back to implementing exists");
-
-        assert_eq!(
-            transition_to_implementing.from,
-            WorkflowState::AwaitingYourReview
-        );
-        assert_eq!(
-            transition_to_implementing.reason,
-            Some(WorkflowTransitionReason::ImplementationResumed)
-        );
+                    if payload.to == WorkflowState::Implementing
+            )
+        }));
     }
 }

@@ -58,7 +58,7 @@ pub use orchestrator_runtime::{
     BackendCheckpointEvent, BackendCrashedEvent, BackendDoneEvent, BackendEvent, BackendKind,
     BackendNeedsInputEvent, BackendOutputEvent, BackendOutputStream, RuntimeArtifactId,
     RuntimeError, RuntimeResult, RuntimeSessionId, SessionHandle, SessionLifecycle, SpawnSpec,
-    TerminalSnapshot, WorkerBackend, WorkerEventStream, WorkerEventSubscription,
+    WorkerBackend, WorkerEventStream, WorkerEventSubscription,
 };
 pub use projection::{
     apply_event, rebuild_projection, retrieve_events, ArtifactProjection, InboxItemProjection,
