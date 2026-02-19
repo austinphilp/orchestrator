@@ -11,7 +11,7 @@ use orchestrator_core::{
     LlmMessage, LlmProvider, LlmResponseStream, LlmResponseSubscription, LlmRole, LlmStreamChunk,
     LlmTool, LlmToolCall, LlmToolCallOutput, LlmToolFunction, LlmTokenUsage, NewEventEnvelope,
     OrchestrationEventPayload, PullRequestRef, RepositoryRef, RetrievalScope, RuntimeMappingRecord,
-    SqliteEventStore, TicketAttachment, TicketDetails, TicketId, TicketQuery, TicketSummary,
+    SqliteEventStore, TicketAttachment, TicketId, TicketQuery,
     TicketingProvider, UpdateTicketDescriptionRequest, UpdateTicketStateRequest, UrlOpener,
     SupervisorQueryArgs, SupervisorQueryCancellationSource, SupervisorQueryCancelledPayload,
     SupervisorQueryChunkPayload, SupervisorQueryContextArgs, SupervisorQueryFinishedPayload,
@@ -1596,7 +1596,7 @@ pub(crate) fn record_user_initiated_supervisor_cancel(event_store_path: &str, st
 
 async fn execute_supervisor_query<P>(
     supervisor: &P,
-    ticketing: &impl TicketingProvider,
+    ticketing: &(dyn TicketingProvider + Send + Sync),
     event_store_path: &str,
     args: SupervisorQueryArgs,
     fallback_context: SupervisorCommandContext,
@@ -1640,14 +1640,14 @@ where
             }
 
             messages.push(turn.assistant_message.clone());
-            for call in &turn.assistant_message.tool_calls {
+            let tool_calls = turn.assistant_message.tool_calls.clone();
+
+            for call in &tool_calls {
                 queued_chunks.push_back(tool_progress_chunk(call));
             }
 
-            let outputs = execute_tool_calls(ticketing, turn.assistant_message.tool_calls).await?;
-            let names = turn
-                .assistant_message
-                .tool_calls
+            let outputs = execute_tool_calls(ticketing, tool_calls.clone()).await?;
+            let names = tool_calls
                 .iter()
                 .map(|call| (call.id.as_str(), call.name.as_str()))
                 .collect::<std::collections::HashMap<_, _>>();
@@ -1744,7 +1744,7 @@ where
         started_at,
         started_time,
         cancellation_requested_by_user,
-        stream,
+        Box::new(stream),
     );
 
     Ok((stream_id, Box::new(stream)))
@@ -1790,7 +1790,7 @@ async fn execute_github_open_review_tabs(
 pub(crate) async fn dispatch_supervisor_runtime_command<P>(
     supervisor: &P,
     code_host: &impl CodeHostProvider,
-    ticketing: &impl TicketingProvider,
+    ticketing: &(dyn TicketingProvider + Send + Sync),
     event_store_path: &str,
     invocation: UntypedCommandInvocation,
     context: SupervisorCommandContext,

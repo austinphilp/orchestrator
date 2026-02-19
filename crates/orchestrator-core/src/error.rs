@@ -7,6 +7,20 @@ pub enum CoreError {
     DependencyUnavailable(String),
     #[error("configuration error: {0}")]
     Configuration(String),
+    #[error("no repository mapping exists for project '{project}' in provider '{provider}'")]
+    MissingProjectRepositoryMapping {
+        provider: String,
+        project: String,
+    },
+    #[error(
+        "mapped repository '{repository_path}' for project '{project}' (provider '{provider}') does not resolve to a single repository: {reason}"
+    )]
+    InvalidMappedRepository {
+        provider: String,
+        project: String,
+        repository_path: String,
+        reason: String,
+    },
     #[error("persistence error: {0}")]
     Persistence(String),
     #[error(transparent)]

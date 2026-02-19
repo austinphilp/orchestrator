@@ -6,8 +6,8 @@ Rust workspace for the Orchestrator bootstrap architecture.
 
 - `orchestrator-app`: composition root and process entrypoint.
 - `orchestrator-core`: shared domain models, traits, and errors.
-- `orchestrator-runtime`: PTY/session lifecycle interfaces and runtime boundaries.
-- `backend-opencode`: OpenCode `WorkerBackend` adapter over runtime PTY primitives.
+- `orchestrator-runtime`: session lifecycle interfaces and runtime boundaries.
+- `backend-opencode`: OpenCode `WorkerBackend` adapter over event-stream sessions.
 - `backend-codex`: Codex-compatible `WorkerBackend` adapter (uses `backend-opencode` transport).
 - `orchestrator-ui`: minimal ratatui-based interface loop.
 - `orchestrator-supervisor`: OpenRouter supervisor adapter.
@@ -33,6 +33,9 @@ Configuration:
 - Choose runtime providers via config or environment:
   - `ORCHESTRATOR_TICKETING_PROVIDER=linear|shortcut` (defaults to `linear`).
   - `ORCHESTRATOR_HARNESS_PROVIDER=opencode|codex` (defaults to `codex`).
+  - `ORCHESTRATOR_OPENCODE_SERVER_BASE_URL` (optional Opencode harness server URL override).
+  - `ORCHESTRATOR_CODEX_SERVER_BASE_URL` is deprecated/unsupported (Codex uses app-server JSON-RPC over stdio).
+  - `ORCHESTRATOR_HARNESS_SERVER_STARTUP_TIMEOUT_SECS` (optional managed harness server health-check timeout in seconds).
 - Optional CLI overrides:
   - `--ticketing-provider linear|shortcut`
   - `--harness-provider opencode|codex`

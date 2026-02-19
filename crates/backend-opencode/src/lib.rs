@@ -1,29 +1,43 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
+use std::fs::OpenOptions;
+use std::io::Write;
 use std::process::Command as SyncCommand;
-use std::ffi::OsString;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::path::{Component, Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
 use std::sync::{Mutex, OnceLock};
 
 use async_trait::async_trait;
+use futures_util::StreamExt;
 use orchestrator_runtime::{
     BackendArtifactEvent, BackendArtifactKind, BackendBlockedEvent, BackendCapabilities,
-    BackendCheckpointEvent, BackendDoneEvent, BackendEvent, BackendKind, BackendNeedsInputEvent,
-    BackendOutputEvent, BackendOutputStream, PtyManager, PtyOutputSubscription, PtyRenderPolicy,
-    PtySpawnSpec, RuntimeArtifactId, RuntimeError, RuntimeResult, SessionHandle, SpawnSpec,
-    TerminalSize, TerminalSnapshot, WorkerBackend, WorkerEventStream, WorkerEventSubscription,
+    BackendCrashedEvent, BackendCheckpointEvent, BackendDoneEvent, BackendEvent, BackendKind,
+    BackendNeedsInputEvent, BackendOutputEvent, BackendOutputStream, RuntimeArtifactId,
+    RuntimeError, RuntimeResult,
+    RuntimeSessionId, SessionHandle, SpawnSpec, WorkerBackend, WorkerEventStream,
+    WorkerEventSubscription,
 };
-use serde::Deserialize;
-use tokio::process::Command;
-use tokio::time::timeout;
+use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
+use tokio::process::{Child, Command};
+use tokio::sync::{broadcast, Mutex as AsyncMutex};
+use tokio::task::JoinHandle;
 
 const DEFAULT_OPENCODE_BINARY: &str = "opencode";
+const DEFAULT_OPENCODE_SERVER_BASE_URL: &str = "http://127.0.0.1:8787";
 const ENV_ALLOW_UNSAFE_COMMAND_PATHS: &str = "ORCHESTRATOR_ALLOW_UNSAFE_COMMAND_PATHS";
+const ENV_HARNESS_LOG_RAW_EVENTS: &str = "ORCHESTRATOR_HARNESS_LOG_RAW_EVENTS";
+const ENV_HARNESS_LOG_NORMALIZED_EVENTS: &str =
+    "ORCHESTRATOR_HARNESS_LOG_NORMALIZED_EVENTS";
+const HARNESS_RAW_LOG_FILE: &str = ".orchestrator/logs/harness-raw.log";
+const HARNESS_NORMALIZED_LOG_FILE: &str = ".orchestrator/logs/harness-normalized.log";
+const ENV_OPENCODE_SERVER_BASE_URL: &str = "ORCHESTRATOR_OPENCODE_SERVER_BASE_URL";
+const ENV_HARNESS_SERVER_STARTUP_TIMEOUT_SECS: &str =
+    "ORCHESTRATOR_HARNESS_SERVER_STARTUP_TIMEOUT_SECS";
 const DEFAULT_OUTPUT_BUFFER: usize = 256;
-const DEFAULT_HEALTH_CHECK_TIMEOUT: Duration = Duration::from_secs(3);
-const DEFAULT_PROTOCOL_GUIDANCE: &str =
-    "Emit @@checkpoint/@@needs_input/@@blocked/@@artifact/@@done lines whenever relevant.";
+const DEFAULT_SERVER_STARTUP_TIMEOUT_SECS: u64 = 10;
 const SESSION_EXPORT_HELP_MARKERS: &[&str] = &[
     "session-export",
     "session_export",
@@ -34,38 +48,30 @@ const DIFF_PROVIDER_HELP_MARKERS: &[&str] = &[
     "diff_provider",
     "diff provider",
 ];
-const TAG_CHECKPOINT: &str = "@@checkpoint";
-const TAG_NEEDS_INPUT: &str = "@@needs_input";
-const TAG_BLOCKED: &str = "@@blocked";
-const TAG_ARTIFACT: &str = "@@artifact";
-const TAG_DONE: &str = "@@done";
 const OPTIONAL_CAPABILITY_HELP_ARGS: [&str; 2] = ["--help", "-h"];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OpenCodeBackendConfig {
     pub binary: PathBuf,
     pub base_args: Vec<String>,
-    pub model_flag: Option<String>,
     pub output_buffer: usize,
-    pub terminal_size: TerminalSize,
-    pub render_policy: PtyRenderPolicy,
-    pub health_check_timeout: Duration,
-    pub protocol_guidance: Option<String>,
+    pub server_base_url: Option<String>,
+    pub server_startup_timeout: Duration,
 }
 
 impl Default for OpenCodeBackendConfig {
     fn default() -> Self {
         Self {
             binary: std::env::var_os("ORCHESTRATOR_OPENCODE_BIN")
-                .map(PathBuf::from)
-                .unwrap_or_else(|| PathBuf::from(DEFAULT_OPENCODE_BINARY)),
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(DEFAULT_OPENCODE_BINARY)),
             base_args: Vec::new(),
-            model_flag: Some("--model".to_owned()),
             output_buffer: DEFAULT_OUTPUT_BUFFER,
-            terminal_size: TerminalSize::default(),
-            render_policy: PtyRenderPolicy::default(),
-            health_check_timeout: DEFAULT_HEALTH_CHECK_TIMEOUT,
-            protocol_guidance: Some(DEFAULT_PROTOCOL_GUIDANCE.to_owned()),
+            server_base_url: std::env::var(ENV_OPENCODE_SERVER_BASE_URL).ok(),
+            server_startup_timeout: Duration::from_secs(
+                parse_server_startup_timeout_secs()
+                    .unwrap_or(DEFAULT_SERVER_STARTUP_TIMEOUT_SECS),
+            ),
         }
     }
 }
@@ -73,104 +79,389 @@ impl Default for OpenCodeBackendConfig {
 #[derive(Clone)]
 pub struct OpenCodeBackend {
     config: OpenCodeBackendConfig,
-    pty_manager: PtyManager,
+    backend_kind: BackendKind,
+    client: reqwest::Client,
+    server_state: Arc<AsyncMutex<ServerState>>,
+    sessions: Arc<AsyncMutex<HashMap<RuntimeSessionId, Arc<OpenCodeSession>>>>,
     backend_capabilities: BackendCapabilities,
+}
+
+#[derive(Debug)]
+struct OpenCodeSession {
+    backend_kind: BackendKind,
+    remote_session_id: String,
+    relay_task: AsyncMutex<Option<JoinHandle<()>>>,
+    event_tx: broadcast::Sender<BackendEvent>,
+    terminal_event_sent: AtomicBool,
+}
+
+#[derive(Default)]
+struct ServerState {
+    base_url: Option<String>,
+    process: Option<Child>,
+}
+
+impl OpenCodeSession {
+    fn emit_non_terminal_event(&self, event: BackendEvent) {
+        maybe_log_normalized_harness_event(
+            self.backend_kind.clone(),
+            self.remote_session_id.as_str(),
+            false,
+            &event,
+        );
+        let _ = self.event_tx.send(event);
+    }
+
+    fn emit_terminal_event(&self, event: BackendEvent) {
+        if self
+            .terminal_event_sent
+            .swap(true, Ordering::SeqCst)
+        {
+            return;
+        }
+        maybe_log_normalized_harness_event(
+            self.backend_kind.clone(),
+            self.remote_session_id.as_str(),
+            true,
+            &event,
+        );
+        let _ = self.event_tx.send(event);
+    }
 }
 
 impl OpenCodeBackend {
     pub fn new(config: OpenCodeBackendConfig) -> Self {
-        let pty_manager =
-            PtyManager::with_render_policy(config.output_buffer, config.render_policy);
+        Self::new_with_kind(config, BackendKind::OpenCode)
+    }
+
+    pub fn new_with_kind(config: OpenCodeBackendConfig, backend_kind: BackendKind) -> Self {
         let backend_capabilities = detect_optional_capabilities(&config.binary);
         Self {
             config,
-            pty_manager,
+            backend_kind,
+            client: reqwest::Client::new(),
+            server_state: Arc::new(AsyncMutex::new(ServerState::default())),
+            sessions: Arc::new(AsyncMutex::new(HashMap::new())),
             backend_capabilities,
         }
     }
 
-    fn spawn_program(&self) -> String {
-        self.config.binary.to_string_lossy().into_owned()
-    }
-
-    fn spawn_args(&self, spec: &SpawnSpec) -> Vec<String> {
-        let mut args = self.config.base_args.clone();
-        if let (Some(model), Some(model_flag)) = (&spec.model, &self.config.model_flag) {
-            args.push(model_flag.clone());
-            args.push(model.clone());
+    fn default_server_base_url(&self) -> String {
+        match self.backend_kind {
+            BackendKind::OpenCode => DEFAULT_OPENCODE_SERVER_BASE_URL.to_owned(),
+            BackendKind::Codex => "http://127.0.0.1:8788".to_owned(),
+            _ => DEFAULT_OPENCODE_SERVER_BASE_URL.to_owned(),
         }
-        args
     }
 
-    fn spawn_environment(
+    fn output_buffer(&self) -> usize {
+        self.config.output_buffer.max(1)
+    }
+
+    async fn session(&self, session_id: &RuntimeSessionId) -> RuntimeResult<Arc<OpenCodeSession>> {
+        let sessions = self.sessions.lock().await;
+        sessions
+            .get(session_id)
+            .cloned()
+            .ok_or_else(|| RuntimeError::SessionNotFound(session_id.as_str().to_owned()))
+    }
+
+    async fn remove_session(
         &self,
-        spec: &SpawnSpec,
-        instruction_prelude: Option<&str>,
-    ) -> Vec<(String, String)> {
-        let mut environment = spec.environment.clone();
-        if let Some(instruction_prelude) = instruction_prelude {
-            environment.push((
-                "ORCHESTRATOR_INSTRUCTION_PRELUDE".to_owned(),
-                instruction_prelude.to_owned(),
-            ));
+        session_id: &RuntimeSessionId,
+    ) -> RuntimeResult<Arc<OpenCodeSession>> {
+        let mut sessions = self.sessions.lock().await;
+        sessions
+            .remove(session_id)
+            .ok_or_else(|| RuntimeError::SessionNotFound(session_id.as_str().to_owned()))
+    }
+
+    async fn ensure_server_base_url(&self) -> RuntimeResult<String> {
+        if let Some(base_url) = self.config.server_base_url.clone() {
+            return Ok(base_url);
         }
-        environment
+
+        {
+            let state = self.server_state.lock().await;
+            if let Some(base_url) = state.base_url.as_ref() {
+                return Ok(base_url.clone());
+            }
+        }
+
+        self.start_managed_server().await?;
+        let state = self.server_state.lock().await;
+        state.base_url.clone().ok_or_else(|| {
+            RuntimeError::Process("managed harness server started without base URL".to_owned())
+        })
     }
 
-    fn composed_instruction_prelude(&self, spec: &SpawnSpec) -> Option<String> {
-        compose_instruction_prelude(
-            self.config.protocol_guidance.as_deref(),
-            spec.instruction_prelude.as_deref(),
-        )
-    }
+    async fn start_managed_server(&self) -> RuntimeResult<()> {
+        let base_url = self.default_server_base_url();
+        {
+            let mut state = self.server_state.lock().await;
+            if state.base_url.is_some() {
+                return Ok(());
+            }
 
-    async fn health_check_command(&self, args: &[OsString]) -> RuntimeResult<()> {
-        let mut command = Command::new(&self.config.binary);
-        command.args(args);
-        command.stdin(Stdio::null());
-        command.stdout(Stdio::null());
-        command.stderr(Stdio::null());
+            validate_command_binary_path(&self.config.binary, false)?;
+            let mut command = Command::new(&self.config.binary);
+            command.args(&self.config.base_args);
+            command.arg("serve");
+            command.stdin(Stdio::null());
+            command.stdout(Stdio::null());
+            command.stderr(Stdio::null());
 
-        let mut child = command.spawn().map_err(|error| {
-            if error.kind() == std::io::ErrorKind::NotFound {
+            let child = command.spawn().map_err(|error| {
                 RuntimeError::DependencyUnavailable(format!(
-                    "OpenCode CLI `{}` was not found in PATH. Install it or set ORCHESTRATOR_OPENCODE_BIN.",
+                    "failed to start {:?} harness server '{}': {error}",
+                    self.backend_kind,
                     self.config.binary.display()
                 ))
-            } else {
-                RuntimeError::DependencyUnavailable(format!(
-                    "failed to start OpenCode CLI `{}`: {error}",
-                    self.config.binary.display()
-                ))
-            }
-        })?;
+            })?;
 
-        match timeout(self.config.health_check_timeout, child.wait()).await {
-            Ok(wait_result) => {
-                let status = wait_result.map_err(|error| {
-                    RuntimeError::DependencyUnavailable(format!(
-                        "OpenCode CLI `{}` failed health check: {error}",
-                        self.config.binary.display()
-                    ))
-                })?;
-                if !status.success() {
-                    return Err(RuntimeError::DependencyUnavailable(format!(
-                        "OpenCode CLI `{}` exited with status {status} during health check.",
-                        self.config.binary.display()
-                    )));
-                }
-            }
-            Err(_) => {
-                let _ = child.kill().await;
-                return Err(RuntimeError::DependencyUnavailable(format!(
-                    "OpenCode CLI health check timed out after {:?} while running `{}`.",
-                    self.config.health_check_timeout,
-                    self.config.binary.display()
-                )));
-            }
-        };
+            state.process = Some(child);
+            state.base_url = Some(base_url.clone());
+        }
+
+        if let Err(error) = self.wait_for_server_health(base_url.as_str()).await {
+            let _ = self.stop_managed_server().await;
+            return Err(error);
+        }
 
         Ok(())
+    }
+
+    async fn stop_managed_server(&self) -> RuntimeResult<()> {
+        let mut process = {
+            let mut state = self.server_state.lock().await;
+            state.base_url = None;
+            state.process.take()
+        };
+
+        if let Some(child) = process.as_mut() {
+            let _ = child.kill().await;
+            let _ = child.wait().await;
+        }
+        Ok(())
+    }
+
+    async fn wait_for_server_health(&self, base_url: &str) -> RuntimeResult<()> {
+        let health_url = format!("{base_url}/health");
+        let started = tokio::time::Instant::now();
+        while started.elapsed() <= self.config.server_startup_timeout {
+            let check = self.client.get(health_url.as_str()).send().await;
+            if let Ok(response) = check {
+                if response.status().is_success() {
+                    return Ok(());
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+
+        Err(RuntimeError::DependencyUnavailable(format!(
+            "{:?} harness server failed health check at {health_url} within {:?}",
+            self.backend_kind, self.config.server_startup_timeout
+        )))
+    }
+
+    async fn create_remote_session(
+        &self,
+        base_url: &str,
+        spec: &SpawnSpec,
+        instruction_prelude: Option<String>,
+    ) -> RuntimeResult<CreateSessionResponse> {
+        let request = CreateSessionRequest {
+            runtime_session_id: spec.session_id.as_str().to_owned(),
+            workdir: spec.workdir.to_string_lossy().into_owned(),
+            model: spec.model.clone(),
+            instruction_prelude,
+            environment: spec.environment.clone(),
+        };
+
+        let response = self
+            .client
+            .post(format!("{base_url}/v1/sessions"))
+            .json(&request)
+            .send()
+            .await
+            .map_err(|error| {
+                RuntimeError::Process(format!(
+                    "{:?} session create request failed: {error}",
+                    self.backend_kind
+                ))
+            })?;
+        let status = response.status();
+        if !status.is_success() {
+            let body = sanitize_error_body(response.text().await.unwrap_or_default().as_str());
+            return Err(RuntimeError::Process(format!(
+                "{:?} session create failed with status {status}: {body}",
+                self.backend_kind
+            )));
+        }
+
+        let body = response.text().await.map_err(|error| {
+            RuntimeError::Protocol(format!(
+                "{:?} session create response body read failed: {error}",
+                self.backend_kind
+            ))
+        })?;
+        parse_create_session_response_body(body.as_str()).ok_or_else(|| {
+            RuntimeError::Protocol(format!(
+                "{:?} session create response parse failed: unsupported shape; body: {}",
+                self.backend_kind,
+                sanitize_error_body(body.as_str())
+            ))
+        })
+    }
+
+    async fn send_remote_input(
+        &self,
+        base_url: &str,
+        remote_session_id: &str,
+        input: &[u8],
+    ) -> RuntimeResult<()> {
+        let request = SendInputRequest {
+            input: String::from_utf8_lossy(input).into_owned(),
+        };
+        let response = self
+            .client
+            .post(format!(
+                "{base_url}/v1/sessions/{remote_session_id}/input"
+            ))
+            .json(&request)
+            .send()
+            .await
+            .map_err(|error| {
+                RuntimeError::Process(format!(
+                    "{:?} send-input request failed: {error}",
+                    self.backend_kind
+                ))
+            })?;
+        if response.status().is_success() {
+            Ok(())
+        } else {
+            let status = response.status();
+            let body = sanitize_error_body(response.text().await.unwrap_or_default().as_str());
+            Err(RuntimeError::Process(format!(
+                "{:?} send-input failed with status {status}: {body}",
+                self.backend_kind
+            )))
+        }
+    }
+
+    async fn close_remote_session(&self, base_url: &str, remote_session_id: &str) -> RuntimeResult<()> {
+        let response = self
+            .client
+            .delete(format!("{base_url}/v1/sessions/{remote_session_id}"))
+            .send()
+            .await
+            .map_err(|error| {
+                RuntimeError::Process(format!(
+                    "{:?} session close request failed: {error}",
+                    self.backend_kind
+                ))
+            })?;
+        if response.status().is_success() {
+            Ok(())
+        } else {
+            let status = response.status();
+            let body = sanitize_error_body(response.text().await.unwrap_or_default().as_str());
+            Err(RuntimeError::Process(format!(
+                "{:?} session close failed with status {status}: {body}",
+                self.backend_kind
+            )))
+        }
+    }
+
+    fn spawn_event_relay_task(
+        client: reqwest::Client,
+        backend_kind: BackendKind,
+        base_url: String,
+        remote_session_id: String,
+        session: Arc<OpenCodeSession>,
+    ) -> JoinHandle<()> {
+        tokio::spawn(async move {
+            let stream_response = client
+                .get(format!("{base_url}/v1/sessions/{remote_session_id}/events"))
+                .send()
+                .await;
+            let response = match stream_response {
+                Ok(response) => response,
+                Err(error) => {
+                    session.emit_terminal_event(BackendEvent::Crashed(BackendCrashedEvent {
+                        reason: format!("{backend_kind:?} stream request failed: {error}"),
+                    }));
+                    return;
+                }
+            };
+
+            if !response.status().is_success() {
+                let status = response.status();
+                let body = response.text().await.unwrap_or_default();
+                session.emit_terminal_event(BackendEvent::Crashed(BackendCrashedEvent {
+                    reason: format!(
+                        "{backend_kind:?} stream failed with status {status}: {body}"
+                    ),
+                }));
+                return;
+            }
+
+            let mut bytes_stream = response.bytes_stream();
+            let mut line_buffer = Vec::new();
+            while let Some(chunk_result) = bytes_stream.next().await {
+                let chunk = match chunk_result {
+                    Ok(chunk) => chunk,
+                    Err(error) => {
+                        session.emit_terminal_event(BackendEvent::Crashed(BackendCrashedEvent {
+                            reason: format!("{backend_kind:?} stream read failed: {error}"),
+                        }));
+                        return;
+                    }
+                };
+
+                line_buffer.extend_from_slice(&chunk);
+                while let Some(newline_index) = line_buffer.iter().position(|byte| *byte == b'\n') {
+                    let mut line = line_buffer.drain(..=newline_index).collect::<Vec<_>>();
+                    if matches!(line.last(), Some(b'\n')) {
+                        line.pop();
+                    }
+                    if matches!(line.last(), Some(b'\r')) {
+                        line.pop();
+                    }
+
+                    maybe_log_raw_harness_line(
+                        backend_kind.clone(),
+                        remote_session_id.as_str(),
+                        line.as_slice(),
+                    );
+
+                    if let Some(event) = parse_server_event_line(&line) {
+                        if matches!(event, BackendEvent::Done(_) | BackendEvent::Crashed(_)) {
+                            session.emit_terminal_event(event);
+                        } else {
+                            session.emit_non_terminal_event(event);
+                        }
+                    }
+                }
+            }
+
+            if !line_buffer.is_empty() {
+                maybe_log_raw_harness_line(
+                    backend_kind.clone(),
+                    remote_session_id.as_str(),
+                    line_buffer.as_slice(),
+                );
+                if let Some(event) = parse_server_event_line(&line_buffer) {
+                    if matches!(event, BackendEvent::Done(_) | BackendEvent::Crashed(_)) {
+                        session.emit_terminal_event(event);
+                    } else {
+                        session.emit_non_terminal_event(event);
+                    }
+                }
+            }
+
+            session.emit_terminal_event(BackendEvent::Done(BackendDoneEvent { summary: None }));
+        })
     }
 }
 
@@ -254,73 +545,352 @@ fn parse_optional_features_from_help(help_text: &str) -> (bool, bool) {
     )
 }
 
+fn parse_server_startup_timeout_secs() -> Option<u64> {
+    std::env::var(ENV_HARNESS_SERVER_STARTUP_TIMEOUT_SECS)
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+}
+
+#[derive(Debug, Serialize)]
+struct CreateSessionRequest {
+    runtime_session_id: String,
+    workdir: String,
+    model: Option<String>,
+    instruction_prelude: Option<String>,
+    environment: Vec<(String, String)>,
+}
+
+struct CreateSessionResponse {
+    session_id: String,
+}
+
+#[derive(Debug, Serialize)]
+struct SendInputRequest {
+    input: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct ServerEventLine {
+    #[serde(rename = "type", default)]
+    event_type: Option<String>,
+    #[serde(default)]
+    stream: Option<String>,
+    #[serde(default)]
+    bytes: Option<Vec<u8>>,
+    #[serde(default)]
+    text: Option<String>,
+    #[serde(default)]
+    summary: Option<String>,
+    #[serde(default)]
+    detail: Option<String>,
+    #[serde(default)]
+    file_refs: Vec<String>,
+    #[serde(default)]
+    prompt_id: Option<String>,
+    #[serde(default)]
+    question: Option<String>,
+    #[serde(default)]
+    options: Vec<String>,
+    #[serde(default)]
+    default_option: Option<String>,
+    #[serde(default)]
+    reason: Option<String>,
+    #[serde(default)]
+    hint: Option<String>,
+    #[serde(default)]
+    log_ref: Option<String>,
+    #[serde(default)]
+    kind: Option<String>,
+    #[serde(default)]
+    artifact_id: Option<String>,
+    #[serde(default)]
+    label: Option<String>,
+    #[serde(default)]
+    uri: Option<String>,
+}
+
+fn parse_server_event_line(line: &[u8]) -> Option<BackendEvent> {
+    let line = std::str::from_utf8(line).ok()?.trim();
+    if line.is_empty() {
+        return None;
+    }
+
+    let event: ServerEventLine = serde_json::from_str(line).ok()?;
+    let event_type = event.event_type.unwrap_or_default().to_ascii_lowercase();
+    match event_type.as_str() {
+        "output" => {
+            let stream = match event
+                .stream
+                .as_deref()
+                .unwrap_or("stdout")
+                .to_ascii_lowercase()
+                .as_str()
+            {
+                "stderr" => BackendOutputStream::Stderr,
+                _ => BackendOutputStream::Stdout,
+            };
+            let bytes = event
+                .bytes
+                .or_else(|| event.text.map(|value| value.into_bytes()))
+                .unwrap_or_default();
+            Some(BackendEvent::Output(BackendOutputEvent { stream, bytes }))
+        }
+        "checkpoint" => Some(BackendEvent::Checkpoint(BackendCheckpointEvent {
+            summary: event.summary.unwrap_or_else(|| "checkpoint".to_owned()),
+            detail: event.detail,
+            file_refs: event.file_refs,
+        })),
+        "needs_input" => Some(BackendEvent::NeedsInput(BackendNeedsInputEvent {
+            prompt_id: event.prompt_id.unwrap_or_else(|| "prompt".to_owned()),
+            question: event.question.unwrap_or_else(|| "input required".to_owned()),
+            options: event.options,
+            default_option: event.default_option,
+        })),
+        "blocked" => Some(BackendEvent::Blocked(BackendBlockedEvent {
+            reason: event.reason.unwrap_or_else(|| "blocked".to_owned()),
+            hint: event.hint,
+            log_ref: event.log_ref,
+        })),
+        "artifact" => Some(BackendEvent::Artifact(BackendArtifactEvent {
+            kind: parse_artifact_kind(event.kind.as_deref().unwrap_or("link")),
+            artifact_id: event.artifact_id.map(RuntimeArtifactId::new),
+            label: event.label,
+            uri: event.uri,
+        })),
+        "done" => Some(BackendEvent::Done(BackendDoneEvent {
+            summary: event.summary,
+        })),
+        "crashed" => Some(BackendEvent::Crashed(BackendCrashedEvent {
+            reason: event.reason.unwrap_or_else(|| "session crashed".to_owned()),
+        })),
+        _ => None,
+    }
+}
+
+fn parse_create_session_response_body(body: &str) -> Option<CreateSessionResponse> {
+    let trimmed = body.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    if let Ok(value) = serde_json::from_str::<Value>(trimmed) {
+        let session_id = extract_session_id(&value)?;
+        return Some(CreateSessionResponse { session_id });
+    }
+
+    if trimmed.contains(char::is_whitespace) {
+        return None;
+    }
+
+    Some(CreateSessionResponse {
+        session_id: trimmed.to_owned(),
+    })
+}
+
+fn extract_session_id(value: &Value) -> Option<String> {
+    extract_named_string(value, &["session_id", "sessionId", "id"]).or_else(|| {
+        extract_named_string(value, &["thread_id", "threadId"])
+    })
+}
+
+fn extract_named_string(value: &Value, keys: &[&str]) -> Option<String> {
+    for key in keys {
+        if let Some(value) = find_string_key_recursive(value, key, 6) {
+            return Some(value.to_owned());
+        }
+    }
+    None
+}
+
+fn find_string_key_recursive(value: &Value, key: &str, depth: usize) -> Option<String> {
+    if depth == 0 {
+        return None;
+    }
+
+    match value {
+        Value::Object(map) => {
+            if let Some(value) = map.get(key).and_then(Value::as_str) {
+                return Some(value.to_owned());
+            }
+            for value in map.values() {
+                if let Some(found) = find_string_key_recursive(value, key, depth - 1) {
+                    return Some(found);
+                }
+            }
+            None
+        }
+        Value::Array(items) => {
+            for value in items {
+                if let Some(found) = find_string_key_recursive(value, key, depth - 1) {
+                    return Some(found);
+                }
+            }
+            None
+        }
+        _ => None,
+    }
+}
+
+fn sanitize_error_body(body: &str) -> String {
+    let mut sanitized = body
+        .chars()
+        .map(|ch| if ch.is_control() { ' ' } else { ch })
+        .collect::<String>();
+    sanitized = sanitized.split_whitespace().collect::<Vec<_>>().join(" ");
+    const MAX_LEN: usize = 240;
+    if sanitized.len() > MAX_LEN {
+        format!("{}...", &sanitized[..MAX_LEN])
+    } else {
+        sanitized
+    }
+}
+
+fn harness_log_raw_events_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| env_flag_enabled(ENV_HARNESS_LOG_RAW_EVENTS))
+}
+
+fn harness_log_normalized_events_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| env_flag_enabled(ENV_HARNESS_LOG_NORMALIZED_EVENTS))
+}
+
+fn env_flag_enabled(name: &str) -> bool {
+    std::env::var(name)
+        .ok()
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(false)
+}
+
+fn maybe_log_raw_harness_line(backend_kind: BackendKind, remote_session_id: &str, line: &[u8]) {
+    if !harness_log_raw_events_enabled() {
+        return;
+    }
+    let text = String::from_utf8_lossy(line).into_owned();
+    let payload = json!({
+        "backend": format!("{:?}", backend_kind),
+        "remote_session_id": remote_session_id,
+        "raw": sanitize_error_body(text.as_str()),
+    });
+    append_harness_log_line(HARNESS_RAW_LOG_FILE, payload.to_string().as_str());
+}
+
+fn maybe_log_normalized_harness_event(
+    backend_kind: BackendKind,
+    remote_session_id: &str,
+    terminal: bool,
+    event: &BackendEvent,
+) {
+    if !harness_log_normalized_events_enabled() {
+        return;
+    }
+    let payload = match event {
+        BackendEvent::Output(output) => json!({
+            "backend": format!("{:?}", backend_kind),
+            "remote_session_id": remote_session_id,
+            "terminal": terminal,
+            "event": "Output",
+            "stream": format!("{:?}", output.stream),
+            "text": String::from_utf8_lossy(&output.bytes).into_owned(),
+        }),
+        _ => json!({
+            "backend": format!("{:?}", backend_kind),
+            "remote_session_id": remote_session_id,
+            "terminal": terminal,
+            "event": format!("{event:?}"),
+        }),
+    };
+    append_harness_log_line(HARNESS_NORMALIZED_LOG_FILE, payload.to_string().as_str());
+}
+
+fn append_harness_log_line(path: &str, line: &str) {
+    if let Some(parent) = Path::new(path).parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path) {
+        let _ = writeln!(file, "{line}");
+    }
+}
+
 #[async_trait]
 impl orchestrator_runtime::SessionLifecycle for OpenCodeBackend {
     async fn spawn(&self, spec: SpawnSpec) -> RuntimeResult<SessionHandle> {
         validate_command_binary_path(&self.config.binary, false)?;
         let session_id = spec.session_id.clone();
-        let instruction_prelude = self.composed_instruction_prelude(&spec);
-        let pty_spec = PtySpawnSpec {
-            session_id: session_id.clone(),
-            program: self.spawn_program(),
-            args: self.spawn_args(&spec),
-            workdir: spec.workdir.clone(),
-            environment: self.spawn_environment(&spec, instruction_prelude.as_deref()),
-            size: self.config.terminal_size,
-        };
+        let base_url = self.ensure_server_base_url().await?;
+        let instruction_prelude = spec.instruction_prelude.clone();
+        let created = self
+            .create_remote_session(&base_url, &spec, instruction_prelude)
+            .await?;
+        let (event_tx, _) = broadcast::channel(self.output_buffer());
+        let session = Arc::new(OpenCodeSession {
+            backend_kind: self.backend_kind.clone(),
+            remote_session_id: created.session_id.clone(),
+            relay_task: AsyncMutex::new(None),
+            event_tx: event_tx.clone(),
+            terminal_event_sent: AtomicBool::new(false),
+        });
 
-        self.pty_manager.spawn(pty_spec).await?;
-
-        if let Some(instruction_prelude) = instruction_prelude {
-            let mut bytes = instruction_prelude.into_bytes();
-            bytes.push(b'\n');
-            if let Err(error) = self.pty_manager.write(&session_id, &bytes).await {
-                let _ = self.pty_manager.kill(&session_id).await;
-                return Err(error);
+        {
+            let mut sessions = self.sessions.lock().await;
+            if sessions.contains_key(&session_id) {
+                return Err(RuntimeError::Process(format!(
+                    "worker session already exists: {}",
+                    session_id.as_str()
+                )));
             }
+            sessions.insert(session_id.clone(), Arc::clone(&session));
+        }
+
+        let relay_task = Self::spawn_event_relay_task(
+            self.client.clone(),
+            self.backend_kind.clone(),
+            base_url,
+            created.session_id,
+            Arc::clone(&session),
+        );
+        {
+            let mut task_slot = session.relay_task.lock().await;
+            *task_slot = Some(relay_task);
         }
 
         Ok(SessionHandle {
             session_id,
-            backend: BackendKind::OpenCode,
+            backend: self.backend_kind.clone(),
         })
     }
 
     async fn kill(&self, session: &SessionHandle) -> RuntimeResult<()> {
-        self.pty_manager.kill(&session.session_id).await
+        validate_session_backend(session, self.backend_kind.clone())?;
+        let base_url = self.ensure_server_base_url().await?;
+        let session = self.remove_session(&session.session_id).await?;
+        let mut relay_task = session.relay_task.lock().await;
+        if let Some(task) = relay_task.take() {
+            task.abort();
+        }
+        drop(relay_task);
+        self.close_remote_session(&base_url, &session.remote_session_id)
+            .await
     }
 
     async fn send_input(&self, session: &SessionHandle, input: &[u8]) -> RuntimeResult<()> {
-        self.pty_manager.write(&session.session_id, input).await
+        validate_session_backend(session, self.backend_kind.clone())?;
+        let base_url = self.ensure_server_base_url().await?;
+        let session = self.session(&session.session_id).await?;
+        self.send_remote_input(&base_url, &session.remote_session_id, input)
+            .await
     }
 
     async fn resize(&self, session: &SessionHandle, cols: u16, rows: u16) -> RuntimeResult<()> {
-        self.pty_manager
-            .resize(&session.session_id, cols, rows)
-            .await
-    }
-}
-
-fn compose_instruction_prelude(
-    protocol_guidance: Option<&str>,
-    instruction_prelude: Option<&str>,
-) -> Option<String> {
-    let mut lines = Vec::new();
-    if let Some(guidance) = protocol_guidance {
-        if !guidance.trim().is_empty() {
-            lines.push(guidance.to_owned());
-        }
-    }
-    if let Some(prelude) = instruction_prelude {
-        if !prelude.trim().is_empty() {
-            lines.push(prelude.to_owned());
-        }
-    }
-
-    if lines.is_empty() {
-        None
-    } else {
-        Some(lines.join("\n"))
+        validate_session_backend(session, self.backend_kind.clone())?;
+        let _ = session;
+        let _ = (cols, rows);
+        Ok(())
     }
 }
 
@@ -371,7 +941,7 @@ fn validate_command_binary_path(
 #[async_trait]
 impl WorkerBackend for OpenCodeBackend {
     fn kind(&self) -> BackendKind {
-        BackendKind::OpenCode
+        self.backend_kind.clone()
     }
 
     fn capabilities(&self) -> BackendCapabilities {
@@ -380,562 +950,47 @@ impl WorkerBackend for OpenCodeBackend {
 
     async fn health_check(&self) -> RuntimeResult<()> {
         validate_command_binary_path(&self.config.binary, false)?;
-        let args = [OsString::from("--version")];
-        self.health_check_command(&args).await
+        let base_url = self.ensure_server_base_url().await?;
+        self.wait_for_server_health(&base_url).await
     }
 
     async fn subscribe(&self, session: &SessionHandle) -> RuntimeResult<WorkerEventStream> {
-        let output = self
-            .pty_manager
-            .subscribe_output(&session.session_id)
-            .await?;
+        validate_session_backend(session, self.backend_kind.clone())?;
+        let session = self.session(&session.session_id).await?;
+        let output = session.event_tx.subscribe();
         Ok(Box::new(OpenCodeEventSubscription {
             output,
-            parser: SupervisorProtocolParser::default(),
-            pending: VecDeque::new(),
-            stream_ended: false,
         }))
-    }
-
-    async fn snapshot(&self, session: &SessionHandle) -> RuntimeResult<TerminalSnapshot> {
-        self.pty_manager.snapshot(&session.session_id).await
     }
 }
 
 struct OpenCodeEventSubscription {
-    output: PtyOutputSubscription,
-    parser: SupervisorProtocolParser,
-    pending: VecDeque<BackendEvent>,
-    stream_ended: bool,
+    output: broadcast::Receiver<BackendEvent>,
 }
 
 #[async_trait]
 impl WorkerEventSubscription for OpenCodeEventSubscription {
     async fn next_event(&mut self) -> RuntimeResult<Option<BackendEvent>> {
-        if let Some(event) = self.pending.pop_front() {
-            return Ok(Some(event));
-        }
-        if self.stream_ended {
-            return Ok(None);
-        }
-
-        match self.output.next_chunk().await? {
-            Some(chunk) => {
-                self.pending
-                    .push_back(BackendEvent::Output(BackendOutputEvent {
-                        stream: BackendOutputStream::Stdout,
-                        bytes: chunk.clone(),
-                    }));
-                self.pending.extend(self.parser.ingest(&chunk));
-                Ok(self.pending.pop_front())
-            }
-            None => {
-                self.stream_ended = true;
-                self.pending.extend(self.parser.finish());
-                Ok(self.pending.pop_front())
+        match self.output.recv().await {
+            Ok(event) => Ok(Some(event)),
+            Err(tokio::sync::broadcast::error::RecvError::Closed) => Ok(None),
+            Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                Err(RuntimeError::Internal(format!(
+                    "opencode backend stream lagged and dropped {skipped} events"
+                )))
             }
         }
     }
 }
 
-#[derive(Default)]
-struct SupervisorProtocolParser {
-    line_buffer: Vec<u8>,
-    heuristic_prompt_counter: u64,
-    last_heuristic_signature: Option<String>,
-}
-
-impl SupervisorProtocolParser {
-    fn ingest(&mut self, chunk: &[u8]) -> Vec<BackendEvent> {
-        if chunk.is_empty() {
-            return Vec::new();
-        }
-
-        self.line_buffer.extend_from_slice(chunk);
-        let mut events = Vec::new();
-        while let Some(newline_index) = self.line_buffer.iter().position(|byte| *byte == b'\n') {
-            let mut line = self.line_buffer.drain(..=newline_index).collect::<Vec<_>>();
-            if matches!(line.last(), Some(b'\n')) {
-                line.pop();
-            }
-            if matches!(line.last(), Some(b'\r')) {
-                line.pop();
-            }
-            if let Some(event) = self.parse_line(&line) {
-                events.push(event);
-            }
-        }
-
-        events
-    }
-
-    fn finish(&mut self) -> Vec<BackendEvent> {
-        if self.line_buffer.is_empty() {
-            return Vec::new();
-        }
-
-        let mut line = std::mem::take(&mut self.line_buffer);
-        if matches!(line.last(), Some(b'\r')) {
-            line.pop();
-        }
-        self.parse_line(&line).into_iter().collect()
-    }
-
-    fn parse_line(&mut self, line: &[u8]) -> Option<BackendEvent> {
-        if let Some(event) = parse_protocol_line(line) {
-            self.last_heuristic_signature = None;
-            return Some(event);
-        }
-        let event = self.parse_heuristic_line(line);
-        if event.is_none() {
-            self.last_heuristic_signature = None;
-        }
-        event
-    }
-
-    fn parse_heuristic_line(&mut self, line: &[u8]) -> Option<BackendEvent> {
-        let line = sanitize_protocol_line(protocol_candidate_bytes(line));
-        let line = line.trim();
-        if line.is_empty() {
-            return None;
-        }
-        if line.starts_with("@@") {
-            // Reserve @@-prefixed lines for structured protocol tags only. If parsing failed, do
-            // not reinterpret the line via heuristics because it can emit false positives.
-            return None;
-        }
-
-        let (signature, event) = heuristic_event_from_line(line, self.heuristic_prompt_counter)?;
-        if self.last_heuristic_signature.as_deref() == Some(signature.as_str()) {
-            return None;
-        }
-        self.last_heuristic_signature = Some(signature);
-        if matches!(event, BackendEvent::NeedsInput(_)) {
-            self.heuristic_prompt_counter = self.heuristic_prompt_counter.saturating_add(1);
-        }
-        Some(event)
-    }
-}
-
-fn parse_protocol_line(line: &[u8]) -> Option<BackendEvent> {
-    let line = sanitize_protocol_line(protocol_candidate_bytes(line));
-    let line = line.trim();
-    if line.is_empty() {
-        return None;
-    }
-
-    if let Some(payload) = protocol_payload(line, TAG_CHECKPOINT) {
-        if payload.is_empty() {
-            return None;
-        }
-        let payload: CheckpointPayload = serde_json::from_str(payload).ok()?;
-        let summary = payload.summary.unwrap_or_else(|| "checkpoint".to_owned());
-        return Some(BackendEvent::Checkpoint(BackendCheckpointEvent {
-            summary,
-            detail: payload.detail,
-            file_refs: payload.files,
-        }));
-    }
-
-    if let Some(payload) = protocol_payload(line, TAG_NEEDS_INPUT) {
-        if payload.is_empty() {
-            return None;
-        }
-        let payload: NeedsInputPayload = serde_json::from_str(payload).ok()?;
-        return Some(BackendEvent::NeedsInput(BackendNeedsInputEvent {
-            prompt_id: payload.id,
-            question: payload.question,
-            options: payload.options,
-            default_option: payload.default,
-        }));
-    }
-
-    if let Some(payload) = protocol_payload(line, TAG_BLOCKED) {
-        if payload.is_empty() {
-            return None;
-        }
-        let payload: BlockedPayload = serde_json::from_str(payload).ok()?;
-        return Some(BackendEvent::Blocked(BackendBlockedEvent {
-            reason: payload.reason,
-            hint: payload.hint,
-            log_ref: payload.log_ref,
-        }));
-    }
-
-    if let Some(payload) = protocol_payload(line, TAG_ARTIFACT) {
-        if payload.is_empty() {
-            return None;
-        }
-        let payload: ArtifactPayload = serde_json::from_str(payload).ok()?;
-        return Some(BackendEvent::Artifact(BackendArtifactEvent {
-            kind: parse_artifact_kind(&payload.kind),
-            artifact_id: payload.artifact_id.map(RuntimeArtifactId::new),
-            label: payload.label,
-            uri: payload.uri,
-        }));
-    }
-
-    if let Some(payload) = protocol_payload(line, TAG_DONE) {
-        if payload.is_empty() {
-            return Some(BackendEvent::Done(BackendDoneEvent { summary: None }));
-        }
-        let payload: DonePayload = serde_json::from_str(payload).ok()?;
-        return Some(BackendEvent::Done(BackendDoneEvent {
-            summary: payload.summary,
-        }));
-    }
-
-    None
-}
-
-fn heuristic_event_from_line(line: &str, prompt_counter: u64) -> Option<(String, BackendEvent)> {
-    let normalized = normalize_heuristic_text(line);
-    let normalized_lower = normalized.to_ascii_lowercase();
-
-    if let Some(reason) = heuristic_blocked_reason(line, &normalized_lower) {
-        return Some((
-            format!("blocked:{normalized_lower}"),
-            BackendEvent::Blocked(BackendBlockedEvent {
-                reason,
-                hint: None,
-                log_ref: None,
-            }),
-        ));
-    }
-
-    if let Some(question) = heuristic_needs_input_question(line, &normalized_lower) {
-        return Some((
-            format!("needs_input:{normalized_lower}"),
-            BackendEvent::NeedsInput(BackendNeedsInputEvent {
-                prompt_id: format!("heuristic-{prompt_counter}"),
-                question,
-                options: Vec::new(),
-                default_option: None,
-            }),
-        ));
-    }
-
-    if let Some(uri) = heuristic_artifact_uri(line, &normalized_lower) {
-        let kind = if uri.contains("/pull/") || uri.contains("/pulls/") {
-            BackendArtifactKind::PullRequest
-        } else {
-            BackendArtifactKind::Link
-        };
-        let label = match kind {
-            BackendArtifactKind::PullRequest => {
-                if normalized_lower.contains("draft") {
-                    Some("Draft PR".to_owned())
-                } else {
-                    Some("Pull request".to_owned())
-                }
-            }
-            _ => Some("Link".to_owned()),
-        };
-        return Some((
-            format!("artifact:{uri}"),
-            BackendEvent::Artifact(BackendArtifactEvent {
-                kind,
-                artifact_id: None,
-                label,
-                uri: Some(uri),
-            }),
-        ));
-    }
-
-    if let Some(summary) = heuristic_done_summary(line, &normalized_lower) {
-        return Some((
-            format!("done:{normalized_lower}"),
-            BackendEvent::Done(BackendDoneEvent {
-                summary: Some(summary),
-            }),
-        ));
-    }
-
-    if let Some((summary, detail)) = heuristic_checkpoint_summary(line) {
-        let signature = format!("checkpoint:{summary}:{}", detail.as_deref().unwrap_or(""));
-        return Some((
-            signature,
-            BackendEvent::Checkpoint(BackendCheckpointEvent {
-                summary,
-                detail,
-                file_refs: Vec::new(),
-            }),
-        ));
-    }
-
-    None
-}
-
-fn normalize_heuristic_text(line: &str) -> String {
-    line.split_whitespace().collect::<Vec<_>>().join(" ")
-}
-
-fn heuristic_blocked_reason(line: &str, line_lower: &str) -> Option<String> {
-    if line_lower.contains("not blocked") {
-        return None;
-    }
-
-    const BLOCKED_MARKERS: [&str; 10] = [
-        "blocked:",
-        "blocker:",
-        "i'm blocked",
-        "i am blocked",
-        "stuck:",
-        "cannot continue",
-        "can't continue",
-        "unable to continue",
-        "waiting for",
-        "tests failing",
-    ];
-
-    if BLOCKED_MARKERS
-        .iter()
-        .any(|marker| line_lower.starts_with(marker) || line_lower.contains(marker))
-    {
-        Some(normalize_heuristic_text(line))
+fn validate_session_backend(session: &SessionHandle, expected: BackendKind) -> RuntimeResult<()> {
+    if session.backend == expected {
+        Ok(())
     } else {
-        None
-    }
-}
-
-fn heuristic_needs_input_question(line: &str, line_lower: &str) -> Option<String> {
-    let question = normalize_heuristic_text(line);
-    if question.is_empty() {
-        return None;
-    }
-
-    for prefix in [
-        "needs input:",
-        "need input:",
-        "need your input:",
-        "question:",
-    ] {
-        if let Some(value) = strip_prefix_case_insensitive(line, prefix) {
-            let trimmed = value.trim();
-            if !trimmed.is_empty() {
-                return Some(trimmed.to_owned());
-            }
-        }
-    }
-
-    let contains_decision_keyword = [
-        "need your input",
-        "need your decision",
-        "please choose",
-        "which option",
-        "should i",
-        "do you want me to",
-        "can you confirm",
-    ]
-    .iter()
-    .any(|needle| line_lower.contains(needle));
-
-    if contains_decision_keyword || (line.ends_with('?') && line_lower.contains("choose")) {
-        return Some(question);
-    }
-
-    None
-}
-
-fn heuristic_artifact_uri(line: &str, line_lower: &str) -> Option<String> {
-    let uri = first_http_uri(line)?;
-    if uri.contains("/pull/") || uri.contains("/pulls/") {
-        return Some(uri);
-    }
-
-    if line_lower.starts_with("artifact:") || line_lower.starts_with("link:") {
-        return Some(uri);
-    }
-
-    None
-}
-
-fn first_http_uri(line: &str) -> Option<String> {
-    for token in line.split_whitespace() {
-        if token.starts_with("https://") || token.starts_with("http://") {
-            let trimmed = token
-                .trim_end_matches(|ch: char| ",.;:!?)]}\"'".contains(ch))
-                .to_owned();
-            if !trimmed.is_empty() {
-                return Some(trimmed);
-            }
-        }
-    }
-    None
-}
-
-fn heuristic_done_summary(line: &str, line_lower: &str) -> Option<String> {
-    if line_lower == "done"
-        || line_lower.starts_with("done:")
-        || line_lower == "all done"
-        || line_lower.starts_with("all done:")
-    {
-        Some(normalize_heuristic_text(line))
-    } else if (line_lower.starts_with("task complete")
-        || line_lower.starts_with("work complete")
-        || line_lower.starts_with("finished successfully")
-        || line_lower.starts_with("completed successfully"))
-        && line_lower.split_whitespace().count() <= 6
-    {
-        // Keep completion phrasing conservative to avoid classifying command output as session-done.
-        Some(normalize_heuristic_text(line))
-    } else {
-        None
-    }
-}
-
-fn heuristic_checkpoint_summary(line: &str) -> Option<(String, Option<String>)> {
-    if let Some(detail) = strip_prefix_case_insensitive(line, "checkpoint:") {
-        let detail = detail.trim();
-        return Some((
-            "checkpoint".to_owned(),
-            (!detail.is_empty()).then(|| detail.to_owned()),
-        ));
-    }
-    if let Some(detail) = strip_prefix_case_insensitive(line, "status:") {
-        let detail = detail.trim();
-        return Some((
-            "status".to_owned(),
-            (!detail.is_empty()).then(|| detail.to_owned()),
-        ));
-    }
-    if let Some(detail) = strip_prefix_case_insensitive(line, "progress:") {
-        let detail = detail.trim();
-        return Some((
-            "progress".to_owned(),
-            (!detail.is_empty()).then(|| detail.to_owned()),
-        ));
-    }
-    if let Some(detail) = strip_prefix_case_insensitive(line, "working on ") {
-        let detail = detail.trim();
-        return Some((
-            "working on".to_owned(),
-            (!detail.is_empty()).then(|| detail.to_owned()),
-        ));
-    }
-    if let Some(detail) = strip_prefix_case_insensitive(line, "implementing ") {
-        let detail = detail.trim();
-        return Some((
-            "implementing".to_owned(),
-            (!detail.is_empty()).then(|| detail.to_owned()),
-        ));
-    }
-    if let Some(detail) = strip_prefix_case_insensitive(line, "refactoring ") {
-        let detail = detail.trim();
-        return Some((
-            "refactoring".to_owned(),
-            (!detail.is_empty()).then(|| detail.to_owned()),
-        ));
-    }
-
-    None
-}
-
-fn strip_prefix_case_insensitive<'a>(value: &'a str, prefix: &str) -> Option<&'a str> {
-    let prefix_len = prefix.len();
-    let candidate = value.get(..prefix_len)?;
-    if candidate.eq_ignore_ascii_case(prefix) {
-        value.get(prefix_len..)
-    } else {
-        None
-    }
-}
-
-fn protocol_candidate_bytes(line: &[u8]) -> &[u8] {
-    match line.iter().rposition(|byte| *byte == b'\r') {
-        Some(last_carriage_return) => &line[last_carriage_return + 1..],
-        None => line,
-    }
-}
-
-fn sanitize_protocol_line(line: &[u8]) -> String {
-    let mut out = Vec::with_capacity(line.len());
-    let mut index = 0usize;
-
-    while index < line.len() {
-        match line[index] {
-            0x1b => {
-                index += strip_escape_sequence(&line[index..]);
-            }
-            byte if byte.is_ascii_control() && byte != b'\t' => {
-                index += 1;
-            }
-            byte => {
-                out.push(byte);
-                index += 1;
-            }
-        }
-    }
-
-    String::from_utf8_lossy(&out).into_owned()
-}
-
-fn strip_escape_sequence(remaining: &[u8]) -> usize {
-    if remaining.len() < 2 {
-        return 1;
-    }
-
-    match remaining[1] {
-        b'[' => strip_csi_sequence(remaining),
-        b']' => strip_osc_sequence(remaining),
-        b'P' | b'X' | b'^' | b'_' => strip_string_sequence(remaining),
-        _ => strip_fe_escape_sequence(remaining),
-    }
-}
-
-fn strip_csi_sequence(remaining: &[u8]) -> usize {
-    for (offset, byte) in remaining.iter().enumerate().skip(2) {
-        if (0x40..=0x7e).contains(byte) {
-            return offset + 1;
-        }
-    }
-    remaining.len()
-}
-
-fn strip_osc_sequence(remaining: &[u8]) -> usize {
-    strip_bel_or_st_terminated_sequence(remaining)
-}
-
-fn strip_string_sequence(remaining: &[u8]) -> usize {
-    strip_bel_or_st_terminated_sequence(remaining)
-}
-
-fn strip_bel_or_st_terminated_sequence(remaining: &[u8]) -> usize {
-    for (offset, byte) in remaining.iter().enumerate().skip(2) {
-        if *byte == 0x07 {
-            return offset + 1;
-        }
-        if *byte == 0x1b && remaining.get(offset + 1) == Some(&b'\\') {
-            return offset + 2;
-        }
-    }
-    remaining.len()
-}
-
-fn strip_fe_escape_sequence(remaining: &[u8]) -> usize {
-    let mut offset = 1usize;
-    while offset < remaining.len() && (0x20..=0x2f).contains(&remaining[offset]) {
-        offset += 1;
-    }
-
-    if offset < remaining.len() && (0x30..=0x7e).contains(&remaining[offset]) {
-        offset + 1
-    } else {
-        remaining.len()
-    }
-}
-
-fn protocol_payload<'a>(line: &'a str, tag: &str) -> Option<&'a str> {
-    let remainder = line.strip_prefix(tag)?;
-    if remainder.is_empty() {
-        return Some(remainder);
-    }
-
-    let first = remainder.chars().next()?;
-    if first.is_whitespace() {
-        Some(remainder.trim_start())
-    } else {
-        None
+        Err(RuntimeError::Protocol(format!(
+            "received backend mismatch: expected {:?}, got {:?}",
+            expected, session.backend
+        )))
     }
 }
 
@@ -952,1080 +1007,33 @@ fn parse_artifact_kind(kind: &str) -> BackendArtifactKind {
     }
 }
 
-#[derive(Debug, Deserialize)]
-struct CheckpointPayload {
-    #[serde(default, alias = "stage")]
-    summary: Option<String>,
-    #[serde(default)]
-    detail: Option<String>,
-    #[serde(default, alias = "file_refs")]
-    files: Vec<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct NeedsInputPayload {
-    #[serde(alias = "prompt_id")]
-    id: String,
-    #[serde(alias = "prompt")]
-    question: String,
-    #[serde(default)]
-    options: Vec<String>,
-    #[serde(default, alias = "default_option")]
-    default: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct BlockedPayload {
-    reason: String,
-    #[serde(default)]
-    hint: Option<String>,
-    #[serde(default)]
-    log_ref: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct ArtifactPayload {
-    kind: String,
-    #[serde(default, alias = "id")]
-    artifact_id: Option<String>,
-    #[serde(default)]
-    label: Option<String>,
-    #[serde(default, alias = "url")]
-    uri: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct DonePayload {
-    #[serde(default)]
-    summary: Option<String>,
-}
-
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
-
-    use orchestrator_runtime::{BackendEvent, RuntimeSessionId, SessionLifecycle};
-    use tokio::time::timeout;
-
     use super::*;
 
-    const TEST_TIMEOUT: Duration = Duration::from_secs(5);
-
-    #[cfg(unix)]
-    fn shell_program() -> &'static str {
-        "sh"
-    }
-
-    #[cfg(windows)]
-    fn shell_program() -> &'static str {
-        "cmd"
-    }
-
-    #[cfg(unix)]
-    fn shell_args(script: &str) -> Vec<String> {
-        vec!["-lc".to_owned(), script.to_owned()]
-    }
-
-    #[cfg(windows)]
-    fn shell_args(script: &str) -> Vec<String> {
-        vec!["/C".to_owned(), script.to_owned()]
-    }
-
-    #[cfg(unix)]
-    fn interactive_echo_script() -> &'static str {
-        "printf 'ready\\n'; read line; printf 'echo:%s\\n' \"$line\"; sleep 5"
-    }
-
-    #[cfg(windows)]
-    fn interactive_echo_script() -> &'static str {
-        "echo ready && set /p line= && echo echo:%line% && ping -n 6 127.0.0.1 >nul"
-    }
-
-    #[cfg(unix)]
-    fn tagged_script() -> &'static str {
-        r#"printf '@@checkpoint {"stage":"implementing","detail":"updating parser","files":["src/lib.rs"]}\n';
-printf '@@needs_input {"id":"q1","question":"Choose API shape","options":["A","B"],"default":"A"}\n';
-printf '@@artifact {"kind":"pr","url":"https://example.test/pulls/12","label":"Draft PR"}\n';
-printf '@@blocked {"reason":"tests failing","hint":"run cargo test"}\n';
-printf '@@done {"summary":"complete"}\n';
-sleep 1"#
-    }
-
-    #[cfg(windows)]
-    fn tagged_script() -> &'static str {
-        "echo @@checkpoint {\"stage\":\"implementing\",\"detail\":\"updating parser\",\"files\":[\"src/lib.rs\"]} && echo @@needs_input {\"id\":\"q1\",\"question\":\"Choose API shape\",\"options\":[\"A\",\"B\"],\"default\":\"A\"} && echo @@artifact {\"kind\":\"pr\",\"url\":\"https://example.test/pulls/12\",\"label\":\"Draft PR\"} && echo @@blocked {\"reason\":\"tests failing\",\"hint\":\"run cargo test\"} && echo @@done {\"summary\":\"complete\"}"
-    }
-
-    #[cfg(unix)]
-    fn optional_artifact_script() -> &'static str {
-        "printf '@@artifact {\"kind\":\"session_export\",\"id\":\"artifact-export\",\"url\":\"file:///tmp/session-export.json\",\"label\":\"Session export\"}\\n'; printf '@@artifact {\"kind\":\"diff\",\"id\":\"artifact-diff\",\"url\":\"file:///tmp/diff.patch\",\"label\":\"Diff\"}\\n'; printf '@@done {\"summary\":\"complete\"}\\n'; sleep 1"
-    }
-
-    #[cfg(windows)]
-    fn optional_artifact_script() -> &'static str {
-        "echo @@artifact {\"kind\":\"session_export\",\"id\":\"artifact-export\",\"url\":\"file:///tmp/session-export.json\",\"label\":\"Session export\"} && echo @@artifact {\"kind\":\"diff\",\"id\":\"artifact-diff\",\"url\":\"file:///tmp/diff.patch\",\"label\":\"Diff\"} && echo @@done {\"summary\":\"complete\"}"
-    }
-
-    #[cfg(unix)]
-    fn unstructured_script() -> &'static str {
-        r#"printf 'working on parser cleanup\n';
-printf 'Need your input: should I split module A/B?\n';
-printf 'I am blocked on failing tests\n';
-printf 'Draft PR ready: https://github.com/example/repo/pull/42\n';
-printf 'all done\n';
-sleep 1"#
-    }
-
-    #[cfg(windows)]
-    fn unstructured_script() -> &'static str {
-        "echo working on parser cleanup && echo Need your input: should I split module A/B? && echo I am blocked on failing tests && echo Draft PR ready: https://github.com/example/repo/pull/42 && echo all done"
-    }
-
-    #[cfg(unix)]
-    fn prelude_capture_script() -> &'static str {
-        "read line; printf 'prelude:%s\\n' \"$line\"; sleep 1"
-    }
-
-    #[cfg(windows)]
-    fn prelude_capture_script() -> &'static str {
-        "set /p line= && echo prelude:%line% && ping -n 2 127.0.0.1 >nul"
-    }
-
-    #[cfg(unix)]
-    fn multi_line_prelude_capture_script() -> &'static str {
-        "read first; read second; printf 'prelude1:%s\\nprelude2:%s\\n' \"$first\" \"$second\"; sleep 1"
-    }
-
-    #[cfg(windows)]
-    fn multi_line_prelude_capture_script() -> &'static str {
-        "set /p first= && set /p second= && echo prelude1:%first% && echo prelude2:%second% && ping -n 2 127.0.0.1 >nul"
-    }
-
-    #[cfg(unix)]
-    fn long_running_script() -> &'static str {
-        "sleep 5"
-    }
-
-    #[cfg(windows)]
-    fn long_running_script() -> &'static str {
-        "ping -n 6 127.0.0.1 >nul"
-    }
-
-    fn os_args(args: Vec<String>) -> Vec<OsString> {
-        args.into_iter().map(OsString::from).collect()
-    }
-
-    fn test_backend(program: &str, args: Vec<String>) -> OpenCodeBackend {
-        let config = OpenCodeBackendConfig {
-            binary: PathBuf::from(program),
-            base_args: args,
-            model_flag: None,
-            output_buffer: 128,
-            terminal_size: TerminalSize::default(),
-            render_policy: PtyRenderPolicy::default(),
-            health_check_timeout: Duration::from_secs(1),
-            protocol_guidance: None,
-        };
-        OpenCodeBackend::new(config)
-    }
-
-    fn spawn_spec(session_id: &str) -> SpawnSpec {
-        SpawnSpec {
-            session_id: RuntimeSessionId::new(session_id),
-            workdir: std::env::current_dir().expect("resolve current dir"),
-            model: None,
-            instruction_prelude: None,
-            environment: Vec::new(),
-        }
-    }
-
-    async fn collect_output_until(
-        stream: &mut WorkerEventStream,
-        needle: &str,
-    ) -> RuntimeResult<String> {
-        timeout(TEST_TIMEOUT, async {
-            let mut output = Vec::new();
-            loop {
-                match stream.next_event().await? {
-                    Some(BackendEvent::Output(event)) => {
-                        output.extend_from_slice(&event.bytes);
-                        if String::from_utf8_lossy(&output).contains(needle) {
-                            return Ok(String::from_utf8_lossy(&output).to_string());
-                        }
-                    }
-                    Some(_) => {}
-                    None => return Ok(String::from_utf8_lossy(&output).to_string()),
-                }
-            }
-        })
-        .await
-        .map_err(|_| RuntimeError::Internal("timed out waiting for output".to_owned()))?
-    }
-
-    #[tokio::test]
-    async fn parser_extracts_events_from_chunked_lines() {
-        let mut parser = SupervisorProtocolParser::default();
-        let events_one = parser.ingest(
-            b"@@checkpoint {\"stage\":\"impl\",\"detail\":\"x\",\"files\":[\"a.rs\"]}\n@@needs_input ",
-        );
-        let events_two = parser.ingest(
-            b"{\"id\":\"q1\",\"question\":\"pick\",\"options\":[\"A\",\"B\"],\"default\":\"B\"}\n",
-        );
-        let events_three = parser.finish();
-
-        assert_eq!(events_one.len(), 1);
-        assert!(matches!(events_one[0], BackendEvent::Checkpoint(_)));
-        assert_eq!(events_two.len(), 1);
-        assert!(matches!(events_two[0], BackendEvent::NeedsInput(_)));
-        assert!(events_three.is_empty());
+    #[test]
+    fn parse_create_session_response_accepts_canonical_shape() {
+        let body = r#"{"session_id":"sess-1","thread_id":"thread-1"}"#;
+        let parsed = parse_create_session_response_body(body).expect("parse session response");
+        assert_eq!(parsed.session_id, "sess-1");
     }
 
     #[test]
-    fn parser_protocol_tags_support_aliases_and_reject_boundary_mismatches() {
-        enum Expected<'a> {
-            Checkpoint {
-                summary: &'a str,
-                detail: Option<&'a str>,
-                file_refs: &'a [&'a str],
-            },
-            NeedsInput {
-                id: &'a str,
-                question: &'a str,
-                default: Option<&'a str>,
-            },
-            Artifact {
-                kind: BackendArtifactKind,
-                artifact_id: Option<&'a str>,
-                uri: Option<&'a str>,
-            },
-            Done {
-                summary: Option<&'a str>,
-            },
-            None,
-        }
-
-        struct Case<'a> {
-            name: &'a str,
-            line: &'a [u8],
-            expected: Expected<'a>,
-        }
-
-        let cases = vec![
-            Case {
-                name: "checkpoint accepts stage/file_refs aliases",
-                line: br#"@@checkpoint {"stage":"planning","detail":"drafted plan","file_refs":["a.rs","b.rs"]}"#,
-                expected: Expected::Checkpoint {
-                    summary: "planning",
-                    detail: Some("drafted plan"),
-                    file_refs: &["a.rs", "b.rs"],
-                },
-            },
-            Case {
-                name: "session_export artifact is parsed as dedicated export kind",
-                line: br#"@@artifact {"kind":"session_export","id":"artifact-export","url":"https://example.test/sessions/99","label":"Session export"}"#,
-                expected: Expected::Artifact {
-                    kind: BackendArtifactKind::SessionExport,
-                    artifact_id: Some("artifact-export"),
-                    uri: Some("https://example.test/sessions/99"),
-                },
-            },
-            Case {
-                name: "diff artifact is parsed as dedicated diff kind",
-                line: br#"@@artifact {"kind":"diff","id":"artifact-diff","url":"https://example.test/diff/99","label":"Diff"}"#,
-                expected: Expected::Artifact {
-                    kind: BackendArtifactKind::Diff,
-                    artifact_id: Some("artifact-diff"),
-                    uri: Some("https://example.test/diff/99"),
-                },
-            },
-            Case {
-                name: "needs_input accepts prompt aliases",
-                line: br#"@@needs_input {"prompt_id":"ask-1","prompt":"Choose path?","default_option":"A"}"#,
-                expected: Expected::NeedsInput {
-                    id: "ask-1",
-                    question: "Choose path?",
-                    default: Some("A"),
-                },
-            },
-            Case {
-                name: "artifact accepts id/url aliases and normalizes kind",
-                line: br#"@@artifact {"kind":"pull-request","id":"artifact-7","url":"https://example.test/pr/7"}"#,
-                expected: Expected::Artifact {
-                    kind: BackendArtifactKind::PullRequest,
-                    artifact_id: Some("artifact-7"),
-                    uri: Some("https://example.test/pr/7"),
-                },
-            },
-            Case {
-                name: "done accepts omitted payload",
-                line: b"@@done",
-                expected: Expected::Done { summary: None },
-            },
-            Case {
-                name: "done accepts explicit summary payload",
-                line: br#"@@done {"summary":"finished"}"#,
-                expected: Expected::Done {
-                    summary: Some("finished"),
-                },
-            },
-            Case {
-                name: "tag prefix must match full token",
-                line: br#"@@checkpointed {"stage":"nope"}"#,
-                expected: Expected::None,
-            },
-            Case {
-                name: "needs_input rejects malformed json payload",
-                line: br#"@@needs_input {"id":"x","question":1}"#,
-                expected: Expected::None,
-            },
-        ];
-
-        for case in cases {
-            let event = parse_protocol_line(case.line);
-            match case.expected {
-                Expected::Checkpoint {
-                    summary,
-                    detail,
-                    file_refs,
-                } => {
-                    let event = event.unwrap_or_else(|| {
-                        panic!("case '{}' expected checkpoint event", case.name)
-                    });
-                    let BackendEvent::Checkpoint(BackendCheckpointEvent {
-                        summary: actual_summary,
-                        detail: actual_detail,
-                        file_refs: actual_refs,
-                    }) = event
-                    else {
-                        panic!("case '{}' produced unexpected checkpoint event", case.name);
-                    };
-                    assert_eq!(actual_summary, summary, "case '{}' summary", case.name);
-                    assert_eq!(
-                        actual_detail.as_deref(),
-                        detail,
-                        "case '{}' detail",
-                        case.name
-                    );
-                    let actual_refs = actual_refs.iter().map(String::as_str).collect::<Vec<_>>();
-                    assert_eq!(actual_refs, file_refs, "case '{}' file refs", case.name);
-                }
-                Expected::NeedsInput {
-                    id,
-                    question,
-                    default,
-                } => {
-                    let event = event.unwrap_or_else(|| {
-                        panic!("case '{}' expected needs_input event", case.name)
-                    });
-                    assert!(
-                        matches!(
-                            event,
-                            BackendEvent::NeedsInput(BackendNeedsInputEvent {
-                                prompt_id: actual_id,
-                                question: actual_question,
-                                default_option: actual_default,
-                                ..
-                            }) if actual_id == id
-                                && actual_question == question
-                                && actual_default.as_deref() == default
-                        ),
-                        "case '{}' produced unexpected needs_input event",
-                        case.name
-                    );
-                }
-                Expected::Artifact {
-                    kind,
-                    artifact_id,
-                    uri,
-                } => {
-                    let event = event
-                        .unwrap_or_else(|| panic!("case '{}' expected artifact event", case.name));
-                    assert!(
-                        matches!(
-                            event,
-                            BackendEvent::Artifact(BackendArtifactEvent {
-                                kind: actual_kind,
-                                artifact_id: actual_id,
-                                uri: actual_uri,
-                                ..
-                            }) if actual_kind == kind
-                                && actual_id.as_ref().map(|id| id.as_str()) == artifact_id
-                                && actual_uri.as_deref() == uri
-                        ),
-                        "case '{}' produced unexpected artifact event",
-                        case.name
-                    );
-                }
-                Expected::Done { summary } => {
-                    let event =
-                        event.unwrap_or_else(|| panic!("case '{}' expected done event", case.name));
-                    assert!(
-                        matches!(
-                            event,
-                            BackendEvent::Done(BackendDoneEvent { summary: actual_summary })
-                                if actual_summary.as_deref() == summary
-                        ),
-                        "case '{}' produced unexpected done event",
-                        case.name
-                    );
-                }
-                Expected::None => assert!(
-                    event.is_none(),
-                    "case '{}' expected parser to ignore line",
-                    case.name
-                ),
-            }
-        }
+    fn parse_create_session_response_accepts_nested_codex_shape() {
+        let body = r#"{"data":{"thread":{"id":"thread-abc"}}}"#;
+        let parsed = parse_create_session_response_body(body).expect("parse nested response");
+        assert_eq!(parsed.session_id, "thread-abc");
     }
 
     #[test]
-    fn optional_feature_detection_from_help_text_parses_available_markers() {
-        let help_text = "Usage: opencode --session-export and --diff-provider\nSupports workspace diff-provider output";
-
-        let (has_session_export, has_diff_provider) = parse_optional_features_from_help(help_text);
-
-        assert!(has_session_export);
-        assert!(has_diff_provider);
+    fn parse_create_session_response_accepts_plain_identifier_body() {
+        let parsed =
+            parse_create_session_response_body("thread-plain").expect("parse plain identifier");
+        assert_eq!(parsed.session_id, "thread-plain");
     }
 
     #[test]
-    fn optional_feature_detection_from_help_text_falls_back_when_markers_are_missing() {
-        let help_text = "Usage: opencode --help\nNo optional features available in this build.\n";
-
-        let (has_session_export, has_diff_provider) = parse_optional_features_from_help(help_text);
-
-        assert!(!has_session_export);
-        assert!(!has_diff_provider);
-    }
-
-    #[test]
-    fn optional_feature_detection_from_help_text_is_case_insensitive_and_punctuation_tolerant() {
-        let help_text =
-            "Usage: opencode\n- --SESSION_EXPORT controls workspace export output.\n- --Diff-Provider preview.\n";
-
-        let (has_session_export, has_diff_provider) = parse_optional_features_from_help(help_text);
-
-        assert!(has_session_export);
-        assert!(has_diff_provider);
-    }
-
-    #[test]
-    fn optional_feature_detection_falls_back_when_binary_is_not_allowed() {
-        let capabilities = detect_optional_capabilities(Path::new("./bin/opencode"));
-
-        assert!(!capabilities.session_export);
-        assert!(!capabilities.diff_provider);
-    }
-
-    #[test]
-    fn parser_finish_flushes_partial_protocol_lines() {
-        let mut parser = SupervisorProtocolParser::default();
-
-        let events = parser.ingest(br#"@@done {"summary":"almost"}"#);
-        assert!(events.is_empty(), "partial line should remain buffered");
-
-        let flushed = parser.finish();
-        assert_eq!(flushed.len(), 1);
-        assert!(matches!(
-            &flushed[0],
-            BackendEvent::Done(BackendDoneEvent {
-                summary: Some(summary)
-            }) if summary == "almost"
-        ));
-
-        let mut malformed = SupervisorProtocolParser::default();
-        malformed.ingest(br#"@@checkpoint {"stage":"oops""#);
-        assert!(
-            malformed.finish().is_empty(),
-            "malformed buffered protocol lines should be ignored"
-        );
-    }
-
-    #[tokio::test]
-    async fn parser_extracts_heuristic_events_from_unstructured_lines() {
-        let mut parser = SupervisorProtocolParser::default();
-        let events = parser.ingest(
-            b"working on parser cleanup\nNeed your input: choose A or B?\nI am blocked on failing tests\nDraft PR ready: https://github.com/example/repo/pull/42\nall done\n",
-        );
-
-        assert_eq!(events.len(), 5);
-        assert!(matches!(
-            &events[0],
-            BackendEvent::Checkpoint(BackendCheckpointEvent {
-                summary,
-                detail: Some(ref detail),
-                ..
-            }) if summary == "working on" && detail == "parser cleanup"
-        ));
-        assert!(matches!(
-            &events[1],
-            BackendEvent::NeedsInput(BackendNeedsInputEvent {
-                ref prompt_id,
-                ref question,
-                ..
-            }) if prompt_id == "heuristic-0" && question == "choose A or B?"
-        ));
-        assert!(matches!(
-            &events[2],
-            BackendEvent::Blocked(BackendBlockedEvent { ref reason, .. }) if reason == "I am blocked on failing tests"
-        ));
-        assert!(matches!(
-            &events[3],
-            BackendEvent::Artifact(BackendArtifactEvent {
-                kind: BackendArtifactKind::PullRequest,
-                uri: Some(ref uri),
-                ..
-            }) if uri == "https://github.com/example/repo/pull/42"
-        ));
-        assert!(matches!(
-            &events[4],
-            BackendEvent::Done(BackendDoneEvent {
-                summary: Some(ref summary)
-            }) if summary == "all done"
-        ));
-    }
-
-    #[tokio::test]
-    async fn parser_suppresses_duplicate_consecutive_heuristic_lines() {
-        let mut parser = SupervisorProtocolParser::default();
-        let events =
-            parser.ingest(b"I am blocked on failing tests\nI am blocked on failing tests\n");
-        assert_eq!(events.len(), 1);
-        assert!(matches!(&events[0], BackendEvent::Blocked(_)));
-    }
-
-    #[tokio::test]
-    async fn parser_does_not_suppress_heuristics_after_non_heuristic_line() {
-        let mut parser = SupervisorProtocolParser::default();
-        let events = parser.ingest(
-            b"I am blocked on failing tests\nrunning cargo test -p foo\nI am blocked on failing tests\n",
-        );
-        assert_eq!(events.len(), 2);
-        assert!(matches!(&events[0], BackendEvent::Blocked(_)));
-        assert!(matches!(&events[1], BackendEvent::Blocked(_)));
-    }
-
-    #[tokio::test]
-    async fn parser_does_not_treat_general_build_logs_as_done() {
-        let mut parser = SupervisorProtocolParser::default();
-        let events = parser.ingest(b"build completed successfully in 12s\n");
-        assert!(
-            events.is_empty(),
-            "completion heuristics should not trigger on generic build logs"
-        );
-    }
-
-    #[test]
-    fn strip_prefix_case_insensitive_handles_non_ascii_without_panicking() {
-        assert_eq!(
-            strip_prefix_case_insensitive("🔥checkpoint: parser", "checkpoint:"),
-            None
-        );
-    }
-
-    #[test]
-    fn compose_instruction_prelude_prepends_protocol_guidance() {
-        let composed = compose_instruction_prelude(
-            Some("Emit @@checkpoint lines."),
-            Some("Implement AP-115 and run tests."),
-        )
-        .expect("combined prelude");
-        assert_eq!(
-            composed,
-            "Emit @@checkpoint lines.\nImplement AP-115 and run tests."
-        );
-    }
-
-    #[test]
-    fn compose_instruction_prelude_omits_empty_inputs() {
-        assert_eq!(
-            compose_instruction_prelude(Some("  "), Some("")),
-            None,
-            "all-empty inputs should not produce a prelude"
-        );
-        assert_eq!(
-            compose_instruction_prelude(Some("Emit tags."), None).as_deref(),
-            Some("Emit tags.")
-        );
-    }
-
-    #[test]
-    fn compose_instruction_prelude_preserves_non_empty_whitespace() {
-        let composed = compose_instruction_prelude(Some("  Emit tags.  "), Some("  Keep format"));
-        assert_eq!(
-            composed.as_deref(),
-            Some("  Emit tags.  \n  Keep format"),
-            "non-empty lines should keep original formatting"
-        );
-    }
-
-    #[tokio::test]
-    async fn parser_parses_all_supervisor_protocol_tags() {
-        let checkpoint = parse_protocol_line(
-            br#"@@checkpoint {"stage":"implementing","detail":"parser update","files":["src/lib.rs"]}"#,
-        )
-        .expect("checkpoint tag should parse");
-        assert!(matches!(
-            checkpoint,
-            BackendEvent::Checkpoint(BackendCheckpointEvent {
-                summary,
-                detail: Some(detail),
-                file_refs
-            }) if summary == "implementing" && detail == "parser update" && file_refs == vec!["src/lib.rs"]
-        ));
-
-        let needs_input = parse_protocol_line(
-            br#"@@needs_input {"id":"q1","question":"Choose A or B","options":["A","B"],"default":"A"}"#,
-        )
-        .expect("needs_input tag should parse");
-        assert!(matches!(
-            needs_input,
-            BackendEvent::NeedsInput(BackendNeedsInputEvent {
-                prompt_id,
-                question,
-                options,
-                default_option: Some(default_option),
-            }) if prompt_id == "q1" && question == "Choose A or B" && options == vec!["A", "B"] && default_option == "A"
-        ));
-
-        let blocked =
-            parse_protocol_line(br#"@@blocked {"reason":"tests failing","hint":"rerun unit tests","log_ref":"artifact:log:1"}"#)
-                .expect("blocked tag should parse");
-        assert!(matches!(
-            blocked,
-            BackendEvent::Blocked(BackendBlockedEvent {
-                reason,
-                hint: Some(hint),
-                log_ref: Some(log_ref),
-            }) if reason == "tests failing" && hint == "rerun unit tests" && log_ref == "artifact:log:1"
-        ));
-
-        let artifact = parse_protocol_line(
-            br#"@@artifact {"kind":"pr","id":"artifact-1","label":"Draft PR","url":"https://example.test/pulls/1"}"#,
-        )
-        .expect("artifact tag should parse");
-        assert!(matches!(
-            artifact,
-            BackendEvent::Artifact(BackendArtifactEvent {
-                kind: BackendArtifactKind::PullRequest,
-                artifact_id: Some(ref artifact_id),
-                label: Some(ref label),
-                uri: Some(ref uri),
-            }) if artifact_id.as_str() == "artifact-1" && label == "Draft PR" && uri == "https://example.test/pulls/1"
-        ));
-
-        let done = parse_protocol_line(br#"@@done {"summary":"all complete"}"#)
-            .expect("done tag should parse");
-        assert!(matches!(
-            done,
-            BackendEvent::Done(BackendDoneEvent {
-                summary: Some(summary)
-            }) if summary == "all complete"
-        ));
-    }
-
-    #[tokio::test]
-    async fn parser_accepts_done_tag_without_payload() {
-        let event = parse_protocol_line(b"@@done").expect("done tag without payload");
-        assert!(matches!(
-            event,
-            BackendEvent::Done(BackendDoneEvent { summary: None })
-        ));
-    }
-
-    #[tokio::test]
-    async fn parser_handles_ansi_wrapped_protocol_line() {
-        let line = b"\x1b[32m@@checkpoint {\"stage\":\"implementing\",\"detail\":\"ansi\",\"files\":[]}\x1b[0m";
-        let event = parse_protocol_line(line).expect("checkpoint tag wrapped in ANSI should parse");
-        assert!(matches!(
-            event,
-            BackendEvent::Checkpoint(BackendCheckpointEvent { summary, .. }) if summary == "implementing"
-        ));
-    }
-
-    #[tokio::test]
-    async fn parser_handles_carriage_return_rewrite_before_protocol_tag() {
-        let line = b"progress 25%\r@@checkpoint {\"stage\":\"implementing\",\"detail\":\"rewrite\",\"files\":[]}";
-        let event =
-            parse_protocol_line(line).expect("checkpoint tag after carriage return should parse");
-        assert!(matches!(
-            event,
-            BackendEvent::Checkpoint(BackendCheckpointEvent { summary, .. }) if summary == "implementing"
-        ));
-    }
-
-    #[tokio::test]
-    async fn parser_handles_escape_sequence_with_intermediate_bytes() {
-        let line = b"\x1b(B@@done {\"summary\":\"complete\"}";
-        let event = parse_protocol_line(line).expect("done tag after ESC sequence should parse");
-        assert!(matches!(
-            event,
-            BackendEvent::Done(BackendDoneEvent { summary: Some(summary) }) if summary == "complete"
-        ));
-    }
-
-    #[tokio::test]
-    async fn parser_ignores_invalid_json_payloads() {
-        assert!(parse_protocol_line(br#"@@checkpoint {"stage":"x""#).is_none());
-        assert!(parse_protocol_line(br#"@@needs_input not-json"#).is_none());
-        assert!(parse_protocol_line(br#"@@artifact {"kind":1}"#).is_none());
-        assert!(parse_protocol_line(br#"@@blocked {"reason":true}"#).is_none());
-        assert!(parse_protocol_line(br#"@@done [1,2,3]"#).is_none());
-    }
-
-    #[tokio::test]
-    async fn parser_does_not_apply_heuristics_to_malformed_protocol_lines() {
-        let mut parser = SupervisorProtocolParser::default();
-        let events = parser.ingest(
-            b"@@artifact {\"kind\":1,\"url\":\"https://github.com/example/repo/pull/42\"}\n",
-        );
-        assert!(
-            events.is_empty(),
-            "malformed protocol lines should be ignored instead of falling back to heuristics"
-        );
-    }
-
-    #[tokio::test]
-    async fn parser_normalizes_unknown_artifact_kind_values() {
-        let event = parse_protocol_line(
-            br#"@@artifact {"kind":"  custom-kind  ","id":"artifact-1","url":"https://example.test"}"#,
-        )
-        .expect("artifact tag should parse");
-
-        assert!(matches!(
-            event,
-            BackendEvent::Artifact(BackendArtifactEvent {
-                kind: BackendArtifactKind::Other(kind),
-                ..
-            }) if kind == "custom-kind"
-        ));
-    }
-
-    #[tokio::test]
-    async fn health_check_reports_missing_binary() {
-        let backend = test_backend("orchestrator-definitely-missing-opencode", Vec::new());
-        let error = backend
-            .health_check()
-            .await
-            .expect_err("missing binary should fail health check");
-        assert!(matches!(
-            error,
-            RuntimeError::DependencyUnavailable(message) if message.contains("not found")
-        ));
-    }
-
-    #[tokio::test]
-    async fn health_check_rejects_non_zero_exit_status() {
-        let backend = test_backend(shell_program(), Vec::new());
-        let args = os_args(shell_args("exit 7"));
-        let error = backend
-            .health_check_command(&args)
-            .await
-            .expect_err("non-zero process should fail health check");
-        assert!(matches!(
-            error,
-            RuntimeError::DependencyUnavailable(message) if message.contains("status")
-        ));
-    }
-
-    #[tokio::test]
-    async fn health_check_times_out_long_running_process() {
-        let config = OpenCodeBackendConfig {
-            binary: PathBuf::from(shell_program()),
-            base_args: Vec::new(),
-            model_flag: None,
-            output_buffer: 128,
-            terminal_size: TerminalSize::default(),
-            render_policy: PtyRenderPolicy::default(),
-            health_check_timeout: Duration::from_millis(50),
-            protocol_guidance: None,
-        };
-        let backend = OpenCodeBackend::new(config);
-        let args = os_args(shell_args(long_running_script()));
-        let error = backend
-            .health_check_command(&args)
-            .await
-            .expect_err("long-running process should time out health check");
-        assert!(matches!(
-            error,
-            RuntimeError::DependencyUnavailable(message) if message.contains("timed out")
-        ));
-    }
-
-    #[tokio::test]
-    async fn spawn_send_input_snapshot_and_kill_use_pty_primitives() {
-        let backend = test_backend(shell_program(), shell_args(interactive_echo_script()));
-        let handle = backend
-            .spawn(spawn_spec("session-opencode-lifecycle"))
-            .await
-            .expect("spawn backend session");
-        assert_eq!(handle.backend, BackendKind::OpenCode);
-
-        let mut stream = backend
-            .subscribe(&handle)
-            .await
-            .expect("subscribe to session");
-        let initial = collect_output_until(&mut stream, "ready")
-            .await
-            .expect("wait for ready output");
-        assert!(initial.contains("ready"));
-
-        backend
-            .send_input(&handle, b"hello\n")
-            .await
-            .expect("send input");
-        let echoed = collect_output_until(&mut stream, "echo:hello")
-            .await
-            .expect("wait for echoed output");
-        assert!(echoed.contains("echo:hello"));
-
-        backend.resize(&handle, 120, 40).await.expect("resize pty");
-
-        let snapshot = backend.snapshot(&handle).await.expect("take snapshot");
-        assert!(snapshot
-            .lines
-            .iter()
-            .any(|line| line.contains("echo:hello")));
-
-        backend.kill(&handle).await.expect("kill session");
-        let error = backend
-            .snapshot(&handle)
-            .await
-            .expect_err("killed session should not be available");
-        assert!(matches!(error, RuntimeError::SessionNotFound(_)));
-    }
-
-    #[tokio::test]
-    async fn subscribe_parses_supervisor_protocol_tags() {
-        let backend = test_backend(shell_program(), shell_args(tagged_script()));
-        let handle = backend
-            .spawn(spawn_spec("session-opencode-tags"))
-            .await
-            .expect("spawn tagged session");
-        let mut stream = backend.subscribe(&handle).await.expect("subscribe to tags");
-
-        let events = timeout(TEST_TIMEOUT, async {
-            let mut events = Vec::new();
-            loop {
-                match stream.next_event().await.expect("read backend event") {
-                    Some(event) => {
-                        let stop = matches!(event, BackendEvent::Done(_));
-                        events.push(event);
-                        if stop {
-                            return events;
-                        }
-                    }
-                    None => return events,
-                }
-            }
-        })
-        .await
-        .expect("collect protocol events");
-
-        assert!(events.iter().any(|event| matches!(
-            event,
-            BackendEvent::Checkpoint(BackendCheckpointEvent { summary, .. }) if summary == "implementing"
-        )));
-        assert!(events.iter().any(|event| matches!(
-            event,
-            BackendEvent::NeedsInput(BackendNeedsInputEvent { prompt_id, .. }) if prompt_id == "q1"
-        )));
-        assert!(events.iter().any(|event| matches!(
-            event,
-            BackendEvent::Artifact(BackendArtifactEvent {
-                kind: BackendArtifactKind::PullRequest,
-                ..
-            })
-        )));
-        assert!(events.iter().any(|event| matches!(
-            event,
-            BackendEvent::Blocked(BackendBlockedEvent { reason, .. }) if reason == "tests failing"
-        )));
-        assert!(events.iter().any(|event| matches!(
-            event,
-            BackendEvent::Done(BackendDoneEvent { summary: Some(value) }) if value == "complete"
-        )));
-    }
-
-    #[tokio::test]
-    async fn subscribe_parses_optional_artifact_payloads() {
-        let backend = test_backend(shell_program(), shell_args(optional_artifact_script()));
-        let handle = backend
-            .spawn(spawn_spec("session-opencode-optional-artifacts"))
-            .await
-            .expect("spawn optional artifact session");
-        let mut stream = backend.subscribe(&handle).await.expect("subscribe optional artifacts");
-
-        let events = timeout(TEST_TIMEOUT, async {
-            let mut events = Vec::new();
-            loop {
-                match stream.next_event().await.expect("read optional artifact event") {
-                    Some(event) => {
-                        let stop = matches!(event, BackendEvent::Done(_));
-                        events.push(event);
-                        if stop {
-                            return events;
-                        }
-                    }
-                    None => return events,
-                }
-            }
-        })
-        .await
-        .expect("collect optional artifact events");
-
-        assert!(events.iter().any(|event| matches!(
-            event,
-            BackendEvent::Artifact(BackendArtifactEvent {
-                kind: BackendArtifactKind::SessionExport,
-                artifact_id: Some(artifact_id),
-                uri: Some(uri),
-                ..
-            }) if artifact_id.as_str() == "artifact-export" && uri == "file:///tmp/session-export.json"
-        )));
-        assert!(events.iter().any(|event| matches!(
-            event,
-            BackendEvent::Artifact(BackendArtifactEvent {
-                kind: BackendArtifactKind::Diff,
-                artifact_id: Some(artifact_id),
-                uri: Some(uri),
-                ..
-            }) if artifact_id.as_str() == "artifact-diff" && uri == "file:///tmp/diff.patch"
-        )));
-        assert!(events.iter().any(|event| matches!(
-            event,
-            BackendEvent::Done(BackendDoneEvent { summary: Some(summary) }) if summary == "complete"
-        )));
-    }
-
-    #[tokio::test]
-    async fn subscribe_applies_fallback_heuristics_for_unstructured_output() {
-        let backend = test_backend(shell_program(), shell_args(unstructured_script()));
-        let handle = backend
-            .spawn(spawn_spec("session-opencode-heuristics"))
-            .await
-            .expect("spawn unstructured session");
-        let mut stream = backend
-            .subscribe(&handle)
-            .await
-            .expect("subscribe to unstructured session");
-
-        let events = timeout(TEST_TIMEOUT, async {
-            let mut events = Vec::new();
-            loop {
-                match stream.next_event().await.expect("read backend event") {
-                    Some(event) => {
-                        let stop = matches!(event, BackendEvent::Done(_));
-                        events.push(event);
-                        if stop {
-                            return events;
-                        }
-                    }
-                    None => return events,
-                }
-            }
-        })
-        .await
-        .expect("collect unstructured events");
-
-        assert!(events.iter().any(|event| matches!(
-            event,
-            BackendEvent::Checkpoint(BackendCheckpointEvent { summary, .. }) if summary == "working on"
-        )));
-        assert!(events.iter().any(|event| matches!(
-            event,
-            BackendEvent::NeedsInput(BackendNeedsInputEvent { prompt_id, .. }) if prompt_id == "heuristic-0"
-        )));
-        assert!(events.iter().any(|event| matches!(
-            event,
-            BackendEvent::Blocked(BackendBlockedEvent { reason, .. }) if reason == "I am blocked on failing tests"
-        )));
-        assert!(events.iter().any(|event| matches!(
-            event,
-            BackendEvent::Artifact(BackendArtifactEvent {
-                kind: BackendArtifactKind::PullRequest,
-                uri: Some(uri),
-                ..
-            }) if uri == "https://github.com/example/repo/pull/42"
-        )));
-        assert!(events.iter().any(|event| matches!(
-            event,
-            BackendEvent::Done(BackendDoneEvent { summary: Some(summary) }) if summary == "all done"
-        )));
-    }
-
-    #[tokio::test]
-    async fn spawn_injects_protocol_guidance_into_session_input() {
-        let backend = OpenCodeBackend::new(OpenCodeBackendConfig {
-            binary: PathBuf::from(shell_program()),
-            base_args: shell_args(prelude_capture_script()),
-            model_flag: None,
-            output_buffer: 128,
-            terminal_size: TerminalSize::default(),
-            render_policy: PtyRenderPolicy::default(),
-            health_check_timeout: Duration::from_secs(1),
-            protocol_guidance: Some("Emit @@checkpoint lines when relevant.".to_owned()),
-        });
-
-        let handle = backend
-            .spawn(spawn_spec("session-opencode-protocol-guidance"))
-            .await
-            .expect("spawn backend session");
-        let mut stream = backend
-            .subscribe(&handle)
-            .await
-            .expect("subscribe to session");
-        let output = collect_output_until(&mut stream, "prelude:")
-            .await
-            .expect("read prelude");
-        assert!(output.contains("prelude:Emit @@checkpoint lines when relevant."));
-
-        backend.kill(&handle).await.expect("kill session");
-    }
-
-    #[tokio::test]
-    async fn spawn_injects_protocol_guidance_before_user_prelude() {
-        let backend = OpenCodeBackend::new(OpenCodeBackendConfig {
-            binary: PathBuf::from(shell_program()),
-            base_args: shell_args(multi_line_prelude_capture_script()),
-            model_flag: None,
-            output_buffer: 128,
-            terminal_size: TerminalSize::default(),
-            render_policy: PtyRenderPolicy::default(),
-            health_check_timeout: Duration::from_secs(1),
-            protocol_guidance: Some("Emit @@checkpoint lines when relevant.".to_owned()),
-        });
-
-        let mut spec = spawn_spec("session-opencode-protocol-guidance-combined");
-        spec.instruction_prelude = Some("Implement AP-115 and run tests.".to_owned());
-
-        let handle = backend.spawn(spec).await.expect("spawn backend session");
-        let mut stream = backend
-            .subscribe(&handle)
-            .await
-            .expect("subscribe to session");
-        let output = collect_output_until(&mut stream, "prelude2:")
-            .await
-            .expect("read combined prelude");
-
-        assert!(output.contains("prelude1:Emit @@checkpoint lines when relevant."));
-        assert!(output.contains("prelude2:Implement AP-115 and run tests."));
-
-        backend.kill(&handle).await.expect("kill session");
-    }
-
-    #[test]
-    fn command_path_guard_rejects_non_bare_binary_by_default() {
-        let err = validate_command_binary_path(Path::new("./bin/opencode"), false)
-            .expect_err("relative command paths should be blocked by default");
-        assert!(err
-            .to_string()
-            .contains("ORCHESTRATOR_ALLOW_UNSAFE_COMMAND_PATHS"));
-    }
-
-    #[test]
-    fn command_path_guard_accepts_non_bare_binary_when_explicitly_enabled() {
-        validate_command_binary_path(Path::new("./bin/opencode"), true)
-            .expect("unsafe command path opt-in should pass");
+    fn parse_create_session_response_rejects_unsupported_shape() {
+        assert!(parse_create_session_response_body(r#"{"ok":true}"#).is_none());
     }
 }

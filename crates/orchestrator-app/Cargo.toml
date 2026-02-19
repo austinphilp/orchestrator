@@ -17,6 +17,7 @@ orchestrator-github = { path = "../orchestrator-github" }
 orchestrator-supervisor = { path = "../orchestrator-supervisor" }
 orchestrator-ui = { path = "../orchestrator-ui" }
 serde.workspace = true
+serde_json.workspace = true
 tokio.workspace = true
 toml.workspace = true
 tracing.workspace = true

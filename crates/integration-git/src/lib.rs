@@ -242,10 +242,12 @@ impl<R: CommandRunner> GitCliVcsProvider<R> {
 
     fn discover_repositories_under_root(&self, root: &Path) -> Result<Vec<PathBuf>, CoreError> {
         if !root.exists() {
-            return Err(CoreError::Configuration(format!(
-                "Configured project root '{}' does not exist.",
-                root.display()
-            )));
+            fs::create_dir_all(root).map_err(|error| {
+                CoreError::Configuration(format!(
+                    "Failed to create configured project root '{}': {error}",
+                    root.display()
+                ))
+            })?;
         }
         if !root.is_dir() {
             return Err(CoreError::Configuration(format!(
@@ -389,6 +391,30 @@ impl<R: CommandRunner> GitCliVcsProvider<R> {
         ]
     }
 
+    fn create_worktree_existing_branch_args(
+        repository_root: &Path,
+        worktree_path: &Path,
+        branch: &str,
+    ) -> Vec<OsString> {
+        vec![
+            OsString::from("-C"),
+            repository_root.as_os_str().to_owned(),
+            OsString::from("worktree"),
+            OsString::from("add"),
+            worktree_path.as_os_str().to_owned(),
+            OsString::from(branch),
+        ]
+    }
+
+    fn worktree_prune_args(repository_root: &Path) -> Vec<OsString> {
+        vec![
+            OsString::from("-C"),
+            repository_root.as_os_str().to_owned(),
+            OsString::from("worktree"),
+            OsString::from("prune"),
+        ]
+    }
+
     fn delete_worktree_args(
         repository_root: &Path,
         worktree_path: &Path,
@@ -470,6 +496,11 @@ impl<R: CommandRunner> GitCliVcsProvider<R> {
             })?;
 
         Ok((ahead, behind))
+    }
+
+    fn is_branch_already_exists_error(error: &CoreError) -> bool {
+        let message = error.to_string().to_ascii_lowercase();
+        message.contains("branch named") && message.contains("already exists")
     }
 
     fn validate_worktree_create_request(
@@ -810,7 +841,20 @@ impl<R: CommandRunner> VcsProvider for GitCliVcsProvider<R> {
             &branch,
             &base_branch,
         );
-        self.run_git(&args)?;
+        if let Err(error) = self.run_git(&args) {
+            if !Self::is_branch_already_exists_error(&error) {
+                return Err(error);
+            }
+
+            let prune_args = Self::worktree_prune_args(&request.repository.root);
+            let _ = self.run_git(&prune_args);
+            let fallback_args = Self::create_worktree_existing_branch_args(
+                &request.repository.root,
+                &request.worktree_path,
+                &branch,
+            );
+            self.run_git(&fallback_args)?;
+        }
 
         Ok(WorktreeSummary {
             worktree_id: request.worktree_id,
@@ -1102,6 +1146,60 @@ mod tests {
             )
         );
         assert_eq!(summary.base_branch, "main");
+    }
+
+    #[tokio::test]
+    async fn create_worktree_reuses_existing_branch_when_branch_already_exists() {
+        let runner = StubRunner::with_results(vec![
+            Ok(output_with_status(
+                1,
+                b"",
+                b"fatal: a branch named 'ap/AP-122-repo-discovery' already exists\n",
+            )),
+            Ok(success_output()),
+            Ok(success_output()),
+        ]);
+        let provider = GitCliVcsProvider::with_binary(runner, PathBuf::from("git"), false);
+
+        let request = CreateWorktreeRequest {
+            worktree_id: WorktreeId::new("wt-122"),
+            repository: sample_repository(PathBuf::from("/tmp/orchestrator/repo")),
+            worktree_path: PathBuf::from("/tmp/orchestrator/worktrees/wt-122"),
+            branch: "ap/AP-122-repo-discovery".to_owned(),
+            base_branch: "main".to_owned(),
+            ticket_identifier: Some("AP-122".to_owned()),
+        };
+
+        provider
+            .create_worktree(request.clone())
+            .await
+            .expect("create worktree with existing branch");
+
+        let calls = provider.runner.calls.lock().expect("lock");
+        assert_eq!(calls.len(), 3);
+        assert_eq!(
+            calls[0].1,
+            GitCliVcsProvider::<ProcessCommandRunner>::create_worktree_args(
+                &request.repository.root,
+                &request.worktree_path,
+                &request.branch,
+                &request.base_branch,
+            )
+        );
+        assert_eq!(
+            calls[1].1,
+            GitCliVcsProvider::<ProcessCommandRunner>::worktree_prune_args(
+                &request.repository.root
+            )
+        );
+        assert_eq!(
+            calls[2].1,
+            GitCliVcsProvider::<ProcessCommandRunner>::create_worktree_existing_branch_args(
+                &request.repository.root,
+                &request.worktree_path,
+                &request.branch,
+            )
+        );
     }
 
     #[tokio::test]

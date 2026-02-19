@@ -19,8 +19,8 @@ pub use adapters::{
     CreateTicketRequest, CreateWorktreeRequest, DeleteWorktreeRequest, GetTicketRequest,
     GithubClient, LlmChatRequest, LlmFinishReason, LlmMessage, LlmProvider, LlmProviderKind,
     LlmRateLimitState, LlmResponseStream, LlmResponseSubscription, LlmRole, LlmStreamChunk,
-    LlmTokenUsage,
-    LlmTool, LlmToolCall, LlmToolFunction, LlmToolResult, PullRequestRef, PullRequestSummary,
+    LlmTokenUsage, LlmTool, LlmToolCall, LlmToolCallOutput, LlmToolChoice,
+    LlmToolChoiceFunction, LlmToolFunction, LlmToolResult, PullRequestRef, PullRequestSummary,
     RepositoryRef, ReviewerRequest, Supervisor, TicketAttachment, TicketDetails, TicketQuery,
     TicketSummary, TicketingProvider, UpdateTicketDescriptionRequest, UpdateTicketStateRequest,
     UrlOpener, VcsProvider, WorktreeManager, WorktreeStatus, WorktreeSummary,
@@ -56,9 +56,9 @@ pub use normalization::{
 pub use orchestrator_runtime::{
     BackendArtifactEvent, BackendArtifactKind, BackendBlockedEvent, BackendCapabilities,
     BackendCheckpointEvent, BackendCrashedEvent, BackendDoneEvent, BackendEvent, BackendKind,
-    BackendNeedsInputEvent, BackendOutputEvent, BackendOutputStream, RuntimeArtifactId,
-    RuntimeError, RuntimeResult, RuntimeSessionId, SessionHandle, SessionLifecycle, SpawnSpec,
-    TerminalSnapshot, WorkerBackend, WorkerEventStream, WorkerEventSubscription,
+    BackendNeedsInputEvent, BackendOutputEvent, BackendOutputStream, BackendTurnStateEvent,
+    RuntimeArtifactId, RuntimeError, RuntimeResult, RuntimeSessionId, SessionHandle,
+    SessionLifecycle, SpawnSpec, WorkerBackend, WorkerEventStream, WorkerEventSubscription,
 };
 pub use projection::{
     apply_event, rebuild_projection, retrieve_events, ArtifactProjection, InboxItemProjection,
