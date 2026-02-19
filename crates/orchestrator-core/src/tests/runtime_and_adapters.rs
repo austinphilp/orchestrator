@@ -64,7 +64,7 @@ fn migration_from_schema_v1_adds_runtime_mapping_tables() {
     drop(conn);
 
     let store = SqliteEventStore::open(db.path()).expect("open and migrate");
-    assert_eq!(store.schema_version().expect("schema version"), 5);
+    assert_eq!(store.schema_version().expect("schema version"), 6);
     drop(store);
 
     let conn = rusqlite::Connection::open(db.path()).expect("open sqlite for inspection");
@@ -91,7 +91,7 @@ fn migration_from_schema_v1_adds_runtime_mapping_tables() {
             row.get(0)
         })
         .expect("count migrations");
-    assert_eq!(migration_count, 5);
+    assert_eq!(migration_count, 6);
 
     let indexes = ["idx_worktrees_path_unique", "idx_sessions_workdir_unique"];
     for index in indexes {
