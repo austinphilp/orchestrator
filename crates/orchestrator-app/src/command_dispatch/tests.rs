@@ -99,6 +99,7 @@ mod tests {
         fallback_pr: Option<PullRequestRef>,
         fallback_calls: Mutex<Vec<(String, String)>>,
         merge_state: PullRequestMergeState,
+        merge_error: Option<String>,
     }
 
     impl MockCodeHost {
@@ -113,6 +114,7 @@ mod tests {
                     base_branch: None,
                     head_branch: None,
                 },
+                merge_error: None,
             }
         }
 
@@ -121,6 +123,20 @@ mod tests {
                 fallback_pr,
                 fallback_calls: Mutex::new(Vec::new()),
                 merge_state,
+                merge_error: None,
+            }
+        }
+
+        fn with_merge_error(
+            fallback_pr: Option<PullRequestRef>,
+            merge_state: PullRequestMergeState,
+            merge_error: impl Into<String>,
+        ) -> Self {
+            Self {
+                fallback_pr,
+                fallback_calls: Mutex::new(Vec::new()),
+                merge_state,
+                merge_error: Some(merge_error.into()),
             }
         }
 
@@ -175,6 +191,9 @@ mod tests {
         }
 
         async fn merge_pull_request(&self, _pr: &PullRequestRef) -> Result<(), CoreError> {
+            if let Some(message) = &self.merge_error {
+                return Err(CoreError::DependencyUnavailable(message.clone()));
+            }
             Ok(())
         }
 
@@ -810,6 +829,176 @@ mod tests {
         let parsed: serde_json::Value =
             serde_json::from_str(first_chunk.delta.as_str()).expect("parse reconcile response");
         assert_eq!(parsed["completed"], true);
+
+        let persisted_store = SqliteEventStore::open(temp_db.path()).expect("reopen store");
+        let events = persisted_store.read_ordered().expect("read events");
+        let latest_state = events
+            .iter()
+            .filter_map(|event| match &event.payload {
+                OrchestrationEventPayload::WorkflowTransition(payload)
+                    if event.work_item_id.as_ref() == Some(&work_item_id) =>
+                {
+                    Some(payload.to.clone())
+                }
+                _ => None,
+            })
+            .last()
+            .expect("workflow transitions recorded");
+        assert_eq!(latest_state, WorkflowState::Done);
+    }
+
+    #[tokio::test]
+    async fn workflow_merge_pr_rolls_back_to_in_review_when_merge_fails() {
+        let temp_db = TestDbPath::new("app-runtime-command-merge-pr-rollback-on-failure");
+        let work_item_id = WorkItemId::new("wi-merge-pr-rollback-on-failure");
+        let session_id = WorkerSessionId::new("sess-merge-pr-rollback-on-failure");
+        let mut store = SqliteEventStore::open(temp_db.path()).expect("open store");
+        seed_runtime_mapping(&mut store, &work_item_id, session_id.as_str()).expect("seed mapping");
+        store
+            .append(NewEventEnvelope {
+                event_id: "evt-awaiting-review-seed".to_owned(),
+                occurred_at: "2026-02-19T00:00:00Z".to_owned(),
+                work_item_id: Some(work_item_id.clone()),
+                session_id: Some(session_id.clone()),
+                payload: OrchestrationEventPayload::WorkflowTransition(WorkflowTransitionPayload {
+                    work_item_id: work_item_id.clone(),
+                    from: WorkflowState::PRDrafted,
+                    to: WorkflowState::AwaitingYourReview,
+                    reason: None,
+                }),
+                schema_version: DOMAIN_EVENT_SCHEMA_VERSION,
+            })
+            .expect("seed awaiting-review workflow transition");
+
+        let code_host = MockCodeHost::with_merge_error(
+            Some(PullRequestRef {
+                repository: RepositoryRef {
+                    id: "acme/repo".to_owned(),
+                    name: "acme/repo".to_owned(),
+                    root: std::path::PathBuf::from("/workspace/wi-merge-pr-rollback-on-failure"),
+                },
+                number: 446,
+                url: "https://github.com/acme/repo/pull/446".to_owned(),
+            }),
+            PullRequestMergeState {
+                merged: false,
+                is_draft: false,
+                merge_conflict: false,
+                base_branch: Some("main".to_owned()),
+                head_branch: Some("ap/AP-446-fix".to_owned()),
+            },
+            "merge blocked by required checks",
+        );
+
+        let (_stream_id, mut stream) = super::execute_workflow_merge_pr(
+            &code_host,
+            temp_db.path().to_str().expect("path"),
+            SupervisorCommandContext {
+                selected_work_item_id: Some(work_item_id.as_str().to_owned()),
+                selected_session_id: Some(session_id.as_str().to_owned()),
+                scope: Some(format!("session:{}", session_id.as_str())),
+            },
+        )
+        .await
+        .expect("merge command should return runtime output payload");
+
+        let first_chunk = stream
+            .next_chunk()
+            .await
+            .expect("read runtime chunk")
+            .expect("expected runtime message");
+        let parsed: serde_json::Value =
+            serde_json::from_str(first_chunk.delta.as_str()).expect("parse merge response");
+        assert_eq!(parsed["completed"], false);
+        assert!(parsed["error"]
+            .as_str()
+            .expect("error message")
+            .contains("merge blocked by required checks"));
+
+        let persisted_store = SqliteEventStore::open(temp_db.path()).expect("reopen store");
+        let events = persisted_store.read_ordered().expect("read events");
+        let transition_targets = events
+            .iter()
+            .filter_map(|event| match &event.payload {
+                OrchestrationEventPayload::WorkflowTransition(payload)
+                    if event.work_item_id.as_ref() == Some(&work_item_id) =>
+                {
+                    Some(payload.to.clone())
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert!(transition_targets.contains(&WorkflowState::Merging));
+        assert_eq!(transition_targets.last(), Some(&WorkflowState::InReview));
+    }
+
+    #[tokio::test]
+    async fn reconcile_pr_merge_progresses_merging_to_done_after_merge() {
+        let temp_db = TestDbPath::new("app-runtime-command-reconcile-merging-to-done");
+        let work_item_id = WorkItemId::new("wi-reconcile-merging");
+        let session_id = WorkerSessionId::new("sess-reconcile-merging");
+        let mut store = SqliteEventStore::open(temp_db.path()).expect("open store");
+        seed_runtime_mapping(&mut store, &work_item_id, session_id.as_str()).expect("seed mapping");
+        store
+            .append(NewEventEnvelope {
+                event_id: "evt-merging-seed".to_owned(),
+                occurred_at: "2026-02-19T00:10:00Z".to_owned(),
+                work_item_id: Some(work_item_id.clone()),
+                session_id: Some(session_id.clone()),
+                payload: OrchestrationEventPayload::WorkflowTransition(WorkflowTransitionPayload {
+                    work_item_id: work_item_id.clone(),
+                    from: WorkflowState::InReview,
+                    to: WorkflowState::Merging,
+                    reason: Some(WorkflowTransitionReason::MergeInitiated),
+                }),
+                schema_version: DOMAIN_EVENT_SCHEMA_VERSION,
+            })
+            .expect("seed merging workflow transition");
+
+        let code_host = MockCodeHost::with_merge_state(
+            Some(PullRequestRef {
+                repository: RepositoryRef {
+                    id: "acme/repo".to_owned(),
+                    name: "acme/repo".to_owned(),
+                    root: std::path::PathBuf::from("/workspace/wi-reconcile-merging"),
+                },
+                number: 447,
+                url: "https://github.com/acme/repo/pull/447".to_owned(),
+            }),
+            PullRequestMergeState {
+                merged: true,
+                is_draft: false,
+                merge_conflict: false,
+                base_branch: Some("main".to_owned()),
+                head_branch: Some("ap/AP-447-fix".to_owned()),
+            },
+        );
+
+        let (_stream_id, mut stream) = execute_workflow_reconcile_pr_merge(
+            &code_host,
+            temp_db.path().to_str().expect("path"),
+            SupervisorCommandContext {
+                selected_work_item_id: Some(work_item_id.as_str().to_owned()),
+                selected_session_id: Some(session_id.as_str().to_owned()),
+                scope: Some(format!("session:{}", session_id.as_str())),
+            },
+        )
+        .await
+        .expect("reconcile should transition merged merging flow to done");
+
+        let first_chunk = stream
+            .next_chunk()
+            .await
+            .expect("read runtime chunk")
+            .expect("expected runtime message");
+        let parsed: serde_json::Value =
+            serde_json::from_str(first_chunk.delta.as_str()).expect("parse reconcile response");
+        assert_eq!(parsed["completed"], true);
+        assert!(parsed["transitions"]
+            .as_array()
+            .expect("transitions")
+            .iter()
+            .any(|transition| transition == "Merging->Done"));
 
         let persisted_store = SqliteEventStore::open(temp_db.path()).expect("reopen store");
         let events = persisted_store.read_ordered().expect("read events");

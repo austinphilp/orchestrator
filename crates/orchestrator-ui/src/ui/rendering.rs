@@ -793,7 +793,8 @@ fn workflow_state_to_badge_label(state: &WorkflowState) -> String {
         }
         WorkflowState::AwaitingYourReview
         | WorkflowState::ReadyForReview
-        | WorkflowState::InReview => TerminalWorkflowStage::Review.label(),
+        | WorkflowState::InReview
+        | WorkflowState::Merging => TerminalWorkflowStage::Review.label(),
         WorkflowState::Done | WorkflowState::Abandoned => TerminalWorkflowStage::Complete.label(),
     }
     .to_owned()

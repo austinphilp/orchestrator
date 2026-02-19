@@ -10,6 +10,7 @@ pub enum WorkflowState {
     AwaitingYourReview,
     ReadyForReview,
     InReview,
+    Merging,
     Done,
     Abandoned,
 }
