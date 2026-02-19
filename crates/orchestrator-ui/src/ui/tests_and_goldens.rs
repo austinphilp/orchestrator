@@ -2732,6 +2732,84 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn run_session_merge_finalize_task_emits_finalized_event() {
+        let provider = Arc::new(TestTicketPickerProvider {
+            tickets: Vec::new(),
+            created: None,
+        });
+        let session_id = WorkerSessionId::new("sess-merge-finalized");
+        let (sender, mut receiver) = mpsc::channel(1);
+
+        run_session_merge_finalize_task(provider, session_id.clone(), sender).await;
+
+        let event = receiver.recv().await.expect("merge queue event");
+        match event {
+            MergeQueueEvent::SessionFinalized {
+                session_id: event_session_id,
+            } => assert_eq!(event_session_id, session_id),
+            _ => panic!("expected merge finalize success event"),
+        }
+    }
+
+    #[tokio::test]
+    async fn run_session_merge_finalize_task_emits_failure_event() {
+        struct FailingMergeFinalizeProvider;
+
+        #[async_trait]
+        impl TicketPickerProvider for FailingMergeFinalizeProvider {
+            async fn list_unfinished_tickets(&self) -> Result<Vec<TicketSummary>, CoreError> {
+                Ok(Vec::new())
+            }
+
+            async fn start_or_resume_ticket(
+                &self,
+                _ticket: TicketSummary,
+                _repository_override: Option<PathBuf>,
+            ) -> Result<SelectedTicketFlowResult, CoreError> {
+                Err(CoreError::DependencyUnavailable("not used".to_owned()))
+            }
+
+            async fn create_and_start_ticket_from_brief(
+                &self,
+                _brief: String,
+            ) -> Result<TicketSummary, CoreError> {
+                Err(CoreError::DependencyUnavailable("not used".to_owned()))
+            }
+
+            async fn reload_projection(&self) -> Result<ProjectionState, CoreError> {
+                Ok(ProjectionState::default())
+            }
+
+            async fn complete_session_after_merge(
+                &self,
+                _session_id: WorkerSessionId,
+            ) -> Result<(), CoreError> {
+                Err(CoreError::DependencyUnavailable(
+                    "merge finalize failed in test".to_owned(),
+                ))
+            }
+        }
+
+        let provider = Arc::new(FailingMergeFinalizeProvider);
+        let session_id = WorkerSessionId::new("sess-merge-fail");
+        let (sender, mut receiver) = mpsc::channel(1);
+
+        run_session_merge_finalize_task(provider, session_id.clone(), sender).await;
+
+        let event = receiver.recv().await.expect("merge queue event");
+        match event {
+            MergeQueueEvent::SessionFinalizeFailed {
+                session_id: event_session_id,
+                message,
+            } => {
+                assert_eq!(event_session_id, session_id);
+                assert!(message.contains("merge finalize failed in test"));
+            }
+            _ => panic!("expected merge finalize failure event"),
+        }
+    }
+
     #[test]
     fn batch_jump_prefers_unresolved_then_falls_back_to_first_any() {
         let mut projection = ProjectionState::default();

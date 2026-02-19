@@ -2,9 +2,10 @@ use integration_linear::LinearTicketingProvider;
 use orchestrator_core::{
     rebuild_projection, CodeHostProvider, CoreError, EventStore, GithubClient, LlmProvider,
     NewEventEnvelope, OrchestrationEventPayload, ProjectionState, SelectedTicketFlowConfig,
-    SelectedTicketFlowResult, SessionCrashedPayload, SqliteEventStore, Supervisor, TicketSummary,
-    TicketingProvider, UntypedCommandInvocation, VcsProvider, WorkerBackend, WorkerSessionId,
-    WorkerSessionStatus, DOMAIN_EVENT_SCHEMA_VERSION,
+    SelectedTicketFlowResult, SessionCompletedPayload, SessionCrashedPayload, SqliteEventStore,
+    SessionHandle, Supervisor, TicketSummary, TicketingProvider, UntypedCommandInvocation,
+    VcsProvider, WorkerBackend, WorkerSessionId, WorkerSessionStatus, RuntimeSessionId,
+    DOMAIN_EVENT_SCHEMA_VERSION,
 };
 use orchestrator_ui::{SupervisorCommandContext, SupervisorCommandDispatcher};
 use serde::{Deserialize, Serialize};

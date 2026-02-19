@@ -4,9 +4,11 @@ mod tests {
     use orchestrator_core::test_support::TestDbPath;
     use orchestrator_core::{
         ArtifactCreatedPayload, ArtifactId, ArtifactKind, ArtifactRecord, BackendKind,
-        CodeHostKind, PullRequestMergeState, PullRequestRef, PullRequestSummary, RepositoryRef,
-        ReviewerRequest, RuntimeMappingRecord, SessionRecord, TicketId, TicketProvider,
-        TicketRecord, WorkItemId, WorkerSessionId, WorkerSessionStatus, WorktreeId, WorktreeRecord,
+        CodeHostKind, NewEventEnvelope, OrchestrationEventPayload, PullRequestMergeState,
+        PullRequestRef, PullRequestSummary, RepositoryRef, ReviewerRequest, RuntimeMappingRecord,
+        SessionRecord, TicketId, TicketProvider, TicketRecord, WorkItemId, WorkerSessionId,
+        WorkerSessionStatus, WorkflowState, WorkflowTransitionPayload, WorktreeId, WorktreeRecord,
+        DOMAIN_EVENT_SCHEMA_VERSION,
     };
     use serde_json::json;
     use std::sync::Mutex;
@@ -96,6 +98,7 @@ mod tests {
     struct MockCodeHost {
         fallback_pr: Option<PullRequestRef>,
         fallback_calls: Mutex<Vec<(String, String)>>,
+        merge_state: PullRequestMergeState,
     }
 
     impl MockCodeHost {
@@ -103,6 +106,21 @@ mod tests {
             Self {
                 fallback_pr,
                 fallback_calls: Mutex::new(Vec::new()),
+                merge_state: PullRequestMergeState {
+                    merged: false,
+                    is_draft: true,
+                    merge_conflict: false,
+                    base_branch: None,
+                    head_branch: None,
+                },
+            }
+        }
+
+        fn with_merge_state(fallback_pr: Option<PullRequestRef>, merge_state: PullRequestMergeState) -> Self {
+            Self {
+                fallback_pr,
+                fallback_calls: Mutex::new(Vec::new()),
+                merge_state,
             }
         }
 
@@ -153,13 +171,7 @@ mod tests {
             &self,
             _pr: &PullRequestRef,
         ) -> Result<PullRequestMergeState, CoreError> {
-            Ok(PullRequestMergeState {
-                merged: false,
-                is_draft: true,
-                merge_conflict: false,
-                base_branch: None,
-                head_branch: None,
-            })
+            Ok(self.merge_state.clone())
         }
 
         async fn merge_pull_request(&self, _pr: &PullRequestRef) -> Result<(), CoreError> {
@@ -701,5 +713,84 @@ mod tests {
         .expect("fallback should persist PR artifact");
         assert_eq!(resolved.number, 444);
     }
-}
 
+    #[tokio::test]
+    async fn reconcile_pr_merge_progresses_awaiting_review_to_done_after_merge() {
+        let temp_db = TestDbPath::new("app-runtime-command-reconcile-awaiting-review-to-done");
+        let work_item_id = WorkItemId::new("wi-reconcile-awaiting-review");
+        let session_id = WorkerSessionId::new("sess-reconcile-awaiting-review");
+        let mut store = SqliteEventStore::open(temp_db.path()).expect("open store");
+        seed_runtime_mapping(&mut store, &work_item_id, session_id.as_str()).expect("seed mapping");
+        store
+            .append(NewEventEnvelope {
+                event_id: "evt-awaiting-review-seed".to_owned(),
+                occurred_at: "2026-02-19T00:00:00Z".to_owned(),
+                work_item_id: Some(work_item_id.clone()),
+                session_id: Some(session_id.clone()),
+                payload: OrchestrationEventPayload::WorkflowTransition(WorkflowTransitionPayload {
+                    work_item_id: work_item_id.clone(),
+                    from: WorkflowState::PRDrafted,
+                    to: WorkflowState::AwaitingYourReview,
+                    reason: None,
+                }),
+                schema_version: DOMAIN_EVENT_SCHEMA_VERSION,
+            })
+            .expect("seed awaiting-review workflow transition");
+
+        let code_host = MockCodeHost::with_merge_state(
+            Some(PullRequestRef {
+                repository: RepositoryRef {
+                    id: "acme/repo".to_owned(),
+                    name: "acme/repo".to_owned(),
+                    root: std::path::PathBuf::from("/workspace/wi-reconcile-awaiting-review"),
+                },
+                number: 445,
+                url: "https://github.com/acme/repo/pull/445".to_owned(),
+            }),
+            PullRequestMergeState {
+                merged: true,
+                is_draft: false,
+                merge_conflict: false,
+                base_branch: Some("main".to_owned()),
+                head_branch: Some("ap/AP-445-fix".to_owned()),
+            },
+        );
+
+        let (_stream_id, mut stream) = execute_workflow_reconcile_pr_merge(
+            &code_host,
+            temp_db.path().to_str().expect("path"),
+            SupervisorCommandContext {
+                selected_work_item_id: Some(work_item_id.as_str().to_owned()),
+                selected_session_id: Some(session_id.as_str().to_owned()),
+                scope: Some(format!("session:{}", session_id.as_str())),
+            },
+        )
+        .await
+        .expect("reconcile should transition merged review flow to done");
+
+        let first_chunk = stream
+            .next_chunk()
+            .await
+            .expect("read runtime chunk")
+            .expect("expected runtime message");
+        let parsed: serde_json::Value =
+            serde_json::from_str(first_chunk.delta.as_str()).expect("parse reconcile response");
+        assert_eq!(parsed["completed"], true);
+
+        let persisted_store = SqliteEventStore::open(temp_db.path()).expect("reopen store");
+        let events = persisted_store.read_ordered().expect("read events");
+        let latest_state = events
+            .iter()
+            .filter_map(|event| match &event.payload {
+                OrchestrationEventPayload::WorkflowTransition(payload)
+                    if event.work_item_id.as_ref() == Some(&work_item_id) =>
+                {
+                    Some(payload.to.clone())
+                }
+                _ => None,
+            })
+            .last()
+            .expect("workflow transitions recorded");
+        assert_eq!(latest_state, WorkflowState::Done);
+    }
+}

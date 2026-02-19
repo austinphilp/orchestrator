@@ -126,6 +126,31 @@ async fn run_merge_queue_command_task(
         .await;
 }
 
+async fn run_session_merge_finalize_task(
+    provider: Arc<dyn TicketPickerProvider>,
+    session_id: WorkerSessionId,
+    sender: mpsc::Sender<MergeQueueEvent>,
+) {
+    match provider
+        .complete_session_after_merge(session_id.clone())
+        .await
+    {
+        Ok(()) => {
+            let _ = sender
+                .send(MergeQueueEvent::SessionFinalized { session_id })
+                .await;
+        }
+        Err(error) => {
+            let _ = sender
+                .send(MergeQueueEvent::SessionFinalizeFailed {
+                    session_id,
+                    message: sanitize_terminal_display_text(error.to_string().as_str()),
+                })
+                .await;
+        }
+    }
+}
+
 #[derive(Debug, Default)]
 struct MergeQueueResponse {
     completed: bool,

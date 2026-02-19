@@ -104,6 +104,83 @@ impl<S: Supervisor, G: GithubClient> App<S, G> {
         Ok(())
     }
 
+    pub async fn complete_session_after_merge(
+        &self,
+        session_id: &WorkerSessionId,
+        worker_backend: &dyn WorkerBackend,
+    ) -> Result<(), CoreError> {
+        let existing_mapping = {
+            let store = open_event_store(&self.config.event_store_path)?;
+            store
+                .find_runtime_mapping_by_session_id(session_id)?
+                .ok_or_else(|| {
+                    CoreError::Configuration(format!(
+                        "could not resolve runtime mapping for session '{}'",
+                        session_id.as_str()
+                    ))
+                })?
+        };
+
+        let mut cleanup_warnings = Vec::new();
+        let handle = SessionHandle {
+            session_id: RuntimeSessionId::new(session_id.as_str().to_owned()),
+            backend: existing_mapping.session.backend_kind.clone(),
+        };
+        if let Err(error) = worker_backend.kill(&handle).await {
+            if !matches!(error, orchestrator_core::RuntimeError::SessionNotFound(_)) {
+                cleanup_warnings.push(format!(
+                    "failed to archive runtime session '{}': {error}",
+                    session_id.as_str()
+                ));
+            }
+        }
+
+        if let Err(error) = cleanup_worktree_after_merge(
+            existing_mapping.worktree.path.as_str(),
+            existing_mapping.worktree.branch.as_str(),
+        ) {
+            cleanup_warnings.push(error.to_string());
+        }
+
+        let mut store = open_event_store(&self.config.event_store_path)?;
+        let mut mapping = store
+            .find_runtime_mapping_by_session_id(session_id)?
+            .ok_or_else(|| {
+                CoreError::Configuration(format!(
+                    "could not resolve runtime mapping for session '{}'",
+                    session_id.as_str()
+                ))
+            })?;
+        mapping.session.status = WorkerSessionStatus::Done;
+        mapping.session.updated_at = now_timestamp();
+        store.upsert_runtime_mapping(&mapping)?;
+        store.delete_harness_session_binding(
+            &mapping.session.session_id,
+            &mapping.session.backend_kind,
+        )?;
+        store.append(NewEventEnvelope {
+            event_id: format!("evt-session-completed-{}", now_nanos()),
+            occurred_at: now_timestamp(),
+            work_item_id: Some(mapping.work_item_id.clone()),
+            session_id: Some(session_id.clone()),
+            payload: OrchestrationEventPayload::SessionCompleted(SessionCompletedPayload {
+                session_id: session_id.clone(),
+                summary: Some("Session archived after PR merge.".to_owned()),
+            }),
+            schema_version: DOMAIN_EVENT_SCHEMA_VERSION,
+        })?;
+
+        if cleanup_warnings.is_empty() {
+            Ok(())
+        } else {
+            Err(CoreError::DependencyUnavailable(format!(
+                "merged session '{}' finalized with cleanup warnings: {}",
+                session_id.as_str(),
+                cleanup_warnings.join("; ")
+            )))
+        }
+    }
+
     pub fn session_worktree_diff(
         &self,
         session_id: &WorkerSessionId,
@@ -290,6 +367,133 @@ fn now_nanos() -> u128 {
         .as_nanos()
 }
 
+fn cleanup_worktree_after_merge(worktree_path_raw: &str, branch: &str) -> Result<(), CoreError> {
+    let worktree_path = PathBuf::from(worktree_path_raw.trim());
+    if worktree_path.as_os_str().is_empty() || !worktree_path.exists() {
+        return Ok(());
+    }
+
+    let repository_root = resolve_repository_root_from_worktree(&worktree_path)?;
+    let worktree_arg = worktree_path.to_string_lossy().to_string();
+
+    let remove_output = run_git_command(
+        repository_root.as_path(),
+        &["worktree", "remove", "--force", worktree_arg.as_str()],
+    )?;
+    if !remove_output.status.success() {
+        let detail = git_output_detail(&remove_output);
+        let normalized = detail.to_ascii_lowercase();
+        if !looks_like_path_missing_error(&normalized) {
+            std::fs::remove_dir_all(&worktree_path).map_err(|error| {
+                CoreError::DependencyUnavailable(format!(
+                    "failed to remove worktree '{}' after merge using git ({detail}) and filesystem fallback ({error})",
+                    worktree_path.display()
+                ))
+            })?;
+        }
+    }
+
+    let branch = branch.trim();
+    if branch.is_empty() {
+        return Ok(());
+    }
+
+    let delete_output = run_git_command(repository_root.as_path(), &["branch", "-d", branch])?;
+    if delete_output.status.success() {
+        return Ok(());
+    }
+
+    let delete_detail = git_output_detail(&delete_output);
+    let delete_normalized = delete_detail.to_ascii_lowercase();
+    if looks_like_branch_missing_error(&delete_normalized) {
+        return Ok(());
+    }
+
+    let force_delete_output =
+        run_git_command(repository_root.as_path(), &["branch", "-D", branch])?;
+    if force_delete_output.status.success() {
+        return Ok(());
+    }
+
+    let force_delete_detail = git_output_detail(&force_delete_output);
+    let force_delete_normalized = force_delete_detail.to_ascii_lowercase();
+    if looks_like_branch_missing_error(&force_delete_normalized) {
+        return Ok(());
+    }
+
+    Err(CoreError::DependencyUnavailable(format!(
+        "failed to delete local merged branch '{branch}': {force_delete_detail}"
+    )))
+}
+
+fn resolve_repository_root_from_worktree(worktree_path: &PathBuf) -> Result<PathBuf, CoreError> {
+    let output = run_git_command(worktree_path.as_path(), &["rev-parse", "--show-toplevel"])?;
+    if !output.status.success() {
+        return Err(CoreError::DependencyUnavailable(format!(
+            "failed to resolve repository root for worktree '{}': {}",
+            worktree_path.display(),
+            git_output_detail(&output)
+        )));
+    }
+
+    let root = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    if root.is_empty() {
+        return Err(CoreError::DependencyUnavailable(format!(
+            "failed to resolve repository root for worktree '{}': empty `git rev-parse` output",
+            worktree_path.display()
+        )));
+    }
+
+    Ok(PathBuf::from(root))
+}
+
+fn run_git_command(
+    cwd: &std::path::Path,
+    args: &[&str],
+) -> Result<std::process::Output, CoreError> {
+    let git_bin = std::env::var_os("ORCHESTRATOR_GIT_BIN")
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "git".into());
+
+    Command::new(&git_bin)
+        .arg("-C")
+        .arg(cwd)
+        .args(args)
+        .output()
+        .map_err(|error| {
+            CoreError::DependencyUnavailable(format!(
+                "failed to execute git command in '{}': {error}",
+                cwd.display()
+            ))
+        })
+}
+
+fn git_output_detail(output: &std::process::Output) -> String {
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+    if !stderr.is_empty() {
+        return stderr;
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    if !stdout.is_empty() {
+        return stdout;
+    }
+    format!("exit status {}", output.status)
+}
+
+fn looks_like_path_missing_error(detail: &str) -> bool {
+    detail.contains("does not exist")
+        || detail.contains("not found")
+        || detail.contains("cannot find")
+        || detail.contains("no such file or directory")
+}
+
+fn looks_like_branch_missing_error(detail: &str) -> bool {
+    detail.contains("not found")
+        || detail.contains("does not exist")
+        || detail.contains("unknown revision")
+        || detail.contains("not a valid branch")
+}
+
 fn sanitize_terminal_display_text(input: &str) -> String {
     let mut output = String::with_capacity(input.len());
     for ch in input.chars() {
@@ -341,4 +545,3 @@ where
         self.supervisor.cancel_stream(stream_id).await
     }
 }
-

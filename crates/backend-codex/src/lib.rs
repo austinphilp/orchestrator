@@ -26,8 +26,9 @@ const ENV_CODEX_BIN: &str = "ORCHESTRATOR_CODEX_BIN";
 const ENV_CODEX_SERVER_BASE_URL: &str = "ORCHESTRATOR_CODEX_SERVER_BASE_URL";
 const ENV_HARNESS_LOG_RAW_EVENTS: &str = "ORCHESTRATOR_HARNESS_LOG_RAW_EVENTS";
 const ENV_HARNESS_LOG_NORMALIZED_EVENTS: &str = "ORCHESTRATOR_HARNESS_LOG_NORMALIZED_EVENTS";
-const HARNESS_RAW_LOG_FILE: &str = ".orchestrator/logs/harness-raw.log";
-const HARNESS_NORMALIZED_LOG_FILE: &str = ".orchestrator/logs/harness-normalized.log";
+const HARNESS_LOG_DIR_NAME: &str = "logs";
+const HARNESS_RAW_LOG_FILE_NAME: &str = "harness-raw.log";
+const HARNESS_NORMALIZED_LOG_FILE_NAME: &str = "harness-normalized.log";
 const ENV_HARNESS_SESSION_ID: &str = "ORCHESTRATOR_HARNESS_SESSION_ID";
 const ENV_HARNESS_SERVER_STARTUP_TIMEOUT_SECS: &str =
     "ORCHESTRATOR_HARNESS_SERVER_STARTUP_TIMEOUT_SECS";
@@ -1479,7 +1480,10 @@ fn maybe_log_raw_harness_line(line: &str) {
         "backend": "codex",
         "raw": sanitize_raw_log_line(line),
     });
-    append_harness_log_line(HARNESS_RAW_LOG_FILE, payload.to_string().as_str());
+    append_harness_log_line(
+        harness_raw_log_path().as_path(),
+        payload.to_string().as_str(),
+    );
 }
 
 fn maybe_log_normalized_harness_event(thread_id: &str, terminal: bool, event: &BackendEvent) {
@@ -1502,16 +1506,105 @@ fn maybe_log_normalized_harness_event(thread_id: &str, terminal: bool, event: &B
             "event": format!("{event:?}"),
         }),
     };
-    append_harness_log_line(HARNESS_NORMALIZED_LOG_FILE, payload.to_string().as_str());
+    append_harness_log_line(
+        harness_normalized_log_path().as_path(),
+        payload.to_string().as_str(),
+    );
 }
 
-fn append_harness_log_line(path: &str, line: &str) {
-    if let Some(parent) = Path::new(path).parent() {
+fn append_harness_log_line(path: &Path, line: &str) {
+    if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
     if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path) {
         let _ = writeln!(file, "{line}");
     }
+}
+
+fn harness_raw_log_path() -> &'static PathBuf {
+    static PATH: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    PATH.get_or_init(|| resolve_orchestrator_logs_dir().join(HARNESS_RAW_LOG_FILE_NAME))
+}
+
+fn harness_normalized_log_path() -> &'static PathBuf {
+    static PATH: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    PATH.get_or_init(|| resolve_orchestrator_logs_dir().join(HARNESS_NORMALIZED_LOG_FILE_NAME))
+}
+
+fn resolve_orchestrator_logs_dir() -> PathBuf {
+    resolve_data_root()
+        .join("orchestrator")
+        .join(HARNESS_LOG_DIR_NAME)
+}
+
+fn resolve_data_root() -> PathBuf {
+    #[cfg(target_os = "windows")]
+    {
+        if let Ok(path) = std::env::var("LOCALAPPDATA") {
+            let path = path.trim();
+            if !path.is_empty() {
+                return absolutize_path(PathBuf::from(path));
+            }
+        }
+        if let Ok(path) = std::env::var("APPDATA") {
+            let path = path.trim();
+            if !path.is_empty() {
+                return absolutize_path(PathBuf::from(path));
+            }
+        }
+        if let Some(home) = resolve_home_dir() {
+            return home.join("AppData").join("Local");
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        if let Some(home) = resolve_home_dir() {
+            return home.join("Library").join("Application Support");
+        }
+    }
+
+    #[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
+    {
+        if let Ok(path) = std::env::var("XDG_DATA_HOME") {
+            let path = path.trim();
+            if !path.is_empty() {
+                return absolutize_path(PathBuf::from(path));
+            }
+        }
+        if let Some(home) = resolve_home_dir() {
+            return home.join(".local").join("share");
+        }
+    }
+
+    std::env::temp_dir()
+}
+
+fn resolve_home_dir() -> Option<PathBuf> {
+    std::env::var("HOME")
+        .ok()
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| {
+            std::env::var("USERPROFILE")
+                .ok()
+                .map(|value| value.trim().to_owned())
+                .filter(|value| !value.is_empty())
+                .map(PathBuf::from)
+        })
+}
+
+fn absolutize_path(path: PathBuf) -> PathBuf {
+    if path.is_absolute() {
+        return path;
+    }
+
+    if let Ok(current) = std::env::current_dir() {
+        return current.join(path);
+    }
+
+    std::env::temp_dir().join(path)
 }
 
 fn sanitize_raw_log_line(line: &str) -> String {
