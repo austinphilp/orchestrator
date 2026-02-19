@@ -1487,6 +1487,7 @@ dependencies = [
  "orchestrator-core",
  "orchestrator-runtime",
  "ratatui",
+ "ratatui-interact",
  "ratskin",
  "serde",
  "serde_json",
@@ -1851,6 +1852,19 @@ dependencies = [
  "crossterm 0.29.0",
  "instability",
  "ratatui-core",
+]
+
+[[package]]
+name = "ratatui-interact"
+version = "0.4.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8d7ffbbfa81465795a6f67e365a4f94675902b56d1cabfdfbfc689f17d87a61b"
+dependencies = [
+ "crossterm 0.29.0",
+ "ratatui",
+ "regex",
+ "thiserror 2.0.18",
+ "unicode-width 0.2.2",
 ]
 
 [[package]]

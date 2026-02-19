@@ -10,8 +10,10 @@ orchestrator-runtime = { path = "../orchestrator-runtime" }
 crossterm.workspace = true
 ratatui.workspace = true
 ratskin.workspace = true
+ratatui-interact.workspace = true
 tokio.workspace = true
 async-trait.workspace = true
+serde_json.workspace = true
 
 [dev-dependencies]
 serde.workspace = true

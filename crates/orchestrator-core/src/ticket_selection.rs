@@ -1,20 +1,19 @@
-use std::path::{Path, PathBuf};
 use std::fs;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::normalization::DOMAIN_EVENT_SCHEMA_VERSION;
+use crate::store::ProjectRepositoryMappingRecord;
 use crate::{
     apply_workflow_transition, BackendKind, CoreError, CreateWorktreeRequest,
     DeleteWorktreeRequest, EventStore, NewEventEnvelope, OrchestrationEventPayload, ProjectId,
-    RepositoryRef, RuntimeError,
-    RuntimeMappingRecord, SessionHandle, SessionRecord, SessionSpawnedPayload, SpawnSpec,
-    SqliteEventStore, TicketId, TicketProvider, TicketRecord, TicketSummary, VcsProvider,
-    WorkItemCreatedPayload, WorkItemId, WorkerBackend, WorkerSessionId, WorkerSessionStatus,
-    WorkflowGuardContext, WorkflowState, WorkflowTransitionPayload, WorkflowTransitionReason,
-    WorktreeCreatedPayload, WorktreeId, WorktreeRecord,
+    RepositoryRef, RuntimeError, RuntimeMappingRecord, SessionHandle, SessionRecord,
+    SessionSpawnedPayload, SpawnSpec, SqliteEventStore, TicketId, TicketProvider, TicketRecord,
+    TicketSummary, VcsProvider, WorkItemCreatedPayload, WorkItemId, WorkerBackend, WorkerSessionId,
+    WorkerSessionStatus, WorkflowGuardContext, WorkflowState, WorkflowTransitionPayload,
+    WorkflowTransitionReason, WorktreeCreatedPayload, WorktreeId, WorktreeRecord,
 };
-use crate::store::ProjectRepositoryMappingRecord;
 
 const DEFAULT_BASE_BRANCH: &str = "main";
 const DEFAULT_PROJECT_ID: &str = "project-default";
@@ -133,7 +132,8 @@ async fn start_new_mapping(
     let (provider, provider_ticket_id) =
         parse_ticket_provider_identity(&selected_ticket.ticket_id)?;
     let repository =
-        resolve_repository_for_ticket(store, vcs, &provider, &project_id, repository_override).await?;
+        resolve_repository_for_ticket(store, vcs, &provider, &project_id, repository_override)
+            .await?;
     store.upsert_project_repository_mapping(&ProjectRepositoryMappingRecord {
         provider: provider.clone(),
         project_id: project_id.clone(),
@@ -215,7 +215,10 @@ async fn start_new_mapping(
         session_id: session_id.clone().into(),
         backend: worker_backend.kind(),
     };
-    if let Err(send_error) = worker_backend.send_input(&kickoff_handle, &kickoff_bytes).await {
+    if let Err(send_error) = worker_backend
+        .send_input(&kickoff_handle, &kickoff_bytes)
+        .await
+    {
         let kill_error = worker_backend.kill(&kickoff_handle).await.err();
         let cleanup_error = vcs
             .delete_worktree(DeleteWorktreeRequest::non_destructive(
@@ -698,10 +701,7 @@ fn ticket_provider_name(provider: &TicketProvider) -> &'static str {
     }
 }
 
-fn cleanup_completed_session_worktrees(
-    mappings: &[RuntimeMappingRecord],
-    worktrees_root: &Path,
-) {
+fn cleanup_completed_session_worktrees(mappings: &[RuntimeMappingRecord], worktrees_root: &Path) {
     for mapping in mappings {
         if mapping.session.status != WorkerSessionStatus::Done {
             continue;
@@ -740,10 +740,7 @@ async fn resolve_repository_for_ticket(
     resolve_single_repository(vcs, &repository_path, provider, project_id).await
 }
 
-fn expand_tilde_repository_path(
-    path: PathBuf,
-    project_id: &str,
-) -> Result<PathBuf, CoreError> {
+fn expand_tilde_repository_path(path: PathBuf, project_id: &str) -> Result<PathBuf, CoreError> {
     let raw = path.to_string_lossy();
     if raw == "~" {
         return resolve_core_home().map(PathBuf::from).ok_or_else(|| {
@@ -753,22 +750,24 @@ fn expand_tilde_repository_path(
         });
     }
     if let Some(suffix) = raw.strip_prefix("~/") {
-        return resolve_core_home().map(PathBuf::from).map(|home| home.join(suffix)).ok_or_else(
-            || {
+        return resolve_core_home()
+            .map(PathBuf::from)
+            .map(|home| home.join(suffix))
+            .ok_or_else(|| {
                 CoreError::Configuration(format!(
                     "Cannot resolve repository path for project '{project_id}': HOME is not set."
                 ))
-            },
-        );
+            });
     }
     if let Some(suffix) = raw.strip_prefix("~\\") {
-        return resolve_core_home().map(PathBuf::from).map(|home| home.join(suffix)).ok_or_else(
-            || {
+        return resolve_core_home()
+            .map(PathBuf::from)
+            .map(|home| home.join(suffix))
+            .ok_or_else(|| {
                 CoreError::Configuration(format!(
                     "Cannot resolve repository path for project '{project_id}': HOME is not set."
                 ))
-            },
-        );
+            });
     }
 
     Ok(path)
@@ -1016,9 +1015,7 @@ mod tests {
     use async_trait::async_trait;
 
     use super::*;
-    use crate::{
-        BackendCapabilities, BackendKind, RuntimeResult, WorktreeStatus,
-    };
+    use crate::{BackendCapabilities, BackendKind, RuntimeResult, WorktreeStatus};
 
     struct StubVcsProvider {
         discovered: Vec<RepositoryRef>,
@@ -1209,7 +1206,10 @@ mod tests {
             Ok(Box::new(EmptyStream))
         }
 
-        async fn harness_session_id(&self, _session: &SessionHandle) -> RuntimeResult<Option<String>> {
+        async fn harness_session_id(
+            &self,
+            _session: &SessionHandle,
+        ) -> RuntimeResult<Option<String>> {
             self.harness_session_ids
                 .lock()
                 .expect("lock")
@@ -1432,10 +1432,7 @@ mod tests {
         .expect_err("expected mapping prompt error");
 
         match err {
-            CoreError::MissingProjectRepositoryMapping {
-                provider,
-                project,
-            } => {
+            CoreError::MissingProjectRepositoryMapping { provider, project } => {
                 assert_eq!(provider, "linear");
                 assert_eq!(project, "proj-126");
             }
@@ -1765,8 +1762,8 @@ mod tests {
             &vcs,
             &backend,
         )
-            .await
-            .expect("resume flow succeeds");
+        .await
+        .expect("resume flow succeeds");
 
         let events = store
             .read_events_for_work_item(&mapping.work_item_id)
@@ -1806,8 +1803,8 @@ mod tests {
             &vcs,
             &backend,
         )
-            .await
-            .expect("resume flow succeeds");
+        .await
+        .expect("resume flow succeeds");
 
         let events = store
             .read_events_for_work_item(&mapping.work_item_id)

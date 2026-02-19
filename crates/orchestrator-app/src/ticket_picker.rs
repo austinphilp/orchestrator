@@ -1,13 +1,13 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use std::path::PathBuf;
 use orchestrator_core::{
     CoreError, CreateTicketRequest, GithubClient, LlmChatRequest, LlmMessage, LlmProvider,
     LlmRole, ProjectionState, SelectedTicketFlowResult, Supervisor, TicketQuery, TicketSummary,
     TicketingProvider, VcsProvider, WorkerBackend, WorkerSessionId,
 };
-use orchestrator_ui::TicketPickerProvider;
+use orchestrator_ui::{SessionWorktreeDiff, TicketPickerProvider};
+use std::path::PathBuf;
 
 use crate::App;
 
@@ -98,11 +98,7 @@ where
             })
         })
         .await
-        .map_err(|error| {
-            CoreError::Configuration(format!(
-                "ticket picker task failed: {error}"
-            ))
-        })?
+        .map_err(|error| CoreError::Configuration(format!("ticket picker task failed: {error}")))?
     }
 
     async fn reload_projection(&self) -> Result<ProjectionState, CoreError> {
@@ -154,6 +150,50 @@ where
             .map_err(|error| {
                 CoreError::Configuration(format!(
                     "ticket picker task failed while marking session crashed: {error}"
+                ))
+            })?
+    }
+
+    async fn session_worktree_diff(
+        &self,
+        session_id: WorkerSessionId,
+    ) -> Result<SessionWorktreeDiff, CoreError> {
+        let app = self.app.clone();
+        tokio::task::spawn_blocking(move || app.session_worktree_diff(&session_id))
+            .await
+            .map_err(|error| {
+                CoreError::Configuration(format!(
+                    "ticket picker task failed while loading session diff: {error}"
+                ))
+            })?
+    }
+
+    async fn set_session_workflow_stage(
+        &self,
+        session_id: WorkerSessionId,
+        workflow_stage: String,
+    ) -> Result<(), CoreError> {
+        let app = self.app.clone();
+        tokio::task::spawn_blocking(move || {
+            app.set_session_workflow_stage(&session_id, workflow_stage.as_str())
+        })
+        .await
+        .map_err(|error| {
+            CoreError::Configuration(format!(
+                "ticket picker task failed while persisting workflow stage: {error}"
+            ))
+        })?
+    }
+
+    async fn list_session_workflow_stages(
+        &self,
+    ) -> Result<Vec<(WorkerSessionId, String)>, CoreError> {
+        let app = self.app.clone();
+        tokio::task::spawn_blocking(move || app.list_session_workflow_stages())
+            .await
+            .map_err(|error| {
+                CoreError::Configuration(format!(
+                    "ticket picker task failed while loading workflow stages: {error}"
                 ))
             })?
     }

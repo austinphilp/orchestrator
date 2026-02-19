@@ -70,7 +70,8 @@ async fn main() -> Result<()> {
         .with_supervisor_command_dispatcher(supervisor_dispatcher)
         .with_ticket_picker_provider(ticket_picker_provider)
         .with_worker_backend(worker_backend.clone());
-    app.start_linear_polling(linear_ticketing.as_deref()).await?;
+    app.start_linear_polling(linear_ticketing.as_deref())
+        .await?;
     match ui.run(&state.status, &state.projection) {
         Ok(()) => {
             app.stop_linear_polling(linear_ticketing.as_deref()).await?;
@@ -146,15 +147,14 @@ fn parse_cli_flags() -> Result<CliFlags, CoreError> {
 fn print_cli_help() {
     println!("Usage: orchestrator-app [--ticketing-provider <linear|shortcut>] [--harness-provider <opencode|codex>]");
     println!();
-    println!("  --ticketing-provider <provider>   Configure ticketing provider (linear or shortcut)");
+    println!(
+        "  --ticketing-provider <provider>   Configure ticketing provider (linear or shortcut)"
+    );
     println!("  --harness-provider <provider>     Configure harness/backend provider (opencode or codex)");
     println!("  --help                            Show this help message");
 }
 
-fn read_cli_value(
-    flag: &str,
-    value: String,
-) -> Result<String, CoreError> {
+fn read_cli_value(flag: &str, value: String) -> Result<String, CoreError> {
     let value = value.trim().to_ascii_lowercase();
     if value.is_empty() {
         return Err(CoreError::Configuration(format!(
@@ -198,19 +198,20 @@ fn build_ticketing_provider(
             let ticketing: Arc<dyn TicketingProvider + Send + Sync> = provider;
             Ok((ticketing, Some(linear_ticketing)))
         }
-        "shortcut" => Ok((
-            Arc::new(ShortcutTicketingProvider::from_env()?),
-            None,
-        )),
+        "shortcut" => Ok((Arc::new(ShortcutTicketingProvider::from_env()?), None)),
         other => Err(CoreError::Configuration(format!(
             "Unknown ticketing provider '{other}'. Expected 'linear' or 'shortcut'."
         ))),
     }
 }
 
-fn build_harness_provider(provider: &str) -> Result<Arc<dyn WorkerBackend + Send + Sync>, CoreError> {
+fn build_harness_provider(
+    provider: &str,
+) -> Result<Arc<dyn WorkerBackend + Send + Sync>, CoreError> {
     match provider {
-        "opencode" => Ok(Arc::new(OpenCodeBackend::new(OpenCodeBackendConfig::default()))),
+        "opencode" => Ok(Arc::new(OpenCodeBackend::new(
+            OpenCodeBackendConfig::default(),
+        ))),
         "codex" => Ok(Arc::new(CodexBackend::from_env())),
         other => Err(CoreError::Configuration(format!(
             "Unknown harness provider '{other}'. Expected 'opencode' or 'codex'."

@@ -21,6 +21,8 @@ pub mod ids {
     pub const UI_OPEN_CHAT_INSPECTOR_FOR_SELECTED: &str = "ui.open_chat_inspector_for_selected";
     pub const SUPERVISOR_QUERY: &str = "supervisor.query";
     pub const WORKFLOW_APPROVE_PR_READY: &str = "workflow.approve_pr_ready";
+    pub const WORKFLOW_RECONCILE_PR_MERGE: &str = "workflow.reconcile_pr_merge";
+    pub const WORKFLOW_MERGE_PR: &str = "workflow.merge_pr";
     pub const GITHUB_OPEN_REVIEW_TABS: &str = "github.open_review_tabs";
 }
 
@@ -74,6 +76,8 @@ pub enum Command {
     UiOpenChatInspectorForSelected,
     SupervisorQuery(SupervisorQueryArgs),
     WorkflowApprovePrReady,
+    WorkflowReconcilePrMerge,
+    WorkflowMergePr,
     GithubOpenReviewTabs,
 }
 
@@ -201,6 +205,8 @@ impl Command {
             Command::UiOpenChatInspectorForSelected => ids::UI_OPEN_CHAT_INSPECTOR_FOR_SELECTED,
             Command::SupervisorQuery(_) => ids::SUPERVISOR_QUERY,
             Command::WorkflowApprovePrReady => ids::WORKFLOW_APPROVE_PR_READY,
+            Command::WorkflowReconcilePrMerge => ids::WORKFLOW_RECONCILE_PR_MERGE,
+            Command::WorkflowMergePr => ids::WORKFLOW_MERGE_PR,
             Command::GithubOpenReviewTabs => ids::GITHUB_OPEN_REVIEW_TABS,
         }
     }
@@ -319,6 +325,31 @@ fn canonical_definitions() -> Vec<CommandDefinition> {
                     Command::WorkflowApprovePrReady,
                 )
             },
+            |_| None,
+        ),
+        CommandDefinition::new(
+            CommandMetadata {
+                id: ids::WORKFLOW_RECONCILE_PR_MERGE,
+                description:
+                    "Reconcile PR merge status and advance workflow to completion when merged.",
+                args: CommandArgSummary::None,
+            },
+            |args| {
+                parse_zero_arg(
+                    ids::WORKFLOW_RECONCILE_PR_MERGE,
+                    args,
+                    Command::WorkflowReconcilePrMerge,
+                )
+            },
+            |_| None,
+        ),
+        CommandDefinition::new(
+            CommandMetadata {
+                id: ids::WORKFLOW_MERGE_PR,
+                description: "Merge the active pull request and reconcile workflow completion.",
+                args: CommandArgSummary::None,
+            },
+            |args| parse_zero_arg(ids::WORKFLOW_MERGE_PR, args, Command::WorkflowMergePr),
             |_| None,
         ),
         CommandDefinition::new(
@@ -586,6 +617,8 @@ mod tests {
             ids::UI_OPEN_CHAT_INSPECTOR_FOR_SELECTED,
             ids::SUPERVISOR_QUERY,
             ids::WORKFLOW_APPROVE_PR_READY,
+            ids::WORKFLOW_RECONCILE_PR_MERGE,
+            ids::WORKFLOW_MERGE_PR,
             ids::GITHUB_OPEN_REVIEW_TABS,
         ] {
             let metadata = registry.lookup(command_id).expect("metadata");
@@ -643,6 +676,32 @@ mod tests {
             .parse_invocation(&invocation)
             .expect_err("workflow args should be rejected");
         assert!(matches!(err, CoreError::InvalidCommandArgs { .. }));
+    }
+
+    #[test]
+    fn workflow_reconcile_pr_merge_is_zero_arg_command() {
+        let registry = CommandRegistry::new().expect("registry");
+        let parsed = registry
+            .parse_invocation(&UntypedCommandInvocation {
+                command_id: ids::WORKFLOW_RECONCILE_PR_MERGE.to_owned(),
+                args: None,
+            })
+            .expect("workflow.reconcile_pr_merge should be zero-arg");
+
+        assert_eq!(parsed, Command::WorkflowReconcilePrMerge);
+    }
+
+    #[test]
+    fn workflow_merge_pr_is_zero_arg_command() {
+        let registry = CommandRegistry::new().expect("registry");
+        let parsed = registry
+            .parse_invocation(&UntypedCommandInvocation {
+                command_id: ids::WORKFLOW_MERGE_PR.to_owned(),
+                args: None,
+            })
+            .expect("workflow.merge_pr should be zero-arg");
+
+        assert_eq!(parsed, Command::WorkflowMergePr);
     }
 
     #[test]

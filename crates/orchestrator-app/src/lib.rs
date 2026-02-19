@@ -1,16 +1,18 @@
 use integration_linear::LinearTicketingProvider;
-use std::path::PathBuf;
-use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
 use orchestrator_core::{
-    rebuild_projection, CoreError, EventStore, GithubClient, LlmProvider, ProjectionState,
-    CodeHostProvider, NewEventEnvelope, OrchestrationEventPayload, SelectedTicketFlowConfig,
-    SelectedTicketFlowResult, SessionCrashedPayload, SqliteEventStore, Supervisor,
-    TicketingProvider, TicketSummary, UntypedCommandInvocation, VcsProvider, WorkerBackend,
-    WorkerSessionId, WorkerSessionStatus, DOMAIN_EVENT_SCHEMA_VERSION,
+    rebuild_projection, CodeHostProvider, CoreError, EventStore, GithubClient, LlmProvider,
+    NewEventEnvelope, OrchestrationEventPayload, ProjectionState, SelectedTicketFlowConfig,
+    SelectedTicketFlowResult, SessionCrashedPayload, SqliteEventStore, Supervisor, TicketSummary,
+    TicketingProvider, UntypedCommandInvocation, VcsProvider, WorkerBackend, WorkerSessionId,
+    WorkerSessionStatus, DOMAIN_EVENT_SCHEMA_VERSION,
 };
 use orchestrator_ui::{SupervisorCommandContext, SupervisorCommandDispatcher};
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
+use std::path::PathBuf;
+use std::process::Command;
+use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 mod command_dispatch;
 mod ticket_picker;
 pub use ticket_picker::AppTicketPickerProvider;
@@ -390,6 +392,177 @@ impl<S: Supervisor, G: GithubClient> App<S, G> {
         }
         Ok(())
     }
+
+    pub fn session_worktree_diff(
+        &self,
+        session_id: &WorkerSessionId,
+    ) -> Result<orchestrator_ui::SessionWorktreeDiff, CoreError> {
+        let store = open_event_store(&self.config.event_store_path)?;
+        let mapping = store
+            .find_runtime_mapping_by_session_id(session_id)?
+            .ok_or_else(|| {
+                CoreError::Configuration(format!(
+                    "could not resolve runtime mapping for session '{}'",
+                    session_id.as_str()
+                ))
+            })?;
+
+        let worktree_path = PathBuf::from(mapping.worktree.path.clone());
+        if !worktree_path.exists() {
+            return Err(CoreError::Configuration(format!(
+                "worktree path does not exist for session '{}': {}",
+                session_id.as_str(),
+                worktree_path.display()
+            )));
+        }
+
+        let git_bin = std::env::var_os("ORCHESTRATOR_GIT_BIN")
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| "git".into());
+
+        let run_git = |args: &[&str]| -> Result<std::process::Output, CoreError> {
+            Command::new(&git_bin)
+                .arg("-C")
+                .arg(&worktree_path)
+                .args(args)
+                .output()
+                .map_err(|error| {
+                    CoreError::DependencyUnavailable(format!(
+                        "failed to execute git in '{}': {error}",
+                        worktree_path.display()
+                    ))
+                })
+        };
+
+        let mut base_candidates = Vec::new();
+        let mapped_base = mapping.worktree.base_branch.trim();
+        if !mapped_base.is_empty() {
+            base_candidates.push(mapped_base.to_owned());
+        }
+
+        if let Ok(origin_head) = run_git(&["symbolic-ref", "--short", "refs/remotes/origin/HEAD"]) {
+            if origin_head.status.success() {
+                let resolved = String::from_utf8_lossy(&origin_head.stdout)
+                    .trim()
+                    .to_owned();
+                if !resolved.is_empty() {
+                    base_candidates.push(resolved.clone());
+                    if let Some(stripped) = resolved.strip_prefix("origin/") {
+                        if !stripped.trim().is_empty() {
+                            base_candidates.push(stripped.trim().to_owned());
+                        }
+                    }
+                }
+            }
+        }
+        base_candidates.extend(
+            ["main", "master", "develop"]
+                .iter()
+                .map(|entry| (*entry).to_owned()),
+        );
+
+        let mut seen = HashSet::new();
+        base_candidates.retain(|candidate| {
+            let trimmed = candidate.trim();
+            !trimmed.is_empty() && seen.insert(trimmed.to_owned())
+        });
+
+        let mut resolved_base_ref = None;
+        'outer: for candidate in base_candidates {
+            let refs_to_try = if candidate.contains('/') {
+                vec![candidate]
+            } else {
+                vec![candidate.clone(), format!("origin/{candidate}")]
+            };
+            for ref_name in refs_to_try {
+                let verify_arg = format!("{ref_name}^{{commit}}");
+                let verify = run_git(&["rev-parse", "--verify", "--quiet", verify_arg.as_str()])?;
+                if verify.status.success() {
+                    resolved_base_ref = Some(ref_name);
+                    break 'outer;
+                }
+            }
+        }
+
+        let base_branch = resolved_base_ref.ok_or_else(|| {
+            CoreError::Configuration(format!(
+                "could not resolve a base branch for session '{}' (tried mapped, origin/HEAD, main/master/develop)",
+                session_id.as_str()
+            ))
+        })?;
+
+        let merge_base_output = run_git(&["merge-base", base_branch.as_str(), "HEAD"])?;
+        if !merge_base_output.status.success() {
+            let stderr = String::from_utf8_lossy(&merge_base_output.stderr)
+                .trim()
+                .to_owned();
+            let detail = if stderr.is_empty() {
+                format!("exit status {}", merge_base_output.status)
+            } else {
+                stderr
+            };
+            return Err(CoreError::DependencyUnavailable(format!(
+                "failed to resolve merge-base for session '{}': {detail}",
+                session_id.as_str()
+            )));
+        }
+        let merge_base = String::from_utf8_lossy(&merge_base_output.stdout)
+            .trim()
+            .to_owned();
+        if merge_base.is_empty() {
+            return Err(CoreError::DependencyUnavailable(format!(
+                "failed to resolve merge-base for session '{}': merge-base output was empty",
+                session_id.as_str()
+            )));
+        }
+
+        let output = run_git(&[
+            "-c",
+            "color.ui=never",
+            "diff",
+            "--no-color",
+            "--no-ext-diff",
+            "--find-renames",
+            "--unified=3",
+            merge_base.as_str(),
+            "--",
+        ])?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+            let detail = if stderr.is_empty() {
+                format!("exit status {}", output.status)
+            } else {
+                stderr
+            };
+            return Err(CoreError::DependencyUnavailable(format!(
+                "git diff failed for session '{}': {detail}",
+                session_id.as_str()
+            )));
+        }
+
+        let diff = sanitize_terminal_display_text(String::from_utf8_lossy(&output.stdout).as_ref());
+        Ok(orchestrator_ui::SessionWorktreeDiff {
+            session_id: session_id.clone(),
+            base_branch,
+            diff,
+        })
+    }
+
+    pub fn set_session_workflow_stage(
+        &self,
+        session_id: &WorkerSessionId,
+        workflow_stage: &str,
+    ) -> Result<(), CoreError> {
+        let store = open_event_store(&self.config.event_store_path)?;
+        store.upsert_session_workflow_stage(session_id, workflow_stage)
+    }
+
+    pub fn list_session_workflow_stages(
+        &self,
+    ) -> Result<Vec<(WorkerSessionId, String)>, CoreError> {
+        let store = open_event_store(&self.config.event_store_path)?;
+        store.list_session_workflow_stages()
+    }
 }
 
 fn now_timestamp() -> String {
@@ -404,6 +577,19 @@ fn now_nanos() -> u128 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_nanos()
+}
+
+fn sanitize_terminal_display_text(input: &str) -> String {
+    let mut output = String::with_capacity(input.len());
+    for ch in input.chars() {
+        match ch {
+            '\n' | '\t' => output.push(ch),
+            '\r' => output.push('\n'),
+            _ if ch.is_control() => {}
+            _ => output.push(ch),
+        }
+    }
+    output
 }
 
 fn supervisor_model_from_env() -> String {
@@ -450,18 +636,17 @@ mod tests {
     use super::*;
     use orchestrator_core::test_support::{with_env_var, with_env_vars, TestDbPath};
     use orchestrator_core::{
-        ArtifactCreatedPayload, ArtifactId, ArtifactKind, ArtifactRecord, BackendCapabilities,
-        BackendKind, CodeHostKind, Command, CommandRegistry, DOMAIN_EVENT_SCHEMA_VERSION, command_ids,
-        AddTicketCommentRequest, CreateTicketRequest, GetTicketRequest,
-        LlmChatRequest, LlmRole, LlmToolCall, TicketQuery,
-        TicketDetails, TicketingProvider, UpdateTicketDescriptionRequest,
-        UpdateTicketStateRequest,
-        LlmFinishReason, LlmProviderKind, LlmResponseStream, LlmResponseSubscription,
-        LlmStreamChunk, NewEventEnvelope, OrchestrationEventPayload, RuntimeMappingRecord,
-        RuntimeResult, SessionHandle, SessionRecord, SpawnSpec,
-        SupervisorQueryArgs, SupervisorQueryCancellationSource, SupervisorQueryContextArgs,
-        TicketId, TicketProvider, TicketSummary, WorkerSessionId, WorkItemId, WorktreeId,
-        WorktreeRecord, WorkerSessionStatus, WorktreeStatus,
+        command_ids, AddTicketCommentRequest, ArtifactCreatedPayload, ArtifactId, ArtifactKind,
+        ArtifactRecord, BackendCapabilities, BackendKind, CodeHostKind, Command, CommandRegistry,
+        CreateTicketRequest, GetTicketRequest, LlmChatRequest, LlmFinishReason, LlmProviderKind,
+        LlmResponseStream, LlmResponseSubscription, LlmRole, LlmStreamChunk, LlmToolCall,
+        NewEventEnvelope, OrchestrationEventPayload, RuntimeMappingRecord, RuntimeResult,
+        SessionHandle, SessionRecord, SpawnSpec, SupervisorQueryArgs,
+        SupervisorQueryCancellationSource, SupervisorQueryContextArgs, TicketDetails, TicketId,
+        TicketProvider, TicketQuery, TicketSummary, TicketingProvider,
+        UpdateTicketDescriptionRequest, UpdateTicketStateRequest, WorkItemId, WorkerSessionId,
+        WorkerSessionStatus, WorktreeId, WorktreeRecord, WorktreeStatus,
+        DOMAIN_EVENT_SCHEMA_VERSION,
     };
     use serde_json::json;
     use std::collections::{BTreeMap, VecDeque};
@@ -628,6 +813,26 @@ mod tests {
         ) -> Result<Vec<orchestrator_core::PullRequestSummary>, CoreError> {
             Ok(Vec::new())
         }
+
+        async fn get_pull_request_merge_state(
+            &self,
+            _pr: &orchestrator_core::PullRequestRef,
+        ) -> Result<orchestrator_core::PullRequestMergeState, CoreError> {
+            Ok(orchestrator_core::PullRequestMergeState {
+                merged: false,
+                is_draft: true,
+                merge_conflict: false,
+                base_branch: None,
+                head_branch: None,
+            })
+        }
+
+        async fn merge_pull_request(
+            &self,
+            _pr: &orchestrator_core::PullRequestRef,
+        ) -> Result<(), CoreError> {
+            Ok(())
+        }
     }
 
     #[derive(Clone, Default)]
@@ -692,12 +897,10 @@ mod tests {
             request: LlmChatRequest,
         ) -> Result<(String, LlmResponseStream), CoreError> {
             self.requests.lock().expect("request lock").push(request);
-                let chunks = {
-                    let mut sequences = self.stream_chunks.lock().expect("stream chunk lock");
-                    sequences
-                        .pop_front()
-                        .unwrap_or_else(Vec::new)
-                };
+            let chunks = {
+                let mut sequences = self.stream_chunks.lock().expect("stream chunk lock");
+                sequences.pop_front().unwrap_or_else(Vec::new)
+            };
             Ok((
                 "test-stream-1".to_owned(),
                 Box::new(TestLlmStream {
@@ -788,6 +991,26 @@ mod tests {
         ) -> Result<Vec<orchestrator_core::PullRequestSummary>, CoreError> {
             Ok(Vec::new())
         }
+
+        async fn get_pull_request_merge_state(
+            &self,
+            _pr: &orchestrator_core::PullRequestRef,
+        ) -> Result<orchestrator_core::PullRequestMergeState, CoreError> {
+            Ok(orchestrator_core::PullRequestMergeState {
+                merged: false,
+                is_draft: true,
+                merge_conflict: false,
+                base_branch: None,
+                head_branch: None,
+            })
+        }
+
+        async fn merge_pull_request(
+            &self,
+            _pr: &orchestrator_core::PullRequestRef,
+        ) -> Result<(), CoreError> {
+            Ok(())
+        }
     }
 
     #[async_trait::async_trait]
@@ -856,10 +1079,7 @@ mod tests {
             state: "In Progress".to_owned(),
             updated_at: "2026-02-16T11:00:00Z".to_owned(),
         };
-        let worktree_path = PathBuf::from(format!(
-            "/workspace/{}",
-            work_item_id.as_str()
-        ));
+        let worktree_path = PathBuf::from(format!("/workspace/{}", work_item_id.as_str()));
         let runtime = RuntimeMappingRecord {
             ticket,
             work_item_id: work_item_id.clone(),
@@ -900,15 +1120,13 @@ mod tests {
                 occurred_at: "2026-02-16T11:02:00Z".to_owned(),
                 work_item_id: Some(work_item_id.clone()),
                 session_id: Some(WorkerSessionId::new(session_id)),
-                payload: OrchestrationEventPayload::ArtifactCreated(
-                    ArtifactCreatedPayload {
-                        artifact_id: artifact.artifact_id.clone(),
-                        work_item_id: work_item_id.clone(),
-                        kind: ArtifactKind::PR,
-                        label: "Pull request".to_owned(),
-                        uri: pr_url.to_owned(),
-                    },
-                ),
+                payload: OrchestrationEventPayload::ArtifactCreated(ArtifactCreatedPayload {
+                    artifact_id: artifact.artifact_id.clone(),
+                    work_item_id: work_item_id.clone(),
+                    kind: ArtifactKind::PR,
+                    label: "Pull request".to_owned(),
+                    uri: pr_url.to_owned(),
+                }),
                 schema_version: DOMAIN_EVENT_SCHEMA_VERSION,
             },
             &[artifact.artifact_id.clone()],
@@ -1164,10 +1382,7 @@ mod tests {
             Ok(())
         }
 
-        async fn list_tickets(
-            &self,
-            _query: TicketQuery,
-        ) -> Result<Vec<TicketSummary>, CoreError> {
+        async fn list_tickets(&self, _query: TicketQuery) -> Result<Vec<TicketSummary>, CoreError> {
             Ok(Vec::new())
         }
 
@@ -1185,14 +1400,12 @@ mod tests {
             _request: UpdateTicketStateRequest,
         ) -> Result<(), CoreError> {
             Err(CoreError::DependencyUnavailable(
-                "mock ticketing provider does not implement update_ticket_state in tests".to_owned(),
+                "mock ticketing provider does not implement update_ticket_state in tests"
+                    .to_owned(),
             ))
         }
 
-        async fn get_ticket(
-            &self,
-            _request: GetTicketRequest,
-        ) -> Result<TicketDetails, CoreError> {
+        async fn get_ticket(&self, _request: GetTicketRequest) -> Result<TicketDetails, CoreError> {
             Err(CoreError::DependencyUnavailable(
                 "mock ticketing provider does not implement get_ticket in tests".to_owned(),
             ))
@@ -1203,7 +1416,8 @@ mod tests {
             _request: UpdateTicketDescriptionRequest,
         ) -> Result<(), CoreError> {
             Err(CoreError::DependencyUnavailable(
-                "mock ticketing provider does not implement update_ticket_description in tests".to_owned(),
+                "mock ticketing provider does not implement update_ticket_description in tests"
+                    .to_owned(),
             ))
         }
 
@@ -1264,14 +1478,8 @@ mod tests {
             }
         }
 
-        fn with_list_tickets_result(
-            &self,
-            tickets: Vec<TicketSummary>,
-        ) -> &Self {
-            *self
-                .list_tickets_result
-                .lock()
-                .expect("list result lock") = Some(Ok(tickets));
+        fn with_list_tickets_result(&self, tickets: Vec<TicketSummary>) -> &Self {
+            *self.list_tickets_result.lock().expect("list result lock") = Some(Ok(tickets));
             self
         }
 
@@ -1308,10 +1516,7 @@ mod tests {
             Ok(())
         }
 
-        async fn list_tickets(
-            &self,
-            query: TicketQuery,
-        ) -> Result<Vec<TicketSummary>, CoreError> {
+        async fn list_tickets(&self, query: TicketQuery) -> Result<Vec<TicketSummary>, CoreError> {
             self.list_tickets_calls
                 .lock()
                 .expect("record list call lock")
@@ -1328,7 +1533,8 @@ mod tests {
             _request: CreateTicketRequest,
         ) -> Result<TicketSummary, CoreError> {
             Err(CoreError::DependencyUnavailable(
-                "scripted mock ticketing provider does not implement create_ticket in tests".to_owned(),
+                "scripted mock ticketing provider does not implement create_ticket in tests"
+                    .to_owned(),
             ))
         }
 
@@ -1347,10 +1553,7 @@ mod tests {
                 .unwrap_or_else(|| Ok(()))
         }
 
-        async fn get_ticket(
-            &self,
-            request: GetTicketRequest,
-        ) -> Result<TicketDetails, CoreError> {
+        async fn get_ticket(&self, request: GetTicketRequest) -> Result<TicketDetails, CoreError> {
             self.get_ticket_calls
                 .lock()
                 .expect("record get call lock")
@@ -1414,8 +1617,8 @@ mod tests {
             config: AppConfig {
                 workspace: "./".to_owned(),
                 event_store_path: temp_db.path().to_string_lossy().to_string(),
-            ticketing_provider: "linear".to_owned(),
-            harness_provider: "codex".to_owned(),
+                ticketing_provider: "linear".to_owned(),
+                harness_provider: "codex".to_owned(),
             },
             ticketing: MockTicketingProvider::service(),
             supervisor: Healthy,
@@ -1542,7 +1745,6 @@ mod tests {
         ) -> RuntimeResult<orchestrator_core::WorkerEventStream> {
             Ok(Box::new(EmptyStream))
         }
-
     }
 
     #[tokio::test]
@@ -1552,8 +1754,8 @@ mod tests {
             config: AppConfig {
                 workspace: "/workspace".to_owned(),
                 event_store_path: temp_db.path().to_string_lossy().to_string(),
-            ticketing_provider: "linear".to_owned(),
-            harness_provider: "codex".to_owned(),
+                ticketing_provider: "linear".to_owned(),
+                harness_provider: "codex".to_owned(),
             },
             ticketing: MockTicketingProvider::service(),
             supervisor: Healthy,
@@ -1610,8 +1812,10 @@ mod tests {
         let transport_trait: Arc<dyn integration_linear::GraphqlTransport> = transport.clone();
         let mut linear_config = integration_linear::LinearConfig::default();
         linear_config.poll_interval = Duration::from_secs(3600);
-        let linear_ticketing =
-            Arc::new(LinearTicketingProvider::with_transport(linear_config, transport_trait));
+        let linear_ticketing = Arc::new(LinearTicketingProvider::with_transport(
+            linear_config,
+            transport_trait,
+        ));
 
         let app = App {
             config: AppConfig {
@@ -1649,8 +1853,12 @@ mod tests {
             github: Healthy,
         };
 
-        app.start_linear_polling(None).await.expect("start polling noop");
-        app.stop_linear_polling(None).await.expect("stop polling noop");
+        app.start_linear_polling(None)
+            .await
+            .expect("start polling noop");
+        app.stop_linear_polling(None)
+            .await
+            .expect("stop polling noop");
     }
 
     #[tokio::test]
@@ -1677,8 +1885,8 @@ mod tests {
             config: AppConfig {
                 workspace: "/workspace".to_owned(),
                 event_store_path: temp_db.path().to_string_lossy().to_string(),
-            ticketing_provider: "linear".to_owned(),
-            harness_provider: "codex".to_owned(),
+                ticketing_provider: "linear".to_owned(),
+                harness_provider: "codex".to_owned(),
             },
             ticketing: MockTicketingProvider::service(),
             supervisor: supervisor.clone(),
@@ -1729,20 +1937,18 @@ mod tests {
         let temp_db = TestDbPath::new("app-supervisor-query-list-tickets-tool");
         let ticketing = {
             let ticketing = ScriptedTicketingProvider::new(TicketProvider::Linear);
-            ticketing.with_list_tickets_result(vec![
-                TicketSummary {
-                    ticket_id: TicketId::from("linear:issue-101"),
-                    identifier: "ISSUE-101".to_owned(),
-                    title: "Validate tool calls".to_owned(),
-                    project: Some("Orchestrator".to_owned()),
-                    state: "In Review".to_owned(),
-                    url: "https://linear.app/example/issue/ISSUE-101".to_owned(),
-                    assignee: Some("owner".to_owned()),
-                    priority: Some(1),
-                    labels: vec!["orchestrator".to_owned()],
-                    updated_at: "2026-02-16T11:00:00Z".to_owned(),
-                },
-            ]);
+            ticketing.with_list_tickets_result(vec![TicketSummary {
+                ticket_id: TicketId::from("linear:issue-101"),
+                identifier: "ISSUE-101".to_owned(),
+                title: "Validate tool calls".to_owned(),
+                project: Some("Orchestrator".to_owned()),
+                state: "In Review".to_owned(),
+                url: "https://linear.app/example/issue/ISSUE-101".to_owned(),
+                assignee: Some("owner".to_owned()),
+                priority: Some(1),
+                labels: vec!["orchestrator".to_owned()],
+                updated_at: "2026-02-16T11:00:00Z".to_owned(),
+            }]);
             Arc::new(ticketing)
         };
 
@@ -1809,7 +2015,9 @@ mod tests {
             chunk_payloads.push(chunk.delta);
         }
 
-        assert!(chunk_payloads.iter().any(|chunk| chunk.contains("[tool-call] list_tickets")));
+        assert!(chunk_payloads
+            .iter()
+            .any(|chunk| chunk.contains("[tool-call] list_tickets")));
         assert!(chunk_payloads
             .iter()
             .any(|chunk| chunk.contains("[tool-result] list_tickets")));
@@ -1827,12 +2035,16 @@ mod tests {
         assert!(requests[1]
             .messages
             .iter()
-            .any(|message| message.role == LlmRole::Tool && message.name.as_deref() == Some("list_tickets")));
+            .any(|message| message.role == LlmRole::Tool
+                && message.name.as_deref() == Some("list_tickets")));
 
         let list_calls = ticketing.list_tickets_calls();
         assert_eq!(list_calls.len(), 1);
         assert_eq!(list_calls[0].assigned_to_me, true);
-        assert_eq!(list_calls[0].states, vec!["In Review".to_owned(), "Blocked".to_owned()]);
+        assert_eq!(
+            list_calls[0].states,
+            vec!["In Review".to_owned(), "Blocked".to_owned()]
+        );
         assert_eq!(list_calls[0].search, Some("tool".to_owned()));
         assert_eq!(list_calls[0].limit, Some(1));
     }
@@ -1920,7 +2132,8 @@ mod tests {
         assert!(requests[1]
             .messages
             .iter()
-            .any(|message| message.role == LlmRole::Tool && message.name.as_deref() == Some("update_ticket_state")));
+            .any(|message| message.role == LlmRole::Tool
+                && message.name.as_deref() == Some("update_ticket_state")));
     }
 
     #[tokio::test]
@@ -1951,8 +2164,8 @@ mod tests {
             config: AppConfig {
                 workspace: "/workspace".to_owned(),
                 event_store_path: temp_db.path().to_string_lossy().to_string(),
-            ticketing_provider: "linear".to_owned(),
-            harness_provider: "codex".to_owned(),
+                ticketing_provider: "linear".to_owned(),
+                harness_provider: "codex".to_owned(),
             },
             ticketing: MockTicketingProvider::service(),
             supervisor: supervisor.clone(),
@@ -2036,8 +2249,8 @@ mod tests {
             config: AppConfig {
                 workspace: "/workspace".to_owned(),
                 event_store_path: temp_db.path().to_string_lossy().to_string(),
-            ticketing_provider: "linear".to_owned(),
-            harness_provider: "codex".to_owned(),
+                ticketing_provider: "linear".to_owned(),
+                harness_provider: "codex".to_owned(),
             },
             ticketing: MockTicketingProvider::service(),
             supervisor: supervisor.clone(),
@@ -2123,8 +2336,8 @@ mod tests {
             config: AppConfig {
                 workspace: "/workspace".to_owned(),
                 event_store_path: temp_db.path().to_string_lossy().to_string(),
-            ticketing_provider: "linear".to_owned(),
-            harness_provider: "codex".to_owned(),
+                ticketing_provider: "linear".to_owned(),
+                harness_provider: "codex".to_owned(),
             },
             ticketing: MockTicketingProvider::service(),
             supervisor: supervisor.clone(),
@@ -2173,8 +2386,8 @@ mod tests {
             config: AppConfig {
                 workspace: "/workspace".to_owned(),
                 event_store_path: temp_db.path().to_string_lossy().to_string(),
-            ticketing_provider: "linear".to_owned(),
-            harness_provider: "codex".to_owned(),
+                ticketing_provider: "linear".to_owned(),
+                harness_provider: "codex".to_owned(),
             },
             ticketing: MockTicketingProvider::service(),
             supervisor: supervisor.clone(),
@@ -2228,8 +2441,8 @@ mod tests {
             config: AppConfig {
                 workspace: "/workspace".to_owned(),
                 event_store_path: temp_db.path().to_string_lossy().to_string(),
-            ticketing_provider: "linear".to_owned(),
-            harness_provider: "codex".to_owned(),
+                ticketing_provider: "linear".to_owned(),
+                harness_provider: "codex".to_owned(),
             },
             ticketing: MockTicketingProvider::service(),
             supervisor: supervisor.clone(),
@@ -2260,9 +2473,7 @@ mod tests {
             .content
             .contains("What is blocking this ticket?"));
         assert!(requests[0].messages[1].content.contains("Context pack:"));
-        assert!(!requests[0].messages[1]
-            .content
-            .contains("Template:"));
+        assert!(!requests[0].messages[1].content.contains("Template:"));
     }
 
     #[tokio::test]
@@ -2284,14 +2495,14 @@ mod tests {
             }]);
 
             let app = App {
-            config: AppConfig {
-                workspace: "/workspace".to_owned(),
-                event_store_path: temp_db.path().to_string_lossy().to_string(),
-            ticketing_provider: "linear".to_owned(),
-            harness_provider: "codex".to_owned(),
-            },
-            ticketing: MockTicketingProvider::service(),
-            supervisor: supervisor.clone(),
+                config: AppConfig {
+                    workspace: "/workspace".to_owned(),
+                    event_store_path: temp_db.path().to_string_lossy().to_string(),
+                    ticketing_provider: "linear".to_owned(),
+                    harness_provider: "codex".to_owned(),
+                },
+                ticketing: MockTicketingProvider::service(),
+                supervisor: supervisor.clone(),
                 github: Healthy,
             };
 
@@ -2332,8 +2543,8 @@ mod tests {
             config: AppConfig {
                 workspace: "/workspace".to_owned(),
                 event_store_path: temp_db.path().to_string_lossy().to_string(),
-            ticketing_provider: "linear".to_owned(),
-            harness_provider: "codex".to_owned(),
+                ticketing_provider: "linear".to_owned(),
+                harness_provider: "codex".to_owned(),
             },
             ticketing: MockTicketingProvider::service(),
             supervisor: supervisor.clone(),
@@ -2370,8 +2581,8 @@ mod tests {
             config: AppConfig {
                 workspace: "/workspace".to_owned(),
                 event_store_path: temp_db.path().to_string_lossy().to_string(),
-            ticketing_provider: "linear".to_owned(),
-            harness_provider: "codex".to_owned(),
+                ticketing_provider: "linear".to_owned(),
+                harness_provider: "codex".to_owned(),
             },
             ticketing: MockTicketingProvider::service(),
             supervisor: QueryingSupervisor::default(),
@@ -2406,8 +2617,8 @@ mod tests {
             config: AppConfig {
                 workspace: "/workspace".to_owned(),
                 event_store_path: temp_db.path().to_string_lossy().to_string(),
-            ticketing_provider: "linear".to_owned(),
-            harness_provider: "codex".to_owned(),
+                ticketing_provider: "linear".to_owned(),
+                harness_provider: "codex".to_owned(),
             },
             ticketing: MockTicketingProvider::service(),
             supervisor: QueryingSupervisor::default(),
@@ -2447,8 +2658,8 @@ mod tests {
             config: AppConfig {
                 workspace: "/workspace".to_owned(),
                 event_store_path: temp_db.path().to_string_lossy().to_string(),
-            ticketing_provider: "linear".to_owned(),
-            harness_provider: "codex".to_owned(),
+                ticketing_provider: "linear".to_owned(),
+                harness_provider: "codex".to_owned(),
             },
             ticketing: MockTicketingProvider::service(),
             supervisor: supervisor.clone(),
@@ -2500,8 +2711,8 @@ mod tests {
             config: AppConfig {
                 workspace: "/workspace".to_owned(),
                 event_store_path: temp_db.path().to_string_lossy().to_string(),
-            ticketing_provider: "linear".to_owned(),
-            harness_provider: "codex".to_owned(),
+                ticketing_provider: "linear".to_owned(),
+                harness_provider: "codex".to_owned(),
             },
             ticketing: MockTicketingProvider::service(),
             supervisor: QueryingSupervisor::default(),
@@ -2543,8 +2754,8 @@ mod tests {
             config: AppConfig {
                 workspace: "/workspace".to_owned(),
                 event_store_path: temp_db.path().to_string_lossy().to_string(),
-            ticketing_provider: "linear".to_owned(),
-            harness_provider: "codex".to_owned(),
+                ticketing_provider: "linear".to_owned(),
+                harness_provider: "codex".to_owned(),
             },
             ticketing: MockTicketingProvider::service(),
             supervisor: QueryingSupervisor::default(),
@@ -2580,11 +2791,7 @@ mod tests {
             "runtime command should return a completion message"
         );
         assert!(
-            stream
-                .next_chunk()
-                .await
-                .expect("stream close")
-                .is_none(),
+            stream.next_chunk().await.expect("stream close").is_none(),
             "runtime command stream should terminate after acknowledgement"
         );
 
@@ -2603,8 +2810,8 @@ mod tests {
             config: AppConfig {
                 workspace: "/workspace".to_owned(),
                 event_store_path: temp_db.path().to_string_lossy().to_string(),
-            ticketing_provider: "linear".to_owned(),
-            harness_provider: "codex".to_owned(),
+                ticketing_provider: "linear".to_owned(),
+                harness_provider: "codex".to_owned(),
             },
             ticketing: MockTicketingProvider::service(),
             supervisor: QueryingSupervisor::default(),
@@ -2615,19 +2822,16 @@ mod tests {
             .expect("serialize workflow.approve_pr_ready");
 
         let err = match app
-            .dispatch_supervisor_command(
-                invocation,
-                SupervisorCommandContext::default(),
-            )
+            .dispatch_supervisor_command(invocation, SupervisorCommandContext::default())
             .await
         {
             Ok(_) => panic!("approve_pr_ready should fail without context"),
             Err(err) => err,
         };
 
-        assert!(err.to_string().contains(
-            "requires an active runtime session or selected work item context"
-        ));
+        assert!(err
+            .to_string()
+            .contains("requires an active runtime session or selected work item context"));
     }
 
     #[tokio::test]
@@ -2650,8 +2854,8 @@ mod tests {
             config: AppConfig {
                 workspace: "/workspace".to_owned(),
                 event_store_path: temp_db.path().to_string_lossy().to_string(),
-            ticketing_provider: "linear".to_owned(),
-            harness_provider: "codex".to_owned(),
+                ticketing_provider: "linear".to_owned(),
+                harness_provider: "codex".to_owned(),
             },
             ticketing: MockTicketingProvider::service(),
             supervisor: QueryingSupervisor::default(),
@@ -2686,7 +2890,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn supervisor_runtime_dispatch_workflow_approve_pr_ready_skips_invalid_pr_artifact_urls() {
+    async fn supervisor_runtime_dispatch_workflow_approve_pr_ready_skips_invalid_pr_artifact_urls()
+    {
         let temp_db = TestDbPath::new("app-runtime-command-approve-pr-ready-invalid-url");
         let work_item_id = WorkItemId::new("wi-approve-invalid-url");
         let mut store = SqliteEventStore::open(temp_db.path()).expect("open store");
@@ -2712,8 +2917,8 @@ mod tests {
             config: AppConfig {
                 workspace: "/workspace".to_owned(),
                 event_store_path: temp_db.path().to_string_lossy().to_string(),
-            ticketing_provider: "linear".to_owned(),
-            harness_provider: "codex".to_owned(),
+                ticketing_provider: "linear".to_owned(),
+                harness_provider: "codex".to_owned(),
             },
             ticketing: MockTicketingProvider::service(),
             supervisor: QueryingSupervisor::default(),
@@ -2761,8 +2966,8 @@ mod tests {
             config: AppConfig {
                 workspace: "/workspace".to_owned(),
                 event_store_path: temp_db.path().to_string_lossy().to_string(),
-            ticketing_provider: "linear".to_owned(),
-            harness_provider: "codex".to_owned(),
+                ticketing_provider: "linear".to_owned(),
+                harness_provider: "codex".to_owned(),
             },
             ticketing: MockTicketingProvider::service(),
             supervisor: QueryingSupervisor::default(),
@@ -2781,7 +2986,9 @@ mod tests {
         };
 
         let message = err.to_string();
-        assert!(message.contains("requires an active runtime session or selected work item context"));
+        assert!(
+            message.contains("requires an active runtime session or selected work item context")
+        );
         assert!(message.contains(command_ids::GITHUB_OPEN_REVIEW_TABS));
     }
 
@@ -2792,8 +2999,8 @@ mod tests {
             config: AppConfig {
                 workspace: "/workspace".to_owned(),
                 event_store_path: temp_db.path().to_string_lossy().to_string(),
-            ticketing_provider: "linear".to_owned(),
-            harness_provider: "codex".to_owned(),
+                ticketing_provider: "linear".to_owned(),
+                harness_provider: "codex".to_owned(),
             },
             ticketing: MockTicketingProvider::service(),
             supervisor: QueryingSupervisor::default(),
@@ -2826,6 +3033,8 @@ mod tests {
             assert!(message.contains(command.id()));
             assert!(message.contains("supervisor.query"));
             assert!(message.contains("workflow.approve_pr_ready"));
+            assert!(message.contains("workflow.reconcile_pr_merge"));
+            assert!(message.contains("workflow.merge_pr"));
             assert!(message.contains("github.open_review_tabs"));
         }
     }
@@ -2838,8 +3047,8 @@ mod tests {
             config: AppConfig {
                 workspace: "/workspace".to_owned(),
                 event_store_path: temp_db.path().to_string_lossy().to_string(),
-            ticketing_provider: "linear".to_owned(),
-            harness_provider: "codex".to_owned(),
+                ticketing_provider: "linear".to_owned(),
+                harness_provider: "codex".to_owned(),
             },
             ticketing: MockTicketingProvider::service(),
             supervisor: supervisor.clone(),
@@ -2870,8 +3079,8 @@ mod tests {
             config: AppConfig {
                 workspace: "/workspace".to_owned(),
                 event_store_path: temp_db.path().to_string_lossy().to_string(),
-            ticketing_provider: "linear".to_owned(),
-            harness_provider: "codex".to_owned(),
+                ticketing_provider: "linear".to_owned(),
+                harness_provider: "codex".to_owned(),
             },
             ticketing: MockTicketingProvider::service(),
             supervisor: supervisor.clone(),
@@ -2937,8 +3146,8 @@ mod tests {
             config: AppConfig {
                 workspace: "/workspace".to_owned(),
                 event_store_path: temp_db.path().to_string_lossy().to_string(),
-            ticketing_provider: "linear".to_owned(),
-            harness_provider: "codex".to_owned(),
+                ticketing_provider: "linear".to_owned(),
+                harness_provider: "codex".to_owned(),
             },
             ticketing: MockTicketingProvider::service(),
             supervisor: supervisor.clone(),
@@ -3000,8 +3209,8 @@ mod tests {
             config: AppConfig {
                 workspace: "/workspace".to_owned(),
                 event_store_path: temp_db.path().to_string_lossy().to_string(),
-            ticketing_provider: "linear".to_owned(),
-            harness_provider: "codex".to_owned(),
+                ticketing_provider: "linear".to_owned(),
+                harness_provider: "codex".to_owned(),
             },
             ticketing: MockTicketingProvider::service(),
             supervisor: supervisor.clone(),

@@ -1190,7 +1190,12 @@ fn migration_from_schema_v1_adds_runtime_mapping_tables() {
     drop(store);
 
     let conn = rusqlite::Connection::open(db.path()).expect("open sqlite for inspection");
-    let tables = ["worktrees", "sessions", "project_repositories", "harness_session_bindings"];
+    let tables = [
+        "worktrees",
+        "sessions",
+        "project_repositories",
+        "harness_session_bindings",
+    ];
     for table in tables {
         let exists: Option<i64> = conn
             .query_row(
