@@ -8,10 +8,7 @@ pub enum CoreError {
     #[error("configuration error: {0}")]
     Configuration(String),
     #[error("no repository mapping exists for project '{project}' in provider '{provider}'")]
-    MissingProjectRepositoryMapping {
-        provider: String,
-        project: String,
-    },
+    MissingProjectRepositoryMapping { provider: String, project: String },
     #[error(
         "mapped repository '{repository_path}' for project '{project}' (provider '{provider}') does not resolve to a single repository: {reason}"
     )]

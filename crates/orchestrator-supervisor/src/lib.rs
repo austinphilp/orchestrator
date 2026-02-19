@@ -478,14 +478,14 @@ async fn run_openrouter_stream(
 
     loop {
         if cancellation.is_cancelled() {
-                let _ = sender
-                    .send(Ok(LlmStreamChunk {
-                        delta: String::new(),
-                        tool_calls: Vec::new(),
-                        finish_reason: Some(LlmFinishReason::Cancelled),
-                        usage: None,
-                        rate_limit: None,
-                    }))
+            let _ = sender
+                .send(Ok(LlmStreamChunk {
+                    delta: String::new(),
+                    tool_calls: Vec::new(),
+                    finish_reason: Some(LlmFinishReason::Cancelled),
+                    usage: None,
+                    rate_limit: None,
+                }))
                 .await;
             return;
         }
@@ -510,13 +510,13 @@ async fn run_openrouter_stream(
                     if event.trim() == "[DONE]" {
                         if !finished
                             && sender
-                                    .send(Ok(LlmStreamChunk {
-                                        delta: String::new(),
-                                        tool_calls: Vec::new(),
-                                        finish_reason: Some(LlmFinishReason::Stop),
-                                        usage: None,
-                                        rate_limit: rate_limit.take(),
-                                    }))
+                                .send(Ok(LlmStreamChunk {
+                                    delta: String::new(),
+                                    tool_calls: Vec::new(),
+                                    finish_reason: Some(LlmFinishReason::Stop),
+                                    usage: None,
+                                    rate_limit: rate_limit.take(),
+                                }))
                                 .await
                                 .is_err()
                         {
@@ -630,7 +630,10 @@ fn parse_stream_event(event: &str) -> Result<Vec<LlmStreamChunk>, CoreError> {
             .to_owned();
 
         let mut tool_calls = Vec::new();
-        if let Some(raw_tool_calls) = choice.get("delta").and_then(Value::as_object).and_then(|delta| delta.get("tool_calls"))
+        if let Some(raw_tool_calls) = choice
+            .get("delta")
+            .and_then(Value::as_object)
+            .and_then(|delta| delta.get("tool_calls"))
         {
             if let Some(values) = raw_tool_calls.as_array() {
                 for raw_call in values {
@@ -904,14 +907,14 @@ mod tests {
         assert!(empty_model.to_string().contains("model"));
 
         let empty_messages = match provider
-                .stream_chat(LlmChatRequest {
-                    model: "openrouter/mock-model".to_owned(),
-                    tools: Vec::new(),
-                    messages: Vec::new(),
-                    tool_choice: None,
-                    temperature: None,
-                    max_output_tokens: None,
-                })
+            .stream_chat(LlmChatRequest {
+                model: "openrouter/mock-model".to_owned(),
+                tools: Vec::new(),
+                messages: Vec::new(),
+                tool_choice: None,
+                temperature: None,
+                max_output_tokens: None,
+            })
             .await
         {
             Ok(_) => panic!("expected empty messages to fail"),

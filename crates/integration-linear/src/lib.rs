@@ -5,8 +5,8 @@ use std::time::{Duration, SystemTime};
 
 use async_trait::async_trait;
 use orchestrator_core::{
-    AddTicketCommentRequest, CoreError, CreateTicketRequest, TicketAttachment, TicketId,
-    GetTicketRequest, TicketDetails, TicketProvider, TicketQuery, TicketSummary, TicketingProvider,
+    AddTicketCommentRequest, CoreError, CreateTicketRequest, GetTicketRequest, TicketAttachment,
+    TicketDetails, TicketId, TicketProvider, TicketQuery, TicketSummary, TicketingProvider,
     UpdateTicketDescriptionRequest, UpdateTicketStateRequest, WorkflowState,
 };
 use serde::Deserialize;
@@ -1167,7 +1167,10 @@ async fn resolve_linear_create_context(
     state: Option<&str>,
 ) -> Result<LinearCreateIssueContext, CoreError> {
     let teams = resolve_linear_teams(transport).await?;
-    let CreateTicketStateSpec { team_token, state_name } = state
+    let CreateTicketStateSpec {
+        team_token,
+        state_name,
+    } = state
         .filter(|value| !value.trim().is_empty())
         .map(parse_create_ticket_state_spec)
         .unwrap_or(CreateTicketStateSpec {
@@ -1196,7 +1199,8 @@ async fn resolve_linear_create_context(
         let target_state = state_name.as_deref().expect("state present");
         let mut matches = Vec::new();
         for team in &teams {
-            if let Some(state) = resolve_linear_team_state_id(transport, &team.id, target_state).await?
+            if let Some(state) =
+                resolve_linear_team_state_id(transport, &team.id, target_state).await?
             {
                 matches.push((team.clone(), state));
             }
@@ -1222,13 +1226,14 @@ async fn resolve_linear_create_context(
     };
 
     let team_state = if let Some(target_state) = state_name.as_deref() {
-            let state = resolve_linear_team_state_id(transport, &team.id, target_state).await?
-                .ok_or_else(|| {
-                    CoreError::Configuration(format!(
-                        "Linear team `{}` has no state named `{target_state}`.",
-                        team.id
-                    ))
-                })?;
+        let state = resolve_linear_team_state_id(transport, &team.id, target_state)
+            .await?
+            .ok_or_else(|| {
+                CoreError::Configuration(format!(
+                    "Linear team `{}` has no state named `{target_state}`.",
+                    team.id
+                ))
+            })?;
         Some(state)
     } else {
         None
@@ -1460,11 +1465,16 @@ impl TicketingProvider for LinearTicketingProvider {
 
         let response = self
             .transport
-            .execute(GraphqlRequest::new(ISSUE_CREATE_MUTATION, json!({ "input": input })))
+            .execute(GraphqlRequest::new(
+                ISSUE_CREATE_MUTATION,
+                json!({ "input": input }),
+            ))
             .await
             .map_err(|error| normalize_linear_api_error(error, "issue create failed"))?;
         let payload: IssueCreateResponse = serde_json::from_value(response).map_err(|error| {
-            CoreError::DependencyUnavailable(format!("failed to decode Linear issueCreate payload: {error}"))
+            CoreError::DependencyUnavailable(format!(
+                "failed to decode Linear issueCreate payload: {error}"
+            ))
         })?;
         if !payload.issue_create.success {
             return Err(CoreError::DependencyUnavailable(
@@ -1472,13 +1482,11 @@ impl TicketingProvider for LinearTicketingProvider {
             ));
         }
 
-        let issue = payload
-            .issue_create
-            .issue
-            .ok_or_else(|| CoreError::DependencyUnavailable(
-                "Linear issueCreate mutation did not return an issue payload."
-                    .to_owned(),
-            ))?;
+        let issue = payload.issue_create.issue.ok_or_else(|| {
+            CoreError::DependencyUnavailable(
+                "Linear issueCreate mutation did not return an issue payload.".to_owned(),
+            )
+        })?;
         let summary = issue_to_summary(&issue);
         {
             let mut cache = self.cache.write().expect("linear ticket cache write lock");
@@ -1550,13 +1558,15 @@ impl TicketingProvider for LinearTicketingProvider {
             .await?;
 
         let payload: IssueDetailsResponse = serde_json::from_value(response).map_err(|error| {
-            CoreError::DependencyUnavailable(format!("failed to decode Linear issue payload: {error}"))
+            CoreError::DependencyUnavailable(format!(
+                "failed to decode Linear issue payload: {error}"
+            ))
         })?;
-        let issue = payload
-            .issue
-            .ok_or_else(|| CoreError::DependencyUnavailable(format!(
+        let issue = payload.issue.ok_or_else(|| {
+            CoreError::DependencyUnavailable(format!(
                 "Linear issue lookup returned no issue for id `{issue_id}`."
-            )))?;
+            ))
+        })?;
         let summary = issue_to_summary(&issue);
 
         {
@@ -1565,7 +1575,10 @@ impl TicketingProvider for LinearTicketingProvider {
                 issue.id.clone(),
                 CachedTicket {
                     summary: summary.clone(),
-                    assignee_id: issue.assignee.as_ref().and_then(|assignee| assignee.id.clone()),
+                    assignee_id: issue
+                        .assignee
+                        .as_ref()
+                        .and_then(|assignee| assignee.id.clone()),
                 },
             );
         }
@@ -1606,7 +1619,8 @@ impl TicketingProvider for LinearTicketingProvider {
             })?;
         if !payload.issue_update.success {
             return Err(CoreError::DependencyUnavailable(
-                "Linear issueUpdate mutation returned success=false for description update.".to_owned(),
+                "Linear issueUpdate mutation returned success=false for description update."
+                    .to_owned(),
             ));
         }
 
@@ -2330,7 +2344,10 @@ mod tests {
             })
             .await
             .expect("create succeeds");
-        assert_eq!(summary.ticket_id, TicketId::from_provider_uuid(TicketProvider::Linear, "issue-801"));
+        assert_eq!(
+            summary.ticket_id,
+            TicketId::from_provider_uuid(TicketProvider::Linear, "issue-801")
+        );
         assert_eq!(summary.identifier, "AP-801");
         assert_eq!(summary.title, "Add linear ticket create test");
 
@@ -2343,7 +2360,10 @@ mod tests {
             requests[1].variables["input"]["title"],
             json!("Add linear ticket create test")
         );
-        assert_eq!(requests[1].variables["input"]["description"], json!("Exercise create path"));
+        assert_eq!(
+            requests[1].variables["input"]["description"],
+            json!("Exercise create path")
+        );
     }
 
     #[tokio::test]
@@ -2358,7 +2378,10 @@ mod tests {
             ]))
             .await;
         transport
-            .push_response(team_states_payload("team-1", &[("state-1", "Todo"), ("state-2", "Done")]))
+            .push_response(team_states_payload(
+                "team-1",
+                &[("state-1", "Todo"), ("state-2", "Done")],
+            ))
             .await;
         transport
             .push_response(issue_create_payload(issue_json(
@@ -2382,7 +2405,10 @@ mod tests {
             })
             .await
             .expect("create succeeds");
-        assert_eq!(summary.ticket_id, TicketId::from_provider_uuid(TicketProvider::Linear, "issue-802"));
+        assert_eq!(
+            summary.ticket_id,
+            TicketId::from_provider_uuid(TicketProvider::Linear, "issue-802")
+        );
         assert_eq!(summary.state, "Todo");
 
         let requests = transport.requests().await;
@@ -2457,10 +2483,16 @@ mod tests {
             ]))
             .await;
         transport
-            .push_response(team_states_payload("team-1", &[("state-1", "Todo"), ("state-2", "Done")]))
+            .push_response(team_states_payload(
+                "team-1",
+                &[("state-1", "Todo"), ("state-2", "Done")],
+            ))
             .await;
         transport
-            .push_response(team_states_payload("team-2", &[("state-3", "In Progress"), ("state-4", "Done")]))
+            .push_response(team_states_payload(
+                "team-2",
+                &[("state-3", "In Progress"), ("state-4", "Done")],
+            ))
             .await;
         let provider = LinearTicketingProvider::with_transport(config, transport);
 
@@ -2474,7 +2506,9 @@ mod tests {
             })
             .await
             .expect_err("missing state should fail");
-        assert!(create_error.to_string().contains("do not expose a state named"));
+        assert!(create_error
+            .to_string()
+            .contains("do not expose a state named"));
     }
 
     #[tokio::test]
@@ -2555,7 +2589,10 @@ mod tests {
             .expect("create succeeds");
 
         let requests = transport.requests().await;
-        assert!(!requests[1].variables["input"].as_object().unwrap().contains_key("description"));
+        assert!(!requests[1].variables["input"]
+            .as_object()
+            .unwrap()
+            .contains_key("description"));
     }
 
     #[tokio::test]
@@ -2575,7 +2612,9 @@ mod tests {
             })
             .await
             .expect_err("labels not supported should fail");
-        assert!(create_error.to_string().contains("does not currently support label creation"));
+        assert!(create_error
+            .to_string()
+            .contains("does not currently support label creation"));
         assert_eq!(transport.request_count().await, 0);
     }
 
@@ -2780,7 +2819,10 @@ mod tests {
 
         assert_eq!(details.summary.identifier, "AP-1001");
         assert_eq!(details.summary.title, "Fetch ticket details");
-        assert_eq!(details.description, Some("Tracks a high-priority bug".to_owned()));
+        assert_eq!(
+            details.description,
+            Some("Tracks a high-priority bug".to_owned())
+        );
 
         let requests = transport.requests().await;
         assert_eq!(requests.len(), 1);
@@ -2812,7 +2854,10 @@ mod tests {
         assert_eq!(requests.len(), 1);
         assert!(requests[0].query.contains("UpdateIssueDescription"));
         assert_eq!(requests[0].variables["id"], json!("issue-1002"));
-        assert_eq!(requests[0].variables["description"], json!("Updated by command"));
+        assert_eq!(
+            requests[0].variables["description"],
+            json!("Updated by command")
+        );
     }
 
     #[tokio::test]

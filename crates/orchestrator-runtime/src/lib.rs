@@ -3,11 +3,11 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 mod worker_manager;
+use std::path::PathBuf;
 pub use worker_manager::{
     ManagedSessionStatus, ManagedSessionSummary, SessionEventSubscription, SessionVisibility,
     WorkerManager, WorkerManagerConfig, WorkerManagerEvent, WorkerManagerEventSubscription,
 };
-use std::path::PathBuf;
 
 macro_rules! runtime_string_id {
     ($name:ident) => {

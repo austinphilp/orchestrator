@@ -9,7 +9,7 @@ use crate::events::{NewEventEnvelope, OrchestrationEventPayload, StoredEventEnve
 use crate::identifiers::{ArtifactId, TicketId, TicketProvider, WorkItemId, WorkerSessionId};
 use crate::status::{ArtifactKind, WorkerSessionStatus};
 
-const CURRENT_SCHEMA_VERSION: u32 = 5;
+const CURRENT_SCHEMA_VERSION: u32 = 6;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RetrievalScope {
@@ -473,6 +473,61 @@ impl SqliteEventStore {
             )
             .map_err(|err| CoreError::Persistence(err.to_string()))?;
         Ok(())
+    }
+
+    pub fn upsert_session_workflow_stage(
+        &self,
+        session_id: &WorkerSessionId,
+        workflow_stage: &str,
+    ) -> Result<(), CoreError> {
+        let workflow_stage = workflow_stage.trim();
+        if workflow_stage.is_empty() {
+            return Err(CoreError::Configuration(
+                "workflow stage cannot be empty".to_owned(),
+            ));
+        }
+
+        self.conn
+            .execute(
+                "
+                INSERT INTO session_workflow_stages (
+                    session_id, workflow_stage, updated_at
+                ) VALUES (?1, ?2, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+                ON CONFLICT(session_id) DO UPDATE SET
+                    workflow_stage = excluded.workflow_stage,
+                    updated_at = excluded.updated_at
+                ",
+                params![session_id.as_str(), workflow_stage],
+            )
+            .map_err(|err| CoreError::Persistence(err.to_string()))?;
+        Ok(())
+    }
+
+    pub fn list_session_workflow_stages(
+        &self,
+    ) -> Result<Vec<(WorkerSessionId, String)>, CoreError> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "
+                SELECT session_id, workflow_stage
+                FROM session_workflow_stages
+                ORDER BY updated_at ASC
+                ",
+            )
+            .map_err(|err| CoreError::Persistence(err.to_string()))?;
+
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((
+                    WorkerSessionId::from(row.get::<_, String>(0)?),
+                    row.get::<_, String>(1)?,
+                ))
+            })
+            .map_err(|err| CoreError::Persistence(err.to_string()))?;
+
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|err| CoreError::Persistence(err.to_string()))
     }
 
     pub fn upsert_runtime_mapping(
@@ -1045,6 +1100,13 @@ impl SqliteEventStore {
                     FOREIGN KEY(session_id) REFERENCES sessions(session_id)
                 );
 
+                CREATE TABLE IF NOT EXISTS session_workflow_stages (
+                    session_id TEXT PRIMARY KEY,
+                    workflow_stage TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    FOREIGN KEY(session_id) REFERENCES sessions(session_id)
+                );
+
                 CREATE INDEX IF NOT EXISTS idx_events_work_item_sequence ON events(work_item_id, sequence ASC);
                 CREATE INDEX IF NOT EXISTS idx_events_session ON events(session_id, sequence DESC);
                 CREATE INDEX IF NOT EXISTS idx_tickets_provider_lookup ON tickets(provider, provider_ticket_id);
@@ -1211,6 +1273,18 @@ impl SqliteEventStore {
                         harness_session_id TEXT NOT NULL,
                         updated_at TEXT NOT NULL,
                         PRIMARY KEY (session_id, backend_kind),
+                        FOREIGN KEY(session_id) REFERENCES sessions(session_id)
+                    );
+                    ",
+                )
+                .map_err(|err| CoreError::Persistence(err.to_string())),
+            6 => tx
+                .execute_batch(
+                    "
+                    CREATE TABLE IF NOT EXISTS session_workflow_stages (
+                        session_id TEXT PRIMARY KEY,
+                        workflow_stage TEXT NOT NULL,
+                        updated_at TEXT NOT NULL,
                         FOREIGN KEY(session_id) REFERENCES sessions(session_id)
                     );
                     ",

@@ -1,7 +1,7 @@
 use std::fs;
 use std::path::PathBuf;
-use std::time::{SystemTime, UNIX_EPOCH};
 use std::time::Duration;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use backend_codex::{CodexBackend, CodexBackendConfig};
 use orchestrator_runtime::{
@@ -31,13 +31,16 @@ fn spawn_spec(session_id: &str) -> SpawnSpec {
     }
 }
 
-async fn collect_until_terminal_event(mut stream: WorkerEventStream) -> RuntimeResult<Vec<BackendEvent>> {
+async fn collect_until_terminal_event(
+    mut stream: WorkerEventStream,
+) -> RuntimeResult<Vec<BackendEvent>> {
     timeout(TEST_TIMEOUT, async {
         let mut events = Vec::new();
         loop {
             match stream.next_event().await? {
                 Some(event) => {
-                    let terminal = matches!(event, BackendEvent::Done(_) | BackendEvent::Crashed(_));
+                    let terminal =
+                        matches!(event, BackendEvent::Done(_) | BackendEvent::Crashed(_));
                     events.push(event);
                     if terminal {
                         return Ok(events);
@@ -170,8 +173,8 @@ async fn codex_backend_uses_app_server_stdio_contract() {
         .expect("send codex input");
 
     let events = collect_until_terminal_event(stream)
-    .await
-    .expect("collect codex events");
+        .await
+        .expect("collect codex events");
     assert!(events.iter().any(|event| {
         matches!(
             event,
@@ -192,7 +195,10 @@ async fn codex_backend_rejects_legacy_http_base_url_config() {
         legacy_server_base_url: Some("http://127.0.0.1:8788".to_owned()),
     });
 
-    let error = backend.health_check().await.expect_err("legacy URL should fail");
+    let error = backend
+        .health_check()
+        .await
+        .expect_err("legacy URL should fail");
     match error {
         RuntimeError::Configuration(message) => {
             assert!(message.contains("ORCHESTRATOR_CODEX_SERVER_BASE_URL"));

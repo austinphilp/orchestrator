@@ -1,23 +1,22 @@
 use std::collections::HashMap;
 use std::fs::OpenOptions;
 use std::io::Write;
+use std::path::{Component, Path, PathBuf};
 use std::process::Command as SyncCommand;
+use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::path::{Component, Path, PathBuf};
-use std::process::Stdio;
-use std::time::Duration;
 use std::sync::{Mutex, OnceLock};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use futures_util::StreamExt;
 use orchestrator_runtime::{
     BackendArtifactEvent, BackendArtifactKind, BackendBlockedEvent, BackendCapabilities,
-    BackendCrashedEvent, BackendCheckpointEvent, BackendDoneEvent, BackendEvent, BackendKind,
+    BackendCheckpointEvent, BackendCrashedEvent, BackendDoneEvent, BackendEvent, BackendKind,
     BackendNeedsInputEvent, BackendOutputEvent, BackendOutputStream, RuntimeArtifactId,
-    RuntimeError, RuntimeResult,
-    RuntimeSessionId, SessionHandle, SpawnSpec, WorkerBackend, WorkerEventStream,
-    WorkerEventSubscription,
+    RuntimeError, RuntimeResult, RuntimeSessionId, SessionHandle, SpawnSpec, WorkerBackend,
+    WorkerEventStream, WorkerEventSubscription,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -29,8 +28,7 @@ const DEFAULT_OPENCODE_BINARY: &str = "opencode";
 const DEFAULT_OPENCODE_SERVER_BASE_URL: &str = "http://127.0.0.1:8787";
 const ENV_ALLOW_UNSAFE_COMMAND_PATHS: &str = "ORCHESTRATOR_ALLOW_UNSAFE_COMMAND_PATHS";
 const ENV_HARNESS_LOG_RAW_EVENTS: &str = "ORCHESTRATOR_HARNESS_LOG_RAW_EVENTS";
-const ENV_HARNESS_LOG_NORMALIZED_EVENTS: &str =
-    "ORCHESTRATOR_HARNESS_LOG_NORMALIZED_EVENTS";
+const ENV_HARNESS_LOG_NORMALIZED_EVENTS: &str = "ORCHESTRATOR_HARNESS_LOG_NORMALIZED_EVENTS";
 const HARNESS_RAW_LOG_FILE: &str = ".orchestrator/logs/harness-raw.log";
 const HARNESS_NORMALIZED_LOG_FILE: &str = ".orchestrator/logs/harness-normalized.log";
 const ENV_OPENCODE_SERVER_BASE_URL: &str = "ORCHESTRATOR_OPENCODE_SERVER_BASE_URL";
@@ -38,16 +36,9 @@ const ENV_HARNESS_SERVER_STARTUP_TIMEOUT_SECS: &str =
     "ORCHESTRATOR_HARNESS_SERVER_STARTUP_TIMEOUT_SECS";
 const DEFAULT_OUTPUT_BUFFER: usize = 256;
 const DEFAULT_SERVER_STARTUP_TIMEOUT_SECS: u64 = 10;
-const SESSION_EXPORT_HELP_MARKERS: &[&str] = &[
-    "session-export",
-    "session_export",
-    "session export",
-];
-const DIFF_PROVIDER_HELP_MARKERS: &[&str] = &[
-    "diff-provider",
-    "diff_provider",
-    "diff provider",
-];
+const SESSION_EXPORT_HELP_MARKERS: &[&str] =
+    &["session-export", "session_export", "session export"];
+const DIFF_PROVIDER_HELP_MARKERS: &[&str] = &["diff-provider", "diff_provider", "diff provider"];
 const OPTIONAL_CAPABILITY_HELP_ARGS: [&str; 2] = ["--help", "-h"];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -63,14 +54,13 @@ impl Default for OpenCodeBackendConfig {
     fn default() -> Self {
         Self {
             binary: std::env::var_os("ORCHESTRATOR_OPENCODE_BIN")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from(DEFAULT_OPENCODE_BINARY)),
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from(DEFAULT_OPENCODE_BINARY)),
             base_args: Vec::new(),
             output_buffer: DEFAULT_OUTPUT_BUFFER,
             server_base_url: std::env::var(ENV_OPENCODE_SERVER_BASE_URL).ok(),
             server_startup_timeout: Duration::from_secs(
-                parse_server_startup_timeout_secs()
-                    .unwrap_or(DEFAULT_SERVER_STARTUP_TIMEOUT_SECS),
+                parse_server_startup_timeout_secs().unwrap_or(DEFAULT_SERVER_STARTUP_TIMEOUT_SECS),
             ),
         }
     }
@@ -113,10 +103,7 @@ impl OpenCodeSession {
     }
 
     fn emit_terminal_event(&self, event: BackendEvent) {
-        if self
-            .terminal_event_sent
-            .swap(true, Ordering::SeqCst)
-        {
+        if self.terminal_event_sent.swap(true, Ordering::SeqCst) {
             return;
         }
         maybe_log_normalized_harness_event(
@@ -325,9 +312,7 @@ impl OpenCodeBackend {
         };
         let response = self
             .client
-            .post(format!(
-                "{base_url}/v1/sessions/{remote_session_id}/input"
-            ))
+            .post(format!("{base_url}/v1/sessions/{remote_session_id}/input"))
             .json(&request)
             .send()
             .await
@@ -349,7 +334,11 @@ impl OpenCodeBackend {
         }
     }
 
-    async fn close_remote_session(&self, base_url: &str, remote_session_id: &str) -> RuntimeResult<()> {
+    async fn close_remote_session(
+        &self,
+        base_url: &str,
+        remote_session_id: &str,
+    ) -> RuntimeResult<()> {
         let response = self
             .client
             .delete(format!("{base_url}/v1/sessions/{remote_session_id}"))
@@ -399,9 +388,7 @@ impl OpenCodeBackend {
                 let status = response.status();
                 let body = response.text().await.unwrap_or_default();
                 session.emit_terminal_event(BackendEvent::Crashed(BackendCrashedEvent {
-                    reason: format!(
-                        "{backend_kind:?} stream failed with status {status}: {body}"
-                    ),
+                    reason: format!("{backend_kind:?} stream failed with status {status}: {body}"),
                 }));
                 return;
             }
@@ -533,11 +520,7 @@ fn query_binary_help_text(binary: &Path) -> Option<String> {
 fn parse_optional_features_from_help(help_text: &str) -> (bool, bool) {
     let normalized = help_text.to_ascii_lowercase();
 
-    let has_marker = |markers: &[&str]| {
-        markers
-            .iter()
-            .any(|marker| normalized.contains(*marker))
-    };
+    let has_marker = |markers: &[&str]| markers.iter().any(|marker| normalized.contains(*marker));
 
     (
         has_marker(SESSION_EXPORT_HELP_MARKERS),
@@ -642,7 +625,9 @@ fn parse_server_event_line(line: &[u8]) -> Option<BackendEvent> {
         })),
         "needs_input" => Some(BackendEvent::NeedsInput(BackendNeedsInputEvent {
             prompt_id: event.prompt_id.unwrap_or_else(|| "prompt".to_owned()),
-            question: event.question.unwrap_or_else(|| "input required".to_owned()),
+            question: event
+                .question
+                .unwrap_or_else(|| "input required".to_owned()),
             options: event.options,
             default_option: event.default_option,
         })),
@@ -688,9 +673,8 @@ fn parse_create_session_response_body(body: &str) -> Option<CreateSessionRespons
 }
 
 fn extract_session_id(value: &Value) -> Option<String> {
-    extract_named_string(value, &["session_id", "sessionId", "id"]).or_else(|| {
-        extract_named_string(value, &["thread_id", "threadId"])
-    })
+    extract_named_string(value, &["session_id", "sessionId", "id"])
+        .or_else(|| extract_named_string(value, &["thread_id", "threadId"]))
 }
 
 fn extract_named_string(value: &Value, keys: &[&str]) -> Option<String> {
@@ -958,9 +942,7 @@ impl WorkerBackend for OpenCodeBackend {
         validate_session_backend(session, self.backend_kind.clone())?;
         let session = self.session(&session.session_id).await?;
         let output = session.event_tx.subscribe();
-        Ok(Box::new(OpenCodeEventSubscription {
-            output,
-        }))
+        Ok(Box::new(OpenCodeEventSubscription { output }))
     }
 }
 

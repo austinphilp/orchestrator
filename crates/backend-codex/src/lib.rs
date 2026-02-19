@@ -10,8 +10,8 @@ use std::time::Duration;
 use orchestrator_runtime::{
     BackendCapabilities, BackendCrashedEvent, BackendDoneEvent, BackendEvent, BackendKind,
     BackendOutputEvent, BackendOutputStream, BackendTurnStateEvent, RuntimeError, RuntimeResult,
-    RuntimeSessionId, SessionHandle, SessionLifecycle, SpawnSpec, WorkerBackend,
-    WorkerEventStream, WorkerEventSubscription,
+    RuntimeSessionId, SessionHandle, SessionLifecycle, SpawnSpec, WorkerBackend, WorkerEventStream,
+    WorkerEventSubscription,
 };
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -25,8 +25,7 @@ const DEFAULT_SERVER_STARTUP_TIMEOUT_SECS: u64 = 10;
 const ENV_CODEX_BIN: &str = "ORCHESTRATOR_CODEX_BIN";
 const ENV_CODEX_SERVER_BASE_URL: &str = "ORCHESTRATOR_CODEX_SERVER_BASE_URL";
 const ENV_HARNESS_LOG_RAW_EVENTS: &str = "ORCHESTRATOR_HARNESS_LOG_RAW_EVENTS";
-const ENV_HARNESS_LOG_NORMALIZED_EVENTS: &str =
-    "ORCHESTRATOR_HARNESS_LOG_NORMALIZED_EVENTS";
+const ENV_HARNESS_LOG_NORMALIZED_EVENTS: &str = "ORCHESTRATOR_HARNESS_LOG_NORMALIZED_EVENTS";
 const HARNESS_RAW_LOG_FILE: &str = ".orchestrator/logs/harness-raw.log";
 const HARNESS_NORMALIZED_LOG_FILE: &str = ".orchestrator/logs/harness-normalized.log";
 const ENV_HARNESS_SESSION_ID: &str = "ORCHESTRATOR_HARNESS_SESSION_ID";
@@ -210,7 +209,9 @@ impl CodexConnection {
             RuntimeError::Process(format!("failed to write codex app-server request: {error}"))
         })?;
         stdin.write_all(b"\n").await.map_err(|error| {
-            RuntimeError::Process(format!("failed to delimit codex app-server request: {error}"))
+            RuntimeError::Process(format!(
+                "failed to delimit codex app-server request: {error}"
+            ))
         })?;
         stdin.flush().await.map_err(|error| {
             RuntimeError::Process(format!("failed to flush codex app-server request: {error}"))
@@ -309,7 +310,11 @@ impl CodexBackend {
             }
         });
         if let Err(error) = connection
-            .request("initialize", initialize_params, self.config.server_startup_timeout)
+            .request(
+                "initialize",
+                initialize_params,
+                self.config.server_startup_timeout,
+            )
             .await
         {
             connection.shutdown().await;
@@ -332,7 +337,10 @@ impl CodexBackend {
             .ok_or_else(|| RuntimeError::SessionNotFound(session_id.as_str().to_owned()))
     }
 
-    async fn remove_session(&self, session_id: &RuntimeSessionId) -> RuntimeResult<Arc<CodexSession>> {
+    async fn remove_session(
+        &self,
+        session_id: &RuntimeSessionId,
+    ) -> RuntimeResult<Arc<CodexSession>> {
         let mut sessions = self.sessions.lock().await;
         sessions
             .remove(session_id)
@@ -372,48 +380,49 @@ impl SessionLifecycle for CodexBackend {
         }
         if let Some(instruction) = spec.instruction_prelude.clone() {
             if !instruction.trim().is_empty() {
-                params.insert("developerInstructions".to_owned(), Value::String(instruction));
+                params.insert(
+                    "developerInstructions".to_owned(),
+                    Value::String(instruction),
+                );
             }
         }
-        let response = if let Some(thread_id) = harness_session_id_from_environment(&spec.environment) {
-            let mut resume_params = params.clone();
-            resume_params.insert(
-                "threadId".to_owned(),
-                Value::String(thread_id),
-            );
-            match connection
-                .request(
-                    "thread/resume",
-                    Value::Object(resume_params),
-                    Duration::from_secs(REQUEST_TIMEOUT_SECS),
-                )
-                .await
-            {
-                Ok(response) => response,
-                Err(error) => {
-                    tracing::warn!(
-                        session_id = spec.session_id.as_str(),
-                        error = %error,
-                        "codex thread/resume failed; starting a new thread"
-                    );
-                    connection
-                        .request(
-                            "thread/start",
-                            Value::Object(params),
-                            Duration::from_secs(REQUEST_TIMEOUT_SECS),
-                        )
-                        .await?
+        let response =
+            if let Some(thread_id) = harness_session_id_from_environment(&spec.environment) {
+                let mut resume_params = params.clone();
+                resume_params.insert("threadId".to_owned(), Value::String(thread_id));
+                match connection
+                    .request(
+                        "thread/resume",
+                        Value::Object(resume_params),
+                        Duration::from_secs(REQUEST_TIMEOUT_SECS),
+                    )
+                    .await
+                {
+                    Ok(response) => response,
+                    Err(error) => {
+                        tracing::warn!(
+                            session_id = spec.session_id.as_str(),
+                            error = %error,
+                            "codex thread/resume failed; starting a new thread"
+                        );
+                        connection
+                            .request(
+                                "thread/start",
+                                Value::Object(params),
+                                Duration::from_secs(REQUEST_TIMEOUT_SECS),
+                            )
+                            .await?
+                    }
                 }
-            }
-        } else {
-            connection
-                .request(
-                    "thread/start",
-                    Value::Object(params),
-                    Duration::from_secs(REQUEST_TIMEOUT_SECS),
-                )
-                .await?
-        };
+            } else {
+                connection
+                    .request(
+                        "thread/start",
+                        Value::Object(params),
+                        Duration::from_secs(REQUEST_TIMEOUT_SECS),
+                    )
+                    .await?
+            };
         let thread_id = extract_thread_id(&response).ok_or_else(|| {
             RuntimeError::Protocol(format!(
                 "codex app-server thread/start response missing thread id: {}",
@@ -703,7 +712,10 @@ async fn run_reader_loop(
     };
     let waiters = {
         let mut pending_guard = pending.lock().await;
-        pending_guard.drain().map(|(_, sender)| sender).collect::<Vec<_>>()
+        pending_guard
+            .drain()
+            .map(|(_, sender)| sender)
+            .collect::<Vec<_>>()
     };
     for waiter in waiters {
         let _ = waiter.send(Err(RuntimeError::Process(reason.clone())));
@@ -748,7 +760,11 @@ fn server_request_result(method: &str) -> Option<Value> {
     }
 }
 
-async fn send_rpc_result(stdin: &Arc<AsyncMutex<ChildStdin>>, id: &Value, result: Value) -> RuntimeResult<()> {
+async fn send_rpc_result(
+    stdin: &Arc<AsyncMutex<ChildStdin>>,
+    id: &Value,
+    result: Value,
+) -> RuntimeResult<()> {
     let payload = json!({
         "jsonrpc": "2.0",
         "id": id.clone(),
@@ -774,19 +790,30 @@ async fn send_rpc_error(
     write_rpc_payload(stdin, &payload).await
 }
 
-async fn write_rpc_payload(stdin: &Arc<AsyncMutex<ChildStdin>>, payload: &Value) -> RuntimeResult<()> {
+async fn write_rpc_payload(
+    stdin: &Arc<AsyncMutex<ChildStdin>>,
+    payload: &Value,
+) -> RuntimeResult<()> {
     let encoded = serde_json::to_string(payload).map_err(|error| {
-        RuntimeError::Protocol(format!("failed to encode codex app-server response payload: {error}"))
+        RuntimeError::Protocol(format!(
+            "failed to encode codex app-server response payload: {error}"
+        ))
     })?;
     let mut stdin = stdin.lock().await;
     stdin.write_all(encoded.as_bytes()).await.map_err(|error| {
-        RuntimeError::Process(format!("failed to write codex app-server response payload: {error}"))
+        RuntimeError::Process(format!(
+            "failed to write codex app-server response payload: {error}"
+        ))
     })?;
     stdin.write_all(b"\n").await.map_err(|error| {
-        RuntimeError::Process(format!("failed to delimit codex app-server response payload: {error}"))
+        RuntimeError::Process(format!(
+            "failed to delimit codex app-server response payload: {error}"
+        ))
     })?;
     stdin.flush().await.map_err(|error| {
-        RuntimeError::Process(format!("failed to flush codex app-server response payload: {error}"))
+        RuntimeError::Process(format!(
+            "failed to flush codex app-server response payload: {error}"
+        ))
     })?;
     Ok(())
 }
@@ -906,10 +933,9 @@ async fn emit_codex_request_meta_event(
     sessions: &Arc<AsyncMutex<HashMap<RuntimeSessionId, Arc<CodexSession>>>>,
 ) {
     let (kind, detail) = match method {
-        "item/commandExecution/requestApproval" => (
-            "command",
-            "command approval requested (auto-accepted)",
-        ),
+        "item/commandExecution/requestApproval" => {
+            ("command", "command approval requested (auto-accepted)")
+        }
         "item/fileChange/requestApproval" => (
             "file-change",
             "file change approval requested (auto-accepted)",
@@ -923,7 +949,10 @@ async fn emit_codex_request_meta_event(
             "tool call requested (currently unsupported by orchestrator backend)",
         ),
         "execCommandApproval" => ("command", "exec command approval requested (auto-approved)"),
-        "applyPatchApproval" => ("file-change", "apply patch approval requested (auto-approved)"),
+        "applyPatchApproval" => (
+            "file-change",
+            "apply patch approval requested (auto-approved)",
+        ),
         _ => return,
     };
 
@@ -1096,22 +1125,21 @@ async fn seed_session_history(
 }
 
 fn extract_turns(response: &Value) -> Option<&Vec<Value>> {
-    response
-        .get("turns")
-        .and_then(Value::as_array)
-        .or_else(|| response.get("thread").and_then(|thread| thread.get("turns")).and_then(Value::as_array))
+    response.get("turns").and_then(Value::as_array).or_else(|| {
+        response
+            .get("thread")
+            .and_then(|thread| thread.get("turns"))
+            .and_then(Value::as_array)
+    })
 }
 
 fn extract_history_items(response: &Value) -> Option<&Vec<Value>> {
-    response
-        .get("items")
-        .and_then(Value::as_array)
-        .or_else(|| {
-            response
-                .get("thread")
-                .and_then(|thread| thread.get("items"))
-                .and_then(Value::as_array)
-        })
+    response.get("items").and_then(Value::as_array).or_else(|| {
+        response
+            .get("thread")
+            .and_then(|thread| thread.get("items"))
+            .and_then(Value::as_array)
+    })
 }
 
 fn emit_history_item(session: &CodexSession, item: &Value, emitted_any: &mut bool) {
@@ -1246,11 +1274,8 @@ fn extract_collaboration_modes(
         };
         let normalized = mode.trim().to_ascii_lowercase();
         if normalized == PLAN_COLLABORATION_MODE_KIND {
-            modes.plan = collaboration_mode_payload(
-                PLAN_COLLABORATION_MODE_KIND,
-                entry,
-                default_model_id,
-            );
+            modes.plan =
+                collaboration_mode_payload(PLAN_COLLABORATION_MODE_KIND, entry, default_model_id);
             continue;
         }
         if normalized == DEFAULT_COLLABORATION_MODE_KIND {
@@ -1307,9 +1332,9 @@ fn collaboration_mode_payload(
     source: &Value,
     default_model_id: Option<&str>,
 ) -> Option<Value> {
-    let model = extract_collaboration_mode_model(source)
-        .or(default_model_id.map(str::to_owned))?;
-    let reasoning_effort = extract_collaboration_mode_reasoning_effort(source).unwrap_or(Value::Null);
+    let model = extract_collaboration_mode_model(source).or(default_model_id.map(str::to_owned))?;
+    let reasoning_effort =
+        extract_collaboration_mode_reasoning_effort(source).unwrap_or(Value::Null);
     let developer_instructions =
         extract_collaboration_mode_developer_instructions(source).unwrap_or(Value::Null);
 
@@ -1373,7 +1398,12 @@ async fn resolve_default_model_id(connection: &CodexConnection) -> RuntimeResult
 
     let preferred = data
         .iter()
-        .find(|entry| entry.get("isDefault").and_then(Value::as_bool).unwrap_or(false))
+        .find(|entry| {
+            entry
+                .get("isDefault")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+        })
         .or_else(|| data.first());
     Ok(preferred.and_then(model_identifier_from_entry))
 }
@@ -1408,18 +1438,15 @@ fn is_collaboration_mode_error(error: &RuntimeError) -> bool {
 }
 
 fn harness_session_id_from_environment(environment: &[(String, String)]) -> Option<String> {
-    environment
-        .iter()
-        .rev()
-        .find_map(|(name, value)| {
-            if name == ENV_HARNESS_SESSION_ID {
-                let trimmed = value.trim();
-                if !trimmed.is_empty() {
-                    return Some(trimmed.to_owned());
-                }
+    environment.iter().rev().find_map(|(name, value)| {
+        if name == ENV_HARNESS_SESSION_ID {
+            let trimmed = value.trim();
+            if !trimmed.is_empty() {
+                return Some(trimmed.to_owned());
             }
-            None
-        })
+        }
+        None
+    })
 }
 
 fn harness_log_raw_events_enabled() -> bool {

@@ -8,8 +8,8 @@ use tokio::task::JoinHandle;
 
 use crate::{
     BackendCapabilities, BackendCrashedEvent, BackendDoneEvent, BackendEvent, BackendKind,
-    RuntimeError, RuntimeResult, RuntimeSessionId, SessionHandle, SpawnSpec,
-    WorkerBackend, WorkerEventStream,
+    RuntimeError, RuntimeResult, RuntimeSessionId, SessionHandle, SpawnSpec, WorkerBackend,
+    WorkerEventStream,
 };
 
 const DEFAULT_SESSION_EVENT_BUFFER: usize = 256;

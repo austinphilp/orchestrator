@@ -9,7 +9,7 @@ use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use backend_opencode::{OpenCodeBackend, OpenCodeBackendConfig};
 use orchestrator_runtime::{
-    BackendEvent, BackendKind, RuntimeResult, RuntimeSessionId, SessionLifecycle, SessionHandle,
+    BackendEvent, BackendKind, RuntimeResult, RuntimeSessionId, SessionHandle, SessionLifecycle,
     SpawnSpec, WorkerBackend, WorkerEventStream,
 };
 use serde::{Deserialize, Serialize};
@@ -94,7 +94,12 @@ async fn events(Path(session_id): Path<String>) -> (StatusCode, Body) {
     (StatusCode::OK, Body::from(payload))
 }
 
-async fn spawn_mock_server() -> (String, MockState, oneshot::Sender<()>, tokio::task::JoinHandle<()>) {
+async fn spawn_mock_server() -> (
+    String,
+    MockState,
+    oneshot::Sender<()>,
+    tokio::task::JoinHandle<()>,
+) {
     let state = MockState::default();
     let app = Router::new()
         .route("/health", get(health))
@@ -138,13 +143,16 @@ fn spawn_spec(session_id: &str) -> SpawnSpec {
     }
 }
 
-async fn collect_until_terminal_event(mut stream: WorkerEventStream) -> RuntimeResult<Vec<BackendEvent>> {
+async fn collect_until_terminal_event(
+    mut stream: WorkerEventStream,
+) -> RuntimeResult<Vec<BackendEvent>> {
     timeout(TEST_TIMEOUT, async {
         let mut events = Vec::new();
         loop {
             match stream.next_event().await? {
                 Some(event) => {
-                    let terminal = matches!(event, BackendEvent::Done(_) | BackendEvent::Crashed(_));
+                    let terminal =
+                        matches!(event, BackendEvent::Done(_) | BackendEvent::Crashed(_));
                     events.push(event);
                     if terminal {
                         return Ok(events);
@@ -247,7 +255,9 @@ async fn opencode_backend_streams_are_isolated_per_session() {
     let output_a = events_a
         .iter()
         .filter_map(|event| match event {
-            BackendEvent::Output(output) => Some(String::from_utf8_lossy(&output.bytes).to_string()),
+            BackendEvent::Output(output) => {
+                Some(String::from_utf8_lossy(&output.bytes).to_string())
+            }
             _ => None,
         })
         .collect::<Vec<_>>()
@@ -255,7 +265,9 @@ async fn opencode_backend_streams_are_isolated_per_session() {
     let output_b = events_b
         .iter()
         .filter_map(|event| match event {
-            BackendEvent::Output(output) => Some(String::from_utf8_lossy(&output.bytes).to_string()),
+            BackendEvent::Output(output) => {
+                Some(String::from_utf8_lossy(&output.bytes).to_string())
+            }
             _ => None,
         })
         .collect::<Vec<_>>()

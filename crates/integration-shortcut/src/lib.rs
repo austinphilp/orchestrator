@@ -46,8 +46,7 @@ impl ShortcutConfig {
         let api_key = api_key.trim().to_owned();
         if api_key.is_empty() {
             return Err(CoreError::Configuration(
-                "ORCHESTRATOR_SHORTCUT_API_KEY is empty. Provide a non-empty API key."
-                    .to_owned(),
+                "ORCHESTRATOR_SHORTCUT_API_KEY is empty. Provide a non-empty API key.".to_owned(),
             ));
         }
 
@@ -69,8 +68,7 @@ impl ShortcutConfig {
             .map(|raw| {
                 let value = raw.parse::<u32>().map_err(|_| {
                     CoreError::Configuration(
-                        "ORCHESTRATOR_SHORTCUT_FETCH_LIMIT must be a non-zero integer."
-                            .to_owned(),
+                        "ORCHESTRATOR_SHORTCUT_FETCH_LIMIT must be a non-zero integer.".to_owned(),
                     )
                 })?;
                 if value == 0 {
@@ -128,11 +126,12 @@ impl ShortcutTicketingProvider {
         format!("{base}/{suffix}")
     }
 
-    async fn request_json<T: DeserializeOwned>(&self, request: reqwest::RequestBuilder) -> Result<T, CoreError> {
+    async fn request_json<T: DeserializeOwned>(
+        &self,
+        request: reqwest::RequestBuilder,
+    ) -> Result<T, CoreError> {
         let response = request.send().await.map_err(|error| {
-            CoreError::DependencyUnavailable(format!(
-                "Shortcut API request failed: {error}"
-            ))
+            CoreError::DependencyUnavailable(format!("Shortcut API request failed: {error}"))
         })?;
 
         let status = response.status();
@@ -155,9 +154,7 @@ impl ShortcutTicketingProvider {
 
     async fn request_status_only(&self, request: reqwest::RequestBuilder) -> Result<(), CoreError> {
         let response = request.send().await.map_err(|error| {
-            CoreError::DependencyUnavailable(format!(
-                "Shortcut API request failed: {error}"
-            ))
+            CoreError::DependencyUnavailable(format!("Shortcut API request failed: {error}"))
         })?;
 
         let status = response.status();
@@ -174,7 +171,10 @@ impl ShortcutTicketingProvider {
         }
     }
 
-    async fn fetch_stories(&self, query_limit: Option<u32>) -> Result<Vec<ShortcutStory>, CoreError> {
+    async fn fetch_stories(
+        &self,
+        query_limit: Option<u32>,
+    ) -> Result<Vec<ShortcutStory>, CoreError> {
         let limit = query_limit.unwrap_or(self.config.fetch_limit).max(1);
         let request = self
             .client
@@ -215,10 +215,7 @@ impl ShortcutTicketingProvider {
         )))
     }
 
-    async fn add_comment_request(
-        &self,
-        request: AddTicketCommentRequest,
-    ) -> Result<(), CoreError> {
+    async fn add_comment_request(&self, request: AddTicketCommentRequest) -> Result<(), CoreError> {
         let story_id = shortcut_provider_ticket_id(&request.ticket_id)?;
         let body = compose_shortcut_comment_body(request.comment.as_str(), &request.attachments)?;
         let response = self
@@ -238,7 +235,10 @@ impl TicketingProvider for ShortcutTicketingProvider {
     }
 
     async fn health_check(&self) -> Result<(), CoreError> {
-        let request = self.client.get(self.endpoint("workflow-states")).query(&[("page_size", "1")]);
+        let request = self
+            .client
+            .get(self.endpoint("workflow-states"))
+            .query(&[("page_size", "1")]);
         let payload = self.request_json::<Value>(request).await?;
         let states = extract_list::<ShortcutWorkflowState>(payload, "workflowStates")?;
         if states.is_empty() {
@@ -299,10 +299,7 @@ impl TicketingProvider for ShortcutTicketingProvider {
         });
 
         stories.truncate(limit as usize);
-        Ok(stories
-            .into_iter()
-            .map(ticket_summary_from_story)
-            .collect())
+        Ok(stories.into_iter().map(ticket_summary_from_story).collect())
     }
 
     async fn create_ticket(
@@ -344,7 +341,9 @@ impl TicketingProvider for ShortcutTicketingProvider {
 
     async fn get_ticket(&self, request: GetTicketRequest) -> Result<TicketDetails, CoreError> {
         let issue_id = shortcut_provider_ticket_id(&request.ticket_id)?;
-        let response = self.client.get(self.endpoint(&format!("stories/{issue_id}")));
+        let response = self
+            .client
+            .get(self.endpoint(&format!("stories/{issue_id}")));
         let story = parse_shortcut_story(self.request_json(response).await?)?;
         Ok(TicketDetails {
             summary: ticket_summary_from_story(story.clone()),
@@ -399,11 +398,13 @@ fn extract_list<T: DeserializeOwned>(payload: Value, key: &str) -> Result<Vec<T>
     if let Some(values) = payload.get(key).and_then(Value::as_array) {
         return values
             .iter()
-            .map(|raw| serde_json::from_value(raw.clone()).map_err(|error| {
-                CoreError::DependencyUnavailable(format!(
-                    "Shortcut payload decode failed: {error}"
-                ))
-            }))
+            .map(|raw| {
+                serde_json::from_value(raw.clone()).map_err(|error| {
+                    CoreError::DependencyUnavailable(format!(
+                        "Shortcut payload decode failed: {error}"
+                    ))
+                })
+            })
             .collect();
     }
 
@@ -414,22 +415,26 @@ fn extract_list<T: DeserializeOwned>(payload: Value, key: &str) -> Result<Vec<T>
     if let Some(values) = payload.get("data").and_then(Value::as_array) {
         return values
             .iter()
-            .map(|raw| serde_json::from_value(raw.clone()).map_err(|error| {
-                CoreError::DependencyUnavailable(format!(
-                    "Shortcut payload decode failed: {error}"
-                ))
-            }))
+            .map(|raw| {
+                serde_json::from_value(raw.clone()).map_err(|error| {
+                    CoreError::DependencyUnavailable(format!(
+                        "Shortcut payload decode failed: {error}"
+                    ))
+                })
+            })
             .collect();
     }
 
     if let Some(values) = payload.get("items").and_then(Value::as_array) {
         return values
             .iter()
-            .map(|raw| serde_json::from_value(raw.clone()).map_err(|error| {
-                CoreError::DependencyUnavailable(format!(
-                    "Shortcut payload decode failed: {error}"
-                ))
-            }))
+            .map(|raw| {
+                serde_json::from_value(raw.clone()).map_err(|error| {
+                    CoreError::DependencyUnavailable(format!(
+                        "Shortcut payload decode failed: {error}"
+                    ))
+                })
+            })
             .collect();
     }
 
@@ -552,11 +557,7 @@ fn ticket_summary_from_story(story: ShortcutStory) -> TicketSummary {
     TicketSummary {
         ticket_id: TicketId::from_provider_uuid(TicketProvider::Shortcut, provider_ticket_id),
         identifier,
-        title: story
-            .name
-            .as_deref()
-            .unwrap_or("Untitled")
-            .to_owned(),
+        title: story.name.as_deref().unwrap_or("Untitled").to_owned(),
         project: story.project.as_ref().map(|project| project.name.clone()),
         state: normalize_story_state_name(&story),
         url: story.app_url.unwrap_or_else(|| "about:blank".to_owned()),
@@ -570,7 +571,9 @@ fn ticket_summary_from_story(story: ShortcutStory) -> TicketSummary {
             .iter()
             .map(|label| label.name.clone())
             .collect(),
-        updated_at: story.updated_at.unwrap_or_else(|| "1970-01-01T00:00:00Z".to_owned()),
+        updated_at: story
+            .updated_at
+            .unwrap_or_else(|| "1970-01-01T00:00:00Z".to_owned()),
     }
 }
 
