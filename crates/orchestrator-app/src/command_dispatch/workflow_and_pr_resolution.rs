@@ -317,6 +317,64 @@ fn append_workflow_transition_event_for_runtime(
     Ok(next)
 }
 
+fn normalize_to_in_review_for_merge(
+    store: &mut SqliteEventStore,
+    runtime: &RuntimeMappingRecord,
+    current: &mut WorkflowState,
+    transitions: &mut Vec<String>,
+    command_id: &str,
+) -> Result<(), CoreError> {
+    loop {
+        if *current == WorkflowState::InReview {
+            return Ok(());
+        }
+
+        if *current == WorkflowState::AwaitingYourReview {
+            let next = append_workflow_transition_event_for_runtime(
+                store,
+                runtime,
+                current,
+                &WorkflowState::ReadyForReview,
+                WorkflowTransitionReason::ApprovalGranted,
+                &WorkflowGuardContext {
+                    has_draft_pr: true,
+                    approval_granted: true,
+                    ..WorkflowGuardContext::default()
+                },
+                command_id,
+            )?;
+            transitions.push("AwaitingYourReview->ReadyForReview".to_owned());
+            *current = next;
+            continue;
+        }
+
+        if *current == WorkflowState::ReadyForReview {
+            let next = append_workflow_transition_event_for_runtime(
+                store,
+                runtime,
+                current,
+                &WorkflowState::InReview,
+                WorkflowTransitionReason::ReviewStarted,
+                &WorkflowGuardContext {
+                    has_draft_pr: true,
+                    ..WorkflowGuardContext::default()
+                },
+                command_id,
+            )?;
+            transitions.push("ReadyForReview->InReview".to_owned());
+            *current = next;
+            continue;
+        }
+
+        return Err(CoreError::InvalidCommandArgs {
+            command_id: command_id.to_owned(),
+            reason: format!(
+                "workflow.merge_pr requires a review-stage work item; current state is '{current:?}'"
+            ),
+        });
+    }
+}
+
 async fn execute_workflow_reconcile_pr_merge<C>(
     code_host: &C,
     event_store_path: &str,
@@ -442,6 +500,24 @@ where
             continue;
         }
 
+        if current == WorkflowState::Merging {
+            let next = append_workflow_transition_event_for_runtime(
+                &mut store,
+                &runtime,
+                &current,
+                &WorkflowState::Done,
+                WorkflowTransitionReason::ReviewApprovedAndMerged,
+                &WorkflowGuardContext {
+                    merge_completed: true,
+                    ..WorkflowGuardContext::default()
+                },
+                command_id,
+            )?;
+            transitions.push("Merging->Done".to_owned());
+            current = next;
+            continue;
+        }
+
         break;
     }
 
@@ -477,13 +553,59 @@ where
     )
     .await?;
 
-    code_host.merge_pull_request(&pr).await.map_err(|error| {
+    let mut current = latest_workflow_state_for_work_item(&store, &runtime.work_item_id)?;
+    let mut transitions = Vec::new();
+    normalize_to_in_review_for_merge(
+        &mut store,
+        &runtime,
+        &mut current,
+        &mut transitions,
+        command_id,
+    )?;
+    let prior_review_state = current.clone();
+
+    let next = append_workflow_transition_event_for_runtime(
+        &mut store,
+        &runtime,
+        &current,
+        &WorkflowState::Merging,
+        WorkflowTransitionReason::MergeInitiated,
+        &WorkflowGuardContext {
+            has_draft_pr: true,
+            ..WorkflowGuardContext::default()
+        },
+        command_id,
+    )?;
+    transitions.push("InReview->Merging".to_owned());
+    current = next;
+
+    if let Err(error) = code_host.merge_pull_request(&pr).await {
+        let _ = append_workflow_transition_event_for_runtime(
+            &mut store,
+            &runtime,
+            &current,
+            &prior_review_state,
+            WorkflowTransitionReason::MergeFailed,
+            &WorkflowGuardContext {
+                has_draft_pr: true,
+                ..WorkflowGuardContext::default()
+            },
+            command_id,
+        );
+        transitions.push("Merging->InReview".to_owned());
+
         let detail = sanitize_error_display_text(error.to_string().as_str());
-        CoreError::DependencyUnavailable(format!(
-            "{command_id} failed for PR #{}: {detail}",
-            pr.number
-        ))
-    })?;
+        let message = json!({
+            "command": command_id,
+            "work_item_id": runtime.work_item_id.as_str(),
+            "merged": false,
+            "completed": false,
+            "transitions": transitions,
+            "error": format!("{command_id} failed for PR #{}: {detail}", pr.number),
+        })
+        .to_string();
+        return runtime_command_response(message.as_str());
+    }
 
     execute_workflow_reconcile_pr_merge(code_host, event_store_path, context).await
 }

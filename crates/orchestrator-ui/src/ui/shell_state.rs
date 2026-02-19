@@ -1442,6 +1442,7 @@ impl UiShellState {
                     WorkflowState::AwaitingYourReview
                         | WorkflowState::ReadyForReview
                         | WorkflowState::InReview
+                        | WorkflowState::Merging
                 )
             })
             .unwrap_or(false)
@@ -3231,7 +3232,8 @@ fn apply_ticket_picker_event(&mut self, event: TicketPickerEvent) {
             Some(
                 WorkflowState::AwaitingYourReview
                 | WorkflowState::ReadyForReview
-                | WorkflowState::InReview,
+                | WorkflowState::InReview
+                | WorkflowState::Merging,
             ) => TerminalWorkflowStage::Review,
             Some(WorkflowState::Done | WorkflowState::Abandoned) => TerminalWorkflowStage::Complete,
             None => TerminalWorkflowStage::Planning,

@@ -253,6 +253,10 @@ impl Default for LinearWorkflowSyncConfig {
                     linear_state: "In Review".to_owned(),
                 },
                 WorkflowStateMapping {
+                    workflow_state: WorkflowState::Merging,
+                    linear_state: "In Review".to_owned(),
+                },
+                WorkflowStateMapping {
                     workflow_state: WorkflowState::Done,
                     linear_state: "Done".to_owned(),
                 },
@@ -476,6 +480,7 @@ fn parse_workflow_state_name(value: &str) -> Result<WorkflowState, CoreError> {
         "awaitingyourreview" => Ok(WorkflowState::AwaitingYourReview),
         "readyforreview" => Ok(WorkflowState::ReadyForReview),
         "inreview" => Ok(WorkflowState::InReview),
+        "merging" => Ok(WorkflowState::Merging),
         "done" => Ok(WorkflowState::Done),
         "abandoned" => Ok(WorkflowState::Abandoned),
         _ => Err(CoreError::Configuration(format!(
@@ -502,6 +507,7 @@ fn workflow_state_key(value: &WorkflowState) -> String {
         WorkflowState::AwaitingYourReview => "awaitingyourreview",
         WorkflowState::ReadyForReview => "readyforreview",
         WorkflowState::InReview => "inreview",
+        WorkflowState::Merging => "merging",
         WorkflowState::Done => "done",
         WorkflowState::Abandoned => "abandoned",
     }
