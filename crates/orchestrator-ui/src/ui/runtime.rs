@@ -140,33 +140,43 @@ impl Ui {
                         terminal_output_area,
                     );
 
-                    let input_text =
-                        render_terminal_input_panel(shell_state.terminal_compose_draft.as_str());
-                    frame.render_widget(
-                        Paragraph::new(input_text).wrap(Wrap { trim: false }).block(
-                            Block::default()
-                                .title("input (Enter send, Shift+Enter newline)")
-                                .borders(Borders::ALL),
-                        ),
-                        terminal_input_area,
-                    );
-                    if shell_state.mode == UiMode::Terminal {
-                        if let Some((cursor_x, cursor_y)) = terminal_input_cursor(
-                            terminal_input_area,
-                            shell_state.terminal_compose_draft.as_str(),
-                        ) {
-                            frame.set_cursor_position((cursor_x, cursor_y));
-                        }
-                    }
+                    shell_state.terminal_compose_input.focused = shell_state.mode == UiMode::Terminal;
+                    TextArea::new()
+                        .label("input (Enter send, Shift+Enter newline)")
+                        .placeholder("Type a message to the harness here.\nPress Enter to send.")
+                        .wrap_mode(WrapMode::Soft)
+                        .render_stateful(frame, terminal_input_area, &mut shell_state.terminal_compose_input);
                 } else {
-                    frame.render_widget(
-                        Paragraph::new(center_text).block(
-                            Block::default()
-                                .title(ui_state.center_pane.title.as_str())
-                                .borders(Borders::ALL),
-                        ),
-                        center_area,
-                    );
+                    if shell_state.is_global_supervisor_chat_active() {
+                        let [chat_output_area, chat_input_area] = Layout::vertical([
+                            Constraint::Min(3),
+                            Constraint::Length(3),
+                        ])
+                        .areas(center_area);
+                        frame.render_widget(
+                            Paragraph::new(center_text).block(
+                                Block::default()
+                                    .title(ui_state.center_pane.title.as_str())
+                                    .borders(Borders::ALL),
+                            ),
+                            chat_output_area,
+                        );
+                        shell_state.global_supervisor_chat_input.focused =
+                            shell_state.mode == UiMode::Insert;
+                        Input::new(&shell_state.global_supervisor_chat_input)
+                            .label("draft (Enter send)")
+                            .placeholder("Type supervisor query")
+                            .render_stateful(frame, chat_input_area);
+                    } else {
+                        frame.render_widget(
+                            Paragraph::new(center_text).block(
+                                Block::default()
+                                    .title(ui_state.center_pane.title.as_str())
+                                    .borders(Borders::ALL),
+                            ),
+                            center_area,
+                        );
+                    }
                 }
 
                 let footer_text = format!(
