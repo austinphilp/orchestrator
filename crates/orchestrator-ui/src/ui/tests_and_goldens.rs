@@ -2615,6 +2615,16 @@ mod tests {
     }
 
     #[test]
+    fn ticket_picker_new_ticket_mode_overlay_text_does_not_duplicate_brief_label() {
+        let mut overlay = TicketPickerOverlayState::default();
+        overlay.begin_new_ticket_mode();
+        overlay.new_ticket_brief_input.set_text("draft");
+
+        let rendered = render_ticket_picker_overlay_text(&overlay);
+        assert!(!rendered.contains("Brief:"));
+    }
+
+    #[test]
     fn ticket_picker_new_ticket_mode_captures_input_and_submit_validation() {
         let mut shell_state = UiShellState::new("ready".to_owned(), triage_projection());
         shell_state.ticket_picker_overlay.open();
