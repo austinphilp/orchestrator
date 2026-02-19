@@ -86,6 +86,10 @@ where
         Ok(tickets)
     }
 
+    async fn list_projects(&self) -> Result<Vec<String>, CoreError> {
+        self.ticketing.list_projects().await
+    }
+
     async fn start_or_resume_ticket(
         &self,
         ticket: TicketSummary,

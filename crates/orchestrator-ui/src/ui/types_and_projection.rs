@@ -21,8 +21,9 @@ use orchestrator_core::{
     WorkerSessionId, WorkerSessionStatus, WorkflowState,
 };
 use orchestrator_runtime::{
-    BackendEvent, BackendKind, BackendOutputEvent, BackendTurnStateEvent, RuntimeError,
-    RuntimeSessionId, SessionHandle, SpawnSpec, WorkerBackend,
+    BackendEvent, BackendKind, BackendNeedsInputAnswer, BackendNeedsInputEvent,
+    BackendNeedsInputQuestion, BackendOutputEvent, BackendTurnStateEvent, RuntimeError,
+    RuntimeResult, RuntimeSessionId, SessionHandle, SpawnSpec, WorkerBackend,
 };
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Layout, Rect};
@@ -30,7 +31,10 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 use ratatui::Terminal;
-use ratatui_interact::components::{Input, InputState, TabConfig, TextArea, TextAreaState, WrapMode};
+use ratatui_interact::components::{
+    Input, InputState, Select, SelectState, SelectStyle, TabConfig, TextArea, TextAreaState,
+    WrapMode,
+};
 use ratskin::RatSkin;
 use tokio::runtime::Handle as TokioHandle;
 use tokio::sync::mpsc;
@@ -56,6 +60,9 @@ const MERGE_REQUEST_RATE_LIMIT: Duration = Duration::from_secs(1);
 #[async_trait]
 pub trait TicketPickerProvider: Send + Sync {
     async fn list_unfinished_tickets(&self) -> Result<Vec<TicketSummary>, CoreError>;
+    async fn list_projects(&self) -> Result<Vec<String>, CoreError> {
+        Ok(Vec::new())
+    }
     async fn start_or_resume_ticket(
         &self,
         ticket: TicketSummary,
@@ -674,6 +681,152 @@ impl TerminalWorkflowStage {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+struct NeedsInputAnswerDraft {
+    selected_option_index: Option<usize>,
+    note: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct NeedsInputPromptState {
+    prompt_id: String,
+    questions: Vec<BackendNeedsInputQuestion>,
+}
+
+#[derive(Debug, Clone)]
+struct NeedsInputModalState {
+    session_id: WorkerSessionId,
+    prompt_id: String,
+    questions: Vec<BackendNeedsInputQuestion>,
+    answer_drafts: Vec<NeedsInputAnswerDraft>,
+    current_question_index: usize,
+    select_state: SelectState,
+    note_input_state: InputState,
+    note_insert_mode: bool,
+    error: Option<String>,
+}
+
+impl NeedsInputModalState {
+    fn new(
+        session_id: WorkerSessionId,
+        prompt_id: String,
+        questions: Vec<BackendNeedsInputQuestion>,
+    ) -> Self {
+        let answer_drafts = vec![NeedsInputAnswerDraft::default(); questions.len()];
+        let mut state = Self {
+            session_id,
+            prompt_id,
+            questions,
+            answer_drafts,
+            current_question_index: 0,
+            select_state: SelectState::new(0),
+            note_input_state: InputState::empty(),
+            note_insert_mode: false,
+            error: None,
+        };
+        state.refresh_controls_from_current_question();
+        state
+    }
+
+    fn current_question(&self) -> Option<&BackendNeedsInputQuestion> {
+        self.questions.get(self.current_question_index)
+    }
+
+    fn persist_current_draft(&mut self) {
+        let Some(draft) = self.answer_drafts.get_mut(self.current_question_index) else {
+            return;
+        };
+        draft.selected_option_index = self.select_state.selected_index;
+        draft.note = self.note_input_state.text.clone();
+    }
+
+    fn refresh_controls_from_current_question(&mut self) {
+        let Some(question) = self.current_question() else {
+            self.select_state = SelectState::new(0);
+            self.note_input_state.clear();
+            self.note_insert_mode = false;
+            return;
+        };
+
+        let options_len = question.options.as_ref().map(Vec::len).unwrap_or(0);
+        let draft = self
+            .answer_drafts
+            .get(self.current_question_index)
+            .cloned()
+            .unwrap_or_default();
+        self.select_state = SelectState::new(options_len);
+        self.select_state.focused = options_len > 0;
+        if let Some(index) = draft.selected_option_index.filter(|index| *index < options_len) {
+            self.select_state.selected_index = Some(index);
+            self.select_state.highlighted_index = index;
+        }
+        self.note_input_state.set_text(draft.note);
+        self.note_input_state.focused = self.note_insert_mode;
+    }
+
+    fn move_to_question(&mut self, next_index: usize) {
+        if next_index >= self.questions.len() {
+            return;
+        }
+        self.persist_current_draft();
+        self.current_question_index = next_index;
+        self.error = None;
+        self.refresh_controls_from_current_question();
+    }
+
+    fn has_next_question(&self) -> bool {
+        self.current_question_index + 1 < self.questions.len()
+    }
+
+    fn current_question_requires_option_selection(&self) -> bool {
+        self.current_question()
+            .and_then(|question| question.options.as_ref())
+            .map(|options| !options.is_empty())
+            .unwrap_or(false)
+    }
+
+    fn build_runtime_answers(&mut self) -> RuntimeResult<Vec<BackendNeedsInputAnswer>> {
+        self.persist_current_draft();
+        let mut answers = Vec::with_capacity(self.questions.len());
+        for (index, question) in self.questions.iter().enumerate() {
+            let draft = self.answer_drafts.get(index).cloned().unwrap_or_default();
+            let mut entries = Vec::new();
+            if let Some(options) = question.options.as_ref().filter(|options| !options.is_empty()) {
+                let Some(selected_index) = draft.selected_option_index else {
+                    return Err(RuntimeError::Protocol(format!(
+                        "select an option for '{}'",
+                        question.header
+                    )));
+                };
+                let Some(option) = options.get(selected_index) else {
+                    return Err(RuntimeError::Protocol(format!(
+                        "invalid option selection for '{}'",
+                        question.header
+                    )));
+                };
+                entries.push(option.label.clone());
+            }
+
+            let note = draft.note.trim();
+            if !note.is_empty() {
+                entries.push(note.to_owned());
+            }
+            if entries.is_empty() {
+                return Err(RuntimeError::Protocol(format!(
+                    "provide a response for '{}'",
+                    question.header
+                )));
+            }
+
+            answers.push(BackendNeedsInputAnswer {
+                question_id: question.id.clone(),
+                answers: entries,
+            });
+        }
+        Ok(answers)
+    }
+}
+
 #[derive(Debug)]
 enum TerminalSessionEvent {
     Output {
@@ -683,6 +836,10 @@ enum TerminalSessionEvent {
     TurnState {
         session_id: WorkerSessionId,
         turn_state: BackendTurnStateEvent,
+    },
+    NeedsInput {
+        session_id: WorkerSessionId,
+        needs_input: BackendNeedsInputEvent,
     },
     StreamFailed {
         session_id: WorkerSessionId,

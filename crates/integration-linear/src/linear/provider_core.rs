@@ -447,6 +447,19 @@ struct LinearTeamNode {
     id: String,
     key: Option<String>,
     name: String,
+    #[serde(default)]
+    projects: LinearTeamProjectConnection,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+struct LinearTeamProjectConnection {
+    #[serde(default)]
+    nodes: Vec<LinearTeamProjectNode>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct LinearTeamProjectNode {
+    name: String,
 }
 
 #[derive(Debug)]
@@ -751,4 +764,3 @@ fn workflow_state_label(state: &WorkflowState) -> &'static str {
         WorkflowState::Abandoned => "Abandoned",
     }
 }
-

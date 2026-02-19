@@ -120,6 +120,11 @@ query Teams {
       id
       key
       name
+      projects {
+        nodes {
+          name
+        }
+      }
     }
   }
 }

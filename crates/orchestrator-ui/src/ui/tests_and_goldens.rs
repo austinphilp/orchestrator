@@ -2658,6 +2658,7 @@ mod tests {
         shell_state.ticket_picker_overlay.loading = false;
         shell_state.ticket_picker_overlay.apply_tickets(
             vec![sample_ticket_summary("issue-300", "AP-300", "Todo")],
+            Vec::new(),
             &["Todo".to_owned()],
         );
         shell_state.ticket_picker_overlay.move_selection(1);

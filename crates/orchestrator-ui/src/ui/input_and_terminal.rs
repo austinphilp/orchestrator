@@ -470,6 +470,9 @@ fn handle_key_press(shell_state: &mut UiShellState, key: KeyEvent) -> bool {
 }
 
 fn route_key_press(shell_state: &mut UiShellState, key: KeyEvent) -> RoutedInput {
+    if shell_state.needs_input_modal.is_some() {
+        return route_needs_input_modal_key(shell_state, key);
+    }
     if shell_state.worktree_diff_modal.is_some() {
         return route_worktree_diff_modal_key(shell_state, key);
     }

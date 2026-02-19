@@ -102,8 +102,12 @@ pub fn normalize_backend_event(
             );
         }
         BackendEvent::NeedsInput(needs_input) => {
-            let prompt = normalize_reason(needs_input.question.as_str(), "choose next action");
-            let options = normalize_needs_input_options(&needs_input.options);
+            let prompt = normalize_reason(
+                primary_needs_input_prompt(needs_input).as_str(),
+                "choose next action",
+            );
+            let options =
+                normalize_needs_input_options(&primary_needs_input_options(needs_input));
             let default_option = normalize_optional_text(needs_input.default_option.as_deref())
                 .map(ToOwned::to_owned);
             let prompt_id = Some(normalize_prompt_id(context, needs_input));
@@ -515,6 +519,22 @@ fn normalize_prompt_id(
         })
 }
 
+fn primary_needs_input_prompt(event: &BackendNeedsInputEvent) -> String {
+    event.questions.first().map_or_else(
+        || event.question.clone(),
+        |question| question.question.clone(),
+    )
+}
+
+fn primary_needs_input_options(event: &BackendNeedsInputEvent) -> Vec<String> {
+    if let Some(question) = event.questions.first() {
+        if let Some(options) = question.options.as_ref() {
+            return options.iter().map(|option| option.label.clone()).collect();
+        }
+    }
+    event.options.clone()
+}
+
 fn normalize_needs_input_options(options: &[String]) -> Vec<String> {
     options
         .iter()
@@ -616,6 +636,7 @@ mod tests {
                 question: "Choose API shape".to_owned(),
                 options: vec!["A".to_owned(), "B".to_owned()],
                 default_option: Some("A".to_owned()),
+                questions: Vec::new(),
             }),
         );
 

@@ -29,6 +29,8 @@ struct UiShellState {
     terminal_session_receiver: Option<mpsc::Receiver<TerminalSessionEvent>>,
     terminal_session_states: HashMap<WorkerSessionId, TerminalViewState>,
     terminal_session_streamed: HashSet<WorkerSessionId>,
+    pending_needs_input_prompts: HashMap<WorkerSessionId, VecDeque<NeedsInputPromptState>>,
+    needs_input_modal: Option<NeedsInputModalState>,
     terminal_compose_input: TextAreaState,
     review_merge_confirm_session: Option<WorkerSessionId>,
     merge_queue: VecDeque<MergeQueueRequest>,
@@ -115,6 +117,8 @@ impl UiShellState {
             terminal_session_receiver,
             terminal_session_states: HashMap::new(),
             terminal_session_streamed: HashSet::new(),
+            pending_needs_input_prompts: HashMap::new(),
+            needs_input_modal: None,
             terminal_compose_input: TextAreaState::empty().with_tab_config(TabConfig::Literal),
             review_merge_confirm_session: None,
             merge_queue: VecDeque::new(),
@@ -1130,6 +1134,29 @@ impl UiShellState {
                     let view = self.terminal_session_states.entry(session_id).or_default();
                     view.turn_active = turn_state.active;
                 }
+                TerminalSessionEvent::NeedsInput {
+                    session_id,
+                    needs_input,
+                } => {
+                    let prompt = self.needs_input_prompt_from_event(needs_input);
+                    if self
+                        .needs_input_modal
+                        .as_ref()
+                        .map(|modal| {
+                            modal.session_id == session_id && modal.prompt_id == prompt.prompt_id
+                        })
+                        .unwrap_or(false)
+                    {
+                        continue;
+                    }
+                    let queue = self
+                        .pending_needs_input_prompts
+                        .entry(session_id)
+                        .or_default();
+                    if !queue.iter().any(|entry| entry.prompt_id == prompt.prompt_id) {
+                        queue.push_back(prompt);
+                    }
+                }
                 TerminalSessionEvent::StreamFailed { session_id, error } => {
                     self.terminal_session_streamed.remove(&session_id);
                     let view = self
@@ -1583,6 +1610,14 @@ impl UiShellState {
                                     })
                                     .await;
                             }
+                            Ok(Some(BackendEvent::NeedsInput(needs_input))) => {
+                                let _ = sender
+                                    .send(TerminalSessionEvent::NeedsInput {
+                                        session_id: stream_session_id.clone(),
+                                        needs_input,
+                                    })
+                                    .await;
+                            }
                             Ok(Some(_)) => {}
                             Ok(None) => {
                                 let _ = sender
@@ -1692,13 +1727,13 @@ impl UiShellState {
         }
     }
 
-    fn apply_ticket_picker_event(&mut self, event: TicketPickerEvent) {
+fn apply_ticket_picker_event(&mut self, event: TicketPickerEvent) {
         match event {
-            TicketPickerEvent::TicketsLoaded { tickets } => {
+            TicketPickerEvent::TicketsLoaded { tickets, projects } => {
                 self.ticket_picker_overlay.loading = false;
                 self.ticket_picker_overlay.error = None;
                 self.ticket_picker_overlay
-                    .apply_tickets(tickets, &self.ticket_picker_priority_states);
+                    .apply_tickets(tickets, projects, &self.ticket_picker_priority_states);
             }
             TicketPickerEvent::TicketsLoadFailed { message } => {
                 self.ticket_picker_overlay.loading = false;
@@ -1729,8 +1764,9 @@ impl UiShellState {
                     self.domain = projection;
                 }
                 if let Some(tickets) = tickets {
+                    let projects = self.ticket_picker_overlay.project_names();
                     self.ticket_picker_overlay
-                        .apply_tickets(tickets, &self.ticket_picker_priority_states);
+                        .apply_tickets(tickets, projects, &self.ticket_picker_priority_states);
                 }
                 if let Some(message) = warning {
                     self.status_warning = Some(format!(
@@ -1771,8 +1807,9 @@ impl UiShellState {
                 self.ticket_picker_overlay.archive_confirm_ticket = None;
                 self.ticket_picker_overlay.error = None;
                 if let Some(tickets) = tickets {
+                    let projects = self.ticket_picker_overlay.project_names();
                     self.ticket_picker_overlay
-                        .apply_tickets(tickets, &self.ticket_picker_priority_states);
+                        .apply_tickets(tickets, projects, &self.ticket_picker_priority_states);
                 }
                 let mut status = format!("archived {}", archived_ticket.identifier);
                 if let Some(message) = warning {
@@ -1790,8 +1827,9 @@ impl UiShellState {
                 self.ticket_picker_overlay.archive_confirm_ticket = None;
                 self.ticket_picker_overlay.error = Some(message.clone());
                 if let Some(tickets) = tickets {
+                    let projects = self.ticket_picker_overlay.project_names();
                     self.ticket_picker_overlay
-                        .apply_tickets(tickets, &self.ticket_picker_priority_states);
+                        .apply_tickets(tickets, projects, &self.ticket_picker_priority_states);
                 }
                 self.status_warning = Some(format!(
                     "ticket picker archive warning ({}): {}",
@@ -1813,8 +1851,9 @@ impl UiShellState {
                     self.domain = projection;
                 }
                 if let Some(tickets) = tickets {
+                    let projects = self.ticket_picker_overlay.project_names();
                     self.ticket_picker_overlay
-                        .apply_tickets(tickets, &self.ticket_picker_priority_states);
+                        .apply_tickets(tickets, projects, &self.ticket_picker_priority_states);
                 }
 
                 let mut status = format!("created and started {}", created_ticket.identifier);
@@ -1832,8 +1871,9 @@ impl UiShellState {
                 self.ticket_picker_overlay.creating = false;
                 self.ticket_picker_overlay.error = Some(message.clone());
                 if let Some(tickets) = tickets {
+                    let projects = self.ticket_picker_overlay.project_names();
                     self.ticket_picker_overlay
-                        .apply_tickets(tickets, &self.ticket_picker_priority_states);
+                        .apply_tickets(tickets, projects, &self.ticket_picker_priority_states);
                 }
                 let mut warning_parts = vec![compact_focus_card_text(message.as_str())];
                 if let Some(extra) = warning {
@@ -2589,12 +2629,220 @@ impl UiShellState {
             self.mode_key_buffer.clear();
             self.which_key_overlay = None;
             self.terminal_escape_pending = false;
+            self.open_pending_needs_input_modal_for_active_session();
         }
     }
 
     fn open_terminal_and_enter_mode(&mut self) {
         self.open_terminal_for_selected();
         self.enter_terminal_mode();
+    }
+
+    fn needs_input_prompt_from_event(
+        &self,
+        event: BackendNeedsInputEvent,
+    ) -> NeedsInputPromptState {
+        let questions = if event.questions.is_empty() {
+            vec![BackendNeedsInputQuestion {
+                id: event.prompt_id.clone(),
+                header: "Input".to_owned(),
+                question: event.question,
+                is_other: false,
+                is_secret: false,
+                options: (!event.options.is_empty()).then(|| {
+                    event
+                        .options
+                        .into_iter()
+                        .map(|label| orchestrator_runtime::BackendNeedsInputOption {
+                            label,
+                            description: String::new(),
+                        })
+                        .collect::<Vec<_>>()
+                }),
+            }]
+        } else {
+            event.questions
+        };
+        NeedsInputPromptState {
+            prompt_id: event.prompt_id,
+            questions,
+        }
+    }
+
+    fn open_pending_needs_input_modal_for_active_session(&mut self) {
+        if self.needs_input_modal.is_some() {
+            return;
+        }
+        let Some(session_id) = self.active_terminal_session_id().cloned() else {
+            return;
+        };
+        let Some(queue) = self.pending_needs_input_prompts.get_mut(&session_id) else {
+            return;
+        };
+        let Some(prompt) = queue.pop_front() else {
+            return;
+        };
+        if queue.is_empty() {
+            self.pending_needs_input_prompts.remove(&session_id);
+        }
+        if prompt.questions.is_empty() {
+            self.status_warning = Some("input request ignored: prompt had no questions".to_owned());
+            return;
+        }
+        self.needs_input_modal = Some(NeedsInputModalState::new(
+            session_id,
+            prompt.prompt_id,
+            prompt.questions,
+        ));
+        self.mode = UiMode::Terminal;
+        self.terminal_escape_pending = false;
+    }
+
+    fn close_needs_input_modal(&mut self) {
+        let Some(modal) = self.needs_input_modal.take() else {
+            return;
+        };
+        let queue = self
+            .pending_needs_input_prompts
+            .entry(modal.session_id)
+            .or_default();
+        queue.push_front(NeedsInputPromptState {
+            prompt_id: modal.prompt_id,
+            questions: modal.questions,
+        });
+    }
+
+    fn complete_needs_input_modal(&mut self) {
+        self.needs_input_modal = None;
+    }
+
+    fn needs_input_modal_is_note_insert_mode(&self) -> bool {
+        self.needs_input_modal
+            .as_ref()
+            .map(|modal| modal.note_insert_mode)
+            .unwrap_or(false)
+    }
+
+    fn move_needs_input_question(&mut self, delta: isize) {
+        let Some(modal) = self.needs_input_modal.as_mut() else {
+            return;
+        };
+        let current = modal.current_question_index as isize;
+        let upper = modal.questions.len().saturating_sub(1) as isize;
+        let next = (current + delta).clamp(0, upper) as usize;
+        modal.move_to_question(next);
+    }
+
+    fn toggle_needs_input_note_insert_mode(&mut self, enabled: bool) {
+        let Some(modal) = self.needs_input_modal.as_mut() else {
+            return;
+        };
+        modal.note_insert_mode = enabled;
+        modal.note_input_state.focused = enabled;
+        modal.select_state.focused = !enabled && modal.current_question_requires_option_selection();
+    }
+
+    fn apply_needs_input_note_key(&mut self, key: KeyEvent) -> bool {
+        let Some(modal) = self.needs_input_modal.as_mut() else {
+            return false;
+        };
+        if !modal.note_insert_mode {
+            return false;
+        }
+
+        match key.code {
+            KeyCode::Esc => {
+                modal.note_insert_mode = false;
+                modal.note_input_state.focused = false;
+                modal.select_state.focused = modal.current_question_requires_option_selection();
+                true
+            }
+            KeyCode::Enter if key.modifiers == KeyModifiers::SHIFT => {
+                modal.note_input_state.insert_char('\n');
+                true
+            }
+            KeyCode::Enter if key.modifiers.is_empty() || key.modifiers == KeyModifiers::CONTROL => {
+                false
+            }
+            KeyCode::Backspace if key.modifiers.is_empty() => {
+                modal.note_input_state.delete_char_backward();
+                true
+            }
+            KeyCode::Delete if key.modifiers.is_empty() => {
+                modal.note_input_state.delete_char_forward();
+                true
+            }
+            KeyCode::Left if key.modifiers.is_empty() => {
+                modal.note_input_state.move_left();
+                true
+            }
+            KeyCode::Right if key.modifiers.is_empty() => {
+                modal.note_input_state.move_right();
+                true
+            }
+            KeyCode::Home if key.modifiers.is_empty() => {
+                modal.note_input_state.move_home();
+                true
+            }
+            KeyCode::End if key.modifiers.is_empty() => {
+                modal.note_input_state.move_end();
+                true
+            }
+            KeyCode::Char(ch)
+                if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT =>
+            {
+                modal.note_input_state.insert_char(ch);
+                true
+            }
+            _ => true,
+        }
+    }
+
+    fn submit_needs_input_modal(&mut self) {
+        let Some(backend) = self.worker_backend.clone() else {
+            if let Some(modal) = self.needs_input_modal.as_mut() {
+                modal.error = Some("input response unavailable: no worker backend configured".to_owned());
+            }
+            return;
+        };
+        let Some(active_modal) = self.needs_input_modal.as_mut() else {
+            return;
+        };
+        let session_id = active_modal.session_id.clone();
+        let prompt_id = active_modal.prompt_id.clone();
+        let answers = match active_modal.build_runtime_answers() {
+            Ok(answers) => answers,
+            Err(error) => {
+                active_modal.error = Some(sanitize_terminal_display_text(error.to_string().as_str()));
+                return;
+            }
+        };
+        let Some(handle) = self.terminal_session_handle(&session_id) else {
+            if let Some(modal) = self.needs_input_modal.as_mut() {
+                modal.error = Some(
+                    "input response unavailable: cannot resolve backend session handle".to_owned(),
+                );
+            }
+            return;
+        };
+
+        match TokioHandle::try_current() {
+            Ok(runtime) => {
+                runtime.spawn(async move {
+                    let _ = backend
+                        .respond_to_needs_input(&handle, prompt_id.as_str(), answers.as_slice())
+                        .await;
+                });
+                self.complete_needs_input_modal();
+                self.open_pending_needs_input_modal_for_active_session();
+            }
+            Err(_) => {
+                if let Some(modal) = self.needs_input_modal.as_mut() {
+                    modal.error =
+                        Some("input response unavailable: tokio runtime unavailable".to_owned());
+                }
+            }
+        }
     }
 
     fn toggle_worktree_diff_modal(&mut self) {

@@ -357,6 +357,13 @@ impl TicketPickerOverlayState {
             .and_then(|status_group| status_group.tickets.get(*ticket_index))
     }
 
+    fn project_names(&self) -> Vec<String> {
+        self.project_groups
+            .iter()
+            .map(|project_group| project_group.project.clone())
+            .collect()
+    }
+
     fn open(&mut self) {
         self.visible = true;
         self.loading = true;
@@ -442,7 +449,12 @@ impl TicketPickerOverlayState {
         !self.creating && !self.new_ticket_brief_input.text().trim().is_empty()
     }
 
-    fn apply_tickets(&mut self, tickets: Vec<TicketSummary>, priority_states: &[String]) {
+    fn apply_tickets(
+        &mut self,
+        tickets: Vec<TicketSummary>,
+        project_names: Vec<String>,
+        priority_states: &[String],
+    ) {
         let selected_project_index = self.selected_project_index();
         let selected_ticket_id = self
             .selected_ticket()
@@ -454,7 +466,12 @@ impl TicketPickerOverlayState {
             .map(|project_group| normalize_ticket_project(project_group.project.as_str()))
             .collect::<HashSet<_>>();
         self.project_groups =
-            group_tickets_by_project(tickets, priority_states, &collapsed_projects);
+            group_tickets_by_project(
+                tickets,
+                project_names,
+                priority_states,
+                &collapsed_projects,
+            );
         self.rebuild_ticket_rows(selected_ticket_id.as_ref(), selected_project_index);
     }
 
@@ -567,6 +584,7 @@ impl TicketPickerOverlayState {
 enum TicketPickerEvent {
     TicketsLoaded {
         tickets: Vec<TicketSummary>,
+        projects: Vec<String>,
     },
     TicketsLoadFailed {
         message: String,

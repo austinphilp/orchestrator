@@ -9,9 +9,10 @@ use std::time::Duration;
 
 use orchestrator_runtime::{
     BackendCapabilities, BackendCrashedEvent, BackendDoneEvent, BackendEvent, BackendKind,
-    BackendOutputEvent, BackendOutputStream, BackendTurnStateEvent, RuntimeError, RuntimeResult,
-    RuntimeSessionId, SessionHandle, SessionLifecycle, SpawnSpec, WorkerBackend, WorkerEventStream,
-    WorkerEventSubscription,
+    BackendNeedsInputAnswer, BackendNeedsInputEvent, BackendNeedsInputOption,
+    BackendNeedsInputQuestion, BackendOutputEvent, BackendOutputStream, BackendTurnStateEvent,
+    RuntimeError, RuntimeResult, RuntimeSessionId, SessionHandle, SessionLifecycle, SpawnSpec,
+    WorkerBackend, WorkerEventStream, WorkerEventSubscription,
 };
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -84,6 +85,7 @@ struct CodexSession {
     turn_active: AtomicBool,
     history_seeded: AtomicBool,
     event_history: std::sync::Mutex<VecDeque<BackendEvent>>,
+    pending_user_input_requests: AsyncMutex<HashMap<String, PendingUserInputRequest>>,
 }
 
 struct CodexConnection {
@@ -91,6 +93,11 @@ struct CodexConnection {
     child: Arc<AsyncMutex<Child>>,
     pending: Arc<AsyncMutex<HashMap<String, oneshot::Sender<RuntimeResult<Value>>>>>,
     next_request_id: AtomicU64,
+}
+
+struct PendingUserInputRequest {
+    request_id: Value,
+    question_ids: Vec<String>,
 }
 
 struct BroadcastSubscription {
@@ -148,6 +155,39 @@ impl CodexSession {
         self.record_event(&event);
         maybe_log_normalized_harness_event(self.thread_id.as_str(), true, &event);
         let _ = self.event_tx.send(event);
+    }
+
+    async fn register_pending_user_input_request(
+        &self,
+        prompt_id: String,
+        request_id: Value,
+        question_ids: Vec<String>,
+    ) {
+        self.pending_user_input_requests.lock().await.insert(
+            prompt_id,
+            PendingUserInputRequest {
+                request_id,
+                question_ids,
+            },
+        );
+    }
+
+    async fn take_pending_user_input_request(
+        &self,
+        prompt_id: &str,
+    ) -> Option<PendingUserInputRequest> {
+        self.pending_user_input_requests.lock().await.remove(prompt_id)
+    }
+
+    async fn restore_pending_user_input_request(
+        &self,
+        prompt_id: String,
+        request: PendingUserInputRequest,
+    ) {
+        self.pending_user_input_requests
+            .lock()
+            .await
+            .insert(prompt_id, request);
     }
 }
 
@@ -446,6 +486,7 @@ impl SessionLifecycle for CodexBackend {
             turn_active: AtomicBool::new(false),
             history_seeded: AtomicBool::new(false),
             event_history: std::sync::Mutex::new(VecDeque::new()),
+            pending_user_input_requests: AsyncMutex::new(HashMap::new()),
         });
         self.sessions
             .lock()
@@ -565,6 +606,68 @@ impl SessionLifecycle for CodexBackend {
                 }
             }
         }
+    }
+
+    async fn respond_to_needs_input(
+        &self,
+        session: &SessionHandle,
+        prompt_id: &str,
+        answers: &[BackendNeedsInputAnswer],
+    ) -> RuntimeResult<()> {
+        let session = self.session(&session.session_id).await?;
+        let prompt_id = prompt_id.trim();
+        if prompt_id.is_empty() {
+            return Err(RuntimeError::Protocol(
+                "codex needs-input response requires a non-empty prompt id".to_owned(),
+            ));
+        }
+
+        let pending = session
+            .take_pending_user_input_request(prompt_id)
+            .await
+            .ok_or_else(|| {
+                RuntimeError::Protocol(format!(
+                    "codex needs-input prompt '{prompt_id}' is not pending"
+                ))
+            })?;
+        let result = match build_codex_tool_user_input_response(answers) {
+            Ok(result) => result,
+            Err(error) => {
+                session
+                    .restore_pending_user_input_request(prompt_id.to_owned(), pending)
+                    .await;
+                return Err(error);
+            }
+        };
+
+        let missing_question_id = pending
+            .question_ids
+            .iter()
+            .find(|question_id| {
+                !result
+                    .get("answers")
+                    .and_then(|entry| entry.get(*question_id))
+                    .is_some()
+            })
+            .cloned();
+        if let Some(question_id) = missing_question_id {
+            session
+                .restore_pending_user_input_request(prompt_id.to_owned(), pending)
+                .await;
+            return Err(RuntimeError::Protocol(format!(
+                "codex needs-input response missing answer for question '{question_id}'"
+            )));
+        }
+
+        let connection = self.ensure_connection().await?;
+        if let Err(error) = send_rpc_result(&connection.stdin, &pending.request_id, result).await {
+            session
+                .restore_pending_user_input_request(prompt_id.to_owned(), pending)
+                .await;
+            return Err(error);
+        }
+        emit_codex_meta_output(&session, "tool-call", "tool user input submitted");
+        Ok(())
     }
 
     async fn resize(&self, _session: &SessionHandle, _cols: u16, _rows: u16) -> RuntimeResult<()> {
@@ -694,6 +797,16 @@ async fn run_reader_loop(
         let params = message.get("params").cloned().unwrap_or(Value::Null);
 
         if let Some(request_id) = message.get("id") {
+            if method == "item/tool/requestUserInput" {
+                match route_tool_request_user_input(request_id, &params, &sessions).await {
+                    Ok(()) => {}
+                    Err(error) => {
+                        let message = error.to_string();
+                        let _ = send_rpc_error(&stdin, request_id, -32602, message.as_str()).await;
+                    }
+                }
+                continue;
+            }
             emit_codex_request_meta_event(method, &params, &sessions).await;
             if let Some(result) = server_request_result(method) {
                 let _ = send_rpc_result(&stdin, request_id, result).await;
@@ -733,6 +846,174 @@ async fn run_reader_loop(
     }
 }
 
+async fn route_tool_request_user_input(
+    request_id: &Value,
+    params: &Value,
+    sessions: &Arc<AsyncMutex<HashMap<RuntimeSessionId, Arc<CodexSession>>>>,
+) -> RuntimeResult<()> {
+    let thread_id = extract_thread_id(params).ok_or_else(|| {
+        RuntimeError::Protocol("tool requestUserInput payload missing thread id".to_owned())
+    })?;
+    let event = parse_tool_request_user_input_event(params)?;
+    let question_ids = event
+        .questions
+        .iter()
+        .map(|question| question.id.clone())
+        .collect::<Vec<_>>();
+
+    let session = {
+        let sessions = sessions.lock().await;
+        sessions
+            .values()
+            .find(|session| session.thread_id == thread_id)
+            .cloned()
+    }
+    .ok_or_else(|| {
+        RuntimeError::SessionNotFound(format!(
+            "no codex session found for thread '{}'",
+            thread_id
+        ))
+    })?;
+
+    session
+        .register_pending_user_input_request(event.prompt_id.clone(), request_id.clone(), question_ids)
+        .await;
+    session.emit_non_terminal_event(BackendEvent::NeedsInput(event));
+    emit_codex_meta_output(
+        &session,
+        "tool-call",
+        "tool user input requested (awaiting user response)",
+    );
+    Ok(())
+}
+
+fn parse_tool_request_user_input_event(params: &Value) -> RuntimeResult<BackendNeedsInputEvent> {
+    let prompt_id = normalize_optional_string(
+        params
+            .get("itemId")
+            .and_then(Value::as_str)
+            .or_else(|| params.get("item_id").and_then(Value::as_str)),
+    )
+    .map(ToOwned::to_owned)
+    .or_else(|| {
+        normalize_optional_string(
+            params
+                .get("turnId")
+                .and_then(Value::as_str)
+                .or_else(|| params.get("turn_id").and_then(Value::as_str)),
+        )
+        .map(|turn_id| format!("prompt-{turn_id}"))
+    })
+    .unwrap_or_else(|| "prompt".to_owned());
+
+    let raw_questions = params
+        .get("questions")
+        .and_then(Value::as_array)
+        .ok_or_else(|| {
+            RuntimeError::Protocol(
+                "tool requestUserInput payload missing questions array".to_owned(),
+            )
+        })?;
+    if raw_questions.is_empty() {
+        return Err(RuntimeError::Protocol(
+            "tool requestUserInput payload contained no questions".to_owned(),
+        ));
+    }
+
+    let mut questions = Vec::with_capacity(raw_questions.len());
+    for (index, raw_question) in raw_questions.iter().enumerate() {
+        questions.push(parse_tool_request_user_input_question(raw_question, index));
+    }
+    let summary_question = questions.first().expect("non-empty questions");
+    let options = summary_question
+        .options
+        .as_ref()
+        .map(|options| {
+            options
+                .iter()
+                .map(|option| option.label.clone())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    Ok(BackendNeedsInputEvent {
+        prompt_id,
+        question: summary_question.question.clone(),
+        options,
+        default_option: None,
+        questions,
+    })
+}
+
+fn parse_tool_request_user_input_question(
+    value: &Value,
+    index: usize,
+) -> BackendNeedsInputQuestion {
+    let fallback_id = format!("question-{}", index + 1);
+    let id = normalize_optional_string(
+        value
+            .get("id")
+            .and_then(Value::as_str)
+            .or_else(|| value.get("questionId").and_then(Value::as_str))
+            .or_else(|| value.get("question_id").and_then(Value::as_str)),
+    )
+    .map(ToOwned::to_owned)
+    .unwrap_or_else(|| fallback_id.clone());
+
+    let header = normalize_optional_string(value.get("header").and_then(Value::as_str))
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| format!("Question {}", index + 1));
+    let question = normalize_optional_string(
+        value
+            .get("question")
+            .and_then(Value::as_str)
+            .or_else(|| value.get("prompt").and_then(Value::as_str)),
+    )
+    .map(ToOwned::to_owned)
+    .unwrap_or_else(|| "input required".to_owned());
+    let is_other = value
+        .get("isOther")
+        .or_else(|| value.get("is_other"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let is_secret = value
+        .get("isSecret")
+        .or_else(|| value.get("is_secret"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+
+    let options = value.get("options").and_then(Value::as_array).and_then(|raw| {
+        let options = raw
+            .iter()
+            .filter_map(|entry| {
+                let label = normalize_optional_string(
+                    entry
+                        .get("label")
+                        .and_then(Value::as_str)
+                        .or_else(|| entry.as_str()),
+                )?
+                .to_owned();
+                let description = normalize_optional_string(
+                    entry.get("description").and_then(Value::as_str),
+                )
+                .map(ToOwned::to_owned)
+                .unwrap_or_default();
+                Some(BackendNeedsInputOption { label, description })
+            })
+            .collect::<Vec<_>>();
+        (!options.is_empty()).then_some(options)
+    });
+
+    BackendNeedsInputQuestion {
+        id,
+        header,
+        question,
+        is_other,
+        is_secret,
+        options,
+    }
+}
+
 fn normalize_request_id(value: &Value) -> Option<String> {
     if let Some(raw) = value.as_str() {
         return Some(raw.to_owned());
@@ -746,19 +1027,56 @@ fn normalize_request_id(value: &Value) -> Option<String> {
     None
 }
 
+fn normalize_optional_string(value: Option<&str>) -> Option<&str> {
+    let value = value?;
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed)
+    }
+}
+
 fn server_request_result(method: &str) -> Option<Value> {
     match method {
         "item/commandExecution/requestApproval" => Some(json!({ "decision": "accept" })),
         "item/fileChange/requestApproval" => Some(json!({ "decision": "accept" })),
         "execCommandApproval" => Some(json!({ "decision": "approved" })),
         "applyPatchApproval" => Some(json!({ "decision": "approved" })),
-        "item/tool/requestUserInput" => Some(json!({ "answers": {} })),
         "item/tool/call" => Some(json!({
             "success": false,
             "contentItems": [{ "type": "inputText", "text": "tool call unsupported by orchestrator backend" }]
         })),
         _ => None,
     }
+}
+
+fn build_codex_tool_user_input_response(answers: &[BackendNeedsInputAnswer]) -> RuntimeResult<Value> {
+    let mut response_answers = serde_json::Map::new();
+    for answer in answers {
+        let question_id = normalize_optional_string(Some(answer.question_id.as_str())).ok_or_else(
+            || RuntimeError::Protocol("codex needs-input answer requires a question id".to_owned()),
+        )?;
+        if response_answers.contains_key(question_id) {
+            return Err(RuntimeError::Protocol(format!(
+                "codex needs-input response contains duplicate question id '{}'",
+                question_id
+            )));
+        }
+        let answer_values = answer
+            .answers
+            .iter()
+            .map(|entry| Value::String(entry.clone()))
+            .collect::<Vec<_>>();
+        response_answers.insert(question_id.to_owned(), json!({ "answers": answer_values }));
+    }
+
+    if response_answers.is_empty() {
+        return Err(RuntimeError::Protocol(
+            "codex needs-input response must include at least one answer".to_owned(),
+        ));
+    }
+    Ok(json!({ "answers": response_answers }))
 }
 
 async fn send_rpc_result(
@@ -943,7 +1261,7 @@ async fn emit_codex_request_meta_event(
         ),
         "item/tool/requestUserInput" => (
             "tool-call",
-            "tool user input requested (auto-answered with empty answers)",
+            "tool user input requested (awaiting user response)",
         ),
         "item/tool/call" => (
             "tool-call",

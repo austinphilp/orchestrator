@@ -210,9 +210,13 @@ impl Ui {
                 if let Some(session_id) = shell_state.review_merge_confirm_session.as_ref() {
                     render_review_merge_confirm_overlay(frame, main, session_id);
                 }
+                if let Some(modal) = shell_state.needs_input_modal.as_ref() {
+                    render_needs_input_modal(frame, main, modal);
+                }
             })?;
 
             if shell_state.ticket_picker_overlay.has_repository_prompt()
+                || shell_state.needs_input_modal_is_note_insert_mode()
                 || (shell_state.mode == UiMode::Terminal && shell_state.is_terminal_view_active())
             {
                 let _ = io::stdout()

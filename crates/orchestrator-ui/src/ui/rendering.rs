@@ -839,6 +839,154 @@ fn render_ticket_picker_overlay(
     }
 }
 
+fn render_needs_input_modal(
+    frame: &mut ratatui::Frame<'_>,
+    anchor_area: Rect,
+    modal: &NeedsInputModalState,
+) {
+    let Some(popup) = needs_input_modal_popup(anchor_area) else {
+        return;
+    };
+    let Some(question) = modal.current_question() else {
+        return;
+    };
+
+    frame.render_widget(Clear, popup);
+    let title = format!(
+        "input required | session {} | {} / {}",
+        modal.session_id.as_str(),
+        modal.current_question_index + 1,
+        modal.questions.len()
+    );
+    let block = Block::default().title(title).borders(Borders::ALL);
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
+
+    let mut constraints = vec![
+        Constraint::Length(3),
+        Constraint::Length(5),
+        Constraint::Length(3),
+    ];
+    if modal.error.is_some() {
+        constraints.push(Constraint::Length(1));
+    }
+    constraints.push(Constraint::Min(2));
+    let sections = Layout::vertical(constraints).split(inner);
+    let question_area = sections[0];
+    let choice_area = sections[1];
+    let note_area = sections[2];
+
+    let header = format!("{} | {}", question.header, question.question);
+    frame.render_widget(
+        Paragraph::new(compact_focus_card_text(header.as_str())).block(
+            Block::default()
+                .title("question")
+                .borders(Borders::ALL),
+        ),
+        question_area,
+    );
+
+    if let Some(options) = question.options.as_ref().filter(|options| !options.is_empty()) {
+        let option_labels = options
+            .iter()
+            .map(|option| option.label.clone())
+            .collect::<Vec<_>>();
+        let mut select_state = modal.select_state.clone();
+        select_state.focused = !modal.note_insert_mode;
+        let _ = Select::new(option_labels.as_slice(), &select_state)
+            .label("choice")
+            .placeholder("Select an option")
+            .style(SelectStyle::minimal().max_options(6))
+            .render_stateful(frame, choice_area);
+        if select_state.is_open {
+            let _ = Select::new(option_labels.as_slice(), &select_state)
+                .label("choice")
+                .placeholder("Select an option")
+                .style(SelectStyle::minimal().max_options(6))
+                .render_dropdown(frame, choice_area, anchor_area);
+        }
+    } else {
+        frame.render_widget(
+            Paragraph::new("No predefined options. Enter a response note.")
+                .block(Block::default().title("choice").borders(Borders::ALL)),
+            choice_area,
+        );
+    }
+
+    let mut note_input_state = modal.note_input_state.clone();
+    note_input_state.focused = modal.note_insert_mode;
+    let note_input = Input::new(&note_input_state)
+        .label("note")
+        .placeholder("Optional with selection; required when no options")
+        .with_border(true);
+    let _ = note_input.render_stateful(frame, note_area);
+    if modal.note_insert_mode {
+        if let Some((x, y)) = needs_input_note_cursor(popup, modal) {
+            frame.set_cursor_position((x, y));
+        }
+    }
+
+    let mut index = 3usize;
+    if let Some(error) = modal.error.as_ref() {
+        frame.render_widget(
+            Paragraph::new(Span::styled(
+                compact_focus_card_text(error.as_str()),
+                Style::default().fg(Color::LightRed),
+            )),
+            sections[index],
+        );
+        index += 1;
+    }
+    let help = format!(
+        "Enter: {} | Tab/S-Tab: question | i: note insert | Esc: close",
+        if modal.has_next_question() {
+            "next question"
+        } else {
+            "submit"
+        }
+    );
+    frame.render_widget(
+        Paragraph::new(help).wrap(Wrap { trim: false }),
+        sections[index],
+    );
+}
+
+fn needs_input_modal_popup(anchor_area: Rect) -> Option<Rect> {
+    if anchor_area.width < 48 || anchor_area.height < 14 {
+        return None;
+    }
+    let width = ((anchor_area.width as f32) * 0.72).round() as u16;
+    let height = ((anchor_area.height as f32) * 0.60).round() as u16;
+    let width = width.clamp(48, anchor_area.width.saturating_sub(2));
+    let height = height.clamp(14, anchor_area.height.saturating_sub(2));
+    Some(Rect {
+        x: anchor_area.x + (anchor_area.width.saturating_sub(width)) / 2,
+        y: anchor_area.y + (anchor_area.height.saturating_sub(height)) / 2,
+        width,
+        height,
+    })
+}
+
+fn needs_input_note_cursor(popup: Rect, modal: &NeedsInputModalState) -> Option<(u16, u16)> {
+    if !modal.note_insert_mode {
+        return None;
+    }
+
+    let inner_x = popup.x.saturating_add(1);
+    let inner_y = popup.y.saturating_add(1);
+    let line_prefix = 1u16;
+    let note_line_offset = 9u16;
+    let note_len = modal.note_input_state.text.chars().count();
+    let inner_width = popup.width.saturating_sub(2);
+    let max_offset = usize::from(inner_width.saturating_sub(2));
+    let x_offset = note_len.min(max_offset);
+    let cursor_x = inner_x
+        .saturating_add(line_prefix)
+        .saturating_add(u16::try_from(x_offset).ok()?);
+    let cursor_y = inner_y.saturating_add(note_line_offset);
+    Some((cursor_x, cursor_y))
+}
+
 fn render_worktree_diff_modal(
     frame: &mut ratatui::Frame<'_>,
     anchor_area: Rect,
@@ -1578,6 +1726,7 @@ fn ticket_project_name(ticket: &TicketSummary) -> String {
 
 fn group_tickets_by_project(
     tickets: Vec<TicketSummary>,
+    project_names: Vec<String>,
     priority_states: &[String],
     collapsed_projects: &HashSet<String>,
 ) -> Vec<TicketProjectGroup> {
@@ -1599,6 +1748,19 @@ fn group_tickets_by_project(
                 project_buckets
             },
         );
+
+    for project_name in project_names {
+        let project_name = project_name.trim().to_owned();
+        if project_name.is_empty() {
+            continue;
+        }
+        if !projects
+            .iter()
+            .any(|(name, _)| name.eq_ignore_ascii_case(project_name.as_str()))
+        {
+            projects.push((project_name, Vec::new()));
+        }
+    }
 
     projects.sort_by(|left, right| {
         normalize_ticket_project(left.0.as_str()).cmp(&normalize_ticket_project(right.0.as_str()))

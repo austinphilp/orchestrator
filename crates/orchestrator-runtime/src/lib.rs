@@ -110,11 +110,35 @@ pub struct BackendCheckpointEvent {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BackendNeedsInputOption {
+    pub label: String,
+    pub description: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BackendNeedsInputQuestion {
+    pub id: String,
+    pub header: String,
+    pub question: String,
+    pub is_other: bool,
+    pub is_secret: bool,
+    pub options: Option<Vec<BackendNeedsInputOption>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BackendNeedsInputEvent {
     pub prompt_id: String,
     pub question: String,
     pub options: Vec<String>,
     pub default_option: Option<String>,
+    #[serde(default)]
+    pub questions: Vec<BackendNeedsInputQuestion>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BackendNeedsInputAnswer {
+    pub question_id: String,
+    pub answers: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -182,6 +206,17 @@ pub trait SessionLifecycle: Send + Sync {
     async fn spawn(&self, spec: SpawnSpec) -> RuntimeResult<SessionHandle>;
     async fn kill(&self, session: &SessionHandle) -> RuntimeResult<()>;
     async fn send_input(&self, session: &SessionHandle, input: &[u8]) -> RuntimeResult<()>;
+    async fn respond_to_needs_input(
+        &self,
+        session: &SessionHandle,
+        prompt_id: &str,
+        answers: &[BackendNeedsInputAnswer],
+    ) -> RuntimeResult<()> {
+        let _ = (session, prompt_id, answers);
+        Err(RuntimeError::Protocol(
+            "needs-input responses are not supported by this backend".to_owned(),
+        ))
+    }
     async fn resize(&self, session: &SessionHandle, cols: u16, rows: u16) -> RuntimeResult<()>;
 }
 

@@ -276,8 +276,15 @@ async fn run_ticket_picker_load_task(
 ) {
     match provider.list_unfinished_tickets().await {
         Ok(tickets) => {
+            let projects = match provider.list_projects().await {
+                Ok(projects) => projects,
+                Err(_) => Vec::new(),
+            };
             let _ = sender
-                .send(TicketPickerEvent::TicketsLoaded { tickets })
+                .send(TicketPickerEvent::TicketsLoaded {
+                    tickets,
+                    projects,
+                })
                 .await;
         }
         Err(error) => {
@@ -675,6 +682,115 @@ fn render_ticket_picker_overlay_text(overlay: &TicketPickerOverlayState) -> Stri
     }
 
     lines.join("\n")
+}
+
+fn route_needs_input_modal_key(shell_state: &mut UiShellState, key: KeyEvent) -> RoutedInput {
+    if shell_state.apply_needs_input_note_key(key) {
+        return RoutedInput::Ignore;
+    }
+
+    if is_escape_to_normal(key) {
+        shell_state.close_needs_input_modal();
+        return RoutedInput::Ignore;
+    }
+    if !key.modifiers.is_empty() {
+        if key.modifiers == KeyModifiers::SHIFT && matches!(key.code, KeyCode::BackTab) {
+            shell_state.move_needs_input_question(-1);
+            return RoutedInput::Ignore;
+        }
+        return RoutedInput::Ignore;
+    }
+
+    match key.code {
+        KeyCode::Char('q') => {
+            shell_state.close_needs_input_modal();
+        }
+        KeyCode::Char('i') => {
+            shell_state.toggle_needs_input_note_insert_mode(true);
+        }
+        KeyCode::Tab | KeyCode::Right | KeyCode::Char('l') => {
+            shell_state.move_needs_input_question(1);
+        }
+        KeyCode::BackTab | KeyCode::Left | KeyCode::Char('h') => {
+            shell_state.move_needs_input_question(-1);
+        }
+        KeyCode::Enter => {
+            let should_submit = shell_state
+                .needs_input_modal
+                .as_ref()
+                .map(|modal| !modal.has_next_question())
+                .unwrap_or(false);
+            if should_submit {
+                shell_state.submit_needs_input_modal();
+            } else {
+                shell_state.move_needs_input_question(1);
+            }
+        }
+        KeyCode::Up
+        | KeyCode::Down
+        | KeyCode::Home
+        | KeyCode::End
+        | KeyCode::PageUp
+        | KeyCode::PageDown
+        | KeyCode::Char(' ')
+        | KeyCode::Char('j')
+        | KeyCode::Char('k') => {
+            if let Some(modal) = shell_state.needs_input_modal.as_mut() {
+                let select_code = match key.code {
+                    KeyCode::Char('j') => KeyCode::Down,
+                    KeyCode::Char('k') => KeyCode::Up,
+                    other => other,
+                };
+                let select_state = &mut modal.select_state;
+                if select_state.enabled && select_state.focused && select_state.total_options > 0 {
+                    if select_state.is_open {
+                        match select_code {
+                            KeyCode::Char(' ') => {
+                                select_state.select_highlighted();
+                            }
+                            KeyCode::Up => {
+                                select_state.highlight_prev();
+                            }
+                            KeyCode::Down => {
+                                select_state.highlight_next();
+                            }
+                            KeyCode::Home => {
+                                select_state.highlight_first();
+                            }
+                            KeyCode::End => {
+                                select_state.highlight_last();
+                            }
+                            KeyCode::PageUp => {
+                                for _ in 0..5 {
+                                    select_state.highlight_prev();
+                                }
+                            }
+                            KeyCode::PageDown => {
+                                for _ in 0..5 {
+                                    select_state.highlight_next();
+                                }
+                            }
+                            _ => {}
+                        }
+                    } else {
+                        match select_code {
+                            KeyCode::Down | KeyCode::Char(' ') => {
+                                select_state.open();
+                            }
+                            KeyCode::Up => {
+                                select_state.open();
+                                select_state.highlight_last();
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+
+    RoutedInput::Ignore
 }
 
 fn route_ticket_picker_key(shell_state: &mut UiShellState, key: KeyEvent) -> RoutedInput {

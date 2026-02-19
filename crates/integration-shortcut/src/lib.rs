@@ -302,6 +302,38 @@ impl TicketingProvider for ShortcutTicketingProvider {
         Ok(stories.into_iter().map(ticket_summary_from_story).collect())
     }
 
+    async fn list_projects(&self) -> Result<Vec<String>, CoreError> {
+        let request = self
+            .client
+            .get(self.endpoint("projects"))
+            .query(&[("page_size", self.config.fetch_limit.to_string())]);
+        let payload = self.request_json::<Value>(request).await?;
+        let projects = extract_list::<ShortcutProjectRecord>(payload, "projects")?
+            .into_iter()
+            .map(|project| project.name)
+            .filter(|name| !name.trim().is_empty())
+            .collect::<Vec<_>>();
+
+        let mut deduped_projects = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        for project in projects {
+            let project = project.trim().to_owned();
+            if project.is_empty() {
+                continue;
+            }
+            let normalized = project.to_ascii_lowercase();
+            if !seen.insert(normalized) {
+                continue;
+            }
+            deduped_projects.push(project);
+        }
+
+        deduped_projects.sort_by(|left, right| {
+            left.to_ascii_lowercase().cmp(&right.to_ascii_lowercase())
+        });
+        Ok(deduped_projects)
+    }
+
     async fn create_ticket(
         &self,
         request: CreateTicketRequest,
@@ -606,6 +638,12 @@ struct ShortcutStory {
 #[derive(Debug, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 struct ShortcutProject {
+    pub name: String,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct ShortcutProjectRecord {
     pub name: String,
 }
 

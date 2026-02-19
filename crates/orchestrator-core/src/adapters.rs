@@ -103,6 +103,9 @@ pub trait TicketingProvider: Send + Sync {
     fn provider(&self) -> TicketProvider;
     async fn health_check(&self) -> Result<(), CoreError>;
     async fn list_tickets(&self, query: TicketQuery) -> Result<Vec<TicketSummary>, CoreError>;
+    async fn list_projects(&self) -> Result<Vec<String>, CoreError> {
+        Ok(Vec::new())
+    }
     async fn create_ticket(&self, request: CreateTicketRequest)
         -> Result<TicketSummary, CoreError>;
     async fn get_ticket(&self, _request: GetTicketRequest) -> Result<TicketDetails, CoreError> {

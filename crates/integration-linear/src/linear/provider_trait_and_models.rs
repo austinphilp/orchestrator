@@ -53,6 +53,58 @@ impl TicketingProvider for LinearTicketingProvider {
         Ok(tickets)
     }
 
+    async fn list_projects(&self) -> Result<Vec<String>, CoreError> {
+        let data = self
+            .transport
+            .execute(GraphqlRequest::new(TEAMS_QUERY, json!({})))
+            .await
+            .map_err(|error| normalize_linear_api_error(error, "could not list Linear projects"))?;
+        let payload: TeamListResponse = serde_json::from_value(data).map_err(|error| {
+            CoreError::DependencyUnavailable(format!("failed to decode Linear teams payload: {error}"))
+        })?;
+
+        let mut projects = payload
+            .teams
+            .nodes
+            .into_iter()
+            .flat_map(|team| {
+                team.projects
+                    .nodes
+                    .into_iter()
+                    .map(|project| project.name)
+            })
+            .filter(|name| !name.trim().is_empty())
+            .collect::<Vec<_>>();
+
+        if projects.is_empty() {
+            let cache_projects = {
+                let cache = self.cache.read().expect("linear ticket cache read lock");
+                cache
+                    .tickets
+                    .values()
+                    .filter_map(|ticket| ticket.summary.project.clone())
+                    .collect::<Vec<_>>()
+            };
+            projects.extend(cache_projects);
+        }
+
+        let mut deduped_projects = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        for mut project in projects {
+            project = project.trim().to_owned();
+            let normalized = project.to_ascii_lowercase();
+            if project.is_empty() || project == "No Project" || !seen.insert(normalized) {
+                continue;
+            }
+            deduped_projects.push(project);
+        }
+
+        deduped_projects.sort_by(|left, right| {
+            left.to_ascii_lowercase().cmp(&right.to_ascii_lowercase())
+        });
+        Ok(deduped_projects)
+    }
+
     async fn create_ticket(
         &self,
         request: CreateTicketRequest,

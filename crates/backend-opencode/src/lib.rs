@@ -14,9 +14,10 @@ use futures_util::StreamExt;
 use orchestrator_runtime::{
     BackendArtifactEvent, BackendArtifactKind, BackendBlockedEvent, BackendCapabilities,
     BackendCheckpointEvent, BackendCrashedEvent, BackendDoneEvent, BackendEvent, BackendKind,
-    BackendNeedsInputEvent, BackendOutputEvent, BackendOutputStream, RuntimeArtifactId,
-    RuntimeError, RuntimeResult, RuntimeSessionId, SessionHandle, SpawnSpec, WorkerBackend,
-    WorkerEventStream, WorkerEventSubscription,
+    BackendNeedsInputEvent, BackendNeedsInputOption, BackendNeedsInputQuestion,
+    BackendOutputEvent, BackendOutputStream, RuntimeArtifactId, RuntimeError, RuntimeResult,
+    RuntimeSessionId, SessionHandle, SpawnSpec, WorkerBackend, WorkerEventStream,
+    WorkerEventSubscription,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -624,14 +625,36 @@ fn parse_server_event_line(line: &[u8]) -> Option<BackendEvent> {
             detail: event.detail,
             file_refs: event.file_refs,
         })),
-        "needs_input" => Some(BackendEvent::NeedsInput(BackendNeedsInputEvent {
-            prompt_id: event.prompt_id.unwrap_or_else(|| "prompt".to_owned()),
-            question: event
-                .question
-                .unwrap_or_else(|| "input required".to_owned()),
-            options: event.options,
-            default_option: event.default_option,
-        })),
+        "needs_input" => {
+            let prompt_id = event.prompt_id.unwrap_or_else(|| "prompt".to_owned());
+            let question = event.question.unwrap_or_else(|| "input required".to_owned());
+            let options = event.options;
+            let question_options = (!options.is_empty()).then(|| {
+                options
+                    .iter()
+                    .map(|label| BackendNeedsInputOption {
+                        label: label.clone(),
+                        description: String::new(),
+                    })
+                    .collect::<Vec<_>>()
+            });
+            let questions = vec![BackendNeedsInputQuestion {
+                id: prompt_id.clone(),
+                header: "Input".to_owned(),
+                question: question.clone(),
+                is_other: false,
+                is_secret: false,
+                options: question_options,
+            }];
+
+            Some(BackendEvent::NeedsInput(BackendNeedsInputEvent {
+                prompt_id,
+                question,
+                options,
+                default_option: event.default_option,
+                questions,
+            }))
+        }
         "blocked" => Some(BackendEvent::Blocked(BackendBlockedEvent {
             reason: event.reason.unwrap_or_else(|| "blocked".to_owned()),
             hint: event.hint,
