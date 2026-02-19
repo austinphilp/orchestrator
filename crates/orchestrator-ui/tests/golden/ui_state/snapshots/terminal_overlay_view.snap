@@ -14,11 +14,6 @@ Attention:
 [center]
 Stack: FocusCard(inbox-terminal) > Terminal(sess-terminal)
 
-Session: sess-terminal
-Status: Running
-Latest checkpoint: artifact-terminal-checkpoint
-
-Terminal output:
 No terminal output available yet.
 
 [which-key]
