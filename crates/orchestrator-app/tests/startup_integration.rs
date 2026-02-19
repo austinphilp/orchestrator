@@ -2,7 +2,7 @@ use orchestrator_app::{App, AppConfig};
 use orchestrator_core::test_support::TestDbPath;
 use orchestrator_core::{
     AddTicketCommentRequest, CoreError, CreateTicketRequest, GithubClient, GetTicketRequest,
-    Supervisor, TicketDetails, TicketId, TicketProvider, TicketQuery, TicketSummary,
+    Supervisor, TicketDetails, TicketProvider, TicketQuery, TicketSummary,
     TicketingProvider, UpdateTicketDescriptionRequest, UpdateTicketStateRequest,
 };
 use std::sync::Arc;
