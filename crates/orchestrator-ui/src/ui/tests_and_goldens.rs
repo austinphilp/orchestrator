@@ -342,6 +342,37 @@ mod tests {
         projection
     }
 
+    fn review_projection_without_pr_artifact() -> ProjectionState {
+        let work_item_id = WorkItemId::new("wi-review");
+        let session_id = WorkerSessionId::new("sess-review");
+
+        let mut projection = ProjectionState::default();
+        projection.work_items.insert(
+            work_item_id.clone(),
+            WorkItemProjection {
+                id: work_item_id.clone(),
+                ticket_id: None,
+                project_id: None,
+                workflow_state: Some(WorkflowState::InReview),
+                session_id: Some(session_id.clone()),
+                worktree_id: None,
+                inbox_items: vec![],
+                artifacts: vec![],
+            },
+        );
+        projection.sessions.insert(
+            session_id,
+            SessionProjection {
+                id: WorkerSessionId::new("sess-review"),
+                work_item_id: Some(work_item_id),
+                status: Some(WorkerSessionStatus::Running),
+                latest_checkpoint: None,
+            },
+        );
+
+        projection
+    }
+
     fn triage_projection() -> ProjectionState {
         let mut projection = ProjectionState::default();
         let rows = vec![
@@ -1511,6 +1542,60 @@ mod tests {
         assert!(status.contains("warning: workflow merge failed"));
         assert!(!status.contains('\0'));
         assert!(!status.contains('\u{2400}'));
+    }
+
+    #[test]
+    fn merge_queue_event_replaces_queued_status_with_pending_message() {
+        let mut shell_state = UiShellState::new("ready".to_owned(), sample_projection(true));
+        let session_id = WorkerSessionId::new("sess-1");
+        let (sender, receiver) = mpsc::channel(4);
+        shell_state.merge_event_receiver = Some(receiver);
+        shell_state.status_warning = Some("merge queued for review session sess-1".to_owned());
+
+        sender
+            .try_send(MergeQueueEvent::Completed {
+                session_id,
+                kind: MergeQueueCommandKind::Merge,
+                completed: false,
+                merge_conflict: false,
+                base_branch: None,
+                head_branch: None,
+                error: None,
+            })
+            .expect("send merge event");
+        shell_state.poll_merge_queue_events();
+
+        assert_eq!(
+            shell_state.status_warning.as_deref(),
+            Some("merge pending for review session sess-1 (waiting for checks or merge queue)")
+        );
+    }
+
+    #[test]
+    fn merge_reconcile_poll_runs_for_pending_session_without_pr_artifact() {
+        let projection = review_projection_without_pr_artifact();
+        let dispatcher = Arc::new(TestSupervisorDispatcher::new(Vec::new()));
+        let mut shell_state = UiShellState::new_with_integrations(
+            "ready".to_owned(),
+            projection,
+            None,
+            Some(dispatcher),
+            None,
+            None,
+        );
+
+        shell_state
+            .merge_pending_sessions
+            .insert(WorkerSessionId::new("sess-review"));
+        shell_state.enqueue_merge_reconcile_polls();
+
+        assert_eq!(shell_state.merge_queue.len(), 1);
+        let request = shell_state
+            .merge_queue
+            .front()
+            .expect("merge reconcile request queued");
+        assert_eq!(request.kind, MergeQueueCommandKind::Reconcile);
+        assert_eq!(request.session_id.as_str(), "sess-review");
     }
 
     #[test]
@@ -2879,6 +2964,114 @@ mod tests {
         handle_key_press(&mut shell_state, key(KeyCode::Char('!')));
 
         assert_eq!(shell_state.terminal_compose_draft, "hi\n!");
+    }
+
+    #[test]
+    fn entering_terminal_mode_snaps_stream_view_to_bottom() {
+        let mut shell_state = UiShellState::new("ready".to_owned(), sample_projection(true));
+        handle_key_press(&mut shell_state, key(KeyCode::Char('i')));
+        assert_eq!(shell_state.mode, UiMode::Terminal);
+        let session_id = shell_state
+            .active_terminal_session_id()
+            .expect("active terminal session")
+            .clone();
+        shell_state
+            .terminal_session_states
+            .entry(session_id.clone())
+            .or_default();
+
+        {
+            let view = shell_state
+                .terminal_session_states
+                .get_mut(&session_id)
+                .expect("terminal view state");
+            view.entries = vec![
+                TerminalTranscriptEntry::Message("line 1".to_owned()),
+                TerminalTranscriptEntry::Message("line 2".to_owned()),
+                TerminalTranscriptEntry::Message("line 3".to_owned()),
+                TerminalTranscriptEntry::Message("line 4".to_owned()),
+            ];
+            view.output_viewport_rows = 2;
+            view.output_scroll_line = 0;
+            view.output_follow_tail = false;
+        }
+
+        handle_key_press(&mut shell_state, key(KeyCode::Esc));
+        assert_eq!(shell_state.mode, UiMode::Normal);
+
+        handle_key_press(&mut shell_state, key(KeyCode::Char('i')));
+        assert_eq!(shell_state.mode, UiMode::Terminal);
+
+        let view = shell_state
+            .terminal_session_states
+            .get_mut(&session_id)
+            .expect("terminal view state");
+        let rendered_line_count = render_terminal_transcript_entries(view).len();
+        assert_eq!(
+            view.output_scroll_line,
+            rendered_line_count.saturating_sub(view.output_viewport_rows)
+        );
+        assert!(view.output_follow_tail);
+    }
+
+    #[test]
+    fn terminal_stream_normal_mode_scrolls_with_shift_jk_and_g() {
+        let mut shell_state = UiShellState::new("ready".to_owned(), sample_projection(true));
+        handle_key_press(&mut shell_state, key(KeyCode::Char('i')));
+        assert_eq!(shell_state.mode, UiMode::Terminal);
+        let session_id = shell_state
+            .active_terminal_session_id()
+            .expect("active terminal session")
+            .clone();
+        shell_state
+            .terminal_session_states
+            .entry(session_id.clone())
+            .or_default();
+        handle_key_press(&mut shell_state, key(KeyCode::Esc));
+        assert_eq!(shell_state.mode, UiMode::Normal);
+
+        {
+            let view = shell_state
+                .terminal_session_states
+                .get_mut(&session_id)
+                .expect("terminal view state");
+            view.entries = vec![
+                TerminalTranscriptEntry::Message("line 1".to_owned()),
+                TerminalTranscriptEntry::Message("line 2".to_owned()),
+                TerminalTranscriptEntry::Message("line 3".to_owned()),
+                TerminalTranscriptEntry::Message("line 4".to_owned()),
+                TerminalTranscriptEntry::Message("line 5".to_owned()),
+            ];
+            view.output_viewport_rows = 2;
+            view.output_scroll_line = 0;
+            view.output_follow_tail = false;
+        }
+
+        handle_key_press(&mut shell_state, shift_key(KeyCode::Char('J')));
+        let view = shell_state
+            .terminal_session_states
+            .get_mut(&session_id)
+            .expect("terminal view state");
+        assert_eq!(view.output_scroll_line, 1);
+
+        handle_key_press(&mut shell_state, shift_key(KeyCode::Char('K')));
+        let view = shell_state
+            .terminal_session_states
+            .get_mut(&session_id)
+            .expect("terminal view state");
+        assert_eq!(view.output_scroll_line, 0);
+
+        handle_key_press(&mut shell_state, key(KeyCode::Char('G')));
+        let view = shell_state
+            .terminal_session_states
+            .get_mut(&session_id)
+            .expect("terminal view state");
+        let rendered_line_count = render_terminal_transcript_entries(view).len();
+        assert_eq!(
+            view.output_scroll_line,
+            rendered_line_count.saturating_sub(view.output_viewport_rows)
+        );
+        assert!(view.output_follow_tail);
     }
 
     #[test]

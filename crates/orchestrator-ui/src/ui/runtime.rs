@@ -124,18 +124,14 @@ impl Ui {
                         output_text.lines.len(),
                         usize::from(viewport_height),
                     );
-                    let (scroll_y, output_cursor_row, output_cursor_col) = shell_state
+                    let scroll_y = shell_state
                         .terminal_session_states
                         .get(&session_id)
                         .map(|view| {
                             let max_scroll = content_height.saturating_sub(viewport_height);
-                            let scroll = (view.output_scroll_line as u16).min(max_scroll);
-                            let row = view
-                                .output_cursor_line
-                                .saturating_sub(view.output_scroll_line);
-                            (scroll, row, view.output_cursor_col)
+                            (view.output_scroll_line as u16).min(max_scroll)
                         })
-                        .unwrap_or((0, 0, 0));
+                        .unwrap_or(0);
                     frame.render_widget(
                         Paragraph::new(output_text)
                             .wrap(Wrap { trim: false })
@@ -143,21 +139,6 @@ impl Ui {
                             .block(Block::default().title("output").borders(Borders::ALL)),
                         terminal_output_area,
                     );
-                    if shell_state.mode == UiMode::Normal
-                        && output_cursor_row < usize::from(viewport_height)
-                    {
-                        let max_col = usize::from(terminal_output_area.width.saturating_sub(3));
-                        let col = output_cursor_col.min(max_col);
-                        let cursor_x = terminal_output_area
-                            .x
-                            .saturating_add(1)
-                            .saturating_add(u16::try_from(col).unwrap_or(0));
-                        let cursor_y = terminal_output_area
-                            .y
-                            .saturating_add(1)
-                            .saturating_add(u16::try_from(output_cursor_row).unwrap_or(0));
-                        frame.set_cursor_position((cursor_x, cursor_y));
-                    }
 
                     let input_text =
                         render_terminal_input_panel(shell_state.terminal_compose_draft.as_str());
@@ -244,4 +225,3 @@ impl Drop for Ui {
         let _ = io::stdout().execute(LeaveAlternateScreen);
     }
 }
-

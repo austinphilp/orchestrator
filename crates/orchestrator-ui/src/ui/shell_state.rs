@@ -30,14 +30,13 @@ struct UiShellState {
     terminal_session_states: HashMap<WorkerSessionId, TerminalViewState>,
     terminal_session_streamed: HashSet<WorkerSessionId>,
     terminal_compose_draft: String,
-    terminal_nav_count: Option<usize>,
-    terminal_nav_pending_g: bool,
     review_merge_confirm_session: Option<WorkerSessionId>,
     merge_queue: VecDeque<MergeQueueRequest>,
     merge_last_dispatched_at: Option<Instant>,
     merge_last_poll_at: Option<Instant>,
     merge_event_sender: Option<mpsc::Sender<MergeQueueEvent>>,
     merge_event_receiver: Option<mpsc::Receiver<MergeQueueEvent>>,
+    merge_pending_sessions: HashSet<WorkerSessionId>,
     review_sync_instructions_sent: HashSet<WorkerSessionId>,
     worktree_diff_modal: Option<WorktreeDiffModalState>,
 }
@@ -116,14 +115,13 @@ impl UiShellState {
             terminal_session_states: HashMap::new(),
             terminal_session_streamed: HashSet::new(),
             terminal_compose_draft: String::new(),
-            terminal_nav_count: None,
-            terminal_nav_pending_g: false,
             review_merge_confirm_session: None,
             merge_queue: VecDeque::new(),
             merge_last_dispatched_at: None,
             merge_last_poll_at: None,
             merge_event_sender,
             merge_event_receiver,
+            merge_pending_sessions: HashSet::new(),
             review_sync_instructions_sent: HashSet::new(),
             worktree_diff_modal: None,
         }
@@ -591,6 +589,24 @@ impl UiShellState {
         self.terminal_session_states.get_mut(&session_id)
     }
 
+    fn snap_active_terminal_output_to_bottom(&mut self) {
+        let Some(view) = self.active_terminal_view_state_mut() else {
+            return;
+        };
+
+        let rendered = render_terminal_transcript_entries(view);
+        if rendered.is_empty() {
+            view.output_scroll_line = 0;
+            view.output_follow_tail = true;
+            return;
+        }
+
+        view.output_follow_tail = true;
+        view.output_scroll_line = rendered
+            .len()
+            .saturating_sub(view.output_viewport_rows.max(1));
+    }
+
     fn sync_terminal_output_viewport(&mut self, rendered_line_count: usize, viewport_rows: usize) {
         let Some(view) = self.active_terminal_view_state_mut() else {
             return;
@@ -598,17 +614,9 @@ impl UiShellState {
 
         view.output_viewport_rows = viewport_rows.max(1);
         if rendered_line_count == 0 {
-            view.output_cursor_line = 0;
             view.output_scroll_line = 0;
-            view.selected_fold_entry = None;
+            view.output_follow_tail = true;
             return;
-        }
-
-        let max_line = rendered_line_count - 1;
-        if view.output_follow_tail {
-            view.output_cursor_line = max_line;
-        } else {
-            view.output_cursor_line = view.output_cursor_line.min(max_line);
         }
 
         let max_scroll = rendered_line_count.saturating_sub(view.output_viewport_rows);
@@ -617,316 +625,47 @@ impl UiShellState {
             return;
         }
 
-        if view.output_cursor_line < view.output_scroll_line {
-            view.output_scroll_line = view.output_cursor_line;
-        } else if view.output_cursor_line >= view.output_scroll_line + view.output_viewport_rows {
-            view.output_scroll_line = view
-                .output_cursor_line
-                .saturating_add(1)
-                .saturating_sub(view.output_viewport_rows);
-        }
         view.output_scroll_line = view.output_scroll_line.min(max_scroll);
     }
 
-    fn move_terminal_output_cursor(&mut self, direction: isize) -> bool {
+    fn scroll_terminal_output_view(&mut self, delta: isize) -> bool {
         let Some(view) = self.active_terminal_view_state_mut() else {
             return false;
         };
         let rendered = render_terminal_transcript_entries(view);
         if rendered.is_empty() {
-            view.selected_fold_entry = None;
-            view.output_cursor_line = 0;
             view.output_scroll_line = 0;
+            view.output_follow_tail = true;
             return false;
         }
 
-        let max_line = rendered.len().saturating_sub(1);
-        let current = view.output_cursor_line.min(max_line);
-        let next = if direction < 0 {
-            current.saturating_sub(direction.unsigned_abs())
+        let max_scroll = rendered.len().saturating_sub(view.output_viewport_rows.max(1));
+        let current = view.output_scroll_line.min(max_scroll);
+        let next = if delta < 0 {
+            current.saturating_sub(delta.unsigned_abs())
         } else {
-            current.saturating_add(direction as usize).min(max_line)
+            current.saturating_add(delta as usize).min(max_scroll)
         };
-        view.output_cursor_line = next;
-        view.output_follow_tail = next == max_line;
-        view.selected_fold_entry = rendered.get(next).and_then(|line| line.fold_header_entry);
-        let max_col = rendered
-            .get(next)
-            .map(|line| line.text.chars().count().saturating_sub(1))
-            .unwrap_or(0);
-        view.output_cursor_col = view.output_cursor_col.min(max_col);
-
-        if !view.output_follow_tail {
-            if view.output_cursor_line < view.output_scroll_line {
-                view.output_scroll_line = view.output_cursor_line;
-            } else if view.output_cursor_line >= view.output_scroll_line + view.output_viewport_rows
-            {
-                view.output_scroll_line = view
-                    .output_cursor_line
-                    .saturating_add(1)
-                    .saturating_sub(view.output_viewport_rows);
-            }
-        }
+        view.output_scroll_line = next;
+        view.output_follow_tail = next == max_scroll;
         next != current
     }
 
-    fn move_terminal_output_cursor_col(&mut self, direction: isize) -> bool {
+    fn scroll_terminal_output_to_bottom(&mut self) -> bool {
         let Some(view) = self.active_terminal_view_state_mut() else {
             return false;
         };
         let rendered = render_terminal_transcript_entries(view);
         if rendered.is_empty() {
-            view.output_cursor_col = 0;
-            return false;
-        }
-        let current_line = view
-            .output_cursor_line
-            .min(rendered.len().saturating_sub(1));
-        let max_col = rendered
-            .get(current_line)
-            .map(|line| line.text.chars().count().saturating_sub(1))
-            .unwrap_or(0);
-        let previous = view.output_cursor_col;
-        view.output_cursor_col = if direction < 0 {
-            view.output_cursor_col
-                .saturating_sub(direction.unsigned_abs())
-        } else {
-            view.output_cursor_col
-                .saturating_add(direction as usize)
-                .min(max_col)
-        };
-        view.output_cursor_col != previous
-    }
-
-    fn set_terminal_output_cursor_line(&mut self, target: usize) -> bool {
-        let Some(view) = self.active_terminal_view_state_mut() else {
-            return false;
-        };
-        let rendered = render_terminal_transcript_entries(view);
-        if rendered.is_empty() {
-            view.selected_fold_entry = None;
-            view.output_cursor_line = 0;
-            view.output_cursor_col = 0;
             view.output_scroll_line = 0;
+            view.output_follow_tail = true;
             return false;
         }
-
-        let max_line = rendered.len().saturating_sub(1);
-        let current = view.output_cursor_line.min(max_line);
-        let next = target.min(max_line);
-        view.output_cursor_line = next;
-        view.output_follow_tail = next == max_line;
-        view.selected_fold_entry = rendered.get(next).and_then(|line| line.fold_header_entry);
-        let max_col = rendered
-            .get(next)
-            .map(|line| line.text.chars().count().saturating_sub(1))
-            .unwrap_or(0);
-        view.output_cursor_col = view.output_cursor_col.min(max_col);
-
-        if !view.output_follow_tail {
-            if view.output_cursor_line < view.output_scroll_line {
-                view.output_scroll_line = view.output_cursor_line;
-            } else if view.output_cursor_line >= view.output_scroll_line + view.output_viewport_rows
-            {
-                view.output_scroll_line = view
-                    .output_cursor_line
-                    .saturating_add(1)
-                    .saturating_sub(view.output_viewport_rows);
-            }
-        }
-        next != current
-    }
-
-    fn set_terminal_output_cursor_col(&mut self, target: usize) -> bool {
-        let Some(view) = self.active_terminal_view_state_mut() else {
-            return false;
-        };
-        let rendered = render_terminal_transcript_entries(view);
-        if rendered.is_empty() {
-            view.output_cursor_col = 0;
-            return false;
-        }
-        let current_line = view
-            .output_cursor_line
-            .min(rendered.len().saturating_sub(1));
-        let max_col = rendered
-            .get(current_line)
-            .map(|line| line.text.chars().count().saturating_sub(1))
-            .unwrap_or(0);
-        let previous = view.output_cursor_col;
-        view.output_cursor_col = target.min(max_col);
-        view.output_cursor_col != previous
-    }
-
-    fn move_terminal_output_line_start(&mut self, first_non_blank: bool) -> bool {
-        let Some(view) = self.active_terminal_view_state_mut() else {
-            return false;
-        };
-        let rendered = render_terminal_transcript_entries(view);
-        if rendered.is_empty() {
-            return false;
-        }
-        let line_index = view
-            .output_cursor_line
-            .min(rendered.len().saturating_sub(1));
-        let text = rendered
-            .get(line_index)
-            .map(|line| line.text.as_str())
-            .unwrap_or("");
-        let target = if first_non_blank {
-            text.chars().position(|ch| !ch.is_whitespace()).unwrap_or(0)
-        } else {
-            0
-        };
-        self.set_terminal_output_cursor_col(target)
-    }
-
-    fn move_terminal_output_line_end(&mut self) -> bool {
-        let Some(view) = self.active_terminal_view_state_mut() else {
-            return false;
-        };
-        let rendered = render_terminal_transcript_entries(view);
-        if rendered.is_empty() {
-            return false;
-        }
-        let line_index = view
-            .output_cursor_line
-            .min(rendered.len().saturating_sub(1));
-        let target = rendered
-            .get(line_index)
-            .map(|line| line.text.chars().count().saturating_sub(1))
-            .unwrap_or(0);
-        self.set_terminal_output_cursor_col(target)
-    }
-
-    fn move_terminal_output_word_forward(
-        &mut self,
-        count: usize,
-        to_end: bool,
-        big_word: bool,
-    ) -> bool {
-        let mut changed = false;
-        for _ in 0..count {
-            let Some(view) = self.active_terminal_view_state_mut() else {
-                break;
-            };
-            let rendered = render_terminal_transcript_entries(view);
-            if rendered.is_empty() {
-                break;
-            }
-            let line_index = view
-                .output_cursor_line
-                .min(rendered.len().saturating_sub(1));
-            let chars = rendered
-                .get(line_index)
-                .map(|line| line.text.chars().collect::<Vec<_>>())
-                .unwrap_or_default();
-            if chars.is_empty() {
-                continue;
-            }
-
-            let mut index = view.output_cursor_col.min(chars.len().saturating_sub(1));
-            if to_end {
-                if chars[index].is_whitespace() {
-                    while index < chars.len() && chars[index].is_whitespace() {
-                        index = index.saturating_add(1);
-                    }
-                    if index >= chars.len() {
-                        index = chars.len().saturating_sub(1);
-                        changed |= self.set_terminal_output_cursor_col(index);
-                        continue;
-                    }
-                }
-                let class = terminal_word_class(chars[index], big_word);
-                while index + 1 < chars.len()
-                    && terminal_word_class(chars[index + 1], big_word) == class
-                {
-                    index = index.saturating_add(1);
-                }
-            } else {
-                let class = terminal_word_class(chars[index], big_word);
-                while index < chars.len() && terminal_word_class(chars[index], big_word) == class {
-                    index = index.saturating_add(1);
-                }
-                while index < chars.len() && chars[index].is_whitespace() {
-                    index = index.saturating_add(1);
-                }
-                if index >= chars.len() {
-                    index = chars.len().saturating_sub(1);
-                }
-            }
-            changed |= self.set_terminal_output_cursor_col(index);
-        }
-        changed
-    }
-
-    fn move_terminal_output_word_backward(&mut self, count: usize, big_word: bool) -> bool {
-        let mut changed = false;
-        for _ in 0..count {
-            let Some(view) = self.active_terminal_view_state_mut() else {
-                break;
-            };
-            let rendered = render_terminal_transcript_entries(view);
-            if rendered.is_empty() {
-                break;
-            }
-            let line_index = view
-                .output_cursor_line
-                .min(rendered.len().saturating_sub(1));
-            let chars = rendered
-                .get(line_index)
-                .map(|line| line.text.chars().collect::<Vec<_>>())
-                .unwrap_or_default();
-            if chars.is_empty() {
-                continue;
-            }
-
-            let mut index = view.output_cursor_col.min(chars.len().saturating_sub(1));
-            while index > 0 && chars[index].is_whitespace() {
-                index = index.saturating_sub(1);
-            }
-
-            let class = terminal_word_class(chars[index], big_word);
-            while index > 0 && terminal_word_class(chars[index - 1], big_word) == class {
-                index = index.saturating_sub(1);
-            }
-            changed |= self.set_terminal_output_cursor_col(index);
-        }
-        changed
-    }
-
-    fn terminal_nav_push_digit(&mut self, digit: u8) {
-        let current = self.terminal_nav_count.unwrap_or(0);
-        let next = current
-            .saturating_mul(10)
-            .saturating_add(usize::from(digit));
-        self.terminal_nav_count = Some(next);
-    }
-
-    fn terminal_nav_take_count(&mut self) -> usize {
-        self.terminal_nav_count.take().unwrap_or(1)
-    }
-
-    fn clear_terminal_nav_prefixes(&mut self) {
-        self.terminal_nav_count = None;
-        self.terminal_nav_pending_g = false;
-    }
-
-    fn fold_or_unfold_selected_terminal_section(&mut self, folded: bool) -> bool {
-        let Some(view) = self.active_terminal_view_state_mut() else {
-            return false;
-        };
-        let Some(selected_index) = view.selected_fold_entry else {
-            return false;
-        };
-        let Some(entry) = view.entries.get_mut(selected_index) else {
-            return false;
-        };
-        let TerminalTranscriptEntry::Foldable(section) = entry else {
-            return false;
-        };
-        section.folded = folded;
-        true
+        let max_scroll = rendered.len().saturating_sub(view.output_viewport_rows.max(1));
+        let previous = view.output_scroll_line.min(max_scroll);
+        view.output_scroll_line = max_scroll;
+        view.output_follow_tail = true;
+        view.output_scroll_line != previous
     }
 
     fn terminal_session_handle(&self, session_id: &WorkerSessionId) -> Option<SessionHandle> {
@@ -1328,10 +1067,7 @@ impl UiShellState {
                         .or_default();
                     view.error = Some(error.to_string());
                     view.entries.clear();
-                    view.selected_fold_entry = None;
                     view.output_fragment.clear();
-                    view.output_cursor_line = 0;
-                    view.output_cursor_col = 0;
                     view.output_scroll_line = 0;
                     view.output_follow_tail = true;
                     view.turn_active = false;
@@ -1372,7 +1108,7 @@ impl UiShellState {
             match event {
                 MergeQueueEvent::Completed {
                     session_id,
-                    kind: _kind,
+                    kind,
                     completed,
                     merge_conflict,
                     base_branch,
@@ -1380,11 +1116,19 @@ impl UiShellState {
                     error,
                 } => {
                     if let Some(error) = error {
+                        if kind == MergeQueueCommandKind::Merge {
+                            self.merge_pending_sessions.remove(&session_id);
+                        }
                         self.status_warning = Some(format!(
                             "workflow merge check failed: {}",
                             sanitize_terminal_display_text(error.as_str())
                         ));
                         continue;
+                    }
+
+                    self.clear_merge_status_warning_for_session(&session_id);
+                    if kind == MergeQueueCommandKind::Merge || !completed {
+                        self.merge_pending_sessions.insert(session_id.clone());
                     }
 
                     if merge_conflict {
@@ -1416,11 +1160,16 @@ impl UiShellState {
                                 instruction.as_str(),
                             );
                         }
+                        self.status_warning = Some(format!(
+                            "merge conflict for review session {}: resolve conflicts and push updates",
+                            session_id.as_str()
+                        ));
                     } else if let Some(view) = self.terminal_session_states.get_mut(&session_id) {
                         view.last_merge_conflict_signature = None;
                     }
 
                     if completed {
+                        self.merge_pending_sessions.remove(&session_id);
                         if let Some(view) = self.terminal_session_states.get_mut(&session_id) {
                             view.workflow_stage = TerminalWorkflowStage::Complete;
                         }
@@ -1438,6 +1187,15 @@ impl UiShellState {
                                 work_item.workflow_state = Some(WorkflowState::Done);
                             }
                         }
+                        self.status_warning = Some(format!(
+                            "merge completed for review session {}",
+                            session_id.as_str()
+                        ));
+                    } else if kind == MergeQueueCommandKind::Merge {
+                        self.status_warning = Some(format!(
+                            "merge pending for review session {} (waiting for checks or merge queue)",
+                            session_id.as_str()
+                        ));
                     }
                 }
             }
@@ -1466,9 +1224,10 @@ impl UiShellState {
                 if !is_open_session_status(session.status.as_ref()) {
                     return None;
                 }
-                if self.session_is_in_review_stage(session_id)
-                    && self.session_has_pr_artifact(session_id)
-                {
+                let in_review = self.session_is_in_review_stage(session_id);
+                let has_merge_context = self.session_has_pr_artifact(session_id)
+                    || self.merge_pending_sessions.contains(session_id);
+                if in_review && has_merge_context {
                     Some(session_id.clone())
                 } else {
                     None
@@ -1478,6 +1237,8 @@ impl UiShellState {
 
         let active_review_sessions = session_ids.iter().cloned().collect::<HashSet<_>>();
         self.review_sync_instructions_sent
+            .retain(|session_id| active_review_sessions.contains(session_id));
+        self.merge_pending_sessions
             .retain(|session_id| active_review_sessions.contains(session_id));
 
         for session_id in session_ids {
@@ -1614,6 +1375,22 @@ impl UiShellState {
                 .map(is_pr_artifact)
                 .unwrap_or(false)
         })
+    }
+
+    fn clear_merge_status_warning_for_session(&mut self, session_id: &WorkerSessionId) {
+        let Some(warning) = self.status_warning.as_deref() else {
+            return;
+        };
+        if !warning.contains(session_id.as_str()) {
+            return;
+        }
+        let is_merge_status = warning.starts_with("merge queued for review session")
+            || warning.starts_with("merge pending for review session")
+            || warning.starts_with("merge completed for review session")
+            || warning.starts_with("merge conflict for review session");
+        if is_merge_status {
+            self.status_warning = None;
+        }
     }
 
     fn enqueue_merge_queue_request(
@@ -2665,7 +2442,6 @@ impl UiShellState {
         self.mode_key_buffer.clear();
         self.which_key_overlay = None;
         self.terminal_escape_pending = false;
-        self.clear_terminal_nav_prefixes();
     }
 
     fn enter_insert_mode(&mut self) {
@@ -2679,6 +2455,7 @@ impl UiShellState {
 
     fn enter_terminal_mode(&mut self) {
         if self.is_terminal_view_active() {
+            self.snap_active_terminal_output_to_bottom();
             self.mode = UiMode::Terminal;
             self.mode_key_buffer.clear();
             self.which_key_overlay = None;
@@ -3032,6 +2809,7 @@ impl UiShellState {
         let Some(session_id) = self.review_merge_confirm_session.take() else {
             return;
         };
+        self.merge_pending_sessions.insert(session_id.clone());
         self.enqueue_merge_queue_request(session_id.clone(), MergeQueueCommandKind::Merge);
         self.status_warning = Some(format!(
             "merge queued for review session {}",
@@ -3069,4 +2847,3 @@ impl UiShellState {
         });
     }
 }
-

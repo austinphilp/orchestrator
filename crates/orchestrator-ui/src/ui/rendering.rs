@@ -181,7 +181,6 @@ fn render_terminal_transcript_entries(state: &TerminalViewState) -> Vec<Rendered
         if index > 0 && (previous_is_foldable || current_is_foldable) {
             lines.push(RenderedTerminalLine {
                 text: String::new(),
-                fold_header_entry: None,
             });
         }
         match entry {
@@ -194,34 +193,22 @@ fn render_terminal_transcript_entries(state: &TerminalViewState) -> Vec<Rendered
                 {
                     lines.push(RenderedTerminalLine {
                         text: String::new(),
-                        fold_header_entry: None,
                     });
                 }
                 lines.push(RenderedTerminalLine {
                     text: line.clone(),
-                    fold_header_entry: None,
                 });
                 if is_user_outgoing_terminal_message(line) {
                     lines.push(RenderedTerminalLine {
                         text: String::new(),
-                        fold_header_entry: None,
                     });
                 }
             }
             TerminalTranscriptEntry::Foldable(section) => {
-                let selected_marker = if state.selected_fold_entry == Some(index) {
-                    "=>"
-                } else {
-                    "  "
-                };
                 let fold_marker = if section.folded { "[+]" } else { "[-]" };
                 let summary = summarize_folded_terminal_content(section.content.as_str());
                 lines.push(RenderedTerminalLine {
-                    text: format!(
-                        "{selected_marker} {fold_marker} {}: {summary}",
-                        section.kind.label()
-                    ),
-                    fold_header_entry: Some(index),
+                    text: format!("  {fold_marker} {}: {summary}", section.kind.label()),
                 });
                 if !section.folded {
                     for content_line in section.content.lines() {
@@ -231,7 +218,6 @@ fn render_terminal_transcript_entries(state: &TerminalViewState) -> Vec<Rendered
                         }
                         lines.push(RenderedTerminalLine {
                             text: format!("  {trimmed}"),
-                            fold_header_entry: None,
                         });
                     }
                 }
@@ -241,7 +227,6 @@ fn render_terminal_transcript_entries(state: &TerminalViewState) -> Vec<Rendered
     if !state.output_fragment.is_empty() {
         lines.push(RenderedTerminalLine {
             text: state.output_fragment.clone(),
-            fold_header_entry: None,
         });
     }
     lines
@@ -1596,4 +1581,3 @@ fn group_tickets_by_status(
     ordered.extend(groups);
     ordered
 }
-
