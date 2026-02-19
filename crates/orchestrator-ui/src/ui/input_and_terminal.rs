@@ -1,0 +1,868 @@
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum UiCommand {
+    EnterNormalMode,
+    EnterInsertMode,
+    ToggleGlobalSupervisorChat,
+    OpenTerminalForSelected,
+    OpenDiffInspectorForSelected,
+    OpenTestInspectorForSelected,
+    OpenPrInspectorForSelected,
+    OpenChatInspectorForSelected,
+    StartTerminalEscapeChord,
+    QuitShell,
+    FocusNextInbox,
+    FocusPreviousInbox,
+    CycleBatchNext,
+    CycleBatchPrevious,
+    JumpFirstInbox,
+    JumpLastInbox,
+    JumpBatchDecideOrUnblock,
+    JumpBatchApprovals,
+    JumpBatchReviewReady,
+    JumpBatchFyiDigest,
+    OpenTicketPicker,
+    CloseTicketPicker,
+    TicketPickerMoveNext,
+    TicketPickerMovePrevious,
+    TicketPickerFoldProject,
+    TicketPickerUnfoldProject,
+    TicketPickerStartSelected,
+    OpenFocusCard,
+    ToggleWorktreeDiffModal,
+    AdvanceTerminalWorkflowStage,
+    KillSelectedSession,
+    MinimizeCenterView,
+}
+
+impl UiCommand {
+    const ALL: [Self; 32] = [
+        Self::EnterNormalMode,
+        Self::EnterInsertMode,
+        Self::ToggleGlobalSupervisorChat,
+        Self::OpenTerminalForSelected,
+        Self::OpenDiffInspectorForSelected,
+        Self::OpenTestInspectorForSelected,
+        Self::OpenPrInspectorForSelected,
+        Self::OpenChatInspectorForSelected,
+        Self::StartTerminalEscapeChord,
+        Self::QuitShell,
+        Self::FocusNextInbox,
+        Self::FocusPreviousInbox,
+        Self::CycleBatchNext,
+        Self::CycleBatchPrevious,
+        Self::JumpFirstInbox,
+        Self::JumpLastInbox,
+        Self::JumpBatchDecideOrUnblock,
+        Self::JumpBatchApprovals,
+        Self::JumpBatchReviewReady,
+        Self::JumpBatchFyiDigest,
+        Self::OpenTicketPicker,
+        Self::CloseTicketPicker,
+        Self::TicketPickerMoveNext,
+        Self::TicketPickerMovePrevious,
+        Self::TicketPickerFoldProject,
+        Self::TicketPickerUnfoldProject,
+        Self::TicketPickerStartSelected,
+        Self::OpenFocusCard,
+        Self::ToggleWorktreeDiffModal,
+        Self::AdvanceTerminalWorkflowStage,
+        Self::KillSelectedSession,
+        Self::MinimizeCenterView,
+    ];
+
+    const fn id(self) -> &'static str {
+        match self {
+            Self::EnterNormalMode => "ui.mode.normal",
+            Self::EnterInsertMode => "ui.mode.insert",
+            Self::ToggleGlobalSupervisorChat => "ui.supervisor_chat.toggle",
+            Self::OpenTerminalForSelected => command_ids::UI_OPEN_TERMINAL_FOR_SELECTED,
+            Self::OpenDiffInspectorForSelected => command_ids::UI_OPEN_DIFF_INSPECTOR_FOR_SELECTED,
+            Self::OpenTestInspectorForSelected => command_ids::UI_OPEN_TEST_INSPECTOR_FOR_SELECTED,
+            Self::OpenPrInspectorForSelected => command_ids::UI_OPEN_PR_INSPECTOR_FOR_SELECTED,
+            Self::OpenChatInspectorForSelected => command_ids::UI_OPEN_CHAT_INSPECTOR_FOR_SELECTED,
+            Self::StartTerminalEscapeChord => "ui.mode.terminal_escape_prefix",
+            Self::QuitShell => "ui.shell.quit",
+            Self::FocusNextInbox => command_ids::UI_FOCUS_NEXT_INBOX,
+            Self::FocusPreviousInbox => "ui.focus_previous_inbox",
+            Self::CycleBatchNext => "ui.cycle_batch_next",
+            Self::CycleBatchPrevious => "ui.cycle_batch_previous",
+            Self::JumpFirstInbox => "ui.jump_first_inbox",
+            Self::JumpLastInbox => "ui.jump_last_inbox",
+            Self::JumpBatchDecideOrUnblock => "ui.jump_batch.decide_or_unblock",
+            Self::JumpBatchApprovals => "ui.jump_batch.approvals",
+            Self::JumpBatchReviewReady => "ui.jump_batch.review_ready",
+            Self::JumpBatchFyiDigest => "ui.jump_batch.fyi_digest",
+            Self::OpenTicketPicker => "ui.ticket_picker.open",
+            Self::CloseTicketPicker => "ui.ticket_picker.close",
+            Self::TicketPickerMoveNext => "ui.ticket_picker.move_next",
+            Self::TicketPickerMovePrevious => "ui.ticket_picker.move_previous",
+            Self::TicketPickerFoldProject => "ui.ticket_picker.fold_project",
+            Self::TicketPickerUnfoldProject => "ui.ticket_picker.unfold_project",
+            Self::TicketPickerStartSelected => "ui.ticket_picker.start_selected",
+            Self::OpenFocusCard => "ui.open_focus_card_for_selected",
+            Self::ToggleWorktreeDiffModal => "ui.worktree.diff.toggle",
+            Self::AdvanceTerminalWorkflowStage => "ui.terminal.workflow.advance",
+            Self::KillSelectedSession => "ui.terminal.kill_selected_session",
+            Self::MinimizeCenterView => "ui.center.pop",
+        }
+    }
+
+    const fn description(self) -> &'static str {
+        match self {
+            Self::EnterNormalMode => "Return to Normal mode",
+            Self::EnterInsertMode => "Enter Insert mode",
+            Self::ToggleGlobalSupervisorChat => "Toggle global supervisor chat panel",
+            Self::OpenTerminalForSelected => "Open terminal for selected item",
+            Self::OpenDiffInspectorForSelected => "Open diff inspector for selected item",
+            Self::OpenTestInspectorForSelected => "Open test inspector for selected item",
+            Self::OpenPrInspectorForSelected => "Open PR inspector for selected item",
+            Self::OpenChatInspectorForSelected => "Open chat inspector for selected item",
+            Self::StartTerminalEscapeChord => "Terminal escape chord (Ctrl-\\ Ctrl-n)",
+            Self::QuitShell => "Quit shell",
+            Self::FocusNextInbox => "Focus next inbox item",
+            Self::FocusPreviousInbox => "Focus previous inbox item",
+            Self::CycleBatchNext => "Cycle to next inbox lane",
+            Self::CycleBatchPrevious => "Cycle to previous inbox lane",
+            Self::JumpFirstInbox => "Jump to first inbox item",
+            Self::JumpLastInbox => "Jump to last inbox item",
+            Self::JumpBatchDecideOrUnblock => "Jump to Decide/Unblock lane",
+            Self::JumpBatchApprovals => "Jump to Approvals lane",
+            Self::JumpBatchReviewReady => "Jump to PR Reviews lane",
+            Self::JumpBatchFyiDigest => "Jump to FYI Digest lane",
+            Self::OpenTicketPicker => "Open ticket picker",
+            Self::CloseTicketPicker => "Close ticket picker",
+            Self::TicketPickerMoveNext => "Move to next ticket picker row",
+            Self::TicketPickerMovePrevious => "Move to previous ticket picker row",
+            Self::TicketPickerFoldProject => "Fold selected project in ticket picker",
+            Self::TicketPickerUnfoldProject => "Unfold selected project in ticket picker",
+            Self::TicketPickerStartSelected => "Start selected ticket",
+            Self::OpenFocusCard => "Open focus card for selected item",
+            Self::ToggleWorktreeDiffModal => "Toggle worktree diff modal for selected session",
+            Self::AdvanceTerminalWorkflowStage => "Advance terminal workflow stage",
+            Self::KillSelectedSession => "Kill selected terminal session",
+            Self::MinimizeCenterView => "Minimize active center view",
+        }
+    }
+
+    fn from_id(id: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|command| command.id() == id)
+    }
+
+    fn is_registered(id: &str) -> bool {
+        Self::from_id(id).is_some()
+    }
+}
+
+fn describe_next_key_binding(hint: &keymap::PrefixHint) -> String {
+    if let Some(command_id) = hint.command_id.as_deref() {
+        return UiCommand::from_id(command_id)
+            .map(UiCommand::description)
+            .unwrap_or(command_id)
+            .to_owned();
+    }
+    if let Some(prefix_label) = hint.prefix_label.as_deref() {
+        return format!("{prefix_label} (prefix)");
+    }
+    "Prefix".to_owned()
+}
+
+fn default_keymap_config() -> KeymapConfig {
+    let binding = |keys: &[&str], command: UiCommand| KeyBindingConfig {
+        keys: keys.iter().map(|key| (*key).to_owned()).collect(),
+        command_id: command.id().to_owned(),
+    };
+
+    KeymapConfig {
+        modes: vec![
+            ModeKeymapConfig {
+                mode: UiMode::Normal,
+                bindings: vec![
+                    binding(&["q"], UiCommand::QuitShell),
+                    binding(&["down"], UiCommand::FocusNextInbox),
+                    binding(&["j"], UiCommand::FocusNextInbox),
+                    binding(&["up"], UiCommand::FocusPreviousInbox),
+                    binding(&["k"], UiCommand::FocusPreviousInbox),
+                    binding(&["tab"], UiCommand::CycleBatchNext),
+                    binding(&["backtab"], UiCommand::CycleBatchPrevious),
+                    binding(&["g"], UiCommand::JumpFirstInbox),
+                    binding(&["G"], UiCommand::JumpLastInbox),
+                    binding(&["1"], UiCommand::JumpBatchDecideOrUnblock),
+                    binding(&["2"], UiCommand::JumpBatchApprovals),
+                    binding(&["3"], UiCommand::JumpBatchReviewReady),
+                    binding(&["4"], UiCommand::JumpBatchFyiDigest),
+                    binding(&["s"], UiCommand::OpenTicketPicker),
+                    binding(&["c"], UiCommand::ToggleGlobalSupervisorChat),
+                    binding(&["enter"], UiCommand::OpenFocusCard),
+                    binding(&["i"], UiCommand::OpenTerminalForSelected),
+                    binding(&["D"], UiCommand::ToggleWorktreeDiffModal),
+                    binding(&["n"], UiCommand::AdvanceTerminalWorkflowStage),
+                    binding(&["x"], UiCommand::KillSelectedSession),
+                    binding(&["backspace"], UiCommand::MinimizeCenterView),
+                    binding(&["z", "1"], UiCommand::JumpBatchDecideOrUnblock),
+                    binding(&["z", "2"], UiCommand::JumpBatchApprovals),
+                    binding(&["z", "3"], UiCommand::JumpBatchReviewReady),
+                    binding(&["z", "4"], UiCommand::JumpBatchFyiDigest),
+                    binding(&["v", "d"], UiCommand::OpenDiffInspectorForSelected),
+                    binding(&["v", "t"], UiCommand::OpenTestInspectorForSelected),
+                    binding(&["v", "p"], UiCommand::OpenPrInspectorForSelected),
+                    binding(&["v", "c"], UiCommand::OpenChatInspectorForSelected),
+                ],
+                prefixes: vec![
+                    KeyPrefixConfig {
+                        keys: vec!["z".to_owned()],
+                        label: "Batch jumps".to_owned(),
+                    },
+                    KeyPrefixConfig {
+                        keys: vec!["v".to_owned()],
+                        label: "Artifact inspectors".to_owned(),
+                    },
+                ],
+            },
+            ModeKeymapConfig {
+                mode: UiMode::Insert,
+                bindings: Vec::new(),
+                prefixes: Vec::new(),
+            },
+            ModeKeymapConfig {
+                mode: UiMode::Terminal,
+                bindings: Vec::new(),
+                prefixes: Vec::new(),
+            },
+        ],
+    }
+}
+
+fn default_keymap_trie() -> &'static KeymapTrie {
+    static KEYMAP: OnceLock<KeymapTrie> = OnceLock::new();
+    KEYMAP.get_or_init(|| {
+        KeymapTrie::compile(&default_keymap_config(), UiCommand::is_registered)
+            .expect("default UI keymap must compile without conflicts")
+    })
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum RoutedInput {
+    Command(UiCommand),
+    UnsupportedCommand { command_id: String },
+    Ignore,
+}
+
+fn mode_help(mode: UiMode) -> &'static str {
+    match mode {
+        UiMode::Normal => {
+            "j/k: select | Tab/S-Tab: batch cycle | 1-4 or z{1-4}: batch jump | g/G: first/last | s: start ticket | c: supervisor chat | Enter: focus | i: terminal | D: worktree diff modal | n: advance session workflow | x: kill selected session | v{d/t/p/c}: inspectors | q: quit"
+        }
+        UiMode::Insert => "Insert input active | Esc/Ctrl-[: Normal",
+        UiMode::Terminal => "Terminal compose active | Enter send | Shift+Enter newline | Esc or Ctrl-\\ Ctrl-n: Normal | then n: advance workflow",
+    }
+}
+
+fn append_terminal_output(state: &mut TerminalViewState, bytes: Vec<u8>) {
+    let chunk = sanitize_terminal_display_text(String::from_utf8_lossy(&bytes).as_ref());
+    if chunk.is_empty() {
+        return;
+    }
+
+    let mut combined = String::new();
+    combined.push_str(state.output_fragment.as_str());
+    combined.push_str(chunk.as_str());
+    state.output_fragment.clear();
+
+    let mut lines = combined.split('\n').collect::<Vec<_>>();
+    if lines.is_empty() {
+        return;
+    }
+
+    if !combined.ends_with('\n') {
+        state.output_fragment = lines.pop().unwrap_or_default().to_owned();
+    }
+
+    for raw_line in lines {
+        let line = raw_line.trim_end_matches('\r');
+        if line.is_empty() {
+            continue;
+        }
+        if let Some((before, kind, content)) = parse_terminal_meta_line_embedded(line) {
+            let before = before.trim();
+            if !before.is_empty() {
+                if is_outgoing_transcript_line(before) {
+                    state.entries.push(TerminalTranscriptEntry::Message(format!(
+                        "> {}",
+                        normalize_outgoing_user_line(before)
+                    )));
+                } else {
+                    state
+                        .entries
+                        .push(TerminalTranscriptEntry::Message(before.to_owned()));
+                }
+            }
+            append_terminal_foldable_content(state, kind, content.as_str());
+            continue;
+        }
+        if is_outgoing_transcript_line(line) {
+            state.entries.push(TerminalTranscriptEntry::Message(format!(
+                "> {}",
+                normalize_outgoing_user_line(line)
+            )));
+        } else {
+            state
+                .entries
+                .push(TerminalTranscriptEntry::Message(line.to_owned()));
+        }
+    }
+}
+
+fn append_terminal_assistant_output(state: &mut TerminalViewState, bytes: Vec<u8>) {
+    append_terminal_output(state, bytes);
+}
+
+fn append_terminal_user_message(state: &mut TerminalViewState, message: &str) {
+    flush_terminal_output_fragment(state);
+    let text = sanitize_terminal_display_text(message);
+    if text.trim().is_empty() {
+        return;
+    }
+
+    for (index, line) in text.lines().enumerate() {
+        if line.is_empty() {
+            continue;
+        }
+        let _ = index;
+        state
+            .entries
+            .push(TerminalTranscriptEntry::Message(format!("> {line}")));
+    }
+}
+
+fn append_terminal_system_message(state: &mut TerminalViewState, message: &str) {
+    flush_terminal_output_fragment(state);
+    let text = sanitize_terminal_display_text(message);
+    if text.trim().is_empty() {
+        return;
+    }
+
+    for (index, line) in text.lines().enumerate() {
+        if line.is_empty() {
+            continue;
+        }
+        if index == 0 {
+            state.entries.push(TerminalTranscriptEntry::Message(format!(
+                "> system: {line}"
+            )));
+        } else {
+            state.entries.push(TerminalTranscriptEntry::Message(format!(
+                "> system: {line}"
+            )));
+        }
+    }
+}
+
+fn parse_terminal_meta_line_embedded(line: &str) -> Option<(String, TerminalFoldKind, String)> {
+    const PREFIX: &str = "[[orchestrator-meta|";
+    let start = line.find(PREFIX)?;
+    let before = line[..start].to_owned();
+    let suffix = &line[start + PREFIX.len()..];
+    let closing = suffix.find("]]")?;
+    let kind = match suffix[..closing].trim() {
+        "reasoning" => TerminalFoldKind::Reasoning,
+        "file-change" => TerminalFoldKind::FileChange,
+        "tool-call" => TerminalFoldKind::ToolCall,
+        "command" => TerminalFoldKind::CommandExecution,
+        _ => TerminalFoldKind::Other,
+    };
+    let content = suffix[closing + 2..].trim().to_owned();
+    Some((before, kind, content))
+}
+
+fn append_terminal_foldable_content(
+    state: &mut TerminalViewState,
+    kind: TerminalFoldKind,
+    content: &str,
+) {
+    let entry_content = if content.trim().is_empty() {
+        "(no details)"
+    } else {
+        content.trim()
+    };
+
+    if let Some(TerminalTranscriptEntry::Foldable(previous)) = state.entries.last_mut() {
+        if previous.kind == kind {
+            if !previous.content.is_empty() {
+                previous.content.push('\n');
+            }
+            previous.content.push_str(entry_content);
+            return;
+        }
+    }
+
+    state
+        .entries
+        .push(TerminalTranscriptEntry::Foldable(TerminalFoldSection {
+            kind,
+            content: entry_content.to_owned(),
+            folded: true,
+        }));
+
+    if state.selected_fold_entry.is_none() {
+        state.selected_fold_entry = Some(state.entries.len().saturating_sub(1));
+    }
+}
+
+fn is_outgoing_transcript_line(line: &str) -> bool {
+    let normalized = line.trim_start();
+    normalized.starts_with("system:")
+        || normalized.starts_with("you:")
+        || normalized.starts_with("user:")
+}
+
+fn flush_terminal_output_fragment(state: &mut TerminalViewState) {
+    let fragment = std::mem::take(&mut state.output_fragment);
+    let line = fragment.trim_end_matches('\r');
+    if line.trim().is_empty() {
+        return;
+    }
+
+    if let Some((before, kind, content)) = parse_terminal_meta_line_embedded(line) {
+        let before = before.trim();
+        if !before.is_empty() {
+            if is_outgoing_transcript_line(before) {
+                state.entries.push(TerminalTranscriptEntry::Message(format!(
+                    "> {}",
+                    normalize_outgoing_user_line(before)
+                )));
+            } else {
+                state
+                    .entries
+                    .push(TerminalTranscriptEntry::Message(before.to_owned()));
+            }
+        }
+        append_terminal_foldable_content(state, kind, content.as_str());
+        return;
+    }
+
+    if is_outgoing_transcript_line(line) {
+        state.entries.push(TerminalTranscriptEntry::Message(format!(
+            "> {}",
+            normalize_outgoing_user_line(line)
+        )));
+    } else {
+        state
+            .entries
+            .push(TerminalTranscriptEntry::Message(line.to_owned()));
+    }
+}
+
+fn normalize_outgoing_user_line(line: &str) -> &str {
+    line.strip_prefix("you: ")
+        .or_else(|| line.strip_prefix("user: "))
+        .unwrap_or(line)
+}
+
+fn handle_key_press(shell_state: &mut UiShellState, key: KeyEvent) -> bool {
+    match route_key_press(shell_state, key) {
+        RoutedInput::Command(command) => dispatch_command(shell_state, command),
+        RoutedInput::UnsupportedCommand { command_id } => {
+            shell_state.status_warning = Some(format!(
+                "unsupported command mapping '{}' in {} mode keymap",
+                command_id,
+                shell_state.mode.label()
+            ));
+            false
+        }
+        RoutedInput::Ignore => false,
+    }
+}
+
+fn route_key_press(shell_state: &mut UiShellState, key: KeyEvent) -> RoutedInput {
+    if shell_state.worktree_diff_modal.is_some() {
+        return route_worktree_diff_modal_key(shell_state, key);
+    }
+    if shell_state.is_ticket_picker_visible() {
+        return route_ticket_picker_key(shell_state, key);
+    }
+    if shell_state.review_merge_confirm_session.is_some() {
+        return route_review_merge_confirm_key(shell_state, key);
+    }
+
+    if shell_state.mode == UiMode::Normal && shell_state.is_terminal_view_active() {
+        match key.code {
+            KeyCode::Char(digit) if digit.is_ascii_digit() => {
+                if digit == '0' && shell_state.terminal_nav_count.is_none() {
+                    shell_state.clear_terminal_nav_prefixes();
+                    shell_state.move_terminal_output_line_start(false);
+                } else if let Some(value) = digit.to_digit(10) {
+                    shell_state.terminal_nav_push_digit(value as u8);
+                }
+                return RoutedInput::Ignore;
+            }
+            KeyCode::Char('g') => {
+                if shell_state.terminal_nav_pending_g {
+                    let target = shell_state.terminal_nav_take_count().saturating_sub(1);
+                    shell_state.set_terminal_output_cursor_line(target);
+                    shell_state.clear_terminal_nav_prefixes();
+                } else {
+                    shell_state.terminal_nav_pending_g = true;
+                }
+                return RoutedInput::Ignore;
+            }
+            KeyCode::Char('w') => {
+                let count = shell_state.terminal_nav_take_count();
+                shell_state.move_terminal_output_word_forward(count, false, false);
+                shell_state.clear_terminal_nav_prefixes();
+                return RoutedInput::Ignore;
+            }
+            KeyCode::Char('W') => {
+                let count = shell_state.terminal_nav_take_count();
+                shell_state.move_terminal_output_word_forward(count, false, true);
+                shell_state.clear_terminal_nav_prefixes();
+                return RoutedInput::Ignore;
+            }
+            KeyCode::Char('e') => {
+                let count = shell_state.terminal_nav_take_count();
+                shell_state.move_terminal_output_word_forward(count, true, false);
+                shell_state.clear_terminal_nav_prefixes();
+                return RoutedInput::Ignore;
+            }
+            KeyCode::Char('E') => {
+                let count = shell_state.terminal_nav_take_count();
+                shell_state.move_terminal_output_word_forward(count, true, true);
+                shell_state.clear_terminal_nav_prefixes();
+                return RoutedInput::Ignore;
+            }
+            KeyCode::Char('b') => {
+                let count = shell_state.terminal_nav_take_count();
+                shell_state.move_terminal_output_word_backward(count, false);
+                shell_state.clear_terminal_nav_prefixes();
+                return RoutedInput::Ignore;
+            }
+            KeyCode::Char('B') => {
+                let count = shell_state.terminal_nav_take_count();
+                shell_state.move_terminal_output_word_backward(count, true);
+                shell_state.clear_terminal_nav_prefixes();
+                return RoutedInput::Ignore;
+            }
+            KeyCode::Char('$') => {
+                shell_state.move_terminal_output_line_end();
+                shell_state.clear_terminal_nav_prefixes();
+                return RoutedInput::Ignore;
+            }
+            KeyCode::Char('^') => {
+                shell_state.move_terminal_output_line_start(true);
+                shell_state.clear_terminal_nav_prefixes();
+                return RoutedInput::Ignore;
+            }
+            KeyCode::Char('j') | KeyCode::Down => {
+                let count = shell_state.terminal_nav_take_count() as isize;
+                shell_state.move_terminal_output_cursor(count.max(1));
+                shell_state.clear_terminal_nav_prefixes();
+                return RoutedInput::Ignore;
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                let count = shell_state.terminal_nav_take_count() as isize;
+                shell_state.move_terminal_output_cursor(-count.max(1));
+                shell_state.clear_terminal_nav_prefixes();
+                return RoutedInput::Ignore;
+            }
+            KeyCode::Char('h') | KeyCode::Left => {
+                if !shell_state.fold_or_unfold_selected_terminal_section(true) {
+                    shell_state.move_terminal_output_cursor_col(-1);
+                }
+                shell_state.clear_terminal_nav_prefixes();
+                return RoutedInput::Ignore;
+            }
+            KeyCode::Char('l') | KeyCode::Right => {
+                if !shell_state.fold_or_unfold_selected_terminal_section(false) {
+                    shell_state.move_terminal_output_cursor_col(1);
+                }
+                shell_state.clear_terminal_nav_prefixes();
+                return RoutedInput::Ignore;
+            }
+            _ => {}
+        }
+        if shell_state.terminal_nav_pending_g {
+            shell_state.clear_terminal_nav_prefixes();
+        }
+    }
+
+    if is_escape_to_normal(key) {
+        if shell_state.is_active_supervisor_stream_visible()
+            && !shell_state.is_global_supervisor_chat_active()
+        {
+            shell_state.cancel_supervisor_stream();
+        }
+        return RoutedInput::Command(UiCommand::EnterNormalMode);
+    }
+    if is_ctrl_char(key, 'c') && shell_state.is_active_supervisor_stream_visible() {
+        shell_state.cancel_supervisor_stream();
+        return RoutedInput::Ignore;
+    }
+    if shell_state.apply_global_chat_insert_key(key) {
+        return RoutedInput::Ignore;
+    }
+    if shell_state.mode == UiMode::Terminal && shell_state.terminal_escape_pending {
+        return route_terminal_mode_key(shell_state, key);
+    }
+    if shell_state.apply_terminal_compose_key(key) {
+        return RoutedInput::Ignore;
+    }
+
+    match shell_state.mode {
+        UiMode::Normal | UiMode::Insert => route_configured_mode_key(shell_state, key),
+        UiMode::Terminal => {
+            if shell_state.is_terminal_view_active() {
+                route_terminal_mode_key(shell_state, key)
+            } else {
+                RoutedInput::Command(UiCommand::EnterNormalMode)
+            }
+        }
+    }
+}
+
+fn route_worktree_diff_modal_key(shell_state: &mut UiShellState, key: KeyEvent) -> RoutedInput {
+    if is_escape_to_normal(key) {
+        shell_state.close_worktree_diff_modal();
+        return RoutedInput::Ignore;
+    }
+
+    if matches!(key.code, KeyCode::Char('D')) {
+        shell_state.close_worktree_diff_modal();
+        return RoutedInput::Ignore;
+    }
+
+    if key.modifiers.is_empty() {
+        match key.code {
+            KeyCode::Enter => {
+                shell_state.insert_selected_worktree_diff_refs_into_compose();
+                return RoutedInput::Ignore;
+            }
+            KeyCode::Char('q') => {
+                shell_state.close_worktree_diff_modal();
+                return RoutedInput::Ignore;
+            }
+            KeyCode::Char('g') => {
+                shell_state.jump_worktree_diff_addition_block(false);
+                return RoutedInput::Ignore;
+            }
+            KeyCode::Char('G') => {
+                shell_state.jump_worktree_diff_addition_block(true);
+                return RoutedInput::Ignore;
+            }
+            KeyCode::Char('j') | KeyCode::Down => {
+                shell_state.scroll_worktree_diff_modal(1);
+                return RoutedInput::Ignore;
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                shell_state.scroll_worktree_diff_modal(-1);
+                return RoutedInput::Ignore;
+            }
+            KeyCode::PageDown => {
+                shell_state.scroll_worktree_diff_modal(12);
+                return RoutedInput::Ignore;
+            }
+            KeyCode::PageUp => {
+                shell_state.scroll_worktree_diff_modal(-12);
+                return RoutedInput::Ignore;
+            }
+            _ => {}
+        }
+    }
+
+    RoutedInput::Ignore
+}
+
+fn route_configured_mode_key(shell_state: &mut UiShellState, key: KeyEvent) -> RoutedInput {
+    match shell_state.keymap.route_key_event(
+        shell_state.mode,
+        &mut shell_state.mode_key_buffer,
+        key,
+    ) {
+        KeymapLookupResult::Command { command_id } => {
+            shell_state.which_key_overlay = None;
+            UiCommand::from_id(command_id.as_str())
+                .map(RoutedInput::Command)
+                .unwrap_or(RoutedInput::UnsupportedCommand { command_id })
+        }
+        KeymapLookupResult::Prefix { .. } => {
+            shell_state.refresh_which_key_overlay();
+            RoutedInput::Ignore
+        }
+        KeymapLookupResult::InvalidPrefix | KeymapLookupResult::NoMatch => {
+            shell_state.which_key_overlay = None;
+            RoutedInput::Ignore
+        }
+    }
+}
+
+fn route_terminal_mode_key(shell_state: &mut UiShellState, key: KeyEvent) -> RoutedInput {
+    if shell_state.terminal_escape_pending {
+        if is_ctrl_char(key, 'n') {
+            return RoutedInput::Command(UiCommand::EnterNormalMode);
+        }
+        shell_state.terminal_escape_pending = false;
+        return RoutedInput::Ignore;
+    }
+
+    if is_ctrl_char(key, '\\') {
+        return RoutedInput::Command(UiCommand::StartTerminalEscapeChord);
+    }
+
+    RoutedInput::Ignore
+}
+
+fn dispatch_command(shell_state: &mut UiShellState, command: UiCommand) -> bool {
+    let _command_id = command.id();
+    match command {
+        UiCommand::EnterNormalMode => {
+            shell_state.enter_normal_mode();
+            false
+        }
+        UiCommand::EnterInsertMode => {
+            shell_state.enter_insert_mode();
+            false
+        }
+        UiCommand::ToggleGlobalSupervisorChat => {
+            shell_state.toggle_global_supervisor_chat();
+            false
+        }
+        UiCommand::OpenTerminalForSelected => {
+            shell_state.open_terminal_and_enter_mode();
+            false
+        }
+        UiCommand::OpenDiffInspectorForSelected => {
+            shell_state.open_inspector_for_selected(ArtifactInspectorKind::Diff);
+            false
+        }
+        UiCommand::OpenTestInspectorForSelected => {
+            shell_state.open_inspector_for_selected(ArtifactInspectorKind::Test);
+            false
+        }
+        UiCommand::OpenPrInspectorForSelected => {
+            shell_state.open_inspector_for_selected(ArtifactInspectorKind::PullRequest);
+            false
+        }
+        UiCommand::OpenChatInspectorForSelected => {
+            shell_state.open_chat_inspector_for_selected();
+            false
+        }
+        UiCommand::StartTerminalEscapeChord => {
+            shell_state.begin_terminal_escape_chord();
+            false
+        }
+        UiCommand::QuitShell => true,
+        UiCommand::FocusNextInbox => {
+            shell_state.move_selection(1);
+            false
+        }
+        UiCommand::FocusPreviousInbox => {
+            shell_state.move_selection(-1);
+            false
+        }
+        UiCommand::CycleBatchNext => {
+            shell_state.cycle_batch(1);
+            false
+        }
+        UiCommand::CycleBatchPrevious => {
+            shell_state.cycle_batch(-1);
+            false
+        }
+        UiCommand::JumpFirstInbox => {
+            shell_state.jump_to_first_item();
+            false
+        }
+        UiCommand::JumpLastInbox => {
+            shell_state.jump_to_last_item();
+            false
+        }
+        UiCommand::JumpBatchDecideOrUnblock => {
+            shell_state.jump_to_batch(InboxBatchKind::DecideOrUnblock);
+            false
+        }
+        UiCommand::JumpBatchApprovals => {
+            shell_state.jump_to_batch(InboxBatchKind::Approvals);
+            false
+        }
+        UiCommand::JumpBatchReviewReady => {
+            shell_state.jump_to_batch(InboxBatchKind::ReviewReady);
+            false
+        }
+        UiCommand::JumpBatchFyiDigest => {
+            shell_state.jump_to_batch(InboxBatchKind::FyiDigest);
+            false
+        }
+        UiCommand::OpenTicketPicker => {
+            shell_state.open_ticket_picker();
+            false
+        }
+        UiCommand::CloseTicketPicker => {
+            shell_state.close_ticket_picker();
+            false
+        }
+        UiCommand::TicketPickerMoveNext => {
+            shell_state.move_ticket_picker_selection(1);
+            false
+        }
+        UiCommand::TicketPickerMovePrevious => {
+            shell_state.move_ticket_picker_selection(-1);
+            false
+        }
+        UiCommand::TicketPickerFoldProject => {
+            shell_state.fold_ticket_picker_selected_project();
+            false
+        }
+        UiCommand::TicketPickerUnfoldProject => {
+            shell_state.unfold_ticket_picker_selected_project();
+            false
+        }
+        UiCommand::TicketPickerStartSelected => {
+            shell_state.start_selected_ticket_from_picker();
+            false
+        }
+        UiCommand::OpenFocusCard => {
+            shell_state.open_focus_card_for_selected();
+            false
+        }
+        UiCommand::ToggleWorktreeDiffModal => {
+            shell_state.toggle_worktree_diff_modal();
+            false
+        }
+        UiCommand::AdvanceTerminalWorkflowStage => {
+            shell_state.advance_terminal_workflow_stage();
+            false
+        }
+        UiCommand::KillSelectedSession => {
+            shell_state.kill_selected_session();
+            false
+        }
+        UiCommand::MinimizeCenterView => {
+            if shell_state.is_global_supervisor_chat_active() {
+                shell_state.close_global_supervisor_chat();
+            } else {
+                shell_state.minimize_center_view();
+            }
+            false
+        }
+    }
+}
+
+fn is_escape_to_normal(key: KeyEvent) -> bool {
+    matches!(key.code, KeyCode::Esc) && key.modifiers.is_empty() || is_ctrl_char(key, '[')
+}
+
+fn is_ctrl_char(key: KeyEvent, ch: char) -> bool {
+    matches!(key.code, KeyCode::Char(code_ch) if code_ch == ch)
+        && key.modifiers == KeyModifiers::CONTROL
+}
+
+#[cfg(test)]
+fn command_id(command: UiCommand) -> &'static str {
+    command.id()
+}
+
+#[cfg(test)]
+fn routed_command(route: RoutedInput) -> Option<UiCommand> {
+    match route {
+        RoutedInput::Command(command) => Some(command),
+        _ => None,
+    }
+}
+
