@@ -19,6 +19,7 @@ pub use adapters::{
     CreateTicketRequest, CreateWorktreeRequest, DeleteWorktreeRequest, GetTicketRequest,
     GithubClient, LlmChatRequest, LlmFinishReason, LlmMessage, LlmProvider, LlmProviderKind,
     LlmRateLimitState, LlmResponseStream, LlmResponseSubscription, LlmRole, LlmStreamChunk,
+    LlmTokenUsage,
     LlmTool, LlmToolCall, LlmToolFunction, LlmToolResult, PullRequestRef, PullRequestSummary,
     RepositoryRef, ReviewerRequest, Supervisor, TicketAttachment, TicketDetails, TicketQuery,
     TicketSummary, TicketingProvider, UpdateTicketDescriptionRequest, UpdateTicketStateRequest,
