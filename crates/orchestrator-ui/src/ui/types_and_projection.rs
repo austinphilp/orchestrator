@@ -670,7 +670,7 @@ impl TerminalWorkflowStage {
             )),
             Self::Implementation => Some((
                 Self::Review,
-                "Workflow transition approved: Implementation -> Review. Pause implementation, run the build and fix all errors and warnings, run the full test suite and verify it passes, then open a GitHub PR using the gh CLI and provide a review-ready summary with PR link, evidence, tests, and open risks. While in review, keep the worktree synced with remote/base as merge-status polling runs.",
+                "Workflow transition approved: Implementation -> Review. Pause implementation, run the build and fix all errors and warnings, run the full test suite and verify it passes, then open a GitHub PR using the gh CLI and provide a review-ready summary with PR link, evidence, tests, and open risks. While in review, keep the worktree synced with remote/base while merge checks run automatically.",
             )),
             Self::Review => Some((
                 Self::Complete,

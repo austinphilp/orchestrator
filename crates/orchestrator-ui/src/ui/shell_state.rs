@@ -1348,10 +1348,7 @@ impl UiShellState {
                 if !is_open_session_status(session.status.as_ref()) {
                     return None;
                 }
-                let in_review = self.session_is_in_review_stage(session_id);
-                let has_merge_context = self.session_has_pr_artifact(session_id)
-                    || self.merge_pending_sessions.contains(session_id);
-                if in_review && has_merge_context {
+                if self.session_is_in_review_stage(session_id) {
                     Some(session_id.clone())
                 } else {
                     None
@@ -1379,7 +1376,7 @@ impl UiShellState {
         }
         self.send_terminal_instruction_to_session(
             session_id,
-            "Review-stage sync directive: keep this worktree synced with remote and the PR base branch while merge-status polling runs. Fetch regularly, rebase/merge as needed, resolve conflicts promptly, and continue polling.",
+            "Review-stage sync directive: keep this worktree synced with remote and the PR base branch. Fetch regularly, rebase/merge as needed, and resolve conflicts promptly while merge checks run automatically.",
         );
         self.review_sync_instructions_sent
             .insert(session_id.clone());
@@ -1480,27 +1477,6 @@ impl UiShellState {
                 let _ = backend.send_input(&handle, bytes.as_slice()).await;
             });
         }
-    }
-
-    fn session_has_pr_artifact(&self, session_id: &WorkerSessionId) -> bool {
-        let Some(work_item_id) = self
-            .domain
-            .sessions
-            .get(session_id)
-            .and_then(|session| session.work_item_id.as_ref())
-        else {
-            return false;
-        };
-        let Some(work_item) = self.domain.work_items.get(work_item_id) else {
-            return false;
-        };
-        work_item.artifacts.iter().any(|artifact_id| {
-            self.domain
-                .artifacts
-                .get(artifact_id)
-                .map(is_pr_artifact)
-                .unwrap_or(false)
-        })
     }
 
     fn clear_merge_status_warning_for_session(&mut self, session_id: &WorkerSessionId) {

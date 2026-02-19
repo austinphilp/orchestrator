@@ -328,10 +328,29 @@ where
     let command_id = command_ids::WORKFLOW_RECONCILE_PR_MERGE;
     let mut store = open_event_store(event_store_path)?;
     let runtime = resolve_runtime_mapping_for_context_with_command(&store, &context, command_id)?;
-    let pr = resolve_pull_request_for_mapping_with_vcs_fallback(
+    let pr = match resolve_pull_request_for_mapping_with_vcs_fallback(
         &mut store, &runtime, command_id, code_host,
     )
-    .await?;
+    .await
+    {
+        Ok(pr) => pr,
+        Err(CoreError::Configuration(_)) => {
+            let message = json!({
+                "command": command_id,
+                "work_item_id": runtime.work_item_id.as_str(),
+                "pr_resolved": false,
+                "merged": false,
+                "merge_conflict": false,
+                "base_branch": serde_json::Value::Null,
+                "head_branch": serde_json::Value::Null,
+                "completed": false,
+                "transitions": []
+            })
+            .to_string();
+            return runtime_command_response(message.as_str());
+        }
+        Err(error) => return Err(error),
+    };
 
     let merge_state = code_host
         .get_pull_request_merge_state(&pr)
@@ -348,6 +367,7 @@ where
         let message = json!({
             "command": command_id,
             "work_item_id": runtime.work_item_id.as_str(),
+            "pr_resolved": true,
             "merged": false,
             "merge_conflict": merge_state.merge_conflict,
             "base_branch": merge_state.base_branch,
@@ -428,6 +448,7 @@ where
     let message = json!({
         "command": command_id,
         "work_item_id": runtime.work_item_id.as_str(),
+        "pr_resolved": true,
         "merged": merge_state.merged,
         "merge_conflict": merge_state.merge_conflict,
         "base_branch": merge_state.base_branch,
