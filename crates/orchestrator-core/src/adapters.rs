@@ -103,7 +103,7 @@ pub trait TicketingProvider: Send + Sync {
     async fn get_ticket(&self, request: GetTicketRequest)
         -> Result<TicketDetails, CoreError> {
         Err(CoreError::DependencyUnavailable(format!(
-            "get_ticket is not implemented by {} provider",
+            "get_ticket is not implemented by {:?} provider",
             self.provider()
         )))
     }
@@ -114,7 +114,7 @@ pub trait TicketingProvider: Send + Sync {
         request: UpdateTicketDescriptionRequest,
     ) -> Result<(), CoreError> {
         Err(CoreError::DependencyUnavailable(format!(
-            "update_ticket_description is not implemented by {} provider",
+            "update_ticket_description is not implemented by {:?} provider",
             self.provider()
         )))
     }
