@@ -58,6 +58,10 @@ pub trait TicketPickerProvider: Send + Sync {
         ticket: TicketSummary,
         repository_override: Option<PathBuf>,
     ) -> Result<SelectedTicketFlowResult, CoreError>;
+    async fn create_and_start_ticket_from_brief(
+        &self,
+        brief: String,
+    ) -> Result<TicketSummary, CoreError>;
     async fn reload_projection(&self) -> Result<ProjectionState, CoreError>;
     async fn mark_session_crashed(
         &self,
@@ -1895,6 +1899,9 @@ struct TicketPickerOverlayState {
     visible: bool,
     loading: bool,
     starting_ticket_id: Option<TicketId>,
+    creating: bool,
+    new_ticket_mode: bool,
+    new_ticket_brief: String,
     error: Option<String>,
     project_groups: Vec<TicketProjectGroup>,
     ticket_rows: Vec<TicketPickerRowRef>,
@@ -1937,6 +1944,9 @@ impl TicketPickerOverlayState {
     fn open(&mut self) {
         self.visible = true;
         self.loading = true;
+        self.creating = false;
+        self.new_ticket_mode = false;
+        self.new_ticket_brief.clear();
         self.error = None;
         self.repository_prompt_ticket = None;
         self.repository_prompt_project_id = None;
@@ -1948,6 +1958,9 @@ impl TicketPickerOverlayState {
         self.visible = false;
         self.loading = false;
         self.starting_ticket_id = None;
+        self.creating = false;
+        self.new_ticket_mode = false;
+        self.new_ticket_brief.clear();
         self.error = None;
         self.repository_prompt_ticket = None;
         self.repository_prompt_project_id = None;
@@ -1980,6 +1993,32 @@ impl TicketPickerOverlayState {
         self.repository_prompt_project_id = None;
         self.repository_prompt_input.clear();
         self.repository_prompt_missing_mapping = true;
+    }
+
+    fn begin_new_ticket_mode(&mut self) {
+        if self.creating {
+            return;
+        }
+        self.new_ticket_mode = true;
+        self.error = None;
+    }
+
+    fn cancel_new_ticket_mode(&mut self) {
+        self.new_ticket_mode = false;
+        self.new_ticket_brief.clear();
+        self.creating = false;
+    }
+
+    fn append_new_ticket_brief_char(&mut self, ch: char) {
+        self.new_ticket_brief.push(ch);
+    }
+
+    fn pop_new_ticket_brief_char(&mut self) {
+        self.new_ticket_brief.pop();
+    }
+
+    fn can_submit_new_ticket(&self) -> bool {
+        !self.creating && !self.new_ticket_brief.trim().is_empty()
     }
 
     fn apply_tickets(&mut self, tickets: Vec<TicketSummary>, priority_states: &[String]) {
@@ -2118,6 +2157,17 @@ enum TicketPickerEvent {
     },
     TicketStartFailed {
         message: String,
+    },
+    TicketCreatedAndStarted {
+        created_ticket: TicketSummary,
+        projection: Option<ProjectionState>,
+        tickets: Option<Vec<TicketSummary>>,
+        warning: Option<String>,
+    },
+    TicketCreateFailed {
+        message: String,
+        tickets: Option<Vec<TicketSummary>>,
+        warning: Option<String>,
     },
     TicketStartRequiresRepository {
         ticket: TicketSummary,
@@ -2885,6 +2935,34 @@ impl UiShellState {
         self.ticket_picker_overlay.close();
     }
 
+    fn begin_create_ticket_from_picker(&mut self) {
+        if !self.ticket_picker_overlay.visible {
+            return;
+        }
+        self.ticket_picker_overlay.begin_new_ticket_mode();
+    }
+
+    fn cancel_create_ticket_from_picker(&mut self) {
+        if !self.ticket_picker_overlay.visible {
+            return;
+        }
+        self.ticket_picker_overlay.cancel_new_ticket_mode();
+    }
+
+    fn append_create_ticket_brief_char(&mut self, ch: char) {
+        if !self.ticket_picker_overlay.visible || !self.ticket_picker_overlay.new_ticket_mode {
+            return;
+        }
+        self.ticket_picker_overlay.append_new_ticket_brief_char(ch);
+    }
+
+    fn pop_create_ticket_brief_char(&mut self) {
+        if !self.ticket_picker_overlay.visible || !self.ticket_picker_overlay.new_ticket_mode {
+            return;
+        }
+        self.ticket_picker_overlay.pop_new_ticket_brief_char();
+    }
+
     fn move_ticket_picker_selection(&mut self, delta: isize) {
         if !self.ticket_picker_overlay.visible {
             return;
@@ -2908,6 +2986,9 @@ impl UiShellState {
 
     fn start_selected_ticket_from_picker(&mut self) {
         if !self.ticket_picker_overlay.visible {
+            return;
+        }
+        if self.ticket_picker_overlay.creating || self.ticket_picker_overlay.new_ticket_mode {
             return;
         }
         let Some(ticket) = self.ticket_picker_overlay.selected_ticket().cloned() else {
@@ -2970,6 +3051,22 @@ impl UiShellState {
 
     fn pop_repository_prompt_char(&mut self) {
         self.ticket_picker_overlay.repository_prompt_input.pop();
+    }
+
+    fn submit_created_ticket_from_picker(&mut self) {
+        if !self.ticket_picker_overlay.visible || !self.ticket_picker_overlay.new_ticket_mode {
+            return;
+        }
+        if !self.ticket_picker_overlay.can_submit_new_ticket() {
+            self.ticket_picker_overlay.error =
+                Some("enter a brief description before creating a ticket".to_owned());
+            return;
+        }
+
+        let brief = self.ticket_picker_overlay.new_ticket_brief.trim().to_owned();
+        self.ticket_picker_overlay.error = None;
+        self.ticket_picker_overlay.creating = true;
+        self.spawn_ticket_picker_create(brief);
     }
 
     fn spawn_ticket_picker_load(&mut self) {
@@ -3036,6 +3133,34 @@ impl UiShellState {
                 self.ticket_picker_overlay.starting_ticket_id = None;
                 self.ticket_picker_overlay.error =
                     Some("tokio runtime unavailable; cannot start ticket".to_owned());
+            }
+        }
+    }
+
+    fn spawn_ticket_picker_create(&mut self, brief: String) {
+        let Some(provider) = self.ticket_picker_provider.clone() else {
+            self.ticket_picker_overlay.creating = false;
+            self.ticket_picker_overlay.error =
+                Some("ticket provider unavailable while creating ticket".to_owned());
+            return;
+        };
+        let Some(sender) = self.ticket_picker_sender.clone() else {
+            self.ticket_picker_overlay.creating = false;
+            self.ticket_picker_overlay.error =
+                Some("ticket picker event channel unavailable while creating ticket".to_owned());
+            return;
+        };
+
+        match TokioHandle::try_current() {
+            Ok(handle) => {
+                handle.spawn(async move {
+                    run_ticket_picker_create_task(provider, brief, sender).await;
+                });
+            }
+            Err(_) => {
+                self.ticket_picker_overlay.creating = false;
+                self.ticket_picker_overlay.error =
+                    Some("tokio runtime unavailable; cannot create ticket".to_owned());
             }
         }
     }
@@ -3341,6 +3466,51 @@ impl UiShellState {
                 self.status_warning = Some(format!(
                     "ticket picker start warning: {}",
                     compact_focus_card_text(message.as_str())
+                ));
+            }
+            TicketPickerEvent::TicketCreatedAndStarted {
+                created_ticket,
+                projection,
+                tickets,
+                warning,
+            } => {
+                self.ticket_picker_overlay.creating = false;
+                self.ticket_picker_overlay.new_ticket_mode = false;
+                self.ticket_picker_overlay.new_ticket_brief.clear();
+                self.ticket_picker_overlay.error = None;
+                if let Some(projection) = projection {
+                    self.domain = projection;
+                }
+                if let Some(tickets) = tickets {
+                    self.ticket_picker_overlay
+                        .apply_tickets(tickets, &self.ticket_picker_priority_states);
+                }
+
+                let mut status = format!("created and started {}", created_ticket.identifier);
+                if let Some(message) = warning {
+                    status.push_str(": ");
+                    status.push_str(compact_focus_card_text(message.as_str()).as_str());
+                }
+                self.status_warning = Some(status);
+            }
+            TicketPickerEvent::TicketCreateFailed {
+                message,
+                tickets,
+                warning,
+            } => {
+                self.ticket_picker_overlay.creating = false;
+                self.ticket_picker_overlay.error = Some(message.clone());
+                if let Some(tickets) = tickets {
+                    self.ticket_picker_overlay
+                        .apply_tickets(tickets, &self.ticket_picker_priority_states);
+                }
+                let mut warning_parts = vec![compact_focus_card_text(message.as_str())];
+                if let Some(extra) = warning {
+                    warning_parts.push(compact_focus_card_text(extra.as_str()));
+                }
+                self.status_warning = Some(format!(
+                    "ticket picker create warning: {}",
+                    warning_parts.join("; ")
                 ));
             }
         }
@@ -4411,6 +4581,55 @@ async fn run_ticket_picker_start_task(
         .await;
 }
 
+async fn run_ticket_picker_create_task(
+    provider: Arc<dyn TicketPickerProvider>,
+    brief: String,
+    sender: mpsc::Sender<TicketPickerEvent>,
+) {
+    let created_ticket = match provider.create_and_start_ticket_from_brief(brief).await {
+        Ok(ticket) => ticket,
+        Err(error) => {
+            let tickets = match provider.list_unfinished_tickets().await {
+                Ok(tickets) => Some(tickets),
+                Err(_) => None,
+            };
+            let _ = sender
+                .send(TicketPickerEvent::TicketCreateFailed {
+                    message: error.to_string(),
+                    tickets,
+                    warning: None,
+                })
+                .await;
+            return;
+        }
+    };
+
+    let mut warning = Vec::new();
+    let projection = match provider.reload_projection().await {
+        Ok(projection) => Some(projection),
+        Err(error) => {
+            warning.push(format!("failed to reload projection: {error}"));
+            None
+        }
+    };
+    let tickets = match provider.list_unfinished_tickets().await {
+        Ok(tickets) => Some(tickets),
+        Err(error) => {
+            warning.push(format!("failed to refresh tickets: {error}"));
+            None
+        }
+    };
+
+    let _ = sender
+        .send(TicketPickerEvent::TicketCreatedAndStarted {
+            created_ticket,
+            projection,
+            tickets,
+            warning: (!warning.is_empty()).then(|| warning.join("; ")),
+        })
+        .await;
+}
+
 fn expand_tilde_path(raw: &str) -> Option<PathBuf> {
     if raw == "~" {
         return resolve_shell_home().map(PathBuf::from);
@@ -4441,16 +4660,31 @@ fn resolve_shell_home() -> Option<String> {
 }
 
 fn render_ticket_picker_overlay_text(overlay: &TicketPickerOverlayState) -> String {
-    let mut lines = vec![
-        "j/k or arrows: move | h/Left: fold | l/Right: unfold | Enter: start | Esc: close"
-            .to_owned(),
-    ];
+    let mut lines = if overlay.new_ticket_mode {
+        vec![
+            "Type brief | Enter: create + start | Backspace: edit | Esc: cancel".to_owned(),
+        ]
+    } else {
+        vec![
+            "j/k or arrows: move | h/Left: fold | l/Right: unfold | Enter: start | n: new ticket | Esc: close"
+                .to_owned(),
+        ]
+    };
 
     if overlay.loading {
         lines.push("Loading unfinished tickets...".to_owned());
     }
     if let Some(starting_ticket_id) = overlay.starting_ticket_id.as_ref() {
         lines.push(format!("Starting {}...", starting_ticket_id.as_str()));
+    }
+    if overlay.creating {
+        lines.push("Creating ticket...".to_owned());
+    }
+    if overlay.new_ticket_mode {
+        lines.push(format!(
+            "Brief: {}",
+            compact_focus_card_text(overlay.new_ticket_brief.as_str())
+        ));
     }
     if let Some(error) = overlay.error.as_ref() {
         lines.push(format!(
@@ -4570,6 +4804,31 @@ fn route_ticket_picker_key(shell_state: &mut UiShellState, key: KeyEvent) -> Rou
         return route_ticket_picker_repository_prompt_key(shell_state, key);
     }
 
+    if shell_state.ticket_picker_overlay.new_ticket_mode {
+        if is_escape_to_normal(key) {
+            shell_state.cancel_create_ticket_from_picker();
+            return RoutedInput::Ignore;
+        }
+
+        if key.modifiers == KeyModifiers::CONTROL {
+            return RoutedInput::Ignore;
+        }
+
+        match key.code {
+            KeyCode::Enter if key.modifiers.is_empty() => {
+                shell_state.submit_created_ticket_from_picker();
+            }
+            KeyCode::Backspace if key.modifiers.is_empty() => {
+                shell_state.pop_create_ticket_brief_char();
+            }
+            KeyCode::Char(ch) if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT => {
+                shell_state.append_create_ticket_brief_char(ch);
+            }
+            _ => {}
+        }
+        return RoutedInput::Ignore;
+    }
+
     if is_escape_to_normal(key) {
         return RoutedInput::Command(UiCommand::CloseTicketPicker);
     }
@@ -4590,6 +4849,10 @@ fn route_ticket_picker_key(shell_state: &mut UiShellState, key: KeyEvent) -> Rou
             RoutedInput::Command(UiCommand::TicketPickerUnfoldProject)
         }
         KeyCode::Enter => RoutedInput::Command(UiCommand::TicketPickerStartSelected),
+        KeyCode::Char('n') => {
+            shell_state.begin_create_ticket_from_picker();
+            RoutedInput::Ignore
+        }
         _ => RoutedInput::Ignore,
     }
 }
@@ -6513,6 +6776,9 @@ fn route_key_press(shell_state: &mut UiShellState, key: KeyEvent) -> RoutedInput
     if shell_state.apply_global_chat_insert_key(key) {
         return RoutedInput::Ignore;
     }
+    if shell_state.mode == UiMode::Terminal && shell_state.terminal_escape_pending {
+        return route_terminal_mode_key(shell_state, key);
+    }
     if shell_state.apply_terminal_compose_key(key) {
         return RoutedInput::Ignore;
     }
@@ -6733,7 +6999,8 @@ mod tests {
         LlmProviderKind, LlmResponseStream, LlmResponseSubscription, LlmStreamChunk,
         OrchestrationEventPayload, OrchestrationEventType, SessionBlockedPayload,
         SessionCheckpointPayload, SessionNeedsInputPayload, SessionProjection, StoredEventEnvelope,
-        SupervisorQueryFinishedPayload, UserRespondedPayload, WorkItemProjection, WorkflowState,
+        SupervisorQueryFinishedPayload, TicketProvider, UserRespondedPayload, WorkItemProjection,
+        WorkflowState,
     };
     use orchestrator_runtime::{
         BackendCapabilities, BackendEvent, BackendKind, RuntimeResult, RuntimeSessionId,
@@ -6881,8 +7148,59 @@ mod tests {
         }
     }
 
+    #[derive(Debug)]
+    struct TestTicketPickerProvider {
+        tickets: Vec<TicketSummary>,
+        created: Option<TicketSummary>,
+    }
+
+    #[async_trait]
+    impl TicketPickerProvider for TestTicketPickerProvider {
+        async fn list_unfinished_tickets(&self) -> Result<Vec<TicketSummary>, CoreError> {
+            Ok(self.tickets.clone())
+        }
+
+        async fn start_or_resume_ticket(
+            &self,
+            _ticket: TicketSummary,
+            _repository_override: Option<PathBuf>,
+        ) -> Result<SelectedTicketFlowResult, CoreError> {
+            Err(CoreError::DependencyUnavailable(
+                "not used in this test provider".to_owned(),
+            ))
+        }
+
+        async fn create_and_start_ticket_from_brief(
+            &self,
+            _brief: String,
+        ) -> Result<TicketSummary, CoreError> {
+            self.created.clone().ok_or_else(|| {
+                CoreError::DependencyUnavailable("create unavailable in test provider".to_owned())
+            })
+        }
+
+        async fn reload_projection(&self) -> Result<ProjectionState, CoreError> {
+            Ok(ProjectionState::default())
+        }
+    }
+
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    fn sample_ticket_summary(id_suffix: &str, identifier: &str, state: &str) -> TicketSummary {
+        TicketSummary {
+            ticket_id: TicketId::from_provider_uuid(TicketProvider::Linear, id_suffix),
+            identifier: identifier.to_owned(),
+            title: format!("{identifier} sample"),
+            project: Some("Core".to_owned()),
+            state: state.to_owned(),
+            url: format!("https://linear.app/acme/issue/{identifier}"),
+            assignee: Some("Austin".to_owned()),
+            priority: Some(0),
+            labels: Vec::new(),
+            updated_at: "2026-02-19T00:00:00Z".to_owned(),
+        }
     }
 
     fn ctrl_key(code: KeyCode) -> KeyEvent {
@@ -7462,8 +7780,9 @@ mod tests {
         let work_item_orchestrator = WorkItemId::new("wi-orchestrator");
         let session_core = WorkerSessionId::new("sess-core");
         let session_orchestrator = WorkerSessionId::new("sess-orchestrator");
-        let ticket_core = TicketId::new("ticket-core");
-        let ticket_orchestrator = TicketId::new("ticket-orchestrator");
+        let ticket_core = TicketId::from_provider_uuid(TicketProvider::Linear, "ticket-core");
+        let ticket_orchestrator =
+            TicketId::from_provider_uuid(TicketProvider::Linear, "ticket-orchestrator");
 
         projection.work_items.insert(
             work_item_core.clone(),
@@ -7569,7 +7888,7 @@ mod tests {
         let mut projection = ProjectionState::default();
         let work_item_id = WorkItemId::new("wi-repo-fallback");
         let session_id = WorkerSessionId::new("sess-repo-fallback");
-        let ticket_id = TicketId::new("ticket-repo-fallback");
+        let ticket_id = TicketId::from_provider_uuid(TicketProvider::Linear, "ticket-repo-fallback");
 
         projection.work_items.insert(
             work_item_id.clone(),
@@ -9133,6 +9452,86 @@ mod tests {
             .kind
             .clone();
         assert_eq!(selected_kind, InboxItemKind::NeedsDecision);
+    }
+
+    #[test]
+    fn ticket_picker_overlay_help_includes_new_ticket_shortcut() {
+        let overlay = TicketPickerOverlayState::default();
+        let rendered = render_ticket_picker_overlay_text(&overlay);
+        assert!(rendered.contains("n: new ticket"));
+    }
+
+    #[test]
+    fn ticket_picker_n_enters_new_ticket_mode() {
+        let mut shell_state = UiShellState::new("ready".to_owned(), triage_projection());
+        shell_state.ticket_picker_overlay.open();
+
+        let routed = route_ticket_picker_key(&mut shell_state, key(KeyCode::Char('n')));
+        assert!(matches!(routed, RoutedInput::Ignore));
+        assert!(shell_state.ticket_picker_overlay.new_ticket_mode);
+    }
+
+    #[test]
+    fn ticket_picker_new_ticket_mode_captures_input_and_submit_validation() {
+        let mut shell_state = UiShellState::new("ready".to_owned(), triage_projection());
+        shell_state.ticket_picker_overlay.open();
+        shell_state.ticket_picker_overlay.begin_new_ticket_mode();
+
+        route_ticket_picker_key(&mut shell_state, key(KeyCode::Char('b')));
+        route_ticket_picker_key(&mut shell_state, key(KeyCode::Char('r')));
+        route_ticket_picker_key(&mut shell_state, key(KeyCode::Backspace));
+        assert_eq!(shell_state.ticket_picker_overlay.new_ticket_brief, "b");
+
+        shell_state.ticket_picker_overlay.new_ticket_brief.clear();
+        route_ticket_picker_key(&mut shell_state, key(KeyCode::Enter));
+        assert!(shell_state
+            .ticket_picker_overlay
+            .error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("enter a brief description"));
+    }
+
+    #[test]
+    fn ticket_picker_esc_cancels_new_ticket_mode_without_closing_overlay() {
+        let mut shell_state = UiShellState::new("ready".to_owned(), triage_projection());
+        shell_state.ticket_picker_overlay.open();
+        shell_state.ticket_picker_overlay.begin_new_ticket_mode();
+        shell_state.ticket_picker_overlay.new_ticket_brief = "draft".to_owned();
+
+        route_ticket_picker_key(&mut shell_state, key(KeyCode::Esc));
+        assert!(shell_state.ticket_picker_overlay.visible);
+        assert!(!shell_state.ticket_picker_overlay.new_ticket_mode);
+        assert!(shell_state.ticket_picker_overlay.new_ticket_brief.is_empty());
+    }
+
+    #[tokio::test]
+    async fn run_ticket_picker_create_task_emits_created_event() {
+        let created = sample_ticket_summary("issue-200", "AP-200", "Todo");
+        let refreshed = vec![sample_ticket_summary("issue-201", "AP-201", "Todo")];
+        let provider = Arc::new(TestTicketPickerProvider {
+            tickets: refreshed.clone(),
+            created: Some(created.clone()),
+        });
+        let (sender, mut receiver) = mpsc::channel(1);
+
+        run_ticket_picker_create_task(provider, "brief".to_owned(), sender).await;
+
+        let event = receiver.recv().await.expect("ticket picker event");
+        match event {
+            TicketPickerEvent::TicketCreatedAndStarted {
+                created_ticket,
+                projection,
+                tickets,
+                warning,
+            } => {
+                assert_eq!(created_ticket.identifier, created.identifier);
+                assert!(projection.is_some());
+                assert_eq!(tickets.unwrap_or_default(), refreshed);
+                assert!(warning.is_none());
+            }
+            _ => panic!("expected ticket created event"),
+        }
     }
 
     #[test]
