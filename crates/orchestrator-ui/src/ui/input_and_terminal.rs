@@ -569,6 +569,14 @@ fn route_worktree_diff_modal_key(shell_state: &mut UiShellState, key: KeyEvent) 
                 shell_state.scroll_worktree_diff_modal(-1);
                 return RoutedInput::Ignore;
             }
+            KeyCode::Char('h') | KeyCode::Left => {
+                shell_state.focus_worktree_diff_files_pane();
+                return RoutedInput::Ignore;
+            }
+            KeyCode::Char('l') | KeyCode::Right => {
+                shell_state.focus_worktree_diff_detail_pane();
+                return RoutedInput::Ignore;
+            }
             KeyCode::PageDown => {
                 shell_state.scroll_worktree_diff_modal(12);
                 return RoutedInput::Ignore;

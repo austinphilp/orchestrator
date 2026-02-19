@@ -1844,10 +1844,11 @@ impl UiShellState {
                         modal.error = None;
                         modal.base_branch = diff.base_branch;
                         modal.content = diff.diff;
-                        modal.selected_addition_block = 0;
-                        let blocks = parse_diff_addition_blocks(modal.content.as_str());
+                        modal.selected_file_index = 0;
+                        modal.selected_hunk_index = 0;
+                        let files = parse_diff_file_summaries(modal.content.as_str());
                         modal.cursor_line =
-                            blocks.first().map(|block| block.start_index).unwrap_or(0);
+                            files.first().map(|file| file.start_index).unwrap_or(0);
                         modal.scroll =
                             modal.cursor_line.saturating_sub(3).min(u16::MAX as usize) as u16;
                     }
@@ -2615,7 +2616,9 @@ impl UiShellState {
             error: None,
             scroll: 0,
             cursor_line: 0,
-            selected_addition_block: 0,
+            selected_file_index: 0,
+            selected_hunk_index: 0,
+            focus: DiffPaneFocus::Files,
         });
         self.spawn_session_diff_load(session_id);
     }
@@ -2624,36 +2627,44 @@ impl UiShellState {
         let Some(modal) = self.worktree_diff_modal.as_mut() else {
             return;
         };
-        let line_count = worktree_diff_modal_line_count(modal);
-        if line_count == 0 {
-            modal.cursor_line = 0;
-            modal.scroll = 0;
-            return;
-        }
-        let blocks = parse_diff_addition_blocks(modal.content.as_str());
-        if blocks.is_empty() {
-            let current = modal.cursor_line.min(line_count.saturating_sub(1));
-            let next = if delta < 0 {
-                current.saturating_sub(delta.unsigned_abs())
-            } else {
-                current
-                    .saturating_add(delta as usize)
-                    .min(line_count.saturating_sub(1))
-            };
-            modal.cursor_line = next;
-            modal.scroll = next.saturating_sub(3).min(u16::MAX as usize) as u16;
-        } else {
-            let max_index = blocks.len().saturating_sub(1);
-            let current_index = modal.selected_addition_block.min(max_index);
-            let next_index = if delta < 0 {
-                current_index.saturating_sub(delta.unsigned_abs())
-            } else {
-                current_index.saturating_add(delta as usize).min(max_index)
-            };
-            modal.selected_addition_block = next_index;
-            let next_line = blocks[next_index].start_index;
-            modal.cursor_line = next_line;
-            modal.scroll = next_line.saturating_sub(3).min(u16::MAX as usize) as u16;
+        match modal.focus {
+            DiffPaneFocus::Files => {
+                let files = parse_diff_file_summaries(modal.content.as_str());
+                if files.is_empty() {
+                    return;
+                }
+                let max_index = files.len().saturating_sub(1);
+                let current = modal.selected_file_index.min(max_index);
+                let next = if delta < 0 {
+                    current.saturating_sub(delta.unsigned_abs())
+                } else {
+                    current.saturating_add(delta as usize).min(max_index)
+                };
+                modal.selected_file_index = next;
+                modal.selected_hunk_index = 0;
+                modal.cursor_line = files[next].start_index;
+                modal.scroll = modal.cursor_line.saturating_sub(3).min(u16::MAX as usize) as u16;
+            }
+            DiffPaneFocus::Diff => {
+                let files = parse_diff_file_summaries(modal.content.as_str());
+                let Some(file) = files.get(modal.selected_file_index.min(files.len().saturating_sub(1)))
+                else {
+                    return;
+                };
+                if file.addition_blocks.is_empty() {
+                    return;
+                }
+                let max_index = file.addition_blocks.len().saturating_sub(1);
+                let current = modal.selected_hunk_index.min(max_index);
+                let next = if delta < 0 {
+                    current.saturating_sub(delta.unsigned_abs())
+                } else {
+                    current.saturating_add(delta as usize).min(max_index)
+                };
+                modal.selected_hunk_index = next;
+                modal.cursor_line = file.addition_blocks[next].start_index;
+                modal.scroll = modal.cursor_line.saturating_sub(3).min(u16::MAX as usize) as u16;
+            }
         }
     }
 
@@ -2661,23 +2672,57 @@ impl UiShellState {
         let Some(modal) = self.worktree_diff_modal.as_mut() else {
             return;
         };
-        let blocks = parse_diff_addition_blocks(modal.content.as_str());
-        if blocks.is_empty() {
-            modal.cursor_line = if to_last {
-                worktree_diff_modal_line_count(modal).saturating_sub(1)
-            } else {
-                0
-            };
-            modal.scroll = modal.cursor_line.saturating_sub(3).min(u16::MAX as usize) as u16;
-            return;
+        match modal.focus {
+            DiffPaneFocus::Files => {
+                let files = parse_diff_file_summaries(modal.content.as_str());
+                if files.is_empty() {
+                    modal.cursor_line = if to_last {
+                        worktree_diff_modal_line_count(modal).saturating_sub(1)
+                    } else {
+                        0
+                    };
+                    modal.scroll = modal.cursor_line.saturating_sub(3).min(u16::MAX as usize) as u16;
+                    return;
+                }
+                modal.selected_file_index = if to_last {
+                    files.len().saturating_sub(1)
+                } else {
+                    0
+                };
+                modal.selected_hunk_index = 0;
+                modal.cursor_line = files[modal.selected_file_index].start_index;
+                modal.scroll = modal.cursor_line.saturating_sub(3).min(u16::MAX as usize) as u16;
+            }
+            DiffPaneFocus::Diff => {
+                let files = parse_diff_file_summaries(modal.content.as_str());
+                let Some(file) = files.get(modal.selected_file_index.min(files.len().saturating_sub(1)))
+                else {
+                    return;
+                };
+                if file.addition_blocks.is_empty() {
+                    return;
+                }
+                modal.selected_hunk_index = if to_last {
+                    file.addition_blocks.len().saturating_sub(1)
+                } else {
+                    0
+                };
+                modal.cursor_line = file.addition_blocks[modal.selected_hunk_index].start_index;
+                modal.scroll = modal.cursor_line.saturating_sub(3).min(u16::MAX as usize) as u16;
+            }
         }
-        modal.selected_addition_block = if to_last {
-            blocks.len().saturating_sub(1)
-        } else {
-            0
-        };
-        modal.cursor_line = blocks[modal.selected_addition_block].start_index;
-        modal.scroll = modal.cursor_line.saturating_sub(3).min(u16::MAX as usize) as u16;
+    }
+
+    fn focus_worktree_diff_files_pane(&mut self) {
+        if let Some(modal) = self.worktree_diff_modal.as_mut() {
+            modal.focus = DiffPaneFocus::Files;
+        }
+    }
+
+    fn focus_worktree_diff_detail_pane(&mut self) {
+        if let Some(modal) = self.worktree_diff_modal.as_mut() {
+            modal.focus = DiffPaneFocus::Diff;
+        }
     }
 
     fn insert_selected_worktree_diff_refs_into_compose(&mut self) {
