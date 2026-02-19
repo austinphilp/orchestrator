@@ -553,7 +553,7 @@ fn render_ticket_picker_overlay_text(overlay: &TicketPickerOverlayState) -> Stri
     if overlay.new_ticket_mode {
         lines.push(format!(
             "Brief: {}",
-            compact_focus_card_text(overlay.new_ticket_brief.as_str())
+            compact_focus_card_text(overlay.new_ticket_brief_input.text())
         ));
     }
     if let Some(error) = overlay.error.as_ref() {
@@ -579,7 +579,7 @@ fn render_ticket_picker_overlay_text(overlay: &TicketPickerOverlayState) -> Stri
             ));
         }
         lines.push("Enter local repository path, then press Enter. Esc to cancel.".to_owned());
-        lines.push(format!("Path: {}", overlay.repository_prompt_input));
+        lines.push(format!("Path: {}", overlay.repository_prompt_input.text()));
         lines.push(String::new());
     }
 
