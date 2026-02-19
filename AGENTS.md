@@ -11,8 +11,8 @@
 - `OPENROUTER_API_KEY` (orchestrator-supervisor): required API key for supervisor.
 - `OPENROUTER_BASE_URL` (orchestrator-supervisor): optional base URL override (defaults to `https://openrouter.ai/api/v1`).
 - `ORCHESTRATOR_SUPERVISOR_MODEL` (orchestrator-ui): optional chat model override.
-- `LINEAR_API_KEY` (integration-linear, scripts/ralph_loop.py): required Linear API key.
-- `ORCHESTRATOR_LINEAR_API_URL` (integration-linear): optional Linear GraphQL endpoint override.
+- `LINEAR_API_KEY` (integration-linear, scripts/ralph_loop.py, scripts/linear_graphql.py): required Linear API key.
+- `ORCHESTRATOR_LINEAR_API_URL` (integration-linear, scripts/linear_graphql.py): optional Linear GraphQL endpoint override.
 - `ORCHESTRATOR_LINEAR_SYNC_INTERVAL_SECS` (integration-linear): optional poll interval in seconds.
 - `ORCHESTRATOR_LINEAR_FETCH_LIMIT` (integration-linear): optional fetch limit for synced issues.
 - `ORCHESTRATOR_LINEAR_SYNC_ASSIGNED_TO_ME` (integration-linear): optional boolean.
@@ -49,6 +49,11 @@
 - Clean code, simplification, and removal of unused code blocks take priority over preserving compatibility.
 - Before making any backwards-incompatible change, notify the user explicitly; otherwise, breaking changes are acceptable.
 - Before handing off work, always verify the app is buildable, tests pass, and there are no compiler warnings.
+
+## Linear GraphQL helper in this repo
+
+- For direct Linear API calls inside this repository/worktree, prefer repo-local `scripts/linear_graphql.py`.
+- Resolve issues by identifier using `issue(id: $issueId)` (for example `AP-208`), not `issues(filter: { identifier: ... })`.
 
 ## Codex App-Server Protocol Notes
 
@@ -97,5 +102,5 @@
 - Approval/tool request notifications currently auto-responded in backend transport layer:
   - `item/commandExecution/requestApproval` -> accept
   - `item/fileChange/requestApproval` -> accept
-  - `item/tool/requestUserInput` -> empty answers
+  - `item/tool/requestUserInput` -> surfaced as interactive `NeedsInput` prompt; requires user response via UI modal
   - `item/tool/call` -> unsupported tool-call stub response

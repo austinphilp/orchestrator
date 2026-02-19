@@ -15,8 +15,8 @@ mod tests {
         WorkflowState,
     };
     use orchestrator_runtime::{
-        BackendCapabilities, BackendEvent, BackendKind, RuntimeResult, RuntimeSessionId,
-        SessionHandle, SessionLifecycle, WorkerEventStream,
+        BackendCapabilities, BackendEvent, BackendKind, BackendNeedsInputEvent, RuntimeResult,
+        RuntimeSessionId, SessionHandle, SessionLifecycle, WorkerEventStream,
     };
     use std::collections::VecDeque;
     use std::sync::{Arc, Mutex};
@@ -1236,6 +1236,52 @@ mod tests {
                 .first(),
             Some(CenterView::FocusCardView { inbox_item_id }) if inbox_item_id.as_str() == "inbox-1"
         ));
+    }
+
+    #[test]
+    fn active_terminal_session_auto_opens_needs_input_modal_on_event() {
+        let backend = Arc::new(ManualTerminalBackend::default());
+        let mut shell_state = UiShellState::new_with_integrations(
+            "ready".to_owned(),
+            sample_projection(true),
+            None,
+            None,
+            None,
+            Some(backend),
+        );
+        shell_state.open_terminal_and_enter_mode();
+        assert!(matches!(
+            shell_state.view_stack.active_center(),
+            Some(CenterView::TerminalView { session_id }) if session_id.as_str() == "sess-1"
+        ));
+        assert!(shell_state.needs_input_modal.is_none());
+
+        let sender = shell_state
+            .terminal_session_sender
+            .clone()
+            .expect("terminal sender");
+        sender
+            .try_send(TerminalSessionEvent::NeedsInput {
+                session_id: WorkerSessionId::new("sess-1"),
+                needs_input: BackendNeedsInputEvent {
+                    prompt_id: "prompt-plan-gate".to_owned(),
+                    question: "Confirm plan".to_owned(),
+                    options: vec!["A".to_owned(), "B".to_owned()],
+                    default_option: Some("A".to_owned()),
+                    questions: Vec::new(),
+                },
+            })
+            .expect("queue needs-input event");
+
+        shell_state.poll_terminal_session_events();
+
+        let modal = shell_state
+            .needs_input_modal
+            .as_ref()
+            .expect("needs-input modal should open for active terminal session");
+        assert_eq!(modal.session_id.as_str(), "sess-1");
+        assert_eq!(modal.prompt_id.as_str(), "prompt-plan-gate");
+        assert!(shell_state.mode == UiMode::Terminal);
     }
 
     #[test]

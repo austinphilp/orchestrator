@@ -1138,6 +1138,11 @@ impl UiShellState {
                     session_id,
                     needs_input,
                 } => {
+                    let should_open_for_active_terminal = self
+                        .active_terminal_session_id()
+                        .map(|active_session_id| active_session_id == &session_id)
+                        .unwrap_or(false)
+                        && self.is_terminal_view_active();
                     let prompt = self.needs_input_prompt_from_event(needs_input);
                     if self
                         .needs_input_modal
@@ -1155,6 +1160,9 @@ impl UiShellState {
                         .or_default();
                     if !queue.iter().any(|entry| entry.prompt_id == prompt.prompt_id) {
                         queue.push_back(prompt);
+                    }
+                    if should_open_for_active_terminal {
+                        self.open_pending_needs_input_modal_for_active_session();
                     }
                 }
                 TerminalSessionEvent::StreamFailed { session_id, error } => {
