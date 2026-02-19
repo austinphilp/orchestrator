@@ -30,7 +30,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 use ratatui::Terminal;
-use ratatui_interact as _;
+use ratatui_interact::components::{Input, InputState, TabConfig, TextArea, TextAreaState, WrapMode};
 use ratskin::RatSkin;
 use tokio::runtime::Handle as TokioHandle;
 use tokio::sync::mpsc;

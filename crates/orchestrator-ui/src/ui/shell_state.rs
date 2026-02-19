@@ -13,7 +13,7 @@ struct UiShellState {
     supervisor_provider: Option<Arc<dyn LlmProvider>>,
     supervisor_command_dispatcher: Option<Arc<dyn SupervisorCommandDispatcher>>,
     supervisor_chat_stream: Option<ActiveSupervisorChatStream>,
-    global_supervisor_chat_draft: String,
+    global_supervisor_chat_input: InputState,
     global_supervisor_chat_last_query: Option<String>,
     global_supervisor_chat_return_context: Option<GlobalSupervisorChatReturnContext>,
     ticket_picker_provider: Option<Arc<dyn TicketPickerProvider>>,
@@ -29,7 +29,7 @@ struct UiShellState {
     terminal_session_receiver: Option<mpsc::Receiver<TerminalSessionEvent>>,
     terminal_session_states: HashMap<WorkerSessionId, TerminalViewState>,
     terminal_session_streamed: HashSet<WorkerSessionId>,
-    terminal_compose_draft: String,
+    terminal_compose_input: TextAreaState,
     review_merge_confirm_session: Option<WorkerSessionId>,
     merge_queue: VecDeque<MergeQueueRequest>,
     merge_last_dispatched_at: Option<Instant>,
@@ -99,7 +99,7 @@ impl UiShellState {
             supervisor_provider,
             supervisor_command_dispatcher,
             supervisor_chat_stream: None,
-            global_supervisor_chat_draft: String::new(),
+            global_supervisor_chat_input: InputState::empty(),
             global_supervisor_chat_last_query: None,
             global_supervisor_chat_return_context: None,
             ticket_picker_provider,
@@ -115,7 +115,7 @@ impl UiShellState {
             terminal_session_receiver,
             terminal_session_states: HashMap::new(),
             terminal_session_streamed: HashSet::new(),
-            terminal_compose_draft: String::new(),
+            terminal_compose_input: TextAreaState::empty().with_tab_config(TabConfig::Literal),
             review_merge_confirm_session: None,
             merge_queue: VecDeque::new(),
             merge_last_dispatched_at: None,
@@ -892,7 +892,7 @@ impl UiShellState {
         else {
             return;
         };
-        let repository_path = self.ticket_picker_overlay.repository_prompt_input.trim();
+        let repository_path = self.ticket_picker_overlay.repository_prompt_input.text().trim();
         if repository_path.is_empty() {
             self.ticket_picker_overlay.error = Some("repository path cannot be empty".to_owned());
             return;
@@ -910,11 +910,13 @@ impl UiShellState {
     }
 
     fn append_repository_prompt_char(&mut self, ch: char) {
-        self.ticket_picker_overlay.repository_prompt_input.push(ch);
+        self.ticket_picker_overlay.repository_prompt_input.insert_char(ch);
     }
 
     fn pop_repository_prompt_char(&mut self) {
-        self.ticket_picker_overlay.repository_prompt_input.pop();
+        self.ticket_picker_overlay
+            .repository_prompt_input
+            .delete_char_backward();
     }
 
     fn submit_created_ticket_from_picker(&mut self) {
@@ -927,7 +929,12 @@ impl UiShellState {
             return;
         }
 
-        let brief = self.ticket_picker_overlay.new_ticket_brief.trim().to_owned();
+        let brief = self
+            .ticket_picker_overlay
+            .new_ticket_brief_input
+            .text()
+            .trim()
+            .to_owned();
         self.ticket_picker_overlay.error = None;
         self.ticket_picker_overlay.creating = true;
         self.spawn_ticket_picker_create(brief);
@@ -1800,7 +1807,7 @@ impl UiShellState {
             } => {
                 self.ticket_picker_overlay.creating = false;
                 self.ticket_picker_overlay.new_ticket_mode = false;
-                self.ticket_picker_overlay.new_ticket_brief.clear();
+                self.ticket_picker_overlay.new_ticket_brief_input.clear();
                 self.ticket_picker_overlay.error = None;
                 if let Some(projection) = projection {
                     self.domain = projection;
@@ -1907,7 +1914,7 @@ impl UiShellState {
     }
 
     fn submit_global_supervisor_chat_query(&mut self) {
-        let query = self.global_supervisor_chat_draft.trim().to_owned();
+        let query = self.global_supervisor_chat_input.text().trim().to_owned();
         if query.is_empty() {
             let message =
                 "supervisor query unavailable: enter a non-empty question before submitting";
@@ -1942,7 +1949,7 @@ impl UiShellState {
         };
 
         if started {
-            self.global_supervisor_chat_draft.clear();
+            self.global_supervisor_chat_input.clear();
             self.global_supervisor_chat_last_query = Some(query);
         }
     }
@@ -1958,13 +1965,13 @@ impl UiShellState {
                 true
             }
             KeyCode::Backspace if key.modifiers.is_empty() => {
-                self.global_supervisor_chat_draft.pop();
+                self.global_supervisor_chat_input.delete_char_backward();
                 true
             }
             KeyCode::Char(ch)
                 if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT =>
             {
-                self.global_supervisor_chat_draft.push(ch);
+                self.global_supervisor_chat_input.insert_char(ch);
                 true
             }
             _ => false,
@@ -1984,21 +1991,21 @@ impl UiShellState {
                 true
             }
             KeyCode::Enter if key.modifiers == KeyModifiers::SHIFT => {
-                self.terminal_compose_draft.push('\n');
+                self.terminal_compose_input.insert_newline();
                 true
             }
             KeyCode::Backspace if key.modifiers.is_empty() => {
-                self.terminal_compose_draft.pop();
+                self.terminal_compose_input.delete_char_backward();
                 true
             }
             KeyCode::Tab if key.modifiers.is_empty() => {
-                self.terminal_compose_draft.push('\t');
+                self.terminal_compose_input.insert_tab();
                 true
             }
             KeyCode::Char(ch)
                 if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT =>
             {
-                self.terminal_compose_draft.push(ch);
+                self.terminal_compose_input.insert_char(ch);
                 true
             }
             _ => false,
@@ -2536,10 +2543,10 @@ impl UiShellState {
         }
         ui_state.center_pane.lines.push(format!(
             "Draft: {}",
-            if self.global_supervisor_chat_draft.is_empty() {
+            if self.global_supervisor_chat_input.is_empty() {
                 "<type in Insert mode>".to_owned()
             } else {
-                self.global_supervisor_chat_draft.clone()
+                self.global_supervisor_chat_input.text().to_owned()
             }
         ));
     }
@@ -2700,15 +2707,15 @@ impl UiShellState {
         }
 
         let insertion = refs.join(" ");
-        if !self.terminal_compose_draft.is_empty()
-            && !self.terminal_compose_draft.ends_with(char::is_whitespace)
-        {
-            self.terminal_compose_draft.push(' ');
+        let mut current = self.terminal_compose_input.text();
+        if !current.is_empty() && !current.ends_with(char::is_whitespace) {
+            current.push(' ');
         }
-        self.terminal_compose_draft.push_str(insertion.as_str());
-        if !self.terminal_compose_draft.ends_with(char::is_whitespace) {
-            self.terminal_compose_draft.push(' ');
+        current.push_str(insertion.as_str());
+        if !current.ends_with(char::is_whitespace) {
+            current.push(' ');
         }
+        self.terminal_compose_input.set_text(current);
         self.status_warning = Some(format!(
             "added {} diff reference{} to compose input",
             refs.len(),
@@ -2792,7 +2799,7 @@ impl UiShellState {
             return;
         }
 
-        if self.terminal_compose_draft.trim().is_empty() {
+        if self.terminal_compose_input.text().trim().is_empty() {
             self.status_warning = Some(
                 "terminal input unavailable: compose a non-empty message before sending".to_owned(),
             );
@@ -2816,7 +2823,7 @@ impl UiShellState {
             return;
         };
 
-        let user_message = self.terminal_compose_draft.clone();
+        let user_message = self.terminal_compose_input.text();
         let mut payload = user_message.clone();
         if !payload.ends_with('\n') {
             payload.push('\n');
@@ -2837,7 +2844,7 @@ impl UiShellState {
                 runtime.spawn(async move {
                     let _ = backend.send_input(&handle, bytes.as_slice()).await;
                 });
-                self.terminal_compose_draft.clear();
+                self.terminal_compose_input.clear();
             }
             Err(_) => {
                 self.status_warning =

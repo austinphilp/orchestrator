@@ -2021,7 +2021,7 @@ mod tests {
         }
         handle_key_press(&mut shell_state, key(KeyCode::Enter));
 
-        assert_eq!(shell_state.global_supervisor_chat_draft, "what changed?");
+        assert_eq!(shell_state.global_supervisor_chat_input.text(), "what changed?");
         assert_eq!(shell_state.global_supervisor_chat_last_query, None);
         let stream = shell_state
             .supervisor_chat_stream
@@ -2623,9 +2623,9 @@ mod tests {
         route_ticket_picker_key(&mut shell_state, key(KeyCode::Char('b')));
         route_ticket_picker_key(&mut shell_state, key(KeyCode::Char('r')));
         route_ticket_picker_key(&mut shell_state, key(KeyCode::Backspace));
-        assert_eq!(shell_state.ticket_picker_overlay.new_ticket_brief, "b");
+        assert_eq!(shell_state.ticket_picker_overlay.new_ticket_brief_input.text(), "b");
 
-        shell_state.ticket_picker_overlay.new_ticket_brief.clear();
+        shell_state.ticket_picker_overlay.new_ticket_brief_input.clear();
         route_ticket_picker_key(&mut shell_state, key(KeyCode::Enter));
         assert!(shell_state
             .ticket_picker_overlay
@@ -2640,12 +2640,15 @@ mod tests {
         let mut shell_state = UiShellState::new("ready".to_owned(), triage_projection());
         shell_state.ticket_picker_overlay.open();
         shell_state.ticket_picker_overlay.begin_new_ticket_mode();
-        shell_state.ticket_picker_overlay.new_ticket_brief = "draft".to_owned();
+        shell_state
+            .ticket_picker_overlay
+            .new_ticket_brief_input
+            .set_text("draft");
 
         route_ticket_picker_key(&mut shell_state, key(KeyCode::Esc));
         assert!(shell_state.ticket_picker_overlay.visible);
         assert!(!shell_state.ticket_picker_overlay.new_ticket_mode);
-        assert!(shell_state.ticket_picker_overlay.new_ticket_brief.is_empty());
+        assert!(shell_state.ticket_picker_overlay.new_ticket_brief_input.is_empty());
     }
 
     #[test]
@@ -3046,7 +3049,7 @@ mod tests {
 
         let routed = route_key_press(&mut shell_state, key(KeyCode::Char('j')));
         assert!(matches!(routed, RoutedInput::Ignore));
-        assert_eq!(shell_state.terminal_compose_draft, "j");
+        assert_eq!(shell_state.terminal_compose_input.text(), "j");
 
         let start_chord = handle_key_press(&mut shell_state, ctrl_key(KeyCode::Char('\\')));
         assert!(!start_chord);
@@ -3087,7 +3090,7 @@ mod tests {
         let routed = route_key_press(&mut shell_state, key(KeyCode::Char('x')));
         assert!(matches!(routed, RoutedInput::Ignore));
         assert!(!shell_state.terminal_escape_pending);
-        assert!(shell_state.terminal_compose_draft.is_empty());
+        assert!(shell_state.terminal_compose_input.is_empty());
     }
 
     #[test]
@@ -3101,7 +3104,7 @@ mod tests {
         handle_key_press(&mut shell_state, shift_key(KeyCode::Enter));
         handle_key_press(&mut shell_state, key(KeyCode::Char('!')));
 
-        assert_eq!(shell_state.terminal_compose_draft, "hi\n!");
+        assert_eq!(shell_state.terminal_compose_input.text(), "hi\n!");
     }
 
     #[test]

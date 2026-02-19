@@ -308,7 +308,7 @@ enum TicketPickerRowRef {
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Default)]
 struct TicketPickerOverlayState {
     visible: bool,
     loading: bool,
@@ -316,14 +316,14 @@ struct TicketPickerOverlayState {
     archiving_ticket_id: Option<TicketId>,
     creating: bool,
     new_ticket_mode: bool,
-    new_ticket_brief: String,
+    new_ticket_brief_input: InputState,
     error: Option<String>,
     project_groups: Vec<TicketProjectGroup>,
     ticket_rows: Vec<TicketPickerRowRef>,
     selected_row_index: Option<usize>,
     repository_prompt_ticket: Option<TicketSummary>,
     repository_prompt_project_id: Option<String>,
-    repository_prompt_input: String,
+    repository_prompt_input: InputState,
     repository_prompt_missing_mapping: bool,
     archive_confirm_ticket: Option<TicketSummary>,
 }
@@ -363,7 +363,7 @@ impl TicketPickerOverlayState {
         self.archiving_ticket_id = None;
         self.creating = false;
         self.new_ticket_mode = false;
-        self.new_ticket_brief.clear();
+        self.new_ticket_brief_input.clear();
         self.error = None;
         self.repository_prompt_ticket = None;
         self.repository_prompt_project_id = None;
@@ -379,7 +379,7 @@ impl TicketPickerOverlayState {
         self.archiving_ticket_id = None;
         self.creating = false;
         self.new_ticket_mode = false;
-        self.new_ticket_brief.clear();
+        self.new_ticket_brief_input.clear();
         self.error = None;
         self.repository_prompt_ticket = None;
         self.repository_prompt_project_id = None;
@@ -401,9 +401,10 @@ impl TicketPickerOverlayState {
         self.repository_prompt_ticket = Some(ticket);
         self.repository_prompt_project_id = Some(project_id);
         if let Some(repository_path_hint) = repository_path_hint {
-            self.repository_prompt_input = repository_path_hint;
+            self.repository_prompt_input.set_text(repository_path_hint);
             self.repository_prompt_missing_mapping = false;
         } else {
+            self.repository_prompt_input.clear();
             self.repository_prompt_missing_mapping = true;
         }
     }
@@ -425,20 +426,20 @@ impl TicketPickerOverlayState {
 
     fn cancel_new_ticket_mode(&mut self) {
         self.new_ticket_mode = false;
-        self.new_ticket_brief.clear();
+        self.new_ticket_brief_input.clear();
         self.creating = false;
     }
 
     fn append_new_ticket_brief_char(&mut self, ch: char) {
-        self.new_ticket_brief.push(ch);
+        self.new_ticket_brief_input.insert_char(ch);
     }
 
     fn pop_new_ticket_brief_char(&mut self) {
-        self.new_ticket_brief.pop();
+        self.new_ticket_brief_input.delete_char_backward();
     }
 
     fn can_submit_new_ticket(&self) -> bool {
-        !self.creating && !self.new_ticket_brief.trim().is_empty()
+        !self.creating && !self.new_ticket_brief_input.text().trim().is_empty()
     }
 
     fn apply_tickets(&mut self, tickets: Vec<TicketSummary>, priority_states: &[String]) {

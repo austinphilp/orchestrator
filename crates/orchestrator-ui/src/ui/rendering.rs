@@ -477,55 +477,6 @@ fn loading_spinner_frame() -> &'static str {
     FRAMES[index]
 }
 
-fn render_terminal_input_panel(draft: &str) -> String {
-    if draft.is_empty() {
-        "Type a message to the harness here.\nPress Enter to send.".to_owned()
-    } else {
-        sanitize_terminal_display_text(draft)
-    }
-}
-
-fn terminal_input_cursor(area: Rect, draft: &str) -> Option<(u16, u16)> {
-    if area.width <= 2 || area.height <= 2 {
-        return None;
-    }
-
-    let content_width = usize::from(area.width.saturating_sub(2)).max(1);
-    let max_row = usize::from(area.height.saturating_sub(3));
-    let mut row: usize = 0;
-    let mut col: usize = 0;
-
-    for ch in draft.chars() {
-        if ch == '\r' {
-            continue;
-        }
-        if ch == '\n' {
-            row = row.saturating_add(1);
-            col = 0;
-            continue;
-        }
-
-        col = col.saturating_add(1);
-        if col >= content_width {
-            row = row.saturating_add(1);
-            col = 0;
-        }
-    }
-
-    let clamped_row = row.min(max_row);
-    let max_col = content_width.saturating_sub(1);
-    let clamped_col = col.min(max_col);
-    let cursor_x = area
-        .x
-        .saturating_add(1)
-        .saturating_add(u16::try_from(clamped_col).ok()?);
-    let cursor_y = area
-        .y
-        .saturating_add(1)
-        .saturating_add(u16::try_from(clamped_row).ok()?);
-    Some((cursor_x, cursor_y))
-}
-
 fn render_markdown_for_terminal(input: &str, width: u16) -> Text<'static> {
     if input.is_empty() {
         return Text::raw(String::new());
@@ -857,15 +808,35 @@ fn render_ticket_picker_overlay(
     let Some(popup) = ticket_picker_popup(anchor_area) else {
         return;
     };
-    if let Some((cursor_x, cursor_y)) = ticket_picker_repository_prompt_cursor(popup, overlay) {
-        frame.set_cursor_position((cursor_x, cursor_y));
-    }
 
     frame.render_widget(Clear, popup);
     frame.render_widget(
         Paragraph::new(content).block(Block::default().title("start ticket").borders(Borders::ALL)),
         popup,
     );
+    if popup.width > 4 && popup.height > 4 {
+        let input_area = Rect {
+            x: popup.x.saturating_add(1),
+            y: popup.y.saturating_add(popup.height.saturating_sub(4)),
+            width: popup.width.saturating_sub(2),
+            height: 3,
+        };
+        if overlay.new_ticket_mode {
+            let mut state = overlay.new_ticket_brief_input.clone();
+            state.focused = true;
+            Input::new(&state)
+                .label("brief")
+                .placeholder("ticket summary")
+                .render_stateful(frame, input_area);
+        } else if overlay.has_repository_prompt() {
+            let mut state = overlay.repository_prompt_input.clone();
+            state.focused = true;
+            Input::new(&state)
+                .label("path")
+                .placeholder("repository path")
+                .render_stateful(frame, input_area);
+        }
+    }
 }
 
 fn render_worktree_diff_modal(
@@ -1320,58 +1291,6 @@ fn review_merge_confirm_popup(anchor_area: Rect) -> Option<Rect> {
         width,
         height,
     })
-}
-
-fn ticket_picker_repository_prompt_cursor(
-    popup: Rect,
-    overlay: &TicketPickerOverlayState,
-) -> Option<(u16, u16)> {
-    if !overlay.has_repository_prompt() {
-        return None;
-    }
-
-    let mut line_index = 1usize;
-    if overlay.loading {
-        line_index += 1;
-    }
-    if overlay.starting_ticket_id.is_some() {
-        line_index += 1;
-    }
-    if overlay.error.is_some() {
-        line_index += 1;
-    }
-
-    // Blank spacer
-    line_index += 1;
-    // Repository project info line
-    line_index += 1;
-    // Prompt guidance line
-    line_index += 1;
-    // Cursor line is the repository path input line.
-
-    let inner_height = popup.height.saturating_sub(2);
-    if line_index >= usize::from(inner_height) {
-        return None;
-    }
-
-    let prefix_len = "Path: ".chars().count();
-    let input_len = overlay.repository_prompt_input.chars().count();
-    let cursor_offset = prefix_len + input_len;
-
-    let inner_width = popup.width.saturating_sub(2);
-    let max_offset = inner_width.saturating_sub(1);
-    let cursor_offset = cursor_offset.min(usize::from(max_offset));
-
-    let cursor_x = popup
-        .x
-        .saturating_add(1)
-        .saturating_add(u16::try_from(cursor_offset).ok()?);
-    let cursor_y = popup
-        .y
-        .saturating_add(1)
-        .saturating_add(u16::try_from(line_index).ok()?);
-
-    Some((cursor_x, cursor_y))
 }
 
 fn ticket_picker_popup(anchor_area: Rect) -> Option<Rect> {
