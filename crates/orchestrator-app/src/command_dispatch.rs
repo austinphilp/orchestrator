@@ -6,17 +6,20 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use orchestrator_core::{
-    command_ids, resolve_supervisor_query_scope, ArtifactKind, Command, CommandRegistry, CodeHostProvider,
-    AddTicketCommentRequest, CoreError, EventStore, GetTicketRequest, LlmChatRequest, LlmFinishReason,
-    LlmMessage, LlmProvider, LlmResponseStream, LlmResponseSubscription, LlmRole, LlmStreamChunk,
-    LlmTool, LlmToolCall, LlmToolCallOutput, LlmToolFunction, LlmTokenUsage, NewEventEnvelope,
-    OrchestrationEventPayload, PullRequestRef, RepositoryRef, RetrievalScope, RuntimeMappingRecord,
-    SqliteEventStore, TicketAttachment, TicketId, TicketQuery,
-    TicketingProvider, UpdateTicketDescriptionRequest, UpdateTicketStateRequest, UrlOpener,
+    apply_workflow_transition, command_ids, resolve_supervisor_query_scope,
+    AddTicketCommentRequest, ArtifactCreatedPayload, ArtifactId, ArtifactKind, ArtifactRecord,
+    CodeHostProvider, Command, CommandRegistry, CoreError, EventStore, GetTicketRequest,
+    LlmChatRequest, LlmFinishReason, LlmMessage, LlmProvider, LlmResponseStream,
+    LlmResponseSubscription, LlmRole, LlmStreamChunk, LlmTokenUsage, LlmTool, LlmToolCall,
+    LlmToolCallOutput, LlmToolFunction, NewEventEnvelope, OrchestrationEventPayload,
+    PullRequestRef, RepositoryRef, RetrievalScope, RuntimeMappingRecord, SqliteEventStore,
     SupervisorQueryArgs, SupervisorQueryCancellationSource, SupervisorQueryCancelledPayload,
     SupervisorQueryChunkPayload, SupervisorQueryContextArgs, SupervisorQueryFinishedPayload,
-    SupervisorQueryKind, SupervisorQueryStartedPayload, UntypedCommandInvocation, WorkItemId,
-    WorkerSessionId, DOMAIN_EVENT_SCHEMA_VERSION,
+    SupervisorQueryKind, SupervisorQueryStartedPayload, TicketAttachment, TicketId, TicketQuery,
+    TicketingProvider, UntypedCommandInvocation, UpdateTicketDescriptionRequest,
+    UpdateTicketStateRequest, UrlOpener, WorkItemId, WorkerSessionId, WorkflowGuardContext,
+    WorkflowState, WorkflowTransitionPayload, WorkflowTransitionReason,
+    DOMAIN_EVENT_SCHEMA_VERSION,
 };
 use orchestrator_github::default_system_url_opener;
 use orchestrator_supervisor::{
@@ -124,7 +127,9 @@ impl SupervisorTool {
             },
             Self::AddTicketComment => LlmToolFunction {
                 name: self.name().to_owned(),
-                description: Some("Attach a comment and optional attachments to a ticket".to_owned()),
+                description: Some(
+                    "Attach a comment and optional attachments to a ticket".to_owned(),
+                ),
                 parameters: json!({
                     "type": "object",
                     "properties": {
@@ -298,12 +303,10 @@ where
 
         if !chunk.tool_calls.is_empty() {
             for call in &chunk.tool_calls {
-                let entry = tool_calls
-                    .entry(call.id.clone())
-                    .or_insert_with(|| {
-                        call_order.push(call.id.clone());
-                        (call.name.clone(), String::new())
-                    });
+                let entry = tool_calls.entry(call.id.clone()).or_insert_with(|| {
+                    call_order.push(call.id.clone());
+                    (call.name.clone(), String::new())
+                });
                 entry.0 = call.name.clone();
                 entry.1.push_str(call.arguments.as_str());
             }
@@ -385,7 +388,8 @@ async fn execute_tool_call(
 
     let output = match tool {
         SupervisorTool::ListTickets => {
-            let args: ListTicketsToolArgs = parse_tool_args("list_tickets", call.arguments.as_str())?;
+            let args: ListTicketsToolArgs =
+                parse_tool_args("list_tickets", call.arguments.as_str())?;
             let tickets = ticketing
                 .list_tickets(TicketQuery {
                     assigned_to_me: args.assigned_to_me,
@@ -481,9 +485,11 @@ static SUPERVISOR_QUERY_EVENT_COUNTER: AtomicU64 = AtomicU64::new(1);
 static SUPERVISOR_QUERY_ID_COUNTER: AtomicU64 = AtomicU64::new(1);
 static RUNTIME_COMMAND_STREAM_COUNTER: AtomicU64 = AtomicU64::new(1);
 
-const SUPPORTED_RUNTIME_COMMAND_IDS: [&str; 3] = [
+const SUPPORTED_RUNTIME_COMMAND_IDS: [&str; 5] = [
     command_ids::SUPERVISOR_QUERY,
     command_ids::WORKFLOW_APPROVE_PR_READY,
+    command_ids::WORKFLOW_RECONCILE_PR_MERGE,
+    command_ids::WORKFLOW_MERGE_PR,
     command_ids::GITHUB_OPEN_REVIEW_TABS,
 ];
 
@@ -732,9 +738,7 @@ impl LlmResponseSubscription for RuntimeCommandResultStream {
     }
 }
 
-fn runtime_command_response(
-    message: &str,
-) -> Result<(String, LlmResponseStream), CoreError> {
+fn runtime_command_response(message: &str) -> Result<(String, LlmResponseStream), CoreError> {
     Ok((
         next_runtime_stream_id(),
         Box::new(RuntimeCommandResultStream::new(message.to_owned())),
@@ -750,12 +754,14 @@ fn query_text(args: &SupervisorQueryArgs) -> Option<String> {
 
 fn parse_pull_request_number(url: &str) -> Result<u64, CoreError> {
     let normalized = normalize_pull_request_url(url);
-    let segment = normalized
-        .split("/pull/")
-        .nth(1)
-        .ok_or_else(|| CoreError::Configuration(format!("Could not resolve PR number from URL `{url}`")))?;
+    let segment = normalized.split("/pull/").nth(1).ok_or_else(|| {
+        CoreError::Configuration(format!("Could not resolve PR number from URL `{url}`"))
+    })?;
 
-    let digits = segment.chars().take_while(char::is_ascii_digit).collect::<String>();
+    let digits = segment
+        .chars()
+        .take_while(char::is_ascii_digit)
+        .collect::<String>();
     if digits.is_empty() {
         return Err(CoreError::Configuration(format!(
             "Pull request URL `{url}` does not include a numeric PR number"
@@ -800,17 +806,19 @@ mod tests {
     use super::*;
     use orchestrator_core::test_support::TestDbPath;
     use orchestrator_core::{
-        ArtifactCreatedPayload, ArtifactId, ArtifactKind, ArtifactRecord, BackendKind, RuntimeMappingRecord,
-        SessionRecord, TicketId, TicketProvider, TicketRecord, WorkItemId, WorktreeId,
-        WorktreeRecord, WorkerSessionStatus, WorkerSessionId,
+        ArtifactCreatedPayload, ArtifactId, ArtifactKind, ArtifactRecord, BackendKind,
+        CodeHostKind, PullRequestMergeState, PullRequestRef, PullRequestSummary, RepositoryRef,
+        ReviewerRequest, RuntimeMappingRecord, SessionRecord, TicketId, TicketProvider,
+        TicketRecord, WorkItemId, WorkerSessionId, WorkerSessionStatus, WorktreeId, WorktreeRecord,
     };
     use serde_json::json;
     use std::sync::Mutex;
 
     #[test]
     fn parse_pull_request_number_supports_query_and_fragment_suffix() {
-        let number = parse_pull_request_number("https://github.com/acme/repo/pull/123?draft=true#section")
-            .expect("parse numeric suffix");
+        let number =
+            parse_pull_request_number("https://github.com/acme/repo/pull/123?draft=true#section")
+                .expect("parse numeric suffix");
         assert_eq!(number, 123);
     }
 
@@ -845,6 +853,12 @@ mod tests {
         assert_eq!(id, "acme/repo");
     }
 
+    #[test]
+    fn sanitize_error_display_text_strips_control_characters() {
+        let sanitized = sanitize_error_display_text("workflow merge\0 failed\u{2400}\r\n");
+        assert_eq!(sanitized, "workflow merge failed\n\n");
+    }
+
     struct MockUrlOpener {
         calls: Mutex<Vec<String>>,
     }
@@ -866,10 +880,7 @@ mod tests {
     #[async_trait::async_trait]
     impl UrlOpener for MockUrlOpener {
         async fn open_url(&self, url: &str) -> Result<(), CoreError> {
-            self.calls
-                .lock()
-                .expect("lock calls")
-                .push(url.to_owned());
+            self.calls.lock().expect("lock calls").push(url.to_owned());
             Ok(())
         }
     }
@@ -883,6 +894,110 @@ mod tests {
                 "open failed intentionally".to_owned(),
             ))
         }
+    }
+
+    struct MockCodeHost {
+        fallback_pr: Option<PullRequestRef>,
+        fallback_calls: Mutex<Vec<(String, String)>>,
+    }
+
+    impl MockCodeHost {
+        fn new(fallback_pr: Option<PullRequestRef>) -> Self {
+            Self {
+                fallback_pr,
+                fallback_calls: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn fallback_calls(&self) -> Vec<(String, String)> {
+            self.fallback_calls
+                .lock()
+                .expect("fallback calls lock")
+                .clone()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl CodeHostProvider for MockCodeHost {
+        fn kind(&self) -> CodeHostKind {
+            CodeHostKind::Github
+        }
+
+        async fn health_check(&self) -> Result<(), CoreError> {
+            Ok(())
+        }
+
+        async fn create_draft_pull_request(
+            &self,
+            _request: orchestrator_core::CreatePullRequestRequest,
+        ) -> Result<PullRequestSummary, CoreError> {
+            Err(CoreError::DependencyUnavailable(
+                "not implemented in test mock".to_owned(),
+            ))
+        }
+
+        async fn mark_ready_for_review(&self, _pr: &PullRequestRef) -> Result<(), CoreError> {
+            Ok(())
+        }
+
+        async fn request_reviewers(
+            &self,
+            _pr: &PullRequestRef,
+            _reviewers: ReviewerRequest,
+        ) -> Result<(), CoreError> {
+            Ok(())
+        }
+
+        async fn list_waiting_for_my_review(&self) -> Result<Vec<PullRequestSummary>, CoreError> {
+            Ok(Vec::new())
+        }
+
+        async fn get_pull_request_merge_state(
+            &self,
+            _pr: &PullRequestRef,
+        ) -> Result<PullRequestMergeState, CoreError> {
+            Ok(PullRequestMergeState {
+                merged: false,
+                is_draft: true,
+                merge_conflict: false,
+                base_branch: None,
+                head_branch: None,
+            })
+        }
+
+        async fn merge_pull_request(&self, _pr: &PullRequestRef) -> Result<(), CoreError> {
+            Ok(())
+        }
+
+        async fn find_open_pull_request_for_branch(
+            &self,
+            repository: &RepositoryRef,
+            head_branch: &str,
+        ) -> Result<Option<PullRequestRef>, CoreError> {
+            self.fallback_calls
+                .lock()
+                .expect("fallback calls lock")
+                .push((
+                    repository.root.to_string_lossy().to_string(),
+                    head_branch.to_owned(),
+                ));
+            Ok(self.fallback_pr.clone())
+        }
+    }
+
+    async fn execute_github_open_review_tabs_with_opener(
+        event_store_path: &str,
+        context: SupervisorCommandContext,
+        url_opener: &impl UrlOpener,
+    ) -> Result<(String, LlmResponseStream), CoreError> {
+        let code_host = MockCodeHost::new(None);
+        super::execute_github_open_review_tabs_with_opener(
+            &code_host,
+            event_store_path,
+            context,
+            url_opener,
+        )
+        .await
     }
 
     fn seed_runtime_mapping(
@@ -903,7 +1018,8 @@ mod tests {
             updated_at: "2026-02-16T11:00:00Z".to_owned(),
         };
 
-        let worktree_path = std::path::PathBuf::from(format!("/workspace/{}", work_item_id.as_str()));
+        let worktree_path =
+            std::path::PathBuf::from(format!("/workspace/{}", work_item_id.as_str()));
         let runtime = RuntimeMappingRecord {
             ticket,
             work_item_id: work_item_id.clone(),
@@ -930,18 +1046,19 @@ mod tests {
         Ok(())
     }
 
-    fn seed_runtime_mapping_with_pr_artifact(
+    fn seed_runtime_mapping_with_artifact(
         store: &mut SqliteEventStore,
         work_item_id: &WorkItemId,
         session_id: &str,
         artifact_id: &str,
+        kind: ArtifactKind,
         pr_url: &str,
     ) -> Result<(), CoreError> {
         seed_runtime_mapping(store, work_item_id, session_id)?;
         let artifact = ArtifactRecord {
             artifact_id: ArtifactId::new(artifact_id),
             work_item_id: work_item_id.clone(),
-            kind: ArtifactKind::PR,
+            kind: kind.clone(),
             metadata: json!({"type": "pull_request"}),
             storage_ref: pr_url.to_owned(),
             created_at: "2026-02-16T11:01:00Z".to_owned(),
@@ -950,7 +1067,7 @@ mod tests {
         let event = OrchestrationEventPayload::ArtifactCreated(ArtifactCreatedPayload {
             artifact_id: artifact.artifact_id.clone(),
             work_item_id: work_item_id.clone(),
-            kind: ArtifactKind::PR,
+            kind,
             label: "Pull request".to_owned(),
             uri: pr_url.to_owned(),
         });
@@ -966,6 +1083,23 @@ mod tests {
             &[artifact.artifact_id.clone()],
         )?;
         Ok(())
+    }
+
+    fn seed_runtime_mapping_with_pr_artifact(
+        store: &mut SqliteEventStore,
+        work_item_id: &WorkItemId,
+        session_id: &str,
+        artifact_id: &str,
+        pr_url: &str,
+    ) -> Result<(), CoreError> {
+        seed_runtime_mapping_with_artifact(
+            store,
+            work_item_id,
+            session_id,
+            artifact_id,
+            ArtifactKind::PR,
+            pr_url,
+        )
     }
 
     #[tokio::test]
@@ -1003,15 +1137,18 @@ mod tests {
             .expect("expected runtime message");
         assert_eq!(first_chunk.finish_reason, Some(LlmFinishReason::Stop));
         assert!(first_chunk.delta.contains("github.open_review_tabs"));
-        assert!(first_chunk.delta.contains("https://github.com/acme/repo/pull/123"));
-        assert!(
-            stream
-                .next_chunk()
-                .await
-                .expect("read runtime close")
-                .is_none()
+        assert!(first_chunk
+            .delta
+            .contains("https://github.com/acme/repo/pull/123"));
+        assert!(stream
+            .next_chunk()
+            .await
+            .expect("read runtime close")
+            .is_none());
+        assert_eq!(
+            opener.calls(),
+            vec!["https://github.com/acme/repo/pull/123".to_owned()]
         );
-        assert_eq!(opener.calls(), vec!["https://github.com/acme/repo/pull/123".to_owned()]);
     }
 
     #[tokio::test]
@@ -1048,8 +1185,57 @@ mod tests {
             .expect("read runtime chunk")
             .expect("expected runtime message");
         assert_eq!(first_chunk.finish_reason, Some(LlmFinishReason::Stop));
-        assert!(first_chunk.delta.contains("https://github.com/acme/repo/pull/124"));
-        assert_eq!(opener.calls(), vec!["https://github.com/acme/repo/pull/124".to_owned()]);
+        assert!(first_chunk
+            .delta
+            .contains("https://github.com/acme/repo/pull/124"));
+        assert_eq!(
+            opener.calls(),
+            vec!["https://github.com/acme/repo/pull/124".to_owned()]
+        );
+    }
+
+    #[tokio::test]
+    async fn execute_github_open_review_tabs_accepts_pr_link_artifacts() {
+        let temp_db = TestDbPath::new("app-runtime-command-open-review-tabs-link-artifact");
+        let work_item_id = WorkItemId::new("wi-open-review-tabs-link-artifact");
+        let mut store = SqliteEventStore::open(temp_db.path()).expect("open store");
+        seed_runtime_mapping_with_artifact(
+            &mut store,
+            &work_item_id,
+            "sess-open-review-tabs-link-artifact",
+            "artifact-pr-link-review",
+            ArtifactKind::Link,
+            "https://github.com/acme/repo/pull/321",
+        )
+        .expect("seed mapping");
+
+        let opener = MockUrlOpener::default();
+        let (stream_id, mut stream) = execute_github_open_review_tabs_with_opener(
+            temp_db.path().to_str().expect("path"),
+            SupervisorCommandContext {
+                selected_work_item_id: Some(work_item_id.as_str().to_owned()),
+                selected_session_id: None,
+                scope: None,
+            },
+            &opener,
+        )
+        .await
+        .expect("open review tabs");
+
+        assert!(stream_id.starts_with("runtime-"));
+        let first_chunk = stream
+            .next_chunk()
+            .await
+            .expect("read runtime chunk")
+            .expect("expected runtime message");
+        assert_eq!(first_chunk.finish_reason, Some(LlmFinishReason::Stop));
+        assert!(first_chunk
+            .delta
+            .contains("https://github.com/acme/repo/pull/321"));
+        assert_eq!(
+            opener.calls(),
+            vec!["https://github.com/acme/repo/pull/321".to_owned()]
+        );
     }
 
     #[tokio::test]
@@ -1074,12 +1260,20 @@ mod tests {
         };
         let event_store_path = temp_db.path().to_str().expect("path").to_owned();
 
-        let _ = execute_github_open_review_tabs_with_opener(&event_store_path, context.clone(), &opener)
-            .await
-            .expect("first invocation");
-        let _ = execute_github_open_review_tabs_with_opener(&event_store_path, context.clone(), &opener)
-            .await
-            .expect("second invocation");
+        let _ = execute_github_open_review_tabs_with_opener(
+            &event_store_path,
+            context.clone(),
+            &opener,
+        )
+        .await
+        .expect("first invocation");
+        let _ = execute_github_open_review_tabs_with_opener(
+            &event_store_path,
+            context.clone(),
+            &opener,
+        )
+        .await
+        .expect("second invocation");
 
         assert_eq!(
             opener.calls(),
@@ -1108,7 +1302,9 @@ mod tests {
 
         let message = err.to_string();
         assert!(message.contains(command_ids::GITHUB_OPEN_REVIEW_TABS));
-        assert!(message.contains("requires an active runtime session or selected work item context"));
+        assert!(
+            message.contains("requires an active runtime session or selected work item context")
+        );
         assert!(opener.calls().is_empty());
     }
 
@@ -1117,8 +1313,12 @@ mod tests {
         let temp_db = TestDbPath::new("app-runtime-command-open-review-tabs-missing-pr");
         let mut store = SqliteEventStore::open(temp_db.path()).expect("open store");
         let work_item_id = WorkItemId::new("wi-open-review-tabs-missing-pr");
-        seed_runtime_mapping(&mut store, &work_item_id, "sess-open-review-tabs-missing-pr")
-            .expect("seed mapping");
+        seed_runtime_mapping(
+            &mut store,
+            &work_item_id,
+            "sess-open-review-tabs-missing-pr",
+        )
+        .expect("seed mapping");
 
         let opener = MockUrlOpener::default();
         let err = match execute_github_open_review_tabs_with_opener(
@@ -1176,12 +1376,154 @@ mod tests {
         assert!(message.contains("open failed intentionally"));
         assert!(message.contains(command_ids::GITHUB_OPEN_REVIEW_TABS));
     }
+
+    #[tokio::test]
+    async fn execute_github_open_review_tabs_lazy_resolves_pr_via_code_host_fallback() {
+        let temp_db = TestDbPath::new("app-runtime-command-open-review-tabs-fallback");
+        let work_item_id = WorkItemId::new("wi-open-review-tabs-fallback");
+        let mut store = SqliteEventStore::open(temp_db.path()).expect("open store");
+        seed_runtime_mapping(&mut store, &work_item_id, "sess-open-review-tabs-fallback")
+            .expect("seed mapping");
+
+        let code_host = MockCodeHost::new(Some(PullRequestRef {
+            repository: RepositoryRef {
+                id: "acme/repo".to_owned(),
+                name: "acme/repo".to_owned(),
+                root: std::path::PathBuf::from("/workspace/wi-open-review-tabs-fallback"),
+            },
+            number: 333,
+            url: "https://github.com/acme/repo/pull/333".to_owned(),
+        }));
+        let opener = MockUrlOpener::default();
+        let (stream_id, mut stream) = super::execute_github_open_review_tabs_with_opener(
+            &code_host,
+            temp_db.path().to_str().expect("path"),
+            SupervisorCommandContext {
+                selected_work_item_id: Some(work_item_id.as_str().to_owned()),
+                selected_session_id: None,
+                scope: None,
+            },
+            &opener,
+        )
+        .await
+        .expect("open review tabs");
+
+        assert!(stream_id.starts_with("runtime-"));
+        let first_chunk = stream
+            .next_chunk()
+            .await
+            .expect("read runtime chunk")
+            .expect("expected runtime message");
+        assert_eq!(first_chunk.finish_reason, Some(LlmFinishReason::Stop));
+        assert!(first_chunk
+            .delta
+            .contains("https://github.com/acme/repo/pull/333"));
+        assert_eq!(
+            opener.calls(),
+            vec!["https://github.com/acme/repo/pull/333".to_owned()]
+        );
+        assert_eq!(code_host.fallback_calls().len(), 1);
+
+        let persisted_store = SqliteEventStore::open(temp_db.path()).expect("reopen store");
+        let runtime = resolve_runtime_mapping_for_context_with_command(
+            &persisted_store,
+            &SupervisorCommandContext {
+                selected_work_item_id: Some(work_item_id.as_str().to_owned()),
+                selected_session_id: None,
+                scope: None,
+            },
+            command_ids::GITHUB_OPEN_REVIEW_TABS,
+        )
+        .expect("runtime mapping");
+        let resolved = resolve_pull_request_for_mapping_with_command(
+            &persisted_store,
+            &runtime,
+            command_ids::GITHUB_OPEN_REVIEW_TABS,
+        )
+        .expect("fallback should persist PR artifact");
+        assert_eq!(resolved.number, 333);
+    }
+
+    #[tokio::test]
+    async fn execute_workflow_reconcile_pr_merge_lazy_resolves_pr_via_code_host_fallback() {
+        let temp_db = TestDbPath::new("app-runtime-command-reconcile-pr-fallback");
+        let work_item_id = WorkItemId::new("wi-reconcile-pr-fallback");
+        let mut store = SqliteEventStore::open(temp_db.path()).expect("open store");
+        seed_runtime_mapping(&mut store, &work_item_id, "sess-reconcile-pr-fallback")
+            .expect("seed mapping");
+
+        let code_host = MockCodeHost::new(Some(PullRequestRef {
+            repository: RepositoryRef {
+                id: "acme/repo".to_owned(),
+                name: "acme/repo".to_owned(),
+                root: std::path::PathBuf::from("/workspace/wi-reconcile-pr-fallback"),
+            },
+            number: 444,
+            url: "https://github.com/acme/repo/pull/444".to_owned(),
+        }));
+
+        let (_stream_id, mut stream) = execute_workflow_reconcile_pr_merge(
+            &code_host,
+            temp_db.path().to_str().expect("path"),
+            SupervisorCommandContext {
+                selected_work_item_id: Some(work_item_id.as_str().to_owned()),
+                selected_session_id: None,
+                scope: None,
+            },
+        )
+        .await
+        .expect("reconcile should succeed with fallback");
+
+        let first_chunk = stream
+            .next_chunk()
+            .await
+            .expect("read runtime chunk")
+            .expect("expected runtime message");
+        assert_eq!(first_chunk.finish_reason, Some(LlmFinishReason::Stop));
+        assert!(first_chunk
+            .delta
+            .contains(command_ids::WORKFLOW_RECONCILE_PR_MERGE));
+        assert_eq!(code_host.fallback_calls().len(), 1);
+
+        let persisted_store = SqliteEventStore::open(temp_db.path()).expect("reopen store");
+        let runtime = resolve_runtime_mapping_for_context_with_command(
+            &persisted_store,
+            &SupervisorCommandContext {
+                selected_work_item_id: Some(work_item_id.as_str().to_owned()),
+                selected_session_id: None,
+                scope: None,
+            },
+            command_ids::WORKFLOW_RECONCILE_PR_MERGE,
+        )
+        .expect("runtime mapping");
+        let resolved = resolve_pull_request_for_mapping_with_command(
+            &persisted_store,
+            &runtime,
+            command_ids::WORKFLOW_RECONCILE_PR_MERGE,
+        )
+        .expect("fallback should persist PR artifact");
+        assert_eq!(resolved.number, 444);
+    }
 }
 
 fn normalize_pull_request_url(url: &str) -> &str {
     url.trim()
         .trim_matches(|ch: char| ch == '"' || ch == '\'' || ch == '(' || ch == ')')
         .trim_end_matches(|ch: char| ch == ',' || ch == ';' || ch == '.')
+}
+
+fn sanitize_error_display_text(input: &str) -> String {
+    let mut output = String::with_capacity(input.len());
+    for ch in input.chars() {
+        match ch {
+            '\n' | '\t' => output.push(ch),
+            '\r' => output.push('\n'),
+            '\u{2400}' => {}
+            _ if ch.is_control() => {}
+            _ => output.push(ch),
+        }
+    }
+    output
 }
 
 fn resolve_runtime_mapping_for_context(
@@ -1229,22 +1571,9 @@ fn resolve_runtime_mapping_for_context_with_command(
     }
 
     Err(CoreError::Configuration(
-        format!(
-            "{command_id} requires an active runtime session or selected work item context"
-        )
-        .to_owned(),
+        format!("{command_id} requires an active runtime session or selected work item context")
+            .to_owned(),
     ))
-}
-
-fn resolve_pull_request_for_mapping(
-    store: &SqliteEventStore,
-    mapping: &RuntimeMappingRecord,
-) -> Result<PullRequestRef, CoreError> {
-    resolve_pull_request_for_mapping_with_command(
-        store,
-        mapping,
-        command_ids::WORKFLOW_APPROVE_PR_READY,
-    )
 }
 
 fn resolve_pull_request_for_mapping_with_command(
@@ -1261,7 +1590,7 @@ fn resolve_pull_request_for_mapping_with_command(
                 continue;
             };
 
-            if artifact.kind != ArtifactKind::PR {
+            if !is_pull_request_artifact_candidate(&artifact.kind, artifact.storage_ref.as_str()) {
                 continue;
             }
 
@@ -1309,6 +1638,108 @@ fn resolve_pull_request_for_mapping_with_command(
     )))
 }
 
+fn repository_ref_for_runtime_mapping(mapping: &RuntimeMappingRecord) -> RepositoryRef {
+    let root = PathBuf::from(mapping.worktree.path.clone());
+    let inferred_name = root
+        .file_name()
+        .and_then(|value| value.to_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("unknown");
+    RepositoryRef {
+        id: inferred_name.to_owned(),
+        name: inferred_name.to_owned(),
+        root,
+    }
+}
+
+fn persist_pull_request_artifact_from_vcs_fallback(
+    store: &mut SqliteEventStore,
+    mapping: &RuntimeMappingRecord,
+    command_id: &str,
+    pr: &PullRequestRef,
+) -> Result<(), CoreError> {
+    let occurred_at = now_timestamp();
+    let artifact_id = ArtifactId::new(next_event_id("artifact-pr-vcs-fallback"));
+    let artifact = ArtifactRecord {
+        artifact_id: artifact_id.clone(),
+        work_item_id: mapping.work_item_id.clone(),
+        kind: ArtifactKind::PR,
+        metadata: json!({
+            "source": "vcs_fallback",
+            "command_id": command_id,
+            "branch": mapping.worktree.branch.as_str(),
+        }),
+        storage_ref: pr.url.clone(),
+        created_at: occurred_at.clone(),
+    };
+    store.create_artifact(&artifact)?;
+    store.append_event(
+        NewEventEnvelope {
+            event_id: next_event_id("artifact-created-pr-vcs-fallback"),
+            occurred_at,
+            work_item_id: Some(mapping.work_item_id.clone()),
+            session_id: Some(mapping.session.session_id.clone()),
+            payload: OrchestrationEventPayload::ArtifactCreated(ArtifactCreatedPayload {
+                artifact_id: artifact_id.clone(),
+                work_item_id: mapping.work_item_id.clone(),
+                kind: ArtifactKind::PR,
+                label: format!("Pull request #{} (vcs fallback)", pr.number),
+                uri: pr.url.clone(),
+            }),
+            schema_version: DOMAIN_EVENT_SCHEMA_VERSION,
+        },
+        &[artifact_id],
+    )?;
+    Ok(())
+}
+
+async fn resolve_pull_request_for_mapping_with_vcs_fallback<C>(
+    store: &mut SqliteEventStore,
+    mapping: &RuntimeMappingRecord,
+    command_id: &str,
+    code_host: &C,
+) -> Result<PullRequestRef, CoreError>
+where
+    C: CodeHostProvider + ?Sized,
+{
+    match resolve_pull_request_for_mapping_with_command(store, mapping, command_id) {
+        Ok(pr) => return Ok(pr),
+        Err(CoreError::Configuration(_)) => {}
+        Err(error) => return Err(error),
+    }
+
+    let repository = repository_ref_for_runtime_mapping(mapping);
+    let fallback = code_host
+        .find_open_pull_request_for_branch(&repository, mapping.worktree.branch.as_str())
+        .await
+        .map_err(|error| {
+            let detail = sanitize_error_display_text(error.to_string().as_str());
+            CoreError::DependencyUnavailable(format!(
+                "{command_id} failed to resolve PR via VCS fallback for work item '{}': {detail}",
+                mapping.work_item_id.as_str(),
+            ))
+        })?;
+
+    let Some(pr) = fallback else {
+        return resolve_pull_request_for_mapping_with_command(store, mapping, command_id);
+    };
+    persist_pull_request_artifact_from_vcs_fallback(store, mapping, command_id, &pr)?;
+    Ok(pr)
+}
+
+fn is_pull_request_artifact_candidate(kind: &ArtifactKind, url: &str) -> bool {
+    matches!(kind, ArtifactKind::PR)
+        || (matches!(kind, ArtifactKind::Link) && looks_like_pull_request_url(url))
+}
+
+fn looks_like_pull_request_url(url: &str) -> bool {
+    let normalized = normalize_pull_request_url(url).to_ascii_lowercase();
+    normalized.contains("/pull/")
+        || normalized.contains("pullrequest")
+        || normalized.contains("pull-request")
+}
+
 async fn execute_workflow_approve_pr_ready<C>(
     code_host: &C,
     event_store_path: &str,
@@ -1317,16 +1748,21 @@ async fn execute_workflow_approve_pr_ready<C>(
 where
     C: CodeHostProvider + ?Sized,
 {
-    let store = open_event_store(event_store_path)?;
+    let command_id = command_ids::WORKFLOW_APPROVE_PR_READY;
+    let mut store = open_event_store(event_store_path)?;
     let runtime = resolve_runtime_mapping_for_context(&store, &context)?;
-    let pr = resolve_pull_request_for_mapping(&store, &runtime)?;
+    let pr = resolve_pull_request_for_mapping_with_vcs_fallback(
+        &mut store, &runtime, command_id, code_host,
+    )
+    .await?;
 
     code_host
         .mark_ready_for_review(&pr)
         .await
         .map_err(|error| {
+            let detail = sanitize_error_display_text(error.to_string().as_str());
             CoreError::DependencyUnavailable(format!(
-                "workflow.approve_pr_ready failed for PR #{}: {error}",
+                "workflow.approve_pr_ready failed for PR #{}: {detail}",
                 pr.number
             ))
         })?;
@@ -1335,6 +1771,186 @@ where
         "workflow.approve_pr_ready command completed for PR #{}",
         pr.number
     ))
+}
+
+fn latest_workflow_state_for_work_item(
+    store: &SqliteEventStore,
+    work_item_id: &WorkItemId,
+) -> Result<WorkflowState, CoreError> {
+    let mut current = WorkflowState::New;
+    let events = store.read_ordered()?;
+    for event in events {
+        if event.work_item_id.as_ref() != Some(work_item_id) {
+            continue;
+        }
+        if let OrchestrationEventPayload::WorkflowTransition(payload) = event.payload {
+            current = payload.to;
+        }
+    }
+    Ok(current)
+}
+
+fn append_workflow_transition_event_for_runtime(
+    store: &mut SqliteEventStore,
+    mapping: &RuntimeMappingRecord,
+    from: &WorkflowState,
+    to: &WorkflowState,
+    reason: WorkflowTransitionReason,
+    guards: &WorkflowGuardContext,
+    command_id: &str,
+) -> Result<WorkflowState, CoreError> {
+    let next = apply_workflow_transition(from, to, &reason, guards).map_err(|error| {
+        CoreError::InvalidCommandArgs {
+            command_id: command_id.to_owned(),
+            reason: format!(
+                "workflow transition validation failed for work item '{}': {error}",
+                mapping.work_item_id.as_str()
+            ),
+        }
+    })?;
+    let session_id = mapping.session.session_id.clone();
+    store.append(NewEventEnvelope {
+        event_id: next_event_id("workflow-transition"),
+        occurred_at: now_timestamp(),
+        work_item_id: Some(mapping.work_item_id.clone()),
+        session_id: Some(session_id),
+        payload: OrchestrationEventPayload::WorkflowTransition(WorkflowTransitionPayload {
+            work_item_id: mapping.work_item_id.clone(),
+            from: from.clone(),
+            to: to.clone(),
+            reason: Some(reason),
+        }),
+        schema_version: DOMAIN_EVENT_SCHEMA_VERSION,
+    })?;
+    Ok(next)
+}
+
+async fn execute_workflow_reconcile_pr_merge<C>(
+    code_host: &C,
+    event_store_path: &str,
+    context: SupervisorCommandContext,
+) -> Result<(String, LlmResponseStream), CoreError>
+where
+    C: CodeHostProvider + ?Sized,
+{
+    let command_id = command_ids::WORKFLOW_RECONCILE_PR_MERGE;
+    let mut store = open_event_store(event_store_path)?;
+    let runtime = resolve_runtime_mapping_for_context_with_command(&store, &context, command_id)?;
+    let pr = resolve_pull_request_for_mapping_with_vcs_fallback(
+        &mut store, &runtime, command_id, code_host,
+    )
+    .await?;
+
+    let merge_state = code_host
+        .get_pull_request_merge_state(&pr)
+        .await
+        .map_err(|error| {
+            let detail = sanitize_error_display_text(error.to_string().as_str());
+            CoreError::DependencyUnavailable(format!(
+                "{command_id} failed for PR #{}: {detail}",
+                pr.number
+            ))
+        })?;
+
+    if !merge_state.merged {
+        let message = json!({
+            "command": command_id,
+            "work_item_id": runtime.work_item_id.as_str(),
+            "merged": false,
+            "merge_conflict": merge_state.merge_conflict,
+            "base_branch": merge_state.base_branch,
+            "head_branch": merge_state.head_branch,
+            "completed": false,
+            "transitions": []
+        })
+        .to_string();
+        return runtime_command_response(message.as_str());
+    }
+
+    let mut transitions = Vec::new();
+    let mut current = latest_workflow_state_for_work_item(&store, &runtime.work_item_id)?;
+
+    loop {
+        if current == WorkflowState::Done {
+            break;
+        }
+
+        if current == WorkflowState::ReadyForReview {
+            let next = append_workflow_transition_event_for_runtime(
+                &mut store,
+                &runtime,
+                &current,
+                &WorkflowState::InReview,
+                WorkflowTransitionReason::ReviewStarted,
+                &WorkflowGuardContext::default(),
+                command_id,
+            )?;
+            transitions.push("ReadyForReview->InReview".to_owned());
+            current = next;
+            continue;
+        }
+
+        if current == WorkflowState::InReview {
+            let next = append_workflow_transition_event_for_runtime(
+                &mut store,
+                &runtime,
+                &current,
+                &WorkflowState::Done,
+                WorkflowTransitionReason::ReviewApprovedAndMerged,
+                &WorkflowGuardContext {
+                    merge_completed: true,
+                    ..WorkflowGuardContext::default()
+                },
+                command_id,
+            )?;
+            transitions.push("InReview->Done".to_owned());
+            current = next;
+            continue;
+        }
+
+        break;
+    }
+
+    let message = json!({
+        "command": command_id,
+        "work_item_id": runtime.work_item_id.as_str(),
+        "merged": merge_state.merged,
+        "merge_conflict": merge_state.merge_conflict,
+        "base_branch": merge_state.base_branch,
+        "head_branch": merge_state.head_branch,
+        "completed": current == WorkflowState::Done,
+        "transitions": transitions
+    })
+    .to_string();
+
+    runtime_command_response(message.as_str())
+}
+
+async fn execute_workflow_merge_pr<C>(
+    code_host: &C,
+    event_store_path: &str,
+    context: SupervisorCommandContext,
+) -> Result<(String, LlmResponseStream), CoreError>
+where
+    C: CodeHostProvider + ?Sized,
+{
+    let command_id = command_ids::WORKFLOW_MERGE_PR;
+    let mut store = open_event_store(event_store_path)?;
+    let runtime = resolve_runtime_mapping_for_context_with_command(&store, &context, command_id)?;
+    let pr = resolve_pull_request_for_mapping_with_vcs_fallback(
+        &mut store, &runtime, command_id, code_host,
+    )
+    .await?;
+
+    code_host.merge_pull_request(&pr).await.map_err(|error| {
+        let detail = sanitize_error_display_text(error.to_string().as_str());
+        CoreError::DependencyUnavailable(format!(
+            "{command_id} failed for PR #{}: {detail}",
+            pr.number
+        ))
+    })?;
+
+    execute_workflow_reconcile_pr_merge(code_host, event_store_path, context).await
 }
 
 fn append_supervisor_event(
@@ -1658,7 +2274,10 @@ where
                     .copied()
                     .unwrap_or("tool");
                 queued_chunks.push_back(LlmStreamChunk {
-                    delta: format!("{TOOL_RESULT_PREFIX} {call_name} {} {}", output.tool_call_id, output.output),
+                    delta: format!(
+                        "{TOOL_RESULT_PREFIX} {call_name} {} {}",
+                        output.tool_call_id, output.output
+                    ),
                     tool_calls: Vec::new(),
                     finish_reason: None,
                     usage: None,
@@ -1751,40 +2370,45 @@ where
 }
 
 async fn execute_github_open_review_tabs_with_opener(
+    code_host: &impl CodeHostProvider,
     event_store_path: &str,
     context: SupervisorCommandContext,
     url_opener: &impl UrlOpener,
 ) -> Result<(String, LlmResponseStream), CoreError> {
-    let store = open_event_store(event_store_path)?;
+    let mut store = open_event_store(event_store_path)?;
     let runtime = resolve_runtime_mapping_for_context_with_command(
         &store,
         &context,
         command_ids::GITHUB_OPEN_REVIEW_TABS,
     )?;
-    let pr = resolve_pull_request_for_mapping_with_command(
-        &store,
+    let pr = resolve_pull_request_for_mapping_with_vcs_fallback(
+        &mut store,
         &runtime,
         command_ids::GITHUB_OPEN_REVIEW_TABS,
-    )?;
+        code_host,
+    )
+    .await?;
 
     let command_id = command_ids::GITHUB_OPEN_REVIEW_TABS;
     UrlOpener::open_url(url_opener, pr.url.as_str())
         .await
         .map_err(|error| {
+            let detail = sanitize_error_display_text(error.to_string().as_str());
             CoreError::DependencyUnavailable(format!(
-                "{command_id} failed to open PR URL '{}': {error}",
-                pr.url
+                "{command_id} failed to open PR URL '{}': {detail}",
+                pr.url,
             ))
         })?;
     runtime_command_response(&format!("{GITHUB_OPEN_REVIEW_TABS_ACK} {}", pr.url))
 }
 
 async fn execute_github_open_review_tabs(
+    code_host: &impl CodeHostProvider,
     event_store_path: &str,
     context: SupervisorCommandContext,
 ) -> Result<(String, LlmResponseStream), CoreError> {
     let opener = default_system_url_opener()?;
-    execute_github_open_review_tabs_with_opener(event_store_path, context, &opener).await
+    execute_github_open_review_tabs_with_opener(code_host, event_store_path, context, &opener).await
 }
 
 pub(crate) async fn dispatch_supervisor_runtime_command<P>(
@@ -1806,8 +2430,14 @@ where
         Command::WorkflowApprovePrReady => {
             execute_workflow_approve_pr_ready(code_host, event_store_path, context).await
         }
+        Command::WorkflowReconcilePrMerge => {
+            execute_workflow_reconcile_pr_merge(code_host, event_store_path, context).await
+        }
+        Command::WorkflowMergePr => {
+            execute_workflow_merge_pr(code_host, event_store_path, context).await
+        }
         Command::GithubOpenReviewTabs => {
-            execute_github_open_review_tabs(event_store_path, context).await
+            execute_github_open_review_tabs(code_host, event_store_path, context).await
         }
         command => Err(invalid_supervisor_runtime_usage(command.id())),
     }

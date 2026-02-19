@@ -6,7 +6,8 @@ use std::process::Command;
 
 use orchestrator_core::{
     CodeHostKind, CodeHostProvider, CoreError, CreatePullRequestRequest, GithubClient,
-    PullRequestRef, PullRequestSummary, RepositoryRef, ReviewerRequest, UrlOpener,
+    PullRequestMergeState, PullRequestRef, PullRequestSummary, RepositoryRef, ReviewerRequest,
+    UrlOpener,
 };
 use serde::Deserialize;
 
@@ -141,12 +142,14 @@ impl<R: CommandRunner> SystemUrlOpener<R> {
     }
 
     fn command_output_detail(output: &std::process::Output) -> String {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+        let stderr = sanitize_command_output_text(String::from_utf8_lossy(&output.stderr).as_ref());
+        let stderr = stderr.trim().to_owned();
         if !stderr.is_empty() {
             return stderr;
         }
 
-        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+        let stdout = sanitize_command_output_text(String::from_utf8_lossy(&output.stdout).as_ref());
+        let stdout = stdout.trim().to_owned();
         if !stdout.is_empty() {
             return stdout;
         }
@@ -219,6 +222,40 @@ impl<R: CommandRunner> GhCliClient<R> {
             OsString::from("pr"),
             OsString::from("ready"),
             OsString::from(pr.number.to_string()),
+        ]
+    }
+
+    fn merge_pull_request_args(pr: &PullRequestRef) -> Vec<OsString> {
+        vec![
+            OsString::from("pr"),
+            OsString::from("merge"),
+            OsString::from(pr.number.to_string()),
+            OsString::from("--delete-branch"),
+        ]
+    }
+
+    fn pull_request_merge_state_args(pr: &PullRequestRef) -> Vec<OsString> {
+        vec![
+            OsString::from("pr"),
+            OsString::from("view"),
+            OsString::from(pr.number.to_string()),
+            OsString::from("--json"),
+            OsString::from("mergedAt,isDraft,mergeStateStatus,baseRefName,headRefName"),
+        ]
+    }
+
+    fn pull_request_for_branch_args(head_branch: &str) -> Vec<OsString> {
+        vec![
+            OsString::from("pr"),
+            OsString::from("list"),
+            OsString::from("--state"),
+            OsString::from("open"),
+            OsString::from("--head"),
+            OsString::from(head_branch),
+            OsString::from("--json"),
+            OsString::from("number,url"),
+            OsString::from("--limit"),
+            OsString::from("1"),
         ]
     }
 
@@ -320,12 +357,14 @@ impl<R: CommandRunner> GhCliClient<R> {
     }
 
     fn command_output_detail(output: &std::process::Output) -> String {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+        let stderr = sanitize_command_output_text(String::from_utf8_lossy(&output.stderr).as_ref());
+        let stderr = stderr.trim().to_owned();
         if !stderr.is_empty() {
             return stderr;
         }
 
-        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+        let stdout = sanitize_command_output_text(String::from_utf8_lossy(&output.stdout).as_ref());
+        let stdout = stdout.trim().to_owned();
         if !stdout.is_empty() {
             return stdout;
         }
@@ -432,6 +471,10 @@ impl<R: CommandRunner> GhCliClient<R> {
             return Some(value);
         }
 
+        Self::extract_repository_name_from_pr_url(url)
+    }
+
+    fn extract_repository_name_from_pr_url(url: &str) -> Option<String> {
         let path = url
             .split("://")
             .nth(1)
@@ -465,6 +508,10 @@ impl<R: CommandRunner> GhCliClient<R> {
             && detail.contains("review")
             && (detail.contains("request") || detail.contains("requested"))
     }
+
+    fn is_already_merged_error(detail: &str) -> bool {
+        detail.contains("already") && detail.contains("merged")
+    }
 }
 
 fn parse_bool_env(name: &str, value: &str) -> Result<bool, CoreError> {
@@ -490,6 +537,20 @@ fn read_bool_env(name: &str) -> Result<bool, CoreError> {
 fn is_bare_command_name(path: &Path) -> bool {
     let mut components = path.components();
     matches!(components.next(), Some(Component::Normal(_))) && components.next().is_none()
+}
+
+fn sanitize_command_output_text(input: &str) -> String {
+    let mut output = String::with_capacity(input.len());
+    for ch in input.chars() {
+        match ch {
+            '\n' | '\t' => output.push(ch),
+            '\r' => output.push('\n'),
+            '\u{2400}' => {}
+            _ if ch.is_control() => {}
+            _ => output.push(ch),
+        }
+    }
+    output
 }
 
 fn validate_command_binary_path(
@@ -640,6 +701,135 @@ impl<R: CommandRunner> CodeHostProvider for GhCliClient<R> {
 
         Ok(summaries)
     }
+
+    async fn get_pull_request_merge_state(
+        &self,
+        pr: &PullRequestRef,
+    ) -> Result<PullRequestMergeState, CoreError> {
+        if pr.number == 0 {
+            return Err(CoreError::Configuration(
+                "Pull request number must be greater than zero.".to_owned(),
+            ));
+        }
+        Self::ensure_repo_root_available(&pr.repository.root, "read pull request merge state")?;
+
+        let args = Self::pull_request_merge_state_args(pr);
+        let output = self.run_gh(&args, Some(pr.repository.root.as_path()))?;
+        let parsed: GhPullRequestMergeState =
+            serde_json::from_slice(&output.stdout).map_err(|error| {
+                CoreError::DependencyUnavailable(format!(
+                    "Failed to parse `gh pr view` merge-state JSON output: {error}. Output: {}",
+                    Self::truncate_for_error(&String::from_utf8_lossy(&output.stdout))
+                ))
+            })?;
+
+        Ok(PullRequestMergeState {
+            merged: parsed.merged_at.is_some(),
+            is_draft: parsed.is_draft,
+            merge_conflict: parsed
+                .merge_state_status
+                .as_deref()
+                .map(|status| {
+                    let normalized = status.trim().to_ascii_uppercase();
+                    normalized == "DIRTY" || normalized == "CONFLICTING"
+                })
+                .unwrap_or(false),
+            base_branch: parsed.base_ref_name.and_then(|branch| {
+                let trimmed = branch.trim().to_owned();
+                if trimmed.is_empty() {
+                    None
+                } else {
+                    Some(trimmed)
+                }
+            }),
+            head_branch: parsed.head_ref_name.and_then(|branch| {
+                let trimmed = branch.trim().to_owned();
+                if trimmed.is_empty() {
+                    None
+                } else {
+                    Some(trimmed)
+                }
+            }),
+        })
+    }
+
+    async fn merge_pull_request(&self, pr: &PullRequestRef) -> Result<(), CoreError> {
+        if pr.number == 0 {
+            return Err(CoreError::Configuration(
+                "Pull request number must be greater than zero.".to_owned(),
+            ));
+        }
+        Self::ensure_repo_root_available(&pr.repository.root, "merge pull request")?;
+
+        let args = Self::merge_pull_request_args(pr);
+        let output = self.run_gh_raw(&args, Some(pr.repository.root.as_path()))?;
+        if output.status.success() {
+            return Ok(());
+        }
+
+        let detail = Self::command_output_detail(&output).to_ascii_lowercase();
+        if Self::is_already_merged_error(&detail) {
+            return Ok(());
+        }
+
+        Err(self.command_failed(&args, &output))
+    }
+
+    async fn find_open_pull_request_for_branch(
+        &self,
+        repository: &RepositoryRef,
+        head_branch: &str,
+    ) -> Result<Option<PullRequestRef>, CoreError> {
+        Self::ensure_repo_root_available(
+            &repository.root,
+            "resolve pull request for branch fallback",
+        )?;
+        let head_branch = head_branch.trim();
+        Self::ensure_non_empty(head_branch, "Pull request head branch")?;
+
+        let args = Self::pull_request_for_branch_args(head_branch);
+        let output = self.run_gh(&args, Some(repository.root.as_path()))?;
+        let prs: Vec<GhBranchPullRequest> =
+            serde_json::from_slice(&output.stdout).map_err(|error| {
+                CoreError::DependencyUnavailable(format!(
+                    "Failed to parse `gh pr list` JSON output: {error}. Output: {}",
+                    Self::truncate_for_error(&String::from_utf8_lossy(&output.stdout))
+                ))
+            })?;
+
+        let Some(pr) = prs.into_iter().next() else {
+            return Ok(None);
+        };
+
+        let repository_name = Self::extract_repository_name_from_pr_url(pr.url.as_str())
+            .or_else(|| {
+                let candidate = repository.name.trim();
+                if candidate.is_empty() {
+                    None
+                } else {
+                    Some(candidate.to_owned())
+                }
+            })
+            .or_else(|| {
+                let candidate = repository.id.trim();
+                if candidate.is_empty() {
+                    None
+                } else {
+                    Some(candidate.to_owned())
+                }
+            })
+            .unwrap_or_else(|| "unknown/unknown".to_owned());
+
+        Ok(Some(PullRequestRef {
+            repository: RepositoryRef {
+                id: repository_name.clone(),
+                name: repository_name,
+                root: repository.root.clone(),
+            },
+            number: pr.number,
+            url: pr.url,
+        }))
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -667,6 +857,26 @@ struct GhReviewQueueRepository {
 struct GhReviewQueueOwner {
     #[serde(default)]
     login: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GhPullRequestMergeState {
+    #[serde(rename = "mergedAt", default)]
+    merged_at: Option<String>,
+    #[serde(rename = "isDraft", default)]
+    is_draft: bool,
+    #[serde(rename = "mergeStateStatus", default)]
+    merge_state_status: Option<String>,
+    #[serde(rename = "baseRefName", default)]
+    base_ref_name: Option<String>,
+    #[serde(rename = "headRefName", default)]
+    head_ref_name: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GhBranchPullRequest {
+    number: u64,
+    url: String,
 }
 
 #[cfg(test)]
@@ -861,6 +1071,16 @@ mod tests {
             .await
             .expect_err("open failure should fail");
         assert!(err.to_string().contains("Unable to open URL"));
+    }
+
+    #[test]
+    fn command_output_detail_strips_control_characters() {
+        let detail = GhCliClient::<ProcessCommandRunner>::command_output_detail(&output(
+            1,
+            "",
+            "GitHub CLI command fa\0i\u{2400}led\r\n",
+        ));
+        assert_eq!(detail, "GitHub CLI command failed");
     }
 
     #[tokio::test]
@@ -1178,6 +1398,67 @@ mod tests {
         assert_eq!(queue.len(), 1);
         assert_eq!(queue[0].reference.repository.id, "octo/docs");
         assert!(queue[0].is_draft);
+    }
+
+    #[tokio::test]
+    async fn find_open_pull_request_for_branch_uses_head_filter_and_parses_result() {
+        let runner = StubRunner::with_results(vec![Ok(output(
+            0,
+            r#"[{"number":52,"url":"https://github.com/octocat/orchestrator/pull/52"}]"#,
+            "",
+        ))]);
+        let client = GhCliClient::new(runner).expect("init");
+        let repository = sample_repository();
+
+        let pr = CodeHostProvider::find_open_pull_request_for_branch(
+            &client,
+            &repository,
+            "feature/resolve-pr",
+        )
+        .await
+        .expect("find branch PR")
+        .expect("expected PR");
+
+        assert_eq!(pr.number, 52);
+        assert_eq!(pr.url, "https://github.com/octocat/orchestrator/pull/52");
+        assert_eq!(pr.repository.id, "octocat/orchestrator");
+        assert_eq!(pr.repository.root, repository.root);
+
+        let calls = client.runner.calls.lock().expect("lock");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(
+            calls[0].1,
+            vec![
+                OsString::from("pr"),
+                OsString::from("list"),
+                OsString::from("--state"),
+                OsString::from("open"),
+                OsString::from("--head"),
+                OsString::from("feature/resolve-pr"),
+                OsString::from("--json"),
+                OsString::from("number,url"),
+                OsString::from("--limit"),
+                OsString::from("1"),
+            ]
+        );
+        assert_eq!(calls[0].2, Some(repository.root.clone()));
+    }
+
+    #[tokio::test]
+    async fn find_open_pull_request_for_branch_returns_none_when_not_found() {
+        let runner = StubRunner::with_results(vec![Ok(output(0, "[]", ""))]);
+        let client = GhCliClient::new(runner).expect("init");
+        let repository = sample_repository();
+
+        let pr = CodeHostProvider::find_open_pull_request_for_branch(
+            &client,
+            &repository,
+            "feature/no-pr",
+        )
+        .await
+        .expect("find branch PR");
+
+        assert!(pr.is_none());
     }
 
     #[test]

@@ -1,8 +1,8 @@
 use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
-use serde_json::Value;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 use crate::{CoreError, TicketId, TicketProvider, WorktreeId};
 
@@ -100,8 +100,7 @@ pub trait TicketingProvider: Send + Sync {
     async fn list_tickets(&self, query: TicketQuery) -> Result<Vec<TicketSummary>, CoreError>;
     async fn create_ticket(&self, request: CreateTicketRequest)
         -> Result<TicketSummary, CoreError>;
-    async fn get_ticket(&self, _request: GetTicketRequest)
-        -> Result<TicketDetails, CoreError> {
+    async fn get_ticket(&self, _request: GetTicketRequest) -> Result<TicketDetails, CoreError> {
         Err(CoreError::DependencyUnavailable(format!(
             "get_ticket is not implemented by {:?} provider",
             self.provider()
@@ -283,6 +282,18 @@ pub struct PullRequestSummary {
     pub is_draft: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PullRequestMergeState {
+    pub merged: bool,
+    pub is_draft: bool,
+    #[serde(default)]
+    pub merge_conflict: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_branch: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub head_branch: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct ReviewerRequest {
     pub users: Vec<String>,
@@ -304,6 +315,18 @@ pub trait CodeHostProvider: Send + Sync {
         reviewers: ReviewerRequest,
     ) -> Result<(), CoreError>;
     async fn list_waiting_for_my_review(&self) -> Result<Vec<PullRequestSummary>, CoreError>;
+    async fn get_pull_request_merge_state(
+        &self,
+        pr: &PullRequestRef,
+    ) -> Result<PullRequestMergeState, CoreError>;
+    async fn merge_pull_request(&self, pr: &PullRequestRef) -> Result<(), CoreError>;
+    async fn find_open_pull_request_for_branch(
+        &self,
+        _repository: &RepositoryRef,
+        _head_branch: &str,
+    ) -> Result<Option<PullRequestRef>, CoreError> {
+        Ok(None)
+    }
 }
 
 #[async_trait]
