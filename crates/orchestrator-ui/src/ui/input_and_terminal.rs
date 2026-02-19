@@ -250,7 +250,7 @@ enum RoutedInput {
 fn mode_help(mode: UiMode) -> &'static str {
     match mode {
         UiMode::Normal => {
-            "j/k: select | Tab/S-Tab: batch cycle | 1-4 or z{1-4}: batch jump | g/G: first/last | s: start ticket | c: supervisor chat | Enter: focus | i: terminal | D: worktree diff modal | n: advance session workflow | x: kill selected session | v{d/t/p/c}: inspectors | q: quit"
+            "j/k: select | Tab/S-Tab: batch cycle | 1-4 or z{1-4}: batch jump | g/G: first/last | s: start ticket | c: supervisor chat | Enter: focus | i: terminal | Shift+J/K: scroll terminal stream | G (terminal): bottom | D: worktree diff modal | n: advance session workflow | x: kill selected session | v{d/t/p/c}: inspectors | q: quit"
         }
         UiMode::Insert => "Insert input active | Esc/Ctrl-[: Normal",
         UiMode::Terminal => "Terminal compose active | Enter send | Shift+Enter newline | Esc or Ctrl-\\ Ctrl-n: Normal | then n: advance workflow",
@@ -402,10 +402,6 @@ fn append_terminal_foldable_content(
             content: entry_content.to_owned(),
             folded: true,
         }));
-
-    if state.selected_fold_entry.is_none() {
-        state.selected_fold_entry = Some(state.entries.len().saturating_sub(1));
-    }
 }
 
 fn is_outgoing_transcript_line(line: &str) -> bool {
@@ -486,101 +482,19 @@ fn route_key_press(shell_state: &mut UiShellState, key: KeyEvent) -> RoutedInput
 
     if shell_state.mode == UiMode::Normal && shell_state.is_terminal_view_active() {
         match key.code {
-            KeyCode::Char(digit) if digit.is_ascii_digit() => {
-                if digit == '0' && shell_state.terminal_nav_count.is_none() {
-                    shell_state.clear_terminal_nav_prefixes();
-                    shell_state.move_terminal_output_line_start(false);
-                } else if let Some(value) = digit.to_digit(10) {
-                    shell_state.terminal_nav_push_digit(value as u8);
-                }
+            KeyCode::Char('J') => {
+                shell_state.scroll_terminal_output_view(1);
                 return RoutedInput::Ignore;
             }
-            KeyCode::Char('g') => {
-                if shell_state.terminal_nav_pending_g {
-                    let target = shell_state.terminal_nav_take_count().saturating_sub(1);
-                    shell_state.set_terminal_output_cursor_line(target);
-                    shell_state.clear_terminal_nav_prefixes();
-                } else {
-                    shell_state.terminal_nav_pending_g = true;
-                }
+            KeyCode::Char('K') => {
+                shell_state.scroll_terminal_output_view(-1);
                 return RoutedInput::Ignore;
             }
-            KeyCode::Char('w') => {
-                let count = shell_state.terminal_nav_take_count();
-                shell_state.move_terminal_output_word_forward(count, false, false);
-                shell_state.clear_terminal_nav_prefixes();
-                return RoutedInput::Ignore;
-            }
-            KeyCode::Char('W') => {
-                let count = shell_state.terminal_nav_take_count();
-                shell_state.move_terminal_output_word_forward(count, false, true);
-                shell_state.clear_terminal_nav_prefixes();
-                return RoutedInput::Ignore;
-            }
-            KeyCode::Char('e') => {
-                let count = shell_state.terminal_nav_take_count();
-                shell_state.move_terminal_output_word_forward(count, true, false);
-                shell_state.clear_terminal_nav_prefixes();
-                return RoutedInput::Ignore;
-            }
-            KeyCode::Char('E') => {
-                let count = shell_state.terminal_nav_take_count();
-                shell_state.move_terminal_output_word_forward(count, true, true);
-                shell_state.clear_terminal_nav_prefixes();
-                return RoutedInput::Ignore;
-            }
-            KeyCode::Char('b') => {
-                let count = shell_state.terminal_nav_take_count();
-                shell_state.move_terminal_output_word_backward(count, false);
-                shell_state.clear_terminal_nav_prefixes();
-                return RoutedInput::Ignore;
-            }
-            KeyCode::Char('B') => {
-                let count = shell_state.terminal_nav_take_count();
-                shell_state.move_terminal_output_word_backward(count, true);
-                shell_state.clear_terminal_nav_prefixes();
-                return RoutedInput::Ignore;
-            }
-            KeyCode::Char('$') => {
-                shell_state.move_terminal_output_line_end();
-                shell_state.clear_terminal_nav_prefixes();
-                return RoutedInput::Ignore;
-            }
-            KeyCode::Char('^') => {
-                shell_state.move_terminal_output_line_start(true);
-                shell_state.clear_terminal_nav_prefixes();
-                return RoutedInput::Ignore;
-            }
-            KeyCode::Char('j') | KeyCode::Down => {
-                let count = shell_state.terminal_nav_take_count() as isize;
-                shell_state.move_terminal_output_cursor(count.max(1));
-                shell_state.clear_terminal_nav_prefixes();
-                return RoutedInput::Ignore;
-            }
-            KeyCode::Char('k') | KeyCode::Up => {
-                let count = shell_state.terminal_nav_take_count() as isize;
-                shell_state.move_terminal_output_cursor(-count.max(1));
-                shell_state.clear_terminal_nav_prefixes();
-                return RoutedInput::Ignore;
-            }
-            KeyCode::Char('h') | KeyCode::Left => {
-                if !shell_state.fold_or_unfold_selected_terminal_section(true) {
-                    shell_state.move_terminal_output_cursor_col(-1);
-                }
-                shell_state.clear_terminal_nav_prefixes();
-                return RoutedInput::Ignore;
-            }
-            KeyCode::Char('l') | KeyCode::Right => {
-                if !shell_state.fold_or_unfold_selected_terminal_section(false) {
-                    shell_state.move_terminal_output_cursor_col(1);
-                }
-                shell_state.clear_terminal_nav_prefixes();
+            KeyCode::Char('G') => {
+                shell_state.scroll_terminal_output_to_bottom();
                 return RoutedInput::Ignore;
             }
             _ => {}
-        }
-        if shell_state.terminal_nav_pending_g {
-            shell_state.clear_terminal_nav_prefixes();
         }
     }
 
@@ -865,4 +779,3 @@ fn routed_command(route: RoutedInput) -> Option<UiCommand> {
         _ => None,
     }
 }
-

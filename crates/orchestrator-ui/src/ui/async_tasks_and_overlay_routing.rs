@@ -134,23 +134,6 @@ struct MergeQueueResponse {
     head_branch: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum TerminalWordClass {
-    Whitespace,
-    Word,
-    Punctuation,
-}
-
-fn terminal_word_class(ch: char, big_word: bool) -> TerminalWordClass {
-    if ch.is_whitespace() {
-        TerminalWordClass::Whitespace
-    } else if big_word || ch.is_alphanumeric() || ch == '_' {
-        TerminalWordClass::Word
-    } else {
-        TerminalWordClass::Punctuation
-    }
-}
-
 fn parse_merge_queue_response(output: &str) -> MergeQueueResponse {
     let trimmed = output.trim();
     if trimmed.is_empty() {
@@ -728,4 +711,3 @@ fn route_ticket_picker_repository_prompt_key(
 
     RoutedInput::Ignore
 }
-

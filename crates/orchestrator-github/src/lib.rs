@@ -178,6 +178,23 @@ pub struct GhCliClient<R: CommandRunner> {
     allow_unsafe_command_paths: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GhMergeStrategy {
+    Merge,
+    Squash,
+    Rebase,
+}
+
+impl GhMergeStrategy {
+    const fn flag(self) -> &'static str {
+        match self {
+            Self::Merge => "--merge",
+            Self::Squash => "--squash",
+            Self::Rebase => "--rebase",
+        }
+    }
+}
+
 impl<R: CommandRunner> GhCliClient<R> {
     pub fn new(runner: R) -> Result<Self, CoreError> {
         let binary = std::env::var_os(ENV_GH_BIN)
@@ -225,13 +242,20 @@ impl<R: CommandRunner> GhCliClient<R> {
         ]
     }
 
-    fn merge_pull_request_args(pr: &PullRequestRef) -> Vec<OsString> {
-        vec![
+    fn merge_pull_request_args(
+        pr: &PullRequestRef,
+        strategy: Option<GhMergeStrategy>,
+    ) -> Vec<OsString> {
+        let mut args = vec![
             OsString::from("pr"),
             OsString::from("merge"),
             OsString::from(pr.number.to_string()),
-            OsString::from("--delete-branch"),
-        ]
+        ];
+        if let Some(strategy) = strategy {
+            args.push(OsString::from(strategy.flag()));
+        }
+        args.push(OsString::from("--delete-branch"));
+        args
     }
 
     fn pull_request_merge_state_args(pr: &PullRequestRef) -> Vec<OsString> {
@@ -512,6 +536,27 @@ impl<R: CommandRunner> GhCliClient<R> {
     fn is_already_merged_error(detail: &str) -> bool {
         detail.contains("already") && detail.contains("merged")
     }
+
+    fn requires_explicit_merge_strategy(detail: &str) -> bool {
+        let mentions_strategy_flags =
+            detail.contains("--merge") || detail.contains("--rebase") || detail.contains("--squash");
+        mentions_strategy_flags && detail.contains("not running interactively")
+    }
+
+    fn is_merge_strategy_disabled(detail: &str, strategy: GhMergeStrategy) -> bool {
+        if !(detail.contains("not allowed")
+            || detail.contains("disabled")
+            || detail.contains("not enabled"))
+        {
+            return false;
+        }
+
+        match strategy {
+            GhMergeStrategy::Merge => detail.contains("merge"),
+            GhMergeStrategy::Squash => detail.contains("squash"),
+            GhMergeStrategy::Rebase => detail.contains("rebase"),
+        }
+    }
 }
 
 fn parse_bool_env(name: &str, value: &str) -> Result<bool, CoreError> {
@@ -761,7 +806,7 @@ impl<R: CommandRunner> CodeHostProvider for GhCliClient<R> {
         }
         Self::ensure_repo_root_available(&pr.repository.root, "merge pull request")?;
 
-        let args = Self::merge_pull_request_args(pr);
+        let args = Self::merge_pull_request_args(pr, None);
         let output = self.run_gh_raw(&args, Some(pr.repository.root.as_path()))?;
         if output.status.success() {
             return Ok(());
@@ -771,8 +816,44 @@ impl<R: CommandRunner> CodeHostProvider for GhCliClient<R> {
         if Self::is_already_merged_error(&detail) {
             return Ok(());
         }
+        if !Self::requires_explicit_merge_strategy(&detail) {
+            return Err(self.command_failed(&args, &output));
+        }
 
-        Err(self.command_failed(&args, &output))
+        let mut first_non_strategy_error: Option<CoreError> = None;
+        let mut last_strategy_disabled_error: Option<CoreError> = None;
+        for strategy in [
+            GhMergeStrategy::Merge,
+            GhMergeStrategy::Squash,
+            GhMergeStrategy::Rebase,
+        ] {
+            let strategy_args = Self::merge_pull_request_args(pr, Some(strategy));
+            let strategy_output =
+                self.run_gh_raw(&strategy_args, Some(pr.repository.root.as_path()))?;
+            if strategy_output.status.success() {
+                return Ok(());
+            }
+
+            let strategy_detail =
+                Self::command_output_detail(&strategy_output).to_ascii_lowercase();
+            if Self::is_already_merged_error(&strategy_detail) {
+                return Ok(());
+            }
+
+            let error = self.command_failed(&strategy_args, &strategy_output);
+            if Self::is_merge_strategy_disabled(&strategy_detail, strategy) {
+                last_strategy_disabled_error = Some(error);
+                continue;
+            }
+
+            if first_non_strategy_error.is_none() {
+                first_non_strategy_error = Some(error);
+            }
+        }
+
+        Err(first_non_strategy_error
+            .or(last_strategy_disabled_error)
+            .unwrap_or_else(|| self.command_failed(&args, &output)))
     }
 
     async fn find_open_pull_request_for_branch(
@@ -1244,6 +1325,147 @@ mod tests {
         CodeHostProvider::mark_ready_for_review(&client, &pr)
             .await
             .expect("already-ready response should be accepted");
+    }
+
+    #[tokio::test]
+    async fn merge_pull_request_retries_with_explicit_strategy_when_required() {
+        let runner = StubRunner::with_results(vec![
+            Ok(output(
+                1,
+                "",
+                "--merge, --rebase, or --squash required when not running interactively",
+            )),
+            Ok(success_output()),
+        ]);
+        let client = GhCliClient::new(runner).expect("init");
+        let pr = PullRequestRef {
+            repository: sample_repository(),
+            number: 7,
+            url: "https://github.com/octocat/orchestrator/pull/7".to_owned(),
+        };
+
+        CodeHostProvider::merge_pull_request(&client, &pr)
+            .await
+            .expect("merge should succeed via strategy retry");
+
+        let calls = client.runner.calls.lock().expect("lock");
+        assert_eq!(calls.len(), 2);
+        assert_eq!(
+            calls[0].1,
+            vec![
+                OsString::from("pr"),
+                OsString::from("merge"),
+                OsString::from("7"),
+                OsString::from("--delete-branch"),
+            ]
+        );
+        assert_eq!(
+            calls[1].1,
+            vec![
+                OsString::from("pr"),
+                OsString::from("merge"),
+                OsString::from("7"),
+                OsString::from("--merge"),
+                OsString::from("--delete-branch"),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn merge_pull_request_falls_back_when_primary_strategy_is_disabled() {
+        let runner = StubRunner::with_results(vec![
+            Ok(output(
+                1,
+                "",
+                "--merge, --rebase, or --squash required when not running interactively",
+            )),
+            Ok(output(1, "", "merge commits are not allowed on this repository")),
+            Ok(success_output()),
+        ]);
+        let client = GhCliClient::new(runner).expect("init");
+        let pr = PullRequestRef {
+            repository: sample_repository(),
+            number: 11,
+            url: "https://github.com/octocat/orchestrator/pull/11".to_owned(),
+        };
+
+        CodeHostProvider::merge_pull_request(&client, &pr)
+            .await
+            .expect("merge should fall back to a supported strategy");
+
+        let calls = client.runner.calls.lock().expect("lock");
+        assert_eq!(calls.len(), 3);
+        assert_eq!(
+            calls[1].1,
+            vec![
+                OsString::from("pr"),
+                OsString::from("merge"),
+                OsString::from("11"),
+                OsString::from("--merge"),
+                OsString::from("--delete-branch"),
+            ]
+        );
+        assert_eq!(
+            calls[2].1,
+            vec![
+                OsString::from("pr"),
+                OsString::from("merge"),
+                OsString::from("11"),
+                OsString::from("--squash"),
+                OsString::from("--delete-branch"),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn merge_pull_request_continues_retrying_strategies_after_non_policy_failure() {
+        let runner = StubRunner::with_results(vec![
+            Ok(output(
+                1,
+                "",
+                "--merge, --rebase, or --squash required when not running interactively",
+            )),
+            Ok(output(1, "", "merge commits are disabled for this repository")),
+            Ok(output(
+                1,
+                "",
+                "merge blocked: required status checks have not passed",
+            )),
+            Ok(success_output()),
+        ]);
+        let client = GhCliClient::new(runner).expect("init");
+        let pr = PullRequestRef {
+            repository: sample_repository(),
+            number: 13,
+            url: "https://github.com/octocat/orchestrator/pull/13".to_owned(),
+        };
+
+        CodeHostProvider::merge_pull_request(&client, &pr)
+            .await
+            .expect("merge should continue retrying strategies and eventually succeed");
+
+        let calls = client.runner.calls.lock().expect("lock");
+        assert_eq!(calls.len(), 4);
+        assert_eq!(
+            calls[2].1,
+            vec![
+                OsString::from("pr"),
+                OsString::from("merge"),
+                OsString::from("13"),
+                OsString::from("--squash"),
+                OsString::from("--delete-branch"),
+            ]
+        );
+        assert_eq!(
+            calls[3].1,
+            vec![
+                OsString::from("pr"),
+                OsString::from("merge"),
+                OsString::from("13"),
+                OsString::from("--rebase"),
+                OsString::from("--delete-branch"),
+            ]
+        );
     }
 
     #[tokio::test]

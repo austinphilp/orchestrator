@@ -548,12 +548,9 @@ impl SupervisorResponseState {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct TerminalViewState {
     entries: Vec<TerminalTranscriptEntry>,
-    selected_fold_entry: Option<usize>,
     error: Option<String>,
     output_fragment: String,
     workflow_stage: TerminalWorkflowStage,
-    output_cursor_line: usize,
-    output_cursor_col: usize,
     output_scroll_line: usize,
     output_viewport_rows: usize,
     output_follow_tail: bool,
@@ -565,12 +562,9 @@ impl Default for TerminalViewState {
     fn default() -> Self {
         Self {
             entries: Vec::new(),
-            selected_fold_entry: None,
             error: None,
             output_fragment: String::new(),
             workflow_stage: TerminalWorkflowStage::Planning,
-            output_cursor_line: 0,
-            output_cursor_col: 0,
             output_scroll_line: 0,
             output_viewport_rows: 1,
             output_follow_tail: true,
@@ -596,7 +590,6 @@ struct TerminalFoldSection {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct RenderedTerminalLine {
     text: String,
-    fold_header_entry: Option<usize>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -653,11 +646,11 @@ impl TerminalWorkflowStage {
         match self {
             Self::Planning => Some((
                 Self::Implementation,
-                "Workflow transition approved: Planning -> Implementation. End planning mode and begin implementation in this worktree now.",
+                "Workflow transition approved: Planning -> Implementation. End planning mode and begin implementation in this worktree now. Before moving out of implementation, run the full test suite for this repository and verify it passes.",
             )),
             Self::Implementation => Some((
                 Self::Review,
-                "Workflow transition approved: Implementation -> Review. Pause implementation, run the build and fix all errors and warnings, then open a GitHub PR using the gh CLI and provide a review-ready summary with PR link, evidence, tests, and open risks. While in review, keep the worktree synced with remote/base as merge-status polling runs.",
+                "Workflow transition approved: Implementation -> Review. Pause implementation, run the build and fix all errors and warnings, run the full test suite and verify it passes, then open a GitHub PR using the gh CLI and provide a review-ready summary with PR link, evidence, tests, and open risks. While in review, keep the worktree synced with remote/base as merge-status polling runs.",
             )),
             Self::Review => Some((
                 Self::Complete,
