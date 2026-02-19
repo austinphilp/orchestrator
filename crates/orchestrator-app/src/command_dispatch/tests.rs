@@ -715,6 +715,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn execute_workflow_reconcile_pr_merge_returns_not_resolved_response_when_pr_missing() {
+        let temp_db = TestDbPath::new("app-runtime-command-reconcile-pr-missing");
+        let work_item_id = WorkItemId::new("wi-reconcile-pr-missing");
+        let mut store = SqliteEventStore::open(temp_db.path()).expect("open store");
+        seed_runtime_mapping(&mut store, &work_item_id, "sess-reconcile-pr-missing")
+            .expect("seed mapping");
+
+        let code_host = MockCodeHost::new(None);
+        let (_stream_id, mut stream) = execute_workflow_reconcile_pr_merge(
+            &code_host,
+            temp_db.path().to_str().expect("path"),
+            SupervisorCommandContext {
+                selected_work_item_id: Some(work_item_id.as_str().to_owned()),
+                selected_session_id: Some("sess-reconcile-pr-missing".to_owned()),
+                scope: Some("session:sess-reconcile-pr-missing".to_owned()),
+            },
+        )
+        .await
+        .expect("reconcile should succeed even when PR cannot be resolved");
+
+        let first_chunk = stream
+            .next_chunk()
+            .await
+            .expect("read runtime chunk")
+            .expect("expected runtime message");
+        let parsed: serde_json::Value =
+            serde_json::from_str(first_chunk.delta.as_str()).expect("parse reconcile response");
+        assert_eq!(parsed["pr_resolved"], false);
+        assert_eq!(parsed["completed"], false);
+        assert_eq!(parsed["merged"], false);
+        assert_eq!(parsed["merge_conflict"], false);
+    }
+
+    #[tokio::test]
     async fn reconcile_pr_merge_progresses_awaiting_review_to_done_after_merge() {
         let temp_db = TestDbPath::new("app-runtime-command-reconcile-awaiting-review-to-done");
         let work_item_id = WorkItemId::new("wi-reconcile-awaiting-review");

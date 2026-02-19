@@ -1167,32 +1167,6 @@ mod tests {
     }
 
     #[test]
-    fn session_has_pr_artifact_accepts_pr_link_artifacts() {
-        let mut projection = sample_projection(true);
-        let work_item_id = WorkItemId::new("wi-1");
-        let artifact_id = ArtifactId::new("artifact-pr-link");
-        projection
-            .work_items
-            .get_mut(&work_item_id)
-            .expect("work item")
-            .artifacts
-            .push(artifact_id.clone());
-        projection.artifacts.insert(
-            artifact_id.clone(),
-            ArtifactProjection {
-                id: artifact_id,
-                work_item_id: work_item_id.clone(),
-                kind: ArtifactKind::Link,
-                label: "GitHub PR link".to_owned(),
-                uri: "https://github.com/acme/orchestrator/pull/321".to_owned(),
-            },
-        );
-
-        let shell_state = UiShellState::new("ready".to_owned(), projection);
-        assert!(shell_state.session_has_pr_artifact(&WorkerSessionId::new("sess-1")));
-    }
-
-    #[test]
     fn open_terminal_with_active_session_focuses_terminal() {
         let mut with_session = UiShellState::new("ready".to_owned(), sample_projection(true));
         with_session.open_terminal_for_selected();
@@ -1622,7 +1596,7 @@ mod tests {
     }
 
     #[test]
-    fn merge_reconcile_poll_runs_for_pending_session_without_pr_artifact() {
+    fn merge_reconcile_poll_runs_for_review_session_without_pr_artifact() {
         let projection = review_projection_without_pr_artifact();
         let dispatcher = Arc::new(TestSupervisorDispatcher::new(Vec::new()));
         let mut shell_state = UiShellState::new_with_integrations(
@@ -1634,9 +1608,6 @@ mod tests {
             None,
         );
 
-        shell_state
-            .merge_pending_sessions
-            .insert(WorkerSessionId::new("sess-review"));
         shell_state.enqueue_merge_reconcile_polls();
 
         assert_eq!(shell_state.merge_queue.len(), 1);
