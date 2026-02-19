@@ -1,4 +1,6 @@
 use std::collections::HashMap;
+use std::fs::OpenOptions;
+use std::io::Write;
 use std::process::Command as SyncCommand;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -18,7 +20,7 @@ use orchestrator_runtime::{
     WorkerEventSubscription,
 };
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{json, Value};
 use tokio::process::{Child, Command};
 use tokio::sync::{broadcast, Mutex as AsyncMutex};
 use tokio::task::JoinHandle;
@@ -29,6 +31,8 @@ const ENV_ALLOW_UNSAFE_COMMAND_PATHS: &str = "ORCHESTRATOR_ALLOW_UNSAFE_COMMAND_
 const ENV_HARNESS_LOG_RAW_EVENTS: &str = "ORCHESTRATOR_HARNESS_LOG_RAW_EVENTS";
 const ENV_HARNESS_LOG_NORMALIZED_EVENTS: &str =
     "ORCHESTRATOR_HARNESS_LOG_NORMALIZED_EVENTS";
+const HARNESS_RAW_LOG_FILE: &str = ".orchestrator/logs/harness-raw.log";
+const HARNESS_NORMALIZED_LOG_FILE: &str = ".orchestrator/logs/harness-normalized.log";
 const ENV_OPENCODE_SERVER_BASE_URL: &str = "ORCHESTRATOR_OPENCODE_SERVER_BASE_URL";
 const ENV_HARNESS_SERVER_STARTUP_TIMEOUT_SECS: &str =
     "ORCHESTRATOR_HARNESS_SERVER_STARTUP_TIMEOUT_SECS";
@@ -84,6 +88,7 @@ pub struct OpenCodeBackend {
 
 #[derive(Debug)]
 struct OpenCodeSession {
+    backend_kind: BackendKind,
     remote_session_id: String,
     relay_task: AsyncMutex<Option<JoinHandle<()>>>,
     event_tx: broadcast::Sender<BackendEvent>,
@@ -98,15 +103,12 @@ struct ServerState {
 
 impl OpenCodeSession {
     fn emit_non_terminal_event(&self, event: BackendEvent) {
-        if harness_log_normalized_events_enabled() {
-            tracing::debug!(
-                target: "orchestrator_harness_events",
-                backend = "opencode",
-                remote_session_id = self.remote_session_id.as_str(),
-                event = ?event,
-                "normalized harness event"
-            );
-        }
+        maybe_log_normalized_harness_event(
+            self.backend_kind.clone(),
+            self.remote_session_id.as_str(),
+            false,
+            &event,
+        );
         let _ = self.event_tx.send(event);
     }
 
@@ -117,15 +119,12 @@ impl OpenCodeSession {
         {
             return;
         }
-        if harness_log_normalized_events_enabled() {
-            tracing::debug!(
-                target: "orchestrator_harness_events",
-                backend = "opencode",
-                remote_session_id = self.remote_session_id.as_str(),
-                event = ?event,
-                "normalized harness terminal event"
-            );
-        }
+        maybe_log_normalized_harness_event(
+            self.backend_kind.clone(),
+            self.remote_session_id.as_str(),
+            true,
+            &event,
+        );
         let _ = self.event_tx.send(event);
     }
 }
@@ -772,14 +771,50 @@ fn maybe_log_raw_harness_line(backend_kind: BackendKind, remote_session_id: &str
     if !harness_log_raw_events_enabled() {
         return;
     }
-    let text = std::str::from_utf8(line).unwrap_or("<non-utf8>");
-    tracing::debug!(
-        target: "orchestrator_harness_events",
-        backend = ?backend_kind,
-        remote_session_id = remote_session_id,
-        raw = sanitize_error_body(text),
-        "raw harness event line"
-    );
+    let text = String::from_utf8_lossy(line).into_owned();
+    let payload = json!({
+        "backend": format!("{:?}", backend_kind),
+        "remote_session_id": remote_session_id,
+        "raw": sanitize_error_body(text.as_str()),
+    });
+    append_harness_log_line(HARNESS_RAW_LOG_FILE, payload.to_string().as_str());
+}
+
+fn maybe_log_normalized_harness_event(
+    backend_kind: BackendKind,
+    remote_session_id: &str,
+    terminal: bool,
+    event: &BackendEvent,
+) {
+    if !harness_log_normalized_events_enabled() {
+        return;
+    }
+    let payload = match event {
+        BackendEvent::Output(output) => json!({
+            "backend": format!("{:?}", backend_kind),
+            "remote_session_id": remote_session_id,
+            "terminal": terminal,
+            "event": "Output",
+            "stream": format!("{:?}", output.stream),
+            "text": String::from_utf8_lossy(&output.bytes).into_owned(),
+        }),
+        _ => json!({
+            "backend": format!("{:?}", backend_kind),
+            "remote_session_id": remote_session_id,
+            "terminal": terminal,
+            "event": format!("{event:?}"),
+        }),
+    };
+    append_harness_log_line(HARNESS_NORMALIZED_LOG_FILE, payload.to_string().as_str());
+}
+
+fn append_harness_log_line(path: &str, line: &str) {
+    if let Some(parent) = Path::new(path).parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path) {
+        let _ = writeln!(file, "{line}");
+    }
 }
 
 #[async_trait]
@@ -794,6 +829,7 @@ impl orchestrator_runtime::SessionLifecycle for OpenCodeBackend {
             .await?;
         let (event_tx, _) = broadcast::channel(self.output_buffer());
         let session = Arc::new(OpenCodeSession {
+            backend_kind: self.backend_kind.clone(),
             remote_session_id: created.session_id.clone(),
             relay_task: AsyncMutex::new(None),
             event_tx: event_tx.clone(),

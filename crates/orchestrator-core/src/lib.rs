@@ -56,9 +56,9 @@ pub use normalization::{
 pub use orchestrator_runtime::{
     BackendArtifactEvent, BackendArtifactKind, BackendBlockedEvent, BackendCapabilities,
     BackendCheckpointEvent, BackendCrashedEvent, BackendDoneEvent, BackendEvent, BackendKind,
-    BackendNeedsInputEvent, BackendOutputEvent, BackendOutputStream, RuntimeArtifactId,
-    RuntimeError, RuntimeResult, RuntimeSessionId, SessionHandle, SessionLifecycle, SpawnSpec,
-    WorkerBackend, WorkerEventStream, WorkerEventSubscription,
+    BackendNeedsInputEvent, BackendOutputEvent, BackendOutputStream, BackendTurnStateEvent,
+    RuntimeArtifactId, RuntimeError, RuntimeResult, RuntimeSessionId, SessionHandle,
+    SessionLifecycle, SpawnSpec, WorkerBackend, WorkerEventStream, WorkerEventSubscription,
 };
 pub use projection::{
     apply_event, rebuild_projection, retrieve_events, ArtifactProjection, InboxItemProjection,

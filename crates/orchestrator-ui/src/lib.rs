@@ -22,13 +22,16 @@ use orchestrator_core::{
     WorkerSessionStatus, WorkflowState,
 };
 use orchestrator_runtime::{
-    BackendEvent, BackendKind, BackendOutputEvent, RuntimeError, RuntimeSessionId, SessionHandle, SpawnSpec,
-    WorkerBackend,
+    BackendEvent, BackendKind, BackendOutputEvent, BackendTurnStateEvent, RuntimeError,
+    RuntimeSessionId, SessionHandle, SpawnSpec, WorkerBackend,
 };
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Layout, Rect};
+use ratatui::style::{Color, Modifier, Style};
+use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 use ratatui::Terminal;
+use ratskin::RatSkin;
 use tokio::runtime::Handle as TokioHandle;
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::error::TryRecvError;
@@ -43,6 +46,7 @@ pub use keymap::{
 const TICKET_PICKER_EVENT_CHANNEL_CAPACITY: usize = 32;
 const TERMINAL_STREAM_EVENT_CHANNEL_CAPACITY: usize = 32;
 const TICKET_PICKER_PRIORITY_STATES_ENV: &str = "ORCHESTRATOR_TICKET_PICKER_PRIORITY_STATES";
+const UI_THEME_ENV: &str = "ORCHESTRATOR_UI_THEME";
 const TICKET_PICKER_PRIORITY_STATES_DEFAULT: &[&str] =
     &["In Progress", "Final Approval", "Todo", "Backlog"];
 
@@ -387,7 +391,7 @@ fn project_center_pane(
             lines.push("g/G: jump first/last item".to_owned());
             lines.push("Enter: open focus card".to_owned());
             lines.push("c: toggle global supervisor chat".to_owned());
-            lines.push("t: open terminal for selected item".to_owned());
+            lines.push("i: open terminal for selected item".to_owned());
             lines.push("v d/t/p/c: open diff/test/PR/chat inspector".to_owned());
             lines.push("Backspace: minimize top view".to_owned());
             CenterPaneState {
@@ -410,13 +414,10 @@ fn project_center_pane(
                         ));
                         lines.push(String::new());
                     }
-                    if terminal_state.lines.is_empty() && terminal_state.output_fragment.is_empty() {
+                    if terminal_state.entries.is_empty() && terminal_state.output_fragment.is_empty() {
                         lines.push("No terminal output available yet.".to_owned());
                     } else {
-                        lines.extend(terminal_state.lines.iter().cloned());
-                        if !terminal_state.output_fragment.is_empty() {
-                            lines.push(terminal_state.output_fragment.clone());
-                        }
+                        lines.extend(render_terminal_transcript_lines(terminal_state));
                     }
                 }
                 None => {
@@ -506,12 +507,77 @@ impl SupervisorResponseState {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct TerminalViewState {
-    lines: Vec<String>,
+    entries: Vec<TerminalTranscriptEntry>,
+    selected_fold_entry: Option<usize>,
     error: Option<String>,
     output_fragment: String,
     workflow_stage: TerminalWorkflowStage,
+    output_cursor_line: usize,
+    output_cursor_col: usize,
+    output_scroll_line: usize,
+    output_viewport_rows: usize,
+    output_follow_tail: bool,
+    turn_active: bool,
+}
+
+impl Default for TerminalViewState {
+    fn default() -> Self {
+        Self {
+            entries: Vec::new(),
+            selected_fold_entry: None,
+            error: None,
+            output_fragment: String::new(),
+            workflow_stage: TerminalWorkflowStage::Planning,
+            output_cursor_line: 0,
+            output_cursor_col: 0,
+            output_scroll_line: 0,
+            output_viewport_rows: 1,
+            output_follow_tail: true,
+            turn_active: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum TerminalTranscriptEntry {
+    Message(String),
+    Foldable(TerminalFoldSection),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TerminalFoldSection {
+    kind: TerminalFoldKind,
+    content: String,
+    folded: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RenderedTerminalLine {
+    text: String,
+    fold_header_entry: Option<usize>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TerminalFoldKind {
+    Reasoning,
+    FileChange,
+    ToolCall,
+    CommandExecution,
+    Other,
+}
+
+impl TerminalFoldKind {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Reasoning => "reasoning",
+            Self::FileChange => "file-change",
+            Self::ToolCall => "tool-call",
+            Self::CommandExecution => "command",
+            Self::Other => "meta",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -524,6 +590,15 @@ enum TerminalWorkflowStage {
 }
 
 impl TerminalWorkflowStage {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Planning => "planning",
+            Self::Implementation => "implementation",
+            Self::Review => "review",
+            Self::Complete => "complete",
+        }
+    }
+
     fn advance_instruction(self) -> Option<(Self, &'static str)> {
         match self {
             Self::Planning => Some((
@@ -548,6 +623,10 @@ enum TerminalSessionEvent {
     Output {
         session_id: WorkerSessionId,
         output: BackendOutputEvent,
+    },
+    TurnState {
+        session_id: WorkerSessionId,
+        turn_state: BackendTurnStateEvent,
     },
     StreamFailed {
         session_id: WorkerSessionId,
@@ -2477,7 +2556,7 @@ impl UiShellState {
     }
 
     fn session_panel_rows(&self) -> Vec<(WorkerSessionId, String, String)> {
-        session_panel_rows(&self.domain)
+        session_panel_rows(&self.domain, &self.terminal_session_states)
     }
 
     fn session_ids_for_navigation(&self) -> Vec<WorkerSessionId> {
@@ -2510,6 +2589,7 @@ impl UiShellState {
         }
         let next = (index as isize + delta).rem_euclid(len as isize) as usize;
         self.selected_session_index = Some(next);
+        self.show_selected_session_output();
         true
     }
 
@@ -2519,6 +2599,7 @@ impl UiShellState {
             false
         } else {
             self.selected_session_index = Some(0);
+            self.show_selected_session_output();
             true
         }
     }
@@ -2530,8 +2611,26 @@ impl UiShellState {
             false
         } else {
             self.selected_session_index = Some(len - 1);
+            self.show_selected_session_output();
             true
         }
+    }
+
+    fn show_selected_session_output(&mut self) {
+        let Some(session_id) = self.selected_session_id_for_panel() else {
+            return;
+        };
+        let should_switch_view = !matches!(
+            self.view_stack.active_center(),
+            Some(CenterView::TerminalView {
+                session_id: active_session_id
+            }) if *active_session_id == session_id
+        );
+        if should_switch_view {
+            self.view_stack
+                .replace_center(CenterView::TerminalView { session_id: session_id.clone() });
+        }
+        self.ensure_terminal_stream(session_id);
     }
 
     fn inbox_item_id_for_session(&self, session_id: &WorkerSessionId) -> Option<InboxItemId> {
@@ -2559,6 +2658,133 @@ impl UiShellState {
             Some(CenterView::TerminalView { session_id }) => Some(session_id),
             _ => None,
         }
+    }
+
+    fn active_terminal_view_state_mut(&mut self) -> Option<&mut TerminalViewState> {
+        let session_id = self.active_terminal_session_id()?.clone();
+        self.terminal_session_states.get_mut(&session_id)
+    }
+
+    fn sync_terminal_output_viewport(&mut self, rendered_line_count: usize, viewport_rows: usize) {
+        let Some(view) = self.active_terminal_view_state_mut() else {
+            return;
+        };
+
+        view.output_viewport_rows = viewport_rows.max(1);
+        if rendered_line_count == 0 {
+            view.output_cursor_line = 0;
+            view.output_scroll_line = 0;
+            view.selected_fold_entry = None;
+            return;
+        }
+
+        let max_line = rendered_line_count - 1;
+        if view.output_follow_tail {
+            view.output_cursor_line = max_line;
+        } else {
+            view.output_cursor_line = view.output_cursor_line.min(max_line);
+        }
+
+        let max_scroll = rendered_line_count.saturating_sub(view.output_viewport_rows);
+        if view.output_follow_tail {
+            view.output_scroll_line = max_scroll;
+            return;
+        }
+
+        if view.output_cursor_line < view.output_scroll_line {
+            view.output_scroll_line = view.output_cursor_line;
+        } else if view.output_cursor_line >= view.output_scroll_line + view.output_viewport_rows {
+            view.output_scroll_line = view
+                .output_cursor_line
+                .saturating_add(1)
+                .saturating_sub(view.output_viewport_rows);
+        }
+        view.output_scroll_line = view.output_scroll_line.min(max_scroll);
+    }
+
+    fn move_terminal_output_cursor(&mut self, direction: isize) -> bool {
+        let Some(view) = self.active_terminal_view_state_mut() else {
+            return false;
+        };
+        let rendered = render_terminal_transcript_entries(view);
+        if rendered.is_empty() {
+            view.selected_fold_entry = None;
+            view.output_cursor_line = 0;
+            view.output_scroll_line = 0;
+            return false;
+        }
+
+        let max_line = rendered.len().saturating_sub(1);
+        let current = view.output_cursor_line.min(max_line);
+        let next = if direction < 0 {
+            current.saturating_sub(direction.unsigned_abs())
+        } else {
+            current.saturating_add(direction as usize).min(max_line)
+        };
+        view.output_cursor_line = next;
+        view.output_follow_tail = next == max_line;
+        view.selected_fold_entry = rendered
+            .get(next)
+            .and_then(|line| line.fold_header_entry);
+        let max_col = rendered
+            .get(next)
+            .map(|line| line.text.chars().count().saturating_sub(1))
+            .unwrap_or(0);
+        view.output_cursor_col = view.output_cursor_col.min(max_col);
+
+        if !view.output_follow_tail {
+            if view.output_cursor_line < view.output_scroll_line {
+                view.output_scroll_line = view.output_cursor_line;
+            } else if view.output_cursor_line >= view.output_scroll_line + view.output_viewport_rows {
+                view.output_scroll_line = view
+                    .output_cursor_line
+                    .saturating_add(1)
+                    .saturating_sub(view.output_viewport_rows);
+            }
+        }
+        next != current
+    }
+
+    fn move_terminal_output_cursor_col(&mut self, direction: isize) -> bool {
+        let Some(view) = self.active_terminal_view_state_mut() else {
+            return false;
+        };
+        let rendered = render_terminal_transcript_entries(view);
+        if rendered.is_empty() {
+            view.output_cursor_col = 0;
+            return false;
+        }
+        let current_line = view.output_cursor_line.min(rendered.len().saturating_sub(1));
+        let max_col = rendered
+            .get(current_line)
+            .map(|line| line.text.chars().count().saturating_sub(1))
+            .unwrap_or(0);
+        let previous = view.output_cursor_col;
+        view.output_cursor_col = if direction < 0 {
+            view.output_cursor_col.saturating_sub(direction.unsigned_abs())
+        } else {
+            view.output_cursor_col
+                .saturating_add(direction as usize)
+                .min(max_col)
+        };
+        view.output_cursor_col != previous
+    }
+
+    fn fold_or_unfold_selected_terminal_section(&mut self, folded: bool) -> bool {
+        let Some(view) = self.active_terminal_view_state_mut() else {
+            return false;
+        };
+        let Some(selected_index) = view.selected_fold_entry else {
+            return false;
+        };
+        let Some(entry) = view.entries.get_mut(selected_index) else {
+            return false;
+        };
+        let TerminalTranscriptEntry::Foldable(section) = entry else {
+            return false;
+        };
+        section.folded = folded;
+        true
     }
 
     fn terminal_session_handle(&self, session_id: &WorkerSessionId) -> Option<SessionHandle> {
@@ -2853,6 +3079,13 @@ impl UiShellState {
                     append_terminal_assistant_output(view, output.bytes);
                     view.error = None;
                 }
+                TerminalSessionEvent::TurnState {
+                    session_id,
+                    turn_state,
+                } => {
+                    let view = self.terminal_session_states.entry(session_id).or_default();
+                    view.turn_active = turn_state.active;
+                }
                 TerminalSessionEvent::StreamFailed { session_id, error } => {
                     self.terminal_session_streamed.remove(&session_id);
                     let view = self
@@ -2860,8 +3093,14 @@ impl UiShellState {
                         .entry(session_id.clone())
                         .or_default();
                     view.error = Some(error.to_string());
-                    view.lines.clear();
+                    view.entries.clear();
+                    view.selected_fold_entry = None;
                     view.output_fragment.clear();
+                    view.output_cursor_line = 0;
+                    view.output_cursor_col = 0;
+                    view.output_scroll_line = 0;
+                    view.output_follow_tail = true;
+                    view.turn_active = false;
                     if let RuntimeError::SessionNotFound(_) = error {
                         self.recover_terminal_session_on_not_found(&session_id);
                     }
@@ -2870,6 +3109,7 @@ impl UiShellState {
                     self.terminal_session_streamed.remove(&session_id);
                     let view = self.terminal_session_states.entry(session_id).or_default();
                     flush_terminal_output_fragment(view);
+                    view.turn_active = false;
                 }
             }
         }
@@ -2921,6 +3161,14 @@ impl UiShellState {
                                     .send(TerminalSessionEvent::Output {
                                         session_id: stream_session_id.clone(),
                                         output,
+                                    })
+                                    .await;
+                            }
+                            Ok(Some(BackendEvent::TurnState(turn_state))) => {
+                                let _ = sender
+                                    .send(TerminalSessionEvent::TurnState {
+                                        session_id: stream_session_id.clone(),
+                                        turn_state,
                                     })
                                     .await;
                             }
@@ -4453,6 +4701,7 @@ impl Ui {
 
                 let sessions_text = render_sessions_panel(
                     &shell_state.domain,
+                    &shell_state.terminal_session_states,
                     shell_state.selected_session_id_for_panel().as_ref(),
                 );
                 frame.render_widget(
@@ -4469,23 +4718,47 @@ impl Ui {
                 );
 
                 let center_text = render_center_panel(&ui_state);
-                if let Some(session_id) = shell_state.active_terminal_session_id() {
+                if let Some(session_id) = shell_state.active_terminal_session_id().cloned() {
                     let center_layout =
                         Layout::vertical([Constraint::Length(3), Constraint::Min(1), Constraint::Length(6)]);
                     let [terminal_meta_area, terminal_output_area, terminal_input_area] =
                         center_layout.areas(center_area);
-                    let meta_text = render_terminal_top_bar(&shell_state.domain, session_id);
+                    let meta_text = render_terminal_top_bar(&shell_state.domain, &session_id);
                     frame.render_widget(
                         Paragraph::new(meta_text)
                             .block(Block::default().title("terminal").borders(Borders::ALL)),
                         terminal_meta_area,
                     );
 
-                    let output_text = render_terminal_output_panel(&ui_state);
+                    let output_text = render_terminal_output_panel(
+                        &ui_state,
+                        terminal_output_area.width.saturating_sub(2),
+                    );
+                    let output_text = append_terminal_loading_indicator(
+                        output_text,
+                        terminal_activity_indicator(
+                            &shell_state.domain,
+                            &shell_state.terminal_session_states,
+                            &session_id,
+                        ),
+                    );
                     let content_height =
-                        estimate_wrapped_line_count(output_text.as_str(), terminal_output_area.width);
-                    let viewport_height = terminal_output_area.height.saturating_sub(2);
-                    let scroll_y = content_height.saturating_sub(viewport_height);
+                        estimate_wrapped_line_count(&output_text, terminal_output_area.width);
+                    let viewport_height = terminal_output_area.height.saturating_sub(2).max(1);
+                    shell_state.sync_terminal_output_viewport(
+                        output_text.lines.len(),
+                        usize::from(viewport_height),
+                    );
+                    let (scroll_y, output_cursor_row, output_cursor_col) = shell_state
+                        .terminal_session_states
+                        .get(&session_id)
+                        .map(|view| {
+                            let max_scroll = content_height.saturating_sub(viewport_height);
+                            let scroll = (view.output_scroll_line as u16).min(max_scroll);
+                            let row = view.output_cursor_line.saturating_sub(view.output_scroll_line);
+                            (scroll, row, view.output_cursor_col)
+                        })
+                        .unwrap_or((0, 0, 0));
                     frame.render_widget(
                         Paragraph::new(output_text)
                             .wrap(Wrap { trim: false })
@@ -4493,6 +4766,21 @@ impl Ui {
                             .block(Block::default().title("output").borders(Borders::ALL)),
                         terminal_output_area,
                     );
+                    if shell_state.mode == UiMode::Normal
+                        && output_cursor_row < usize::from(viewport_height)
+                    {
+                        let max_col = usize::from(terminal_output_area.width.saturating_sub(3));
+                        let col = output_cursor_col.min(max_col);
+                        let cursor_x = terminal_output_area
+                            .x
+                            .saturating_add(1)
+                            .saturating_add(u16::try_from(col).unwrap_or(0));
+                        let cursor_y = terminal_output_area
+                            .y
+                            .saturating_add(1)
+                            .saturating_add(u16::try_from(output_cursor_row).unwrap_or(0));
+                        frame.set_cursor_position((cursor_x, cursor_y));
+                    }
 
                     let input_text =
                         render_terminal_input_panel(shell_state.terminal_compose_draft.as_str());
@@ -4626,18 +4914,14 @@ fn render_inbox_panel(ui_state: &UiState) -> String {
     lines.join("\n")
 }
 
-fn session_panel_rows(domain: &ProjectionState) -> Vec<(WorkerSessionId, String, String)> {
-    let mut work_item_repo = HashMap::new();
-    for event in &domain.events {
-        if let OrchestrationEventPayload::WorktreeCreated(payload) = &event.payload {
-            work_item_repo.insert(
-                payload.work_item_id.clone(),
-                repository_name_from_path(payload.path.as_str()),
-            );
-        }
-    }
+fn session_panel_rows(
+    domain: &ProjectionState,
+    terminal_session_states: &HashMap<WorkerSessionId, TerminalViewState>,
+) -> Vec<(WorkerSessionId, String, String)> {
+    let work_item_repo = work_item_repository_labels(domain);
+    let ticket_labels = ticket_labels_by_ticket_id(domain);
 
-    let mut sessions_by_repo: HashMap<String, Vec<(WorkerSessionId, String)>> = HashMap::new();
+    let mut sessions_by_project: HashMap<String, Vec<(WorkerSessionId, String)>> = HashMap::new();
     for session in domain.sessions.values() {
         if !is_open_session_status(session.status.as_ref()) {
             continue;
@@ -4653,31 +4937,30 @@ fn session_panel_rows(domain: &ProjectionState) -> Vec<(WorkerSessionId, String,
             }
         }
 
-        let repo = repository_label_for_session(session, domain, &work_item_repo);
-        let status = session_status_label(session.status.as_ref());
-        let work_item = session
-            .work_item_id
-            .as_ref()
-                .map(|work_item_id| work_item_id.as_str())
-                .unwrap_or("unknown");
-        let line = format!("  [{}] {} - {}", status, session.id.as_str(), work_item);
-        sessions_by_repo.entry(repo).or_default().push((session.id.clone(), line));
+        let project = project_label_for_session(session, domain, &work_item_repo);
+        let ticket = ticket_label_for_session(session, domain, &ticket_labels);
+        let status = workflow_badge_for_session(session, domain, terminal_session_states);
+        let line = format!("  [{}] {}", status, ticket);
+        sessions_by_project
+            .entry(project)
+            .or_default()
+            .push((session.id.clone(), line));
     }
 
-    if sessions_by_repo.is_empty() {
+    if sessions_by_project.is_empty() {
         return Vec::new();
     }
 
     let mut rows = Vec::new();
-    let mut repos = sessions_by_repo.keys().cloned().collect::<Vec<_>>();
-    repos.sort_unstable();
-    for repo in repos {
-        let mut sessions = sessions_by_repo
-            .remove(&repo)
+    let mut projects = sessions_by_project.keys().cloned().collect::<Vec<_>>();
+    projects.sort_unstable();
+    for project in projects {
+        let mut sessions = sessions_by_project
+            .remove(&project)
             .unwrap_or_default();
         sessions.sort_unstable_by(|left, right| left.1.cmp(&right.1));
         for (session_id, line) in sessions {
-            rows.push((session_id, repo.clone(), line));
+            rows.push((session_id, project.clone(), line));
         }
     }
 
@@ -4686,9 +4969,10 @@ fn session_panel_rows(domain: &ProjectionState) -> Vec<(WorkerSessionId, String,
 
 fn render_sessions_panel(
     domain: &ProjectionState,
+    terminal_session_states: &HashMap<WorkerSessionId, TerminalViewState>,
     selected_session_id: Option<&WorkerSessionId>,
 ) -> String {
-    let session_rows = session_panel_rows(domain);
+    let session_rows = session_panel_rows(domain, terminal_session_states);
     if session_rows.is_empty() {
         return "No open sessions.".to_owned();
     }
@@ -4746,13 +5030,309 @@ fn render_terminal_top_bar(domain: &ProjectionState, session_id: &WorkerSessionI
     sanitize_terminal_display_text(text.as_str())
 }
 
-fn render_terminal_output_panel(ui_state: &UiState) -> String {
-    let raw = if ui_state.center_pane.lines.is_empty() {
-        "No terminal output available yet.".to_owned()
+fn render_terminal_transcript_lines(state: &TerminalViewState) -> Vec<String> {
+    render_terminal_transcript_entries(state)
+        .into_iter()
+        .map(|line| line.text)
+        .collect()
+}
+
+fn render_terminal_transcript_entries(state: &TerminalViewState) -> Vec<RenderedTerminalLine> {
+    let mut lines = Vec::new();
+    for (index, entry) in state.entries.iter().enumerate() {
+        let previous_is_foldable = index
+            .checked_sub(1)
+            .and_then(|previous| state.entries.get(previous))
+            .map(|previous| matches!(previous, TerminalTranscriptEntry::Foldable(_)))
+            .unwrap_or(false);
+        let current_is_foldable = matches!(entry, TerminalTranscriptEntry::Foldable(_));
+        if index > 0 && (previous_is_foldable || current_is_foldable) {
+            lines.push(RenderedTerminalLine {
+                text: String::new(),
+                fold_header_entry: None,
+            });
+        }
+        match entry {
+            TerminalTranscriptEntry::Message(line) => lines.push(RenderedTerminalLine {
+                text: line.clone(),
+                fold_header_entry: None,
+            }),
+            TerminalTranscriptEntry::Foldable(section) => {
+                let selected_marker = if state.selected_fold_entry == Some(index) { "=>" } else { "  " };
+                let fold_marker = if section.folded { "[+]" } else { "[-]" };
+                let summary = summarize_folded_terminal_content(section.content.as_str());
+                lines.push(RenderedTerminalLine {
+                    text: format!(
+                        "{selected_marker} {fold_marker} {}: {summary}",
+                        section.kind.label()
+                    ),
+                    fold_header_entry: Some(index),
+                });
+                if !section.folded {
+                    for content_line in section.content.lines() {
+                        let trimmed = content_line.trim();
+                        if trimmed.is_empty() {
+                            continue;
+                        }
+                        lines.push(RenderedTerminalLine {
+                            text: format!("  {trimmed}"),
+                            fold_header_entry: None,
+                        });
+                    }
+                }
+            }
+        }
+    }
+    if !state.output_fragment.is_empty() {
+        lines.push(RenderedTerminalLine {
+            text: state.output_fragment.clone(),
+            fold_header_entry: None,
+        });
+    }
+    lines
+}
+
+fn summarize_folded_terminal_content(content: &str) -> String {
+    let compact = content
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    if compact.is_empty() {
+        return "(no details)".to_owned();
+    }
+    const MAX_CHARS: usize = 96;
+    if compact.chars().count() > MAX_CHARS {
+        let truncated = compact.chars().take(MAX_CHARS).collect::<String>();
+        format!("{truncated}...")
     } else {
-        ui_state.center_pane.lines.join("\n")
+        compact
+    }
+}
+
+fn render_terminal_output_panel(ui_state: &UiState, width: u16) -> Text<'static> {
+    if ui_state.center_pane.lines.is_empty() {
+        return Text::raw("No terminal output available yet.");
+    }
+    render_terminal_output_with_accents(&ui_state.center_pane.lines, width.max(1))
+}
+
+fn render_terminal_output_with_accents(lines: &[String], width: u16) -> Text<'static> {
+    let mut rendered = Vec::new();
+    let mut active_fold_kind: Option<TerminalFoldKind> = None;
+
+    for raw_line in lines {
+        let line = sanitize_terminal_display_text(raw_line);
+        if line.trim().is_empty() {
+            active_fold_kind = None;
+            rendered.push(Line::from(String::new()));
+            continue;
+        }
+
+        if let Some((kind, folded)) = parse_fold_header_line(&line) {
+            active_fold_kind = if folded { None } else { Some(kind) };
+            rendered.push(Line::from(Span::styled(
+                line,
+                fold_accent_style(kind, true),
+            )));
+            continue;
+        }
+
+        if let Some(kind) = active_fold_kind {
+            rendered.push(Line::from(Span::styled(
+                line,
+                fold_accent_style(kind, false),
+            )));
+            continue;
+        }
+
+        if line.starts_with("> ") {
+            rendered.push(Line::from(Span::styled(
+                line,
+                Style::default().fg(Color::LightBlue),
+            )));
+            continue;
+        }
+
+        let markdown = render_markdown_for_terminal(line.as_str(), width);
+        if markdown.lines.is_empty() {
+            rendered.push(Line::from(String::new()));
+        } else {
+            rendered.extend(markdown.lines.into_iter());
+        }
+    }
+
+    Text::from(rendered)
+}
+
+fn parse_fold_header_line(line: &str) -> Option<(TerminalFoldKind, bool)> {
+    let trimmed = line.trim_start();
+    let without_cursor = trimmed.strip_prefix("=> ").unwrap_or(trimmed);
+    let (folded, remainder) = if let Some(rest) = without_cursor.strip_prefix("[+]") {
+        (true, rest)
+    } else if let Some(rest) = without_cursor.strip_prefix("[-]") {
+        (false, rest)
+    } else {
+        return None;
     };
-    render_markdown_for_terminal(sanitize_terminal_display_text(raw.as_str()).as_str())
+
+    let remainder = remainder.trim_start();
+    for kind in [
+        TerminalFoldKind::Reasoning,
+        TerminalFoldKind::FileChange,
+        TerminalFoldKind::ToolCall,
+        TerminalFoldKind::CommandExecution,
+        TerminalFoldKind::Other,
+    ] {
+        let prefix = format!("{}:", kind.label());
+        if remainder.starts_with(prefix.as_str()) {
+            return Some((kind, folded));
+        }
+    }
+    None
+}
+
+fn fold_accent_style(kind: TerminalFoldKind, header: bool) -> Style {
+    let color = match kind {
+        TerminalFoldKind::Reasoning => Color::Rgb(163, 190, 140),
+        TerminalFoldKind::FileChange => Color::Rgb(208, 135, 112),
+        TerminalFoldKind::ToolCall => Color::Rgb(180, 142, 173),
+        TerminalFoldKind::CommandExecution => Color::Rgb(129, 161, 193),
+        TerminalFoldKind::Other => Color::Rgb(143, 188, 187),
+    };
+    let mut style = Style::default().fg(color);
+    if header {
+        style = style.add_modifier(Modifier::BOLD);
+    } else {
+        style = style.add_modifier(Modifier::DIM);
+    }
+    style
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TerminalActivityIndicator {
+    None,
+    Working,
+    AwaitingPlanningInput,
+}
+
+fn terminal_activity_indicator(
+    domain: &ProjectionState,
+    terminal_session_states: &HashMap<WorkerSessionId, TerminalViewState>,
+    session_id: &WorkerSessionId,
+) -> TerminalActivityIndicator {
+    if terminal_session_is_running(domain, terminal_session_states, session_id) {
+        return TerminalActivityIndicator::Working;
+    }
+    if terminal_session_is_awaiting_planning_input(domain, terminal_session_states, session_id) {
+        return TerminalActivityIndicator::AwaitingPlanningInput;
+    }
+    TerminalActivityIndicator::None
+}
+
+fn terminal_session_is_running(
+    domain: &ProjectionState,
+    terminal_session_states: &HashMap<WorkerSessionId, TerminalViewState>,
+    session_id: &WorkerSessionId,
+) -> bool {
+    if !matches!(
+        domain
+            .sessions
+            .get(session_id)
+            .and_then(|session| session.status.as_ref()),
+        Some(WorkerSessionStatus::Running)
+    ) {
+        return false;
+    }
+    session_turn_is_active(terminal_session_states, session_id)
+}
+
+fn terminal_session_is_awaiting_planning_input(
+    domain: &ProjectionState,
+    terminal_session_states: &HashMap<WorkerSessionId, TerminalViewState>,
+    session_id: &WorkerSessionId,
+) -> bool {
+    if session_turn_is_active(terminal_session_states, session_id) {
+        return false;
+    }
+    let waiting_for_user = matches!(
+        domain
+            .sessions
+            .get(session_id)
+            .and_then(|session| session.status.as_ref()),
+        Some(WorkerSessionStatus::WaitingForUser)
+    );
+    waiting_for_user && session_is_in_planning_stage(domain, terminal_session_states, session_id)
+}
+
+fn session_is_in_planning_stage(
+    domain: &ProjectionState,
+    terminal_session_states: &HashMap<WorkerSessionId, TerminalViewState>,
+    session_id: &WorkerSessionId,
+) -> bool {
+    if let Some(view) = terminal_session_states.get(session_id) {
+        return view.workflow_stage == TerminalWorkflowStage::Planning;
+    }
+    let Some(workflow_state) = domain
+        .sessions
+        .get(session_id)
+        .and_then(|session| session.work_item_id.as_ref())
+        .and_then(|work_item_id| domain.work_items.get(work_item_id))
+        .and_then(|work_item| work_item.workflow_state.as_ref())
+    else {
+        return true;
+    };
+    matches!(workflow_state, WorkflowState::New | WorkflowState::Planning)
+}
+
+fn session_turn_is_active(
+    terminal_session_states: &HashMap<WorkerSessionId, TerminalViewState>,
+    session_id: &WorkerSessionId,
+) -> bool {
+    terminal_session_states
+        .get(session_id)
+        .map(|state| state.turn_active)
+        .unwrap_or(false)
+}
+
+fn append_terminal_loading_indicator(
+    mut text: Text<'static>,
+    indicator: TerminalActivityIndicator,
+) -> Text<'static> {
+    if matches!(indicator, TerminalActivityIndicator::None) {
+        return text;
+    }
+    if !text.lines.is_empty() {
+        text.lines.push(Line::from(String::new()));
+    }
+    match indicator {
+        TerminalActivityIndicator::None => {}
+        TerminalActivityIndicator::Working => {
+            let frame = loading_spinner_frame();
+            text.lines.push(Line::from(Span::styled(
+                format!("{frame} agent working..."),
+                Style::default()
+                    .fg(Color::LightCyan)
+                    .add_modifier(Modifier::DIM),
+            )));
+        }
+        TerminalActivityIndicator::AwaitingPlanningInput => {
+            text.lines.push(Line::from(Span::styled(
+                "󰥔 awaiting input",
+                Style::default().fg(Color::Yellow),
+            )));
+        }
+    }
+    text
+}
+
+fn loading_spinner_frame() -> &'static str {
+    const FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+    let elapsed_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as usize)
+        .unwrap_or(0);
+    let index = (elapsed_ms / 200) % FRAMES.len();
+    FRAMES[index]
 }
 
 fn render_terminal_input_panel(draft: &str) -> String {
@@ -4804,108 +5384,50 @@ fn terminal_input_cursor(area: Rect, draft: &str) -> Option<(u16, u16)> {
     Some((cursor_x, cursor_y))
 }
 
-fn estimate_wrapped_line_count(text: &str, area_width: u16) -> u16 {
-    let width = area_width.saturating_sub(2).max(1) as usize;
-    let mut total: u16 = 0;
-    for line in text.split('\n') {
-        let chars = line.chars().count();
-        let wrapped = if chars == 0 {
-            1
-        } else {
-            1 + (chars.saturating_sub(1) / width)
-        } as u16;
-        total = total.saturating_add(wrapped);
+fn render_markdown_for_terminal(input: &str, width: u16) -> Text<'static> {
+    if input.is_empty() {
+        return Text::raw(String::new());
     }
-    total.max(1)
+
+    let source = preprocess_markdown_layout(input);
+    let lines = terminal_markdown_skin().parse(RatSkin::parse_text(source.as_str()), width);
+    if lines.is_empty() {
+        Text::raw(String::new())
+    } else {
+        Text::from(
+            lines
+                .into_iter()
+                .map(|line| {
+                    Line::from(
+                        line.spans
+                            .into_iter()
+                            .map(|span| Span::styled(span.content.into_owned(), span.style))
+                            .collect::<Vec<_>>(),
+                    )
+                })
+                .collect::<Vec<_>>(),
+        )
+    }
 }
 
-fn render_markdown_for_terminal(input: &str) -> String {
-    if input.is_empty() {
-        return String::new();
-    }
-
-    let mut rendered = Vec::new();
-    let mut in_code_block = false;
+fn preprocess_markdown_layout(input: &str) -> String {
+    let mut output = Vec::new();
     for raw_line in input.lines() {
         let line = raw_line.trim_end_matches('\r');
-        let trimmed_start = line.trim_start();
-
-        if trimmed_start.starts_with("```") {
-            if in_code_block {
-                rendered.push("[/code]".to_owned());
-                rendered.push(String::new());
-            } else {
-                rendered.push(String::new());
-                rendered.push("[code]".to_owned());
+        if is_markdown_heading(line.trim_start()) {
+            if output.last().map(|entry: &String| !entry.trim().is_empty()).unwrap_or(false) {
+                output.push(String::new());
             }
-            in_code_block = !in_code_block;
+            output.push(line.to_owned());
+            output.push(String::new());
             continue;
         }
-
-        if in_code_block {
-            rendered.push(format!("    {line}"));
-            continue;
-        }
-
-        rendered.push(render_markdown_line(line));
+        output.push(line.to_owned());
     }
-
-    if rendered.is_empty() {
-        String::new()
-    } else {
-        rendered.join("\n")
-    }
+    output.join("\n")
 }
 
-fn render_markdown_line(line: &str) -> String {
-    if line.starts_with("> ") || line.starts_with("< ") {
-        return line.to_owned();
-    }
-
-    let indent = line.len().saturating_sub(line.trim_start().len());
-    let indent_prefix = " ".repeat(indent);
-    let trimmed = line.trim_start();
-
-    if trimmed.is_empty() {
-        return String::new();
-    }
-
-    if is_markdown_rule(trimmed) {
-        return format!("{indent_prefix}{}", "-".repeat(32));
-    }
-
-    if let Some(text) = trim_markdown_heading(trimmed) {
-        return format!("{indent_prefix}{}", normalize_markdown_inline(text));
-    }
-
-    if let Some(rest) = trimmed
-        .strip_prefix("- ")
-        .or_else(|| trimmed.strip_prefix("* "))
-        .or_else(|| trimmed.strip_prefix("+ "))
-    {
-        return format!("{indent_prefix}- {}", normalize_markdown_inline(rest));
-    }
-
-    if let Some(rest) = trimmed.strip_prefix("> ") {
-        return format!("{indent_prefix}| {}", normalize_markdown_inline(rest));
-    }
-
-    if let Some((marker, rest)) = split_markdown_numbered_item(trimmed) {
-        return format!(
-            "{indent_prefix}{marker} {}",
-            normalize_markdown_inline(rest)
-        );
-    }
-
-    format!("{indent_prefix}{}", normalize_markdown_inline(trimmed))
-}
-
-fn is_markdown_rule(line: &str) -> bool {
-    let stripped = line.trim();
-    matches!(stripped, "---" | "***" | "___")
-}
-
-fn trim_markdown_heading(line: &str) -> Option<&str> {
+fn is_markdown_heading(line: &str) -> bool {
     let mut level = 0usize;
     for ch in line.chars() {
         if ch == '#' {
@@ -4915,67 +5437,86 @@ fn trim_markdown_heading(line: &str) -> Option<&str> {
         }
     }
     if level == 0 || level > 6 {
-        return None;
+        return false;
     }
     line.get(level..)
         .map(str::trim_start)
-        .filter(|value| !value.is_empty())
+        .map(|value| !value.is_empty())
+        .unwrap_or(false)
 }
 
-fn split_markdown_numbered_item(line: &str) -> Option<(&str, &str)> {
-    let dot_idx = line.find(". ")?;
-    if dot_idx == 0 {
-        return None;
-    }
-    let marker = &line[..dot_idx];
-    if !marker.chars().all(|ch| ch.is_ascii_digit()) {
-        return None;
-    }
-    Some((&line[..dot_idx + 1], &line[dot_idx + 2..]))
-}
-
-fn normalize_markdown_inline(input: &str) -> String {
-    let with_links = rewrite_markdown_links(input);
-    with_links
-        .replace("**", "")
-        .replace("__", "")
-        .replace('`', "")
-}
-
-fn rewrite_markdown_links(input: &str) -> String {
-    let mut output = String::new();
-    let mut remaining = input;
-
-    loop {
-        let Some(open) = remaining.find('[') else {
-            output.push_str(remaining);
-            break;
-        };
-        output.push_str(&remaining[..open]);
-        let after_open = &remaining[open + 1..];
-        let Some(mid) = after_open.find("](") else {
-            output.push('[');
-            output.push_str(after_open);
-            break;
-        };
-        let text = &after_open[..mid];
-        let after_mid = &after_open[mid + 2..];
-        let Some(close) = after_mid.find(')') else {
-            output.push('[');
-            output.push_str(after_open);
-            break;
-        };
-        let url = &after_mid[..close];
-        output.push_str(text);
-        if !url.is_empty() {
-            output.push_str(" (");
-            output.push_str(url);
-            output.push(')');
+fn terminal_markdown_skin() -> &'static RatSkin {
+    static SKIN: OnceLock<RatSkin> = OnceLock::new();
+    SKIN.get_or_init(|| {
+        let mut skin = RatSkin::default();
+        if matches!(ui_theme_from_env(), UiTheme::Nord) {
+            apply_nord_markdown_theme(&mut skin);
         }
-        remaining = &after_mid[close + 1..];
-    }
+        skin.skin.paragraph.right_margin = 0;
+        skin.skin.code_block.left_margin = 0;
+        for header in &mut skin.skin.headers {
+            header.left_margin = 0;
+            header.right_margin = 0;
+        }
+        skin
+    })
+}
 
-    output
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum UiTheme {
+    Default,
+    Nord,
+}
+
+fn ui_theme_from_env() -> UiTheme {
+    static THEME: OnceLock<UiTheme> = OnceLock::new();
+    *THEME.get_or_init(|| {
+        let value = std::env::var(UI_THEME_ENV)
+            .ok()
+            .map(|entry| entry.trim().to_ascii_lowercase())
+            .unwrap_or_else(|| "nord".to_owned());
+        match value.as_str() {
+            "default" => UiTheme::Default,
+            "nord" => UiTheme::Nord,
+            _ => UiTheme::Nord,
+        }
+    })
+}
+
+fn apply_nord_markdown_theme(skin: &mut RatSkin) {
+    // Nord-inspired palette
+    // Polar Night:  #2E3440 #3B4252 #434C5E #4C566A
+    // Snow Storm:   #D8DEE9 #E5E9F0 #ECEFF4
+    // Frost:        #8FBCBB #88C0D0 #81A1C1 #5E81AC
+    // Aurora:       #BF616A #D08770 #EBCB8B #A3BE8C #B48EAD
+    skin.skin.paragraph.set_fg((216, 222, 233).into()); // nord4
+    skin.skin.bold.set_fg((236, 239, 244).into()); // nord6
+    skin.skin.italic.set_fg((136, 192, 208).into()); // nord8
+    skin.skin.strikeout.set_fg((180, 142, 173).into()); // nord15
+
+    skin.skin.headers[0].set_fg((235, 203, 139).into()); // nord13
+    skin.skin.headers[1].set_fg((143, 188, 187).into()); // nord7
+    skin.skin.headers[2].set_fg((129, 161, 193).into()); // nord9
+    skin.skin.headers[3].set_fg((136, 192, 208).into()); // nord8
+    skin.skin.headers[4].set_fg((163, 190, 140).into()); // nord14
+    skin.skin.headers[5].set_fg((208, 135, 112).into()); // nord12
+
+    skin.skin.inline_code.set_fgbg((235, 203, 139).into(), (46, 52, 64).into()); // nord13 on nord0
+    skin.skin.code_block.set_fgbg((236, 239, 244).into(), (59, 66, 82).into()); // nord6 on nord1
+
+    skin.skin.bullet.set_fg((136, 192, 208).into()); // nord8
+    skin.skin.quote_mark.set_fg((94, 129, 172).into()); // nord10
+    skin.skin.horizontal_rule.set_fg((76, 86, 106).into()); // nord3
+    skin.skin.table.compound_style.set_fg((129, 161, 193).into()); // nord9
+}
+
+fn estimate_wrapped_line_count(text: &Text<'_>, _area_width: u16) -> u16 {
+    let count = text.lines.len();
+    if count == 0 {
+        1
+    } else {
+        count.min(u16::MAX as usize) as u16
+    }
 }
 
 fn sanitize_terminal_display_text(input: &str) -> String {
@@ -4998,7 +5539,48 @@ fn repository_name_from_path(path: &str) -> String {
         .map_or_else(|| "unknown-repo".to_owned(), ToOwned::to_owned)
 }
 
-fn repository_label_for_session(
+fn work_item_repository_labels(domain: &ProjectionState) -> HashMap<WorkItemId, String> {
+    let mut work_item_repo = HashMap::new();
+    for event in &domain.events {
+        if let OrchestrationEventPayload::WorktreeCreated(payload) = &event.payload {
+            work_item_repo.insert(
+                payload.work_item_id.clone(),
+                repository_name_from_path(payload.path.as_str()),
+            );
+        }
+    }
+    work_item_repo
+}
+
+fn ticket_labels_by_ticket_id(domain: &ProjectionState) -> HashMap<String, String> {
+    let mut ticket_labels = HashMap::new();
+    for event in &domain.events {
+        if let OrchestrationEventPayload::TicketSynced(payload) = &event.payload {
+            ticket_labels.insert(
+                payload.ticket_id.as_str().to_owned(),
+                format_ticket_label(
+                    payload.identifier.as_str(),
+                    payload.title.as_str(),
+                    &payload.ticket_id,
+                ),
+            );
+        }
+    }
+    ticket_labels
+}
+
+fn format_ticket_label(identifier: &str, title: &str, ticket_id: &TicketId) -> String {
+    let identifier = identifier.trim();
+    let title = title.trim();
+    match (identifier.is_empty(), title.is_empty()) {
+        (false, false) => format!("{identifier}: {title}"),
+        (false, true) => identifier.to_owned(),
+        (true, false) => title.to_owned(),
+        (true, true) => ticket_id.as_str().to_owned(),
+    }
+}
+
+fn project_label_for_session(
     session: &SessionProjection,
     domain: &ProjectionState,
     work_item_repo: &HashMap<WorkItemId, String>,
@@ -5006,16 +5588,45 @@ fn repository_label_for_session(
     session
         .work_item_id
         .as_ref()
-        .and_then(|work_item_id| work_item_repo.get(work_item_id).cloned())
+        .and_then(|work_item_id| domain.work_items.get(work_item_id))
+        .and_then(|work_item| work_item.project_id.as_ref())
+        .map(|project_id: &ProjectId| project_id.as_str().trim().to_owned())
+        .filter(|project_id| !project_id.is_empty())
         .or_else(|| {
             session
                 .work_item_id
                 .as_ref()
-                .and_then(|work_item_id| domain.work_items.get(work_item_id))
-                .and_then(|work_item| work_item.project_id.as_ref())
-                .map(|project_id: &ProjectId| project_id.as_str().to_owned())
+                .and_then(|work_item_id| work_item_repo.get(work_item_id).cloned())
         })
         .unwrap_or_else(|| "unknown-repo".to_owned())
+}
+
+fn ticket_label_for_session(
+    session: &SessionProjection,
+    domain: &ProjectionState,
+    ticket_labels: &HashMap<String, String>,
+) -> String {
+    let Some(work_item_id) = session.work_item_id.as_ref() else {
+        return format!("session {}", session.id.as_str());
+    };
+    let Some(work_item) = domain.work_items.get(work_item_id) else {
+        return format!("session {}", session.id.as_str());
+    };
+    let Some(ticket_id) = work_item.ticket_id.as_ref() else {
+        return format!("session {}", session.id.as_str());
+    };
+    ticket_labels
+        .get(ticket_id.as_str())
+        .cloned()
+        .or_else(|| {
+            let fallback = ticket_id.as_str().trim();
+            if fallback.is_empty() {
+                None
+            } else {
+                Some(fallback.to_owned())
+            }
+        })
+        .unwrap_or_else(|| format!("session {}", session.id.as_str()))
 }
 
 fn is_open_session_status(status: Option<&WorkerSessionStatus>) -> bool {
@@ -5034,6 +5645,53 @@ fn session_status_label(status: Option<&WorkerSessionStatus>) -> &'static str {
         Some(WorkerSessionStatus::Crashed) => "crashed",
         None => "unknown",
     }
+}
+
+fn workflow_badge_for_session(
+    session: &SessionProjection,
+    domain: &ProjectionState,
+    terminal_session_states: &HashMap<WorkerSessionId, TerminalViewState>,
+) -> String {
+    let workflow = terminal_session_states
+        .get(&session.id)
+        .map(|state| state.workflow_stage.label().to_owned())
+        .or_else(|| {
+            session
+                .work_item_id
+                .as_ref()
+                .and_then(|work_item_id| domain.work_items.get(work_item_id))
+                .and_then(|work_item| work_item.workflow_state.as_ref())
+                .map(workflow_state_to_badge_label)
+        })
+        .or_else(|| {
+            if matches!(session.status.as_ref(), Some(WorkerSessionStatus::Running)) {
+                Some(TerminalWorkflowStage::Planning.label().to_owned())
+            } else {
+                None
+            }
+        })
+        .unwrap_or_else(|| session_status_label(session.status.as_ref()).to_owned());
+    if matches!(session.status.as_ref(), Some(WorkerSessionStatus::Running))
+        && session_turn_is_active(terminal_session_states, &session.id)
+    {
+        format!("{workflow} {}", loading_spinner_frame())
+    } else {
+        workflow
+    }
+}
+
+fn workflow_state_to_badge_label(state: &WorkflowState) -> String {
+    match state {
+        WorkflowState::New | WorkflowState::Planning => TerminalWorkflowStage::Planning.label(),
+        WorkflowState::Implementing | WorkflowState::Testing | WorkflowState::PRDrafted => {
+            TerminalWorkflowStage::Implementation.label()
+        }
+        WorkflowState::AwaitingYourReview
+        | WorkflowState::ReadyForReview
+        | WorkflowState::InReview => TerminalWorkflowStage::Review.label(),
+        WorkflowState::Done | WorkflowState::Abandoned => TerminalWorkflowStage::Complete.label(),
+    }
+    .to_owned()
 }
 
 fn render_ticket_picker_overlay(
@@ -5521,11 +6179,10 @@ fn default_keymap_config() -> KeymapConfig {
                     binding(&["s"], UiCommand::OpenTicketPicker),
                     binding(&["c"], UiCommand::ToggleGlobalSupervisorChat),
                     binding(&["enter"], UiCommand::OpenFocusCard),
-                    binding(&["t"], UiCommand::OpenTerminalForSelected),
+                    binding(&["i"], UiCommand::OpenTerminalForSelected),
                     binding(&["w"], UiCommand::AdvanceTerminalWorkflowStage),
                     binding(&["x"], UiCommand::KillSelectedSession),
                     binding(&["backspace"], UiCommand::MinimizeCenterView),
-                    binding(&["i"], UiCommand::EnterInsertMode),
                     binding(&["z", "1"], UiCommand::JumpBatchDecideOrUnblock),
                     binding(&["z", "2"], UiCommand::JumpBatchApprovals),
                     binding(&["z", "3"], UiCommand::JumpBatchReviewReady),
@@ -5578,7 +6235,7 @@ enum RoutedInput {
 fn mode_help(mode: UiMode) -> &'static str {
     match mode {
         UiMode::Normal => {
-            "j/k: select | Tab/S-Tab: batch cycle | 1-4 or z{1-4}: batch jump | g/G: first/last | s: start ticket | c: supervisor chat | Enter: focus | t: terminal | w: advance session workflow | x: kill selected session | v{d/t/p/c}: inspectors | i: insert | q: quit"
+            "j/k: select | Tab/S-Tab: batch cycle | 1-4 or z{1-4}: batch jump | g/G: first/last | s: start ticket | c: supervisor chat | Enter: focus | i: terminal | w: advance session workflow | x: kill selected session | v{d/t/p/c}: inspectors | q: quit"
         }
         UiMode::Insert => "Insert input active | Esc/Ctrl-[: Normal",
         UiMode::Terminal => "Terminal compose active | Enter send | Shift+Enter newline | Esc or Ctrl-\\ Ctrl-n: Normal | then w: advance workflow",
@@ -5610,8 +6267,37 @@ fn append_terminal_output(state: &mut TerminalViewState, bytes: Vec<u8>) {
         if line.is_empty() {
             continue;
         }
-        let marker = if is_outgoing_transcript_line(line) { '>' } else { '<' };
-        state.lines.push(format!("{marker} {line}"));
+        if let Some((before, kind, content)) = parse_terminal_meta_line_embedded(line) {
+            let before = before.trim();
+            if !before.is_empty() {
+                if is_outgoing_transcript_line(before) {
+                    state
+                        .entries
+                        .push(TerminalTranscriptEntry::Message(format!(
+                            "> {}",
+                            normalize_outgoing_user_line(before)
+                        )));
+                } else {
+                    state
+                        .entries
+                        .push(TerminalTranscriptEntry::Message(before.to_owned()));
+                }
+            }
+            append_terminal_foldable_content(state, kind, content.as_str());
+            continue;
+        }
+        if is_outgoing_transcript_line(line) {
+            state
+                .entries
+                .push(TerminalTranscriptEntry::Message(format!(
+                    "> {}",
+                    normalize_outgoing_user_line(line)
+                )));
+        } else {
+            state
+                .entries
+                .push(TerminalTranscriptEntry::Message(line.to_owned()));
+        }
     }
 }
 
@@ -5630,11 +6316,10 @@ fn append_terminal_user_message(state: &mut TerminalViewState, message: &str) {
         if line.is_empty() {
             continue;
         }
-        if index == 0 {
-            state.lines.push(format!("> you: {line}"));
-        } else {
-            state.lines.push(format!("> {line}"));
-        }
+        let _ = index;
+        state
+            .entries
+            .push(TerminalTranscriptEntry::Message(format!("> {line}")));
     }
 }
 
@@ -5650,10 +6335,65 @@ fn append_terminal_system_message(state: &mut TerminalViewState, message: &str) 
             continue;
         }
         if index == 0 {
-            state.lines.push(format!("> system: {line}"));
+            state
+                .entries
+                .push(TerminalTranscriptEntry::Message(format!("> system: {line}")));
         } else {
-            state.lines.push(format!("> {line}"));
+            state
+                .entries
+                .push(TerminalTranscriptEntry::Message(format!("> system: {line}")));
         }
+    }
+}
+
+fn parse_terminal_meta_line_embedded(line: &str) -> Option<(String, TerminalFoldKind, String)> {
+    const PREFIX: &str = "[[orchestrator-meta|";
+    let start = line.find(PREFIX)?;
+    let before = line[..start].to_owned();
+    let suffix = &line[start + PREFIX.len()..];
+    let closing = suffix.find("]]")?;
+    let kind = match suffix[..closing].trim() {
+        "reasoning" => TerminalFoldKind::Reasoning,
+        "file-change" => TerminalFoldKind::FileChange,
+        "tool-call" => TerminalFoldKind::ToolCall,
+        "command" => TerminalFoldKind::CommandExecution,
+        _ => TerminalFoldKind::Other,
+    };
+    let content = suffix[closing + 2..].trim().to_owned();
+    Some((before, kind, content))
+}
+
+fn append_terminal_foldable_content(
+    state: &mut TerminalViewState,
+    kind: TerminalFoldKind,
+    content: &str,
+) {
+    let entry_content = if content.trim().is_empty() {
+        "(no details)"
+    } else {
+        content.trim()
+    };
+
+    if let Some(TerminalTranscriptEntry::Foldable(previous)) = state.entries.last_mut() {
+        if previous.kind == kind {
+            if !previous.content.is_empty() {
+                previous.content.push('\n');
+            }
+            previous.content.push_str(entry_content);
+            return;
+        }
+    }
+
+    state
+        .entries
+        .push(TerminalTranscriptEntry::Foldable(TerminalFoldSection {
+            kind,
+            content: entry_content.to_owned(),
+            folded: true,
+        }));
+
+    if state.selected_fold_entry.is_none() {
+        state.selected_fold_entry = Some(state.entries.len().saturating_sub(1));
     }
 }
 
@@ -5671,8 +6411,45 @@ fn flush_terminal_output_fragment(state: &mut TerminalViewState) {
         return;
     }
 
-    let marker = if is_outgoing_transcript_line(line) { '>' } else { '<' };
-    state.lines.push(format!("{marker} {line}"));
+    if let Some((before, kind, content)) = parse_terminal_meta_line_embedded(line) {
+        let before = before.trim();
+        if !before.is_empty() {
+            if is_outgoing_transcript_line(before) {
+                state
+                    .entries
+                    .push(TerminalTranscriptEntry::Message(format!(
+                        "> {}",
+                        normalize_outgoing_user_line(before)
+                    )));
+            } else {
+                state
+                    .entries
+                    .push(TerminalTranscriptEntry::Message(before.to_owned()));
+            }
+        }
+        append_terminal_foldable_content(state, kind, content.as_str());
+        return;
+    }
+
+    if is_outgoing_transcript_line(line) {
+        state
+            .entries
+            .push(TerminalTranscriptEntry::Message(format!(
+                "> {}",
+                normalize_outgoing_user_line(line)
+            )));
+    } else {
+        state
+            .entries
+            .push(TerminalTranscriptEntry::Message(line.to_owned()));
+    }
+}
+
+fn normalize_outgoing_user_line(line: &str) -> &str {
+    line
+        .strip_prefix("you: ")
+        .or_else(|| line.strip_prefix("user: "))
+        .unwrap_or(line)
 }
 
 fn handle_key_press(shell_state: &mut UiShellState, key: KeyEvent) -> bool {
@@ -5693,6 +6470,32 @@ fn handle_key_press(shell_state: &mut UiShellState, key: KeyEvent) -> bool {
 fn route_key_press(shell_state: &mut UiShellState, key: KeyEvent) -> RoutedInput {
     if shell_state.is_ticket_picker_visible() {
         return route_ticket_picker_key(shell_state, key);
+    }
+
+    if shell_state.mode == UiMode::Normal && shell_state.is_terminal_view_active() {
+        match key.code {
+            KeyCode::Char('j') | KeyCode::Down => {
+                shell_state.move_terminal_output_cursor(1);
+                return RoutedInput::Ignore;
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                shell_state.move_terminal_output_cursor(-1);
+                return RoutedInput::Ignore;
+            }
+            KeyCode::Char('h') | KeyCode::Left => {
+                if !shell_state.fold_or_unfold_selected_terminal_section(true) {
+                    shell_state.move_terminal_output_cursor_col(-1);
+                }
+                return RoutedInput::Ignore;
+            }
+            KeyCode::Char('l') | KeyCode::Right => {
+                if !shell_state.fold_or_unfold_selected_terminal_section(false) {
+                    shell_state.move_terminal_output_cursor_col(1);
+                }
+                return RoutedInput::Ignore;
+            }
+            _ => {}
+        }
     }
 
     if is_escape_to_normal(key) {
@@ -6650,6 +7453,224 @@ mod tests {
             receiver,
         ));
         sender
+    }
+
+    #[test]
+    fn session_panel_groups_by_project_and_names_sessions_from_ticket_metadata() {
+        let mut projection = ProjectionState::default();
+        let work_item_core = WorkItemId::new("wi-core");
+        let work_item_orchestrator = WorkItemId::new("wi-orchestrator");
+        let session_core = WorkerSessionId::new("sess-core");
+        let session_orchestrator = WorkerSessionId::new("sess-orchestrator");
+        let ticket_core = TicketId::new("ticket-core");
+        let ticket_orchestrator = TicketId::new("ticket-orchestrator");
+
+        projection.work_items.insert(
+            work_item_core.clone(),
+            WorkItemProjection {
+                id: work_item_core.clone(),
+                ticket_id: Some(ticket_core.clone()),
+                project_id: Some(ProjectId::new("Core Platform")),
+                workflow_state: None,
+                session_id: Some(session_core.clone()),
+                worktree_id: None,
+                inbox_items: vec![],
+                artifacts: vec![],
+            },
+        );
+        projection.work_items.insert(
+            work_item_orchestrator.clone(),
+            WorkItemProjection {
+                id: work_item_orchestrator.clone(),
+                ticket_id: Some(ticket_orchestrator.clone()),
+                project_id: Some(ProjectId::new("Orchestrator")),
+                workflow_state: None,
+                session_id: Some(session_orchestrator.clone()),
+                worktree_id: None,
+                inbox_items: vec![],
+                artifacts: vec![],
+            },
+        );
+
+        projection.sessions.insert(
+            session_core.clone(),
+            SessionProjection {
+                id: session_core.clone(),
+                work_item_id: Some(work_item_core.clone()),
+                status: Some(WorkerSessionStatus::WaitingForUser),
+                latest_checkpoint: None,
+            },
+        );
+        projection.sessions.insert(
+            session_orchestrator.clone(),
+            SessionProjection {
+                id: session_orchestrator.clone(),
+                work_item_id: Some(work_item_orchestrator.clone()),
+                status: Some(WorkerSessionStatus::WaitingForUser),
+                latest_checkpoint: None,
+            },
+        );
+
+        projection.events.push(StoredEventEnvelope {
+            event_id: "evt-ticket-core".to_owned(),
+            sequence: 1,
+            occurred_at: "2026-02-19T00:00:00Z".to_owned(),
+            work_item_id: Some(work_item_core),
+            session_id: None,
+            event_type: OrchestrationEventType::TicketSynced,
+            payload: OrchestrationEventPayload::TicketSynced(orchestrator_core::TicketSyncedPayload {
+                ticket_id: ticket_core,
+                identifier: "AP-101".to_owned(),
+                title: "Harden session lifecycle".to_owned(),
+                state: "In Progress".to_owned(),
+                assignee: None,
+                priority: None,
+            }),
+            schema_version: 1,
+        });
+        projection.events.push(StoredEventEnvelope {
+            event_id: "evt-ticket-orchestrator".to_owned(),
+            sequence: 2,
+            occurred_at: "2026-02-19T00:00:01Z".to_owned(),
+            work_item_id: Some(work_item_orchestrator),
+            session_id: None,
+            event_type: OrchestrationEventType::TicketSynced,
+            payload: OrchestrationEventPayload::TicketSynced(orchestrator_core::TicketSyncedPayload {
+                ticket_id: ticket_orchestrator,
+                identifier: "AP-202".to_owned(),
+                title: "Session list redesign".to_owned(),
+                state: "In Progress".to_owned(),
+                assignee: None,
+                priority: None,
+            }),
+            schema_version: 1,
+        });
+
+        let rows = session_panel_rows(&projection, &HashMap::new());
+        assert_eq!(
+            rows,
+            vec![
+                (
+                    session_core,
+                    "Core Platform".to_owned(),
+                    "  [waiting] AP-101: Harden session lifecycle".to_owned()
+                ),
+                (
+                    session_orchestrator,
+                    "Orchestrator".to_owned(),
+                    "  [waiting] AP-202: Session list redesign".to_owned()
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn session_panel_uses_repository_name_when_project_name_is_missing() {
+        let mut projection = ProjectionState::default();
+        let work_item_id = WorkItemId::new("wi-repo-fallback");
+        let session_id = WorkerSessionId::new("sess-repo-fallback");
+        let ticket_id = TicketId::new("ticket-repo-fallback");
+
+        projection.work_items.insert(
+            work_item_id.clone(),
+            WorkItemProjection {
+                id: work_item_id.clone(),
+                ticket_id: Some(ticket_id.clone()),
+                project_id: None,
+                workflow_state: None,
+                session_id: Some(session_id.clone()),
+                worktree_id: None,
+                inbox_items: vec![],
+                artifacts: vec![],
+            },
+        );
+        projection.sessions.insert(
+            session_id.clone(),
+            SessionProjection {
+                id: session_id.clone(),
+                work_item_id: Some(work_item_id.clone()),
+                status: Some(WorkerSessionStatus::WaitingForUser),
+                latest_checkpoint: None,
+            },
+        );
+
+        projection.events.push(StoredEventEnvelope {
+            event_id: "evt-worktree-created".to_owned(),
+            sequence: 1,
+            occurred_at: "2026-02-19T00:01:00Z".to_owned(),
+            work_item_id: Some(work_item_id.clone()),
+            session_id: None,
+            event_type: OrchestrationEventType::WorktreeCreated,
+            payload: OrchestrationEventPayload::WorktreeCreated(
+                orchestrator_core::WorktreeCreatedPayload {
+                    worktree_id: orchestrator_core::WorktreeId::new("wt-repo-fallback"),
+                    work_item_id: work_item_id.clone(),
+                    path: "/tmp/github/orchestrator".to_owned(),
+                    branch: "feature/repo-fallback".to_owned(),
+                    base_branch: "main".to_owned(),
+                },
+            ),
+            schema_version: 1,
+        });
+        projection.events.push(StoredEventEnvelope {
+            event_id: "evt-ticket-synced".to_owned(),
+            sequence: 2,
+            occurred_at: "2026-02-19T00:01:01Z".to_owned(),
+            work_item_id: Some(work_item_id),
+            session_id: None,
+            event_type: OrchestrationEventType::TicketSynced,
+            payload: OrchestrationEventPayload::TicketSynced(orchestrator_core::TicketSyncedPayload {
+                ticket_id,
+                identifier: "AP-303".to_owned(),
+                title: "Repository label fallback".to_owned(),
+                state: "In Progress".to_owned(),
+                assignee: None,
+                priority: None,
+            }),
+            schema_version: 1,
+        });
+
+        let rows = session_panel_rows(&projection, &HashMap::new());
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].0, session_id);
+        assert_eq!(rows[0].1, "orchestrator");
+        assert_eq!(rows[0].2, "  [waiting] AP-303: Repository label fallback");
+    }
+
+    #[test]
+    fn session_panel_falls_back_to_session_id_when_ticket_is_missing() {
+        let mut projection = ProjectionState::default();
+        let work_item_id = WorkItemId::new("wi-no-ticket");
+        let session_id = WorkerSessionId::new("sess-no-ticket");
+
+        projection.work_items.insert(
+            work_item_id.clone(),
+            WorkItemProjection {
+                id: work_item_id.clone(),
+                ticket_id: None,
+                project_id: Some(ProjectId::new("Orchestrator")),
+                workflow_state: None,
+                session_id: Some(session_id.clone()),
+                worktree_id: None,
+                inbox_items: vec![],
+                artifacts: vec![],
+            },
+        );
+        projection.sessions.insert(
+            session_id.clone(),
+            SessionProjection {
+                id: session_id.clone(),
+                work_item_id: Some(work_item_id),
+                status: Some(WorkerSessionStatus::WaitingForUser),
+                latest_checkpoint: None,
+            },
+        );
+
+        let rows = session_panel_rows(&projection, &HashMap::new());
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].0, session_id);
+        assert_eq!(rows[0].1, "Orchestrator");
+        assert_eq!(rows[0].2, "  [waiting] session sess-no-ticket");
     }
 
     #[test]
@@ -8306,8 +9327,7 @@ mod tests {
         shell_state.move_selection(2);
         let before_index = shell_state.ui_state().selected_inbox_index;
 
-        let enter_insert = handle_key_press(&mut shell_state, key(KeyCode::Char('i')));
-        assert!(!enter_insert);
+        shell_state.enter_insert_mode();
         assert_eq!(shell_state.mode, UiMode::Insert);
 
         handle_key_press(&mut shell_state, key(KeyCode::Char('j')));
@@ -8319,7 +9339,7 @@ mod tests {
     #[test]
     fn insert_mode_is_not_entered_while_terminal_view_is_active() {
         let mut shell_state = UiShellState::new("ready".to_owned(), sample_projection(true));
-        handle_key_press(&mut shell_state, key(KeyCode::Char('t')));
+        handle_key_press(&mut shell_state, key(KeyCode::Char('i')));
         assert_eq!(shell_state.mode, UiMode::Terminal);
         assert!(shell_state.is_terminal_view_active());
 
@@ -8327,7 +9347,7 @@ mod tests {
         assert_eq!(shell_state.mode, UiMode::Normal);
         assert!(shell_state.is_terminal_view_active());
 
-        handle_key_press(&mut shell_state, key(KeyCode::Char('i')));
+        shell_state.enter_insert_mode();
         assert_eq!(shell_state.mode, UiMode::Normal);
     }
 
@@ -8345,7 +9365,7 @@ mod tests {
     #[test]
     fn terminal_mode_supports_escape_chord_with_compose_buffer() {
         let mut shell_state = UiShellState::new("ready".to_owned(), sample_projection(true));
-        handle_key_press(&mut shell_state, key(KeyCode::Char('t')));
+        handle_key_press(&mut shell_state, key(KeyCode::Char('i')));
         assert_eq!(shell_state.mode, UiMode::Terminal);
         assert!(shell_state.is_terminal_view_active());
 
@@ -8385,7 +9405,7 @@ mod tests {
     #[test]
     fn terminal_escape_prefix_replays_when_chord_not_completed() {
         let mut shell_state = UiShellState::new("ready".to_owned(), sample_projection(true));
-        handle_key_press(&mut shell_state, key(KeyCode::Char('t')));
+        handle_key_press(&mut shell_state, key(KeyCode::Char('i')));
         assert_eq!(shell_state.mode, UiMode::Terminal);
 
         handle_key_press(&mut shell_state, ctrl_key(KeyCode::Char('\\')));
@@ -8398,7 +9418,7 @@ mod tests {
     #[test]
     fn terminal_compose_supports_multiline_input() {
         let mut shell_state = UiShellState::new("ready".to_owned(), sample_projection(true));
-        handle_key_press(&mut shell_state, key(KeyCode::Char('t')));
+        handle_key_press(&mut shell_state, key(KeyCode::Char('i')));
         assert_eq!(shell_state.mode, UiMode::Terminal);
 
         handle_key_press(&mut shell_state, key(KeyCode::Char('h')));
@@ -8418,7 +9438,7 @@ mod tests {
         );
         assert_eq!(
             routed_command(route_key_press(&mut shell_state, key(KeyCode::Char('i')))),
-            Some(UiCommand::EnterInsertMode)
+            Some(UiCommand::OpenTerminalForSelected)
         );
         assert_eq!(
             routed_command(route_key_press(&mut shell_state, key(KeyCode::Char('q')))),
