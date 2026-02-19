@@ -538,8 +538,9 @@ impl<R: CommandRunner> GhCliClient<R> {
     }
 
     fn requires_explicit_merge_strategy(detail: &str) -> bool {
-        let mentions_strategy_flags =
-            detail.contains("--merge") || detail.contains("--rebase") || detail.contains("--squash");
+        let mentions_strategy_flags = detail.contains("--merge")
+            || detail.contains("--rebase")
+            || detail.contains("--squash");
         mentions_strategy_flags && detail.contains("not running interactively")
     }
 
@@ -1379,7 +1380,11 @@ mod tests {
                 "",
                 "--merge, --rebase, or --squash required when not running interactively",
             )),
-            Ok(output(1, "", "merge commits are not allowed on this repository")),
+            Ok(output(
+                1,
+                "",
+                "merge commits are not allowed on this repository",
+            )),
             Ok(success_output()),
         ]);
         let client = GhCliClient::new(runner).expect("init");
@@ -1425,7 +1430,11 @@ mod tests {
                 "",
                 "--merge, --rebase, or --squash required when not running interactively",
             )),
-            Ok(output(1, "", "merge commits are disabled for this repository")),
+            Ok(output(
+                1,
+                "",
+                "merge commits are disabled for this repository",
+            )),
             Ok(output(
                 1,
                 "",

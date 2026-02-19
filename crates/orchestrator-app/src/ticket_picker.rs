@@ -243,6 +243,35 @@ where
                 ))
             })?
     }
+
+    async fn complete_session_after_merge(
+        &self,
+        session_id: WorkerSessionId,
+    ) -> Result<(), CoreError> {
+        let app = self.app.clone();
+        let worker_backend = self.worker_backend.clone();
+        tokio::task::spawn_blocking(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(|error| {
+                    CoreError::Configuration(format!(
+                        "failed to initialize merge-finalization runtime: {error}"
+                    ))
+                })?;
+
+            runtime.block_on(async {
+                app.complete_session_after_merge(&session_id, worker_backend.as_ref())
+                    .await
+            })
+        })
+        .await
+        .map_err(|error| {
+            CoreError::Configuration(format!(
+                "ticket picker task failed while finalizing merged session: {error}"
+            ))
+        })?
+    }
 }
 
 const DEFAULT_SUPERVISOR_MODEL: &str = "openai/gpt-4o-mini";

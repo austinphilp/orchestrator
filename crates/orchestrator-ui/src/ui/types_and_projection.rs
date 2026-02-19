@@ -98,6 +98,12 @@ pub trait TicketPickerProvider: Send + Sync {
     ) -> Result<Vec<(WorkerSessionId, String)>, CoreError> {
         Ok(Vec::new())
     }
+    async fn complete_session_after_merge(
+        &self,
+        _session_id: WorkerSessionId,
+    ) -> Result<(), CoreError> {
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

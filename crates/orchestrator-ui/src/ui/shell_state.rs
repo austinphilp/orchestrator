@@ -37,6 +37,7 @@ struct UiShellState {
     merge_event_sender: Option<mpsc::Sender<MergeQueueEvent>>,
     merge_event_receiver: Option<mpsc::Receiver<MergeQueueEvent>>,
     merge_pending_sessions: HashSet<WorkerSessionId>,
+    merge_finalizing_sessions: HashSet<WorkerSessionId>,
     review_sync_instructions_sent: HashSet<WorkerSessionId>,
     worktree_diff_modal: Option<WorktreeDiffModalState>,
 }
@@ -122,6 +123,7 @@ impl UiShellState {
             merge_event_sender,
             merge_event_receiver,
             merge_pending_sessions: HashSet::new(),
+            merge_finalizing_sessions: HashSet::new(),
             review_sync_instructions_sent: HashSet::new(),
             worktree_diff_modal: None,
         }
@@ -1233,6 +1235,9 @@ impl UiShellState {
 
                     if completed {
                         self.merge_pending_sessions.remove(&session_id);
+                        if let Some(session) = self.domain.sessions.get_mut(&session_id) {
+                            session.status = Some(WorkerSessionStatus::Done);
+                        }
                         if let Some(view) = self.terminal_session_states.get_mut(&session_id) {
                             view.workflow_stage = TerminalWorkflowStage::Complete;
                         }
@@ -1254,12 +1259,27 @@ impl UiShellState {
                             "merge completed for review session {}",
                             session_id.as_str()
                         ));
+                        self.spawn_session_merge_finalize(session_id.clone());
                     } else if kind == MergeQueueCommandKind::Merge {
                         self.status_warning = Some(format!(
                             "merge pending for review session {} (waiting for checks or merge queue)",
                             session_id.as_str()
                         ));
                     }
+                }
+                MergeQueueEvent::SessionFinalized { session_id } => {
+                    self.merge_finalizing_sessions.remove(&session_id);
+                }
+                MergeQueueEvent::SessionFinalizeFailed {
+                    session_id,
+                    message,
+                } => {
+                    self.merge_finalizing_sessions.remove(&session_id);
+                    self.status_warning = Some(format!(
+                        "merged session {} finalized with warnings: {}",
+                        session_id.as_str(),
+                        compact_focus_card_text(message.as_str())
+                    ));
                 }
             }
         }
@@ -1302,6 +1322,8 @@ impl UiShellState {
         self.review_sync_instructions_sent
             .retain(|session_id| active_review_sessions.contains(session_id));
         self.merge_pending_sessions
+            .retain(|session_id| active_review_sessions.contains(session_id));
+        self.merge_finalizing_sessions
             .retain(|session_id| active_review_sessions.contains(session_id));
 
         for session_id in session_ids {
@@ -2724,6 +2746,38 @@ impl UiShellState {
                     modal.loading = false;
                     modal.error = Some("diff unavailable: tokio runtime is not active".to_owned());
                 }
+            }
+        }
+    }
+
+    fn spawn_session_merge_finalize(&mut self, session_id: WorkerSessionId) {
+        if !self.merge_finalizing_sessions.insert(session_id.clone()) {
+            return;
+        }
+
+        let Some(provider) = self.ticket_picker_provider.clone() else {
+            self.merge_finalizing_sessions.remove(&session_id);
+            return;
+        };
+        let Some(sender) = self.merge_event_sender.clone() else {
+            self.merge_finalizing_sessions.remove(&session_id);
+            self.status_warning = Some(
+                "merge finalization unavailable: merge event channel is not available".to_owned(),
+            );
+            return;
+        };
+
+        match TokioHandle::try_current() {
+            Ok(handle) => {
+                handle.spawn(async move {
+                    run_session_merge_finalize_task(provider, session_id, sender).await;
+                });
+            }
+            Err(_) => {
+                self.merge_finalizing_sessions.remove(&session_id);
+                self.status_warning = Some(
+                    "merge finalization unavailable: tokio runtime is not active".to_owned(),
+                );
             }
         }
     }

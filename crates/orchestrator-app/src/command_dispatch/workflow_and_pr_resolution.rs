@@ -367,6 +367,25 @@ where
             break;
         }
 
+        if current == WorkflowState::AwaitingYourReview {
+            let next = append_workflow_transition_event_for_runtime(
+                &mut store,
+                &runtime,
+                &current,
+                &WorkflowState::ReadyForReview,
+                WorkflowTransitionReason::ApprovalGranted,
+                &WorkflowGuardContext {
+                    has_draft_pr: true,
+                    approval_granted: true,
+                    ..WorkflowGuardContext::default()
+                },
+                command_id,
+            )?;
+            transitions.push("AwaitingYourReview->ReadyForReview".to_owned());
+            current = next;
+            continue;
+        }
+
         if current == WorkflowState::ReadyForReview {
             let next = append_workflow_transition_event_for_runtime(
                 &mut store,
@@ -374,7 +393,10 @@ where
                 &current,
                 &WorkflowState::InReview,
                 WorkflowTransitionReason::ReviewStarted,
-                &WorkflowGuardContext::default(),
+                &WorkflowGuardContext {
+                    has_draft_pr: true,
+                    ..WorkflowGuardContext::default()
+                },
                 command_id,
             )?;
             transitions.push("ReadyForReview->InReview".to_owned());

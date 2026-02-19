@@ -656,4 +656,11 @@ enum MergeQueueEvent {
         head_branch: Option<String>,
         error: Option<String>,
     },
+    SessionFinalized {
+        session_id: WorkerSessionId,
+    },
+    SessionFinalizeFailed {
+        session_id: WorkerSessionId,
+        message: String,
+    },
 }

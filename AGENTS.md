@@ -37,8 +37,8 @@
 - `ORCHESTRATOR_OPENCODE_SERVER_BASE_URL` (backend-opencode): optional base URL override for OpenCode harness server (defaults to managed local server at `http://127.0.0.1:8787`).
 - `ORCHESTRATOR_CODEX_SERVER_BASE_URL` (backend-codex): deprecated/unsupported. Codex uses JSON-RPC app-server over stdio; setting this now causes a configuration error.
 - `ORCHESTRATOR_HARNESS_SERVER_STARTUP_TIMEOUT_SECS` (backend-opencode, backend-codex): optional startup health-check timeout in seconds for managed harness server processes.
-- `ORCHESTRATOR_HARNESS_LOG_RAW_EVENTS` (backend-opencode, backend-codex): optional boolean toggle to append raw harness event payload lines to `.orchestrator/logs/harness-raw.log`.
-- `ORCHESTRATOR_HARNESS_LOG_NORMALIZED_EVENTS` (backend-opencode, backend-codex): optional boolean toggle to append normalized `BackendEvent` payloads to `.orchestrator/logs/harness-normalized.log`.
+- `ORCHESTRATOR_HARNESS_LOG_RAW_EVENTS` (backend-opencode, backend-codex): optional boolean toggle to append raw harness event payload lines to `${XDG_DATA_HOME:-$HOME/.local/share}/orchestrator/logs/harness-raw.log` on Linux (platform-equivalent app data dir on macOS/Windows).
+- `ORCHESTRATOR_HARNESS_LOG_NORMALIZED_EVENTS` (backend-opencode, backend-codex): optional boolean toggle to append normalized `BackendEvent` payloads to `${XDG_DATA_HOME:-$HOME/.local/share}/orchestrator/logs/harness-normalized.log` on Linux (platform-equivalent app data dir on macOS/Windows).
 - `ORCHESTRATOR_TICKET_PICKER_PRIORITY_STATES` (orchestrator-ui): optional comma-separated ticket state ordering.
 - `ORCHESTRATOR_UI_THEME` (orchestrator-ui): optional UI markdown theme override for terminal chat rendering (`nord` or `default`; defaults to `nord`).
 - `ORCHESTRATOR_UPDATE_GOLDENS` (orchestrator-ui): optional test helper toggle for golden snapshot updates.
