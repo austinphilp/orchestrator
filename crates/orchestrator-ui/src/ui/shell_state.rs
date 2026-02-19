@@ -1105,6 +1105,41 @@ impl UiShellState {
         self.spawn_ticket_picker_start_with_override(ticket, repository_override);
     }
 
+    fn begin_archive_selected_ticket_from_picker(&mut self) {
+        if !self.ticket_picker_overlay.visible {
+            return;
+        }
+        if self.ticket_picker_overlay.loading
+            || self.ticket_picker_overlay.creating
+            || self.ticket_picker_overlay.new_ticket_mode
+            || self.ticket_picker_overlay.starting_ticket_id.is_some()
+            || self.ticket_picker_overlay.archiving_ticket_id.is_some()
+        {
+            return;
+        }
+        let Some(ticket) = self.ticket_picker_overlay.selected_ticket().cloned() else {
+            return;
+        };
+        self.ticket_picker_overlay.error = None;
+        self.ticket_picker_overlay.archive_confirm_ticket = Some(ticket);
+    }
+
+    fn cancel_ticket_picker_archive_confirmation(&mut self) {
+        self.ticket_picker_overlay.archive_confirm_ticket = None;
+    }
+
+    fn submit_ticket_picker_archive_confirmation(&mut self) {
+        let Some(ticket) = self.ticket_picker_overlay.archive_confirm_ticket.clone() else {
+            return;
+        };
+        if self.ticket_picker_overlay.archiving_ticket_id.is_some() {
+            return;
+        }
+        self.ticket_picker_overlay.error = None;
+        self.ticket_picker_overlay.archiving_ticket_id = Some(ticket.ticket_id.clone());
+        self.spawn_ticket_picker_archive(ticket);
+    }
+
     fn submit_ticket_picker_repository_prompt(&mut self) {
         if !self.ticket_picker_overlay.visible {
             return;
@@ -1245,6 +1280,34 @@ impl UiShellState {
                 self.ticket_picker_overlay.creating = false;
                 self.ticket_picker_overlay.error =
                     Some("tokio runtime unavailable; cannot create ticket".to_owned());
+            }
+        }
+    }
+
+    fn spawn_ticket_picker_archive(&mut self, ticket: TicketSummary) {
+        let Some(provider) = self.ticket_picker_provider.clone() else {
+            self.ticket_picker_overlay.archiving_ticket_id = None;
+            self.ticket_picker_overlay.error =
+                Some("ticket provider unavailable while archiving ticket".to_owned());
+            return;
+        };
+        let Some(sender) = self.ticket_picker_sender.clone() else {
+            self.ticket_picker_overlay.archiving_ticket_id = None;
+            self.ticket_picker_overlay.error =
+                Some("ticket picker event channel unavailable while archiving ticket".to_owned());
+            return;
+        };
+
+        match TokioHandle::try_current() {
+            Ok(handle) => {
+                handle.spawn(async move {
+                    run_ticket_picker_archive_task(provider, ticket, sender).await;
+                });
+            }
+            Err(_) => {
+                self.ticket_picker_overlay.archiving_ticket_id = None;
+                self.ticket_picker_overlay.error =
+                    Some("tokio runtime unavailable; cannot archive ticket".to_owned());
             }
         }
     }
@@ -1891,6 +1954,43 @@ impl UiShellState {
                 self.ticket_picker_overlay.error = Some(message.clone());
                 self.status_warning = Some(format!(
                     "ticket picker start warning: {}",
+                    compact_focus_card_text(message.as_str())
+                ));
+            }
+            TicketPickerEvent::TicketArchived {
+                archived_ticket,
+                tickets,
+                warning,
+            } => {
+                self.ticket_picker_overlay.archiving_ticket_id = None;
+                self.ticket_picker_overlay.archive_confirm_ticket = None;
+                self.ticket_picker_overlay.error = None;
+                if let Some(tickets) = tickets {
+                    self.ticket_picker_overlay
+                        .apply_tickets(tickets, &self.ticket_picker_priority_states);
+                }
+                let mut status = format!("archived {}", archived_ticket.identifier);
+                if let Some(message) = warning {
+                    status.push_str(": ");
+                    status.push_str(compact_focus_card_text(message.as_str()).as_str());
+                }
+                self.status_warning = Some(status);
+            }
+            TicketPickerEvent::TicketArchiveFailed {
+                ticket,
+                message,
+                tickets,
+            } => {
+                self.ticket_picker_overlay.archiving_ticket_id = None;
+                self.ticket_picker_overlay.archive_confirm_ticket = None;
+                self.ticket_picker_overlay.error = Some(message.clone());
+                if let Some(tickets) = tickets {
+                    self.ticket_picker_overlay
+                        .apply_tickets(tickets, &self.ticket_picker_priority_states);
+                }
+                self.status_warning = Some(format!(
+                    "ticket picker archive warning ({}): {}",
+                    ticket.identifier,
                     compact_focus_card_text(message.as_str())
                 ));
             }
@@ -3069,4 +3169,3 @@ impl UiShellState {
         });
     }
 }
-

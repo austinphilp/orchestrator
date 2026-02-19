@@ -191,6 +191,10 @@ mod tests {
             })
         }
 
+        async fn archive_ticket(&self, _ticket: TicketSummary) -> Result<(), CoreError> {
+            Ok(())
+        }
+
         async fn reload_projection(&self) -> Result<ProjectionState, CoreError> {
             Ok(ProjectionState::default())
         }
@@ -2512,6 +2516,7 @@ mod tests {
         let overlay = TicketPickerOverlayState::default();
         let rendered = render_ticket_picker_overlay_text(&overlay);
         assert!(rendered.contains("n: new ticket"));
+        assert!(rendered.contains("x: archive"));
     }
 
     #[test]
@@ -2558,6 +2563,34 @@ mod tests {
         assert!(shell_state.ticket_picker_overlay.new_ticket_brief.is_empty());
     }
 
+    #[test]
+    fn ticket_picker_x_enters_archive_confirm_mode() {
+        let mut shell_state = UiShellState::new("ready".to_owned(), triage_projection());
+        shell_state.ticket_picker_overlay.open();
+        shell_state.ticket_picker_overlay.loading = false;
+        shell_state.ticket_picker_overlay.apply_tickets(
+            vec![sample_ticket_summary("issue-300", "AP-300", "Todo")],
+            &["Todo".to_owned()],
+        );
+        shell_state.ticket_picker_overlay.move_selection(1);
+
+        let routed = route_ticket_picker_key(&mut shell_state, key(KeyCode::Char('x')));
+        assert!(matches!(routed, RoutedInput::Ignore));
+        assert!(shell_state.ticket_picker_overlay.archive_confirm_ticket.is_some());
+    }
+
+    #[test]
+    fn ticket_picker_archive_confirm_esc_cancels_without_closing_overlay() {
+        let mut shell_state = UiShellState::new("ready".to_owned(), triage_projection());
+        shell_state.ticket_picker_overlay.open();
+        shell_state.ticket_picker_overlay.archive_confirm_ticket =
+            Some(sample_ticket_summary("issue-301", "AP-301", "Todo"));
+
+        route_ticket_picker_key(&mut shell_state, key(KeyCode::Esc));
+        assert!(shell_state.ticket_picker_overlay.visible);
+        assert!(shell_state.ticket_picker_overlay.archive_confirm_ticket.is_none());
+    }
+
     #[tokio::test]
     async fn run_ticket_picker_create_task_emits_created_event() {
         let created = sample_ticket_summary("issue-200", "AP-200", "Todo");
@@ -2584,6 +2617,33 @@ mod tests {
                 assert!(warning.is_none());
             }
             _ => panic!("expected ticket created event"),
+        }
+    }
+
+    #[tokio::test]
+    async fn run_ticket_picker_archive_task_emits_archived_event() {
+        let archived = sample_ticket_summary("issue-202", "AP-202", "Todo");
+        let refreshed = vec![sample_ticket_summary("issue-203", "AP-203", "Todo")];
+        let provider = Arc::new(TestTicketPickerProvider {
+            tickets: refreshed.clone(),
+            created: None,
+        });
+        let (sender, mut receiver) = mpsc::channel(1);
+
+        run_ticket_picker_archive_task(provider, archived.clone(), sender).await;
+
+        let event = receiver.recv().await.expect("ticket picker event");
+        match event {
+            TicketPickerEvent::TicketArchived {
+                archived_ticket,
+                tickets,
+                warning,
+            } => {
+                assert_eq!(archived_ticket.identifier, archived.identifier);
+                assert_eq!(tickets.unwrap_or_default(), refreshed);
+                assert!(warning.is_none());
+            }
+            _ => panic!("expected ticket archived event"),
         }
     }
 

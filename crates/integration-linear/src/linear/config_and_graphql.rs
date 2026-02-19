@@ -5,9 +5,10 @@ use std::time::{Duration, SystemTime};
 
 use async_trait::async_trait;
 use orchestrator_core::{
-    AddTicketCommentRequest, CoreError, CreateTicketRequest, GetTicketRequest, TicketAttachment,
-    TicketDetails, TicketId, TicketProvider, TicketQuery, TicketSummary, TicketingProvider,
-    UpdateTicketDescriptionRequest, UpdateTicketStateRequest, WorkflowState,
+    AddTicketCommentRequest, ArchiveTicketRequest, CoreError, CreateTicketRequest,
+    GetTicketRequest, TicketAttachment, TicketDetails, TicketId, TicketProvider, TicketQuery,
+    TicketSummary, TicketingProvider, UpdateTicketDescriptionRequest, UpdateTicketStateRequest,
+    WorkflowState,
 };
 use serde::Deserialize;
 use serde_json::json;
@@ -29,6 +30,7 @@ query ListOpenIssues($first: Int!) {
   issues(
     first: $first
     filter: {
+      archivedAt: { null: true }
       state: {
         type: {
           neq: "completed"
@@ -90,6 +92,14 @@ query IssueTeamStates($id: String!) {
 const UPDATE_ISSUE_STATE_MUTATION: &str = r#"
 mutation UpdateIssueState($id: String!, $stateId: String!) {
   issueUpdate(id: $id, input: { stateId: $stateId }) {
+    success
+  }
+}
+"#;
+
+const ISSUE_ARCHIVE_MUTATION: &str = r#"
+mutation ArchiveIssue($id: String!) {
+  issueArchive(id: $id) {
     success
   }
 }
@@ -617,4 +627,3 @@ fn truncate_for_error(body: &str) -> String {
         format!("{}...", body.chars().take(MAX_LEN).collect::<String>())
     }
 }
-
