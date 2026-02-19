@@ -31,7 +31,7 @@ Tab/Shift+Tab: cycle batch lanes
 g/G: jump first/last item
 Enter: open focus card
 c: toggle global supervisor chat
-t: open terminal for selected item
+i: open terminal for selected item
 v d/t/p/c: open diff/test/PR/chat inspector
 Backspace: minimize top view
 
