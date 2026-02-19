@@ -629,7 +629,15 @@ struct WorktreeDiffModalState {
     error: Option<String>,
     scroll: u16,
     cursor_line: usize,
-    selected_addition_block: usize,
+    selected_file_index: usize,
+    selected_hunk_index: usize,
+    focus: DiffPaneFocus,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DiffPaneFocus {
+    Files,
+    Diff,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
