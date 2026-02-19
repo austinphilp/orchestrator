@@ -83,6 +83,21 @@ pub async fn start_or_resume_selected_ticket(
     if let Some(existing_mapping) =
         store.find_runtime_mapping_by_ticket(&provider, provider_ticket_id.as_str())?
     {
+        if existing_mapping.session.status != WorkerSessionStatus::Done
+            && !mapping_worktree_exists(&existing_mapping)
+        {
+            return start_new_mapping(
+                store,
+                selected_ticket,
+                config,
+                project_id,
+                repository_override,
+                vcs,
+                worker_backend,
+            )
+            .await;
+        }
+
         return resume_existing_mapping(
             store,
             selected_ticket,
@@ -664,6 +679,16 @@ fn selected_ticket_project_id(
         .filter(|project| !project.is_empty())
         .map(ProjectId::new)
         .unwrap_or_else(|| fallback_project_id.clone())
+}
+
+fn mapping_worktree_exists(mapping: &RuntimeMappingRecord) -> bool {
+    let primary = PathBuf::from(mapping.worktree.path.as_str());
+    if primary.exists() {
+        return true;
+    }
+
+    let session_workdir = PathBuf::from(mapping.session.workdir.as_str());
+    session_workdir.exists()
 }
 
 fn ticket_provider_name(provider: &TicketProvider) -> &'static str {

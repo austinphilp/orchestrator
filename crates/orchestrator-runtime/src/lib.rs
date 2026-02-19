@@ -149,6 +149,11 @@ pub struct BackendDoneEvent {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BackendTurnStateEvent {
+    pub active: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BackendCrashedEvent {
     pub reason: String,
 }
@@ -160,6 +165,7 @@ pub enum BackendEvent {
     NeedsInput(BackendNeedsInputEvent),
     Blocked(BackendBlockedEvent),
     Artifact(BackendArtifactEvent),
+    TurnState(BackendTurnStateEvent),
     Done(BackendDoneEvent),
     Crashed(BackendCrashedEvent),
 }

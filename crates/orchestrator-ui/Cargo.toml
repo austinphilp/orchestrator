@@ -9,6 +9,7 @@ orchestrator-core = { path = "../orchestrator-core" }
 orchestrator-runtime = { path = "../orchestrator-runtime" }
 crossterm.workspace = true
 ratatui.workspace = true
+ratskin.workspace = true
 tokio.workspace = true
 async-trait.workspace = true
 

@@ -1,5 +1,7 @@
 use std::collections::{HashMap, VecDeque};
-use std::path::PathBuf;
+use std::fs::OpenOptions;
+use std::io::Write;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -7,9 +9,9 @@ use std::time::Duration;
 
 use orchestrator_runtime::{
     BackendCapabilities, BackendCrashedEvent, BackendDoneEvent, BackendEvent, BackendKind,
-    BackendOutputEvent, BackendOutputStream, RuntimeError, RuntimeResult, RuntimeSessionId,
-    SessionHandle, SessionLifecycle, SpawnSpec, WorkerBackend, WorkerEventStream,
-    WorkerEventSubscription,
+    BackendOutputEvent, BackendOutputStream, BackendTurnStateEvent, RuntimeError, RuntimeResult,
+    RuntimeSessionId, SessionHandle, SessionLifecycle, SpawnSpec, WorkerBackend,
+    WorkerEventStream, WorkerEventSubscription,
 };
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -25,6 +27,8 @@ const ENV_CODEX_SERVER_BASE_URL: &str = "ORCHESTRATOR_CODEX_SERVER_BASE_URL";
 const ENV_HARNESS_LOG_RAW_EVENTS: &str = "ORCHESTRATOR_HARNESS_LOG_RAW_EVENTS";
 const ENV_HARNESS_LOG_NORMALIZED_EVENTS: &str =
     "ORCHESTRATOR_HARNESS_LOG_NORMALIZED_EVENTS";
+const HARNESS_RAW_LOG_FILE: &str = ".orchestrator/logs/harness-raw.log";
+const HARNESS_NORMALIZED_LOG_FILE: &str = ".orchestrator/logs/harness-normalized.log";
 const ENV_HARNESS_SESSION_ID: &str = "ORCHESTRATOR_HARNESS_SESSION_ID";
 const ENV_HARNESS_SERVER_STARTUP_TIMEOUT_SECS: &str =
     "ORCHESTRATOR_HARNESS_SERVER_STARTUP_TIMEOUT_SECS";
@@ -33,6 +37,7 @@ const PLAN_COLLABORATION_MODE_KIND: &str = "plan";
 const DEFAULT_COLLABORATION_MODE_KIND: &str = "default";
 const PLAN_TO_IMPLEMENTATION_TRANSITION_MARKER: &str =
     "workflow transition approved: planning -> implementation";
+const TERMINAL_META_PREFIX: &str = "[[orchestrator-meta|";
 
 #[derive(Debug, Clone)]
 pub struct CodexBackendConfig {
@@ -76,6 +81,7 @@ struct CodexSession {
     default_collaboration_mode: Option<Value>,
     event_tx: broadcast::Sender<BackendEvent>,
     terminal_event_sent: AtomicBool,
+    turn_active: AtomicBool,
     history_seeded: AtomicBool,
     event_history: std::sync::Mutex<VecDeque<BackendEvent>>,
 }
@@ -122,32 +128,25 @@ impl CodexSession {
 
     fn emit_non_terminal_event(&self, event: BackendEvent) {
         self.record_event(&event);
-        if harness_log_normalized_events_enabled() {
-            tracing::debug!(
-                target: "orchestrator_harness_events",
-                backend = "codex",
-                thread_id = self.thread_id.as_str(),
-                event = ?event,
-                "normalized harness event"
-            );
-        }
+        maybe_log_normalized_harness_event(self.thread_id.as_str(), false, &event);
         let _ = self.event_tx.send(event);
+    }
+
+    fn set_turn_active(&self, active: bool) {
+        let was_active = self.turn_active.swap(active, Ordering::SeqCst);
+        if was_active == active {
+            return;
+        }
+        self.emit_non_terminal_event(BackendEvent::TurnState(BackendTurnStateEvent { active }));
     }
 
     fn emit_terminal_event(&self, event: BackendEvent) {
         if self.terminal_event_sent.swap(true, Ordering::SeqCst) {
             return;
         }
+        self.set_turn_active(false);
         self.record_event(&event);
-        if harness_log_normalized_events_enabled() {
-            tracing::debug!(
-                target: "orchestrator_harness_events",
-                backend = "codex",
-                thread_id = self.thread_id.as_str(),
-                event = ?event,
-                "normalized harness terminal event"
-            );
-        }
+        maybe_log_normalized_harness_event(self.thread_id.as_str(), true, &event);
         let _ = self.event_tx.send(event);
     }
 }
@@ -422,7 +421,8 @@ impl SessionLifecycle for CodexBackend {
             ))
         })?;
 
-        let collaboration_modes = resolve_collaboration_modes(connection.as_ref()).await;
+        let collaboration_modes =
+            resolve_collaboration_modes(connection.as_ref(), spec.model.as_deref()).await;
         let (event_tx, _drop_rx) = broadcast::channel(DEFAULT_OUTPUT_BUFFER);
         let session = Arc::new(CodexSession {
             thread_id,
@@ -433,6 +433,7 @@ impl SessionLifecycle for CodexBackend {
             default_collaboration_mode: collaboration_modes.default,
             event_tx,
             terminal_event_sent: AtomicBool::new(false),
+            turn_active: AtomicBool::new(false),
             history_seeded: AtomicBool::new(false),
             event_history: std::sync::Mutex::new(VecDeque::new()),
         });
@@ -508,7 +509,10 @@ impl SessionLifecycle for CodexBackend {
             )
             .await;
         match request {
-            Ok(_) => Ok(()),
+            Ok(_) => {
+                session.set_turn_active(true);
+                Ok(())
+            }
             Err(error) => {
                 if collaboration_mode.is_some() && is_collaboration_mode_error(&error) {
                     tracing::warn!(
@@ -544,6 +548,7 @@ impl SessionLifecycle for CodexBackend {
                             Duration::from_secs(REQUEST_TIMEOUT_SECS),
                         )
                         .await?;
+                    session.set_turn_active(true);
                     Ok(())
                 } else {
                     Err(error)
@@ -679,6 +684,7 @@ async fn run_reader_loop(
         let params = message.get("params").cloned().unwrap_or(Value::Null);
 
         if let Some(request_id) = message.get("id") {
+            emit_codex_request_meta_event(method, &params, &sessions).await;
             if let Some(result) = server_request_result(method) {
                 let _ = send_rpc_result(&stdin, request_id, result).await;
             } else {
@@ -805,11 +811,10 @@ async fn route_notification(
     };
 
     match method {
-        "item/agentMessage/delta"
-        | "item/commandExecution/outputDelta"
-        | "item/fileChange/outputDelta"
-        | "item/reasoning/textDelta"
-        | "item/reasoning/summaryTextDelta" => {
+        "turn/started" | "turn/created" | "turn/inProgress" => {
+            session.set_turn_active(true);
+        }
+        "item/agentMessage/delta" | "item/plan/delta" => {
             if let Some(delta) = params.get("delta").and_then(Value::as_str) {
                 if !delta.is_empty() {
                     session.emit_non_terminal_event(BackendEvent::Output(BackendOutputEvent {
@@ -819,7 +824,27 @@ async fn route_notification(
                 }
             }
         }
-        "item/agentMessage" | "item/agentMessage/completed" | "item/agentMessage/created" => {
+        "item/commandExecution/outputDelta" => {
+            if let Some(delta) = params.get("delta").and_then(Value::as_str) {
+                emit_codex_meta_output(&session, "command", delta);
+            }
+        }
+        "item/fileChange/outputDelta" => {
+            if let Some(delta) = params.get("delta").and_then(Value::as_str) {
+                emit_codex_meta_output(&session, "file-change", delta);
+            }
+        }
+        "item/reasoning/textDelta" | "item/reasoning/summaryTextDelta" => {
+            if let Some(delta) = params.get("delta").and_then(Value::as_str) {
+                emit_codex_meta_output(&session, "reasoning", delta);
+            }
+        }
+        "item/agentMessage"
+        | "item/agentMessage/completed"
+        | "item/agentMessage/created"
+        | "item/plan"
+        | "item/plan/completed"
+        | "item/plan/created" => {
             if let Some(text) = extract_agent_text_from_notification(params) {
                 if !text.is_empty() {
                     session.emit_non_terminal_event(BackendEvent::Output(BackendOutputEvent {
@@ -851,6 +876,7 @@ async fn route_notification(
             }
         }
         "turn/completed" => {
+            session.set_turn_active(false);
             let status = params
                 .get("turn")
                 .and_then(|turn| turn.get("status"))
@@ -871,6 +897,66 @@ async fn route_notification(
             }
         }
         _ => {}
+    }
+}
+
+async fn emit_codex_request_meta_event(
+    method: &str,
+    params: &Value,
+    sessions: &Arc<AsyncMutex<HashMap<RuntimeSessionId, Arc<CodexSession>>>>,
+) {
+    let (kind, detail) = match method {
+        "item/commandExecution/requestApproval" => (
+            "command",
+            "command approval requested (auto-accepted)",
+        ),
+        "item/fileChange/requestApproval" => (
+            "file-change",
+            "file change approval requested (auto-accepted)",
+        ),
+        "item/tool/requestUserInput" => (
+            "tool-call",
+            "tool user input requested (auto-answered with empty answers)",
+        ),
+        "item/tool/call" => (
+            "tool-call",
+            "tool call requested (currently unsupported by orchestrator backend)",
+        ),
+        "execCommandApproval" => ("command", "exec command approval requested (auto-approved)"),
+        "applyPatchApproval" => ("file-change", "apply patch approval requested (auto-approved)"),
+        _ => return,
+    };
+
+    let Some(thread_id) = extract_thread_id(params) else {
+        return;
+    };
+    let session = {
+        let sessions = sessions.lock().await;
+        sessions
+            .values()
+            .find(|session| session.thread_id == thread_id)
+            .cloned()
+    };
+    let Some(session) = session else {
+        return;
+    };
+    emit_codex_meta_output(&session, kind, detail);
+}
+
+fn emit_codex_meta_output(session: &CodexSession, kind: &str, text: &str) {
+    let details = text
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>();
+    if details.is_empty() {
+        return;
+    }
+    for detail in details {
+        session.emit_non_terminal_event(BackendEvent::Output(BackendOutputEvent {
+            stream: BackendOutputStream::Stdout,
+            bytes: format!("\n{TERMINAL_META_PREFIX}{kind}]] {detail}\n").into_bytes(),
+        }));
     }
 }
 
@@ -1080,7 +1166,7 @@ fn extract_history_user_text(item: &Value) -> Option<String> {
 
 fn extract_history_agent_text(item: &Value) -> Option<String> {
     let item_type = item.get("type").and_then(Value::as_str)?;
-    if item_type != "agentMessage" {
+    if item_type != "agentMessage" && item_type != "plan" {
         return None;
     }
 
@@ -1117,7 +1203,15 @@ struct CollaborationModes {
     default: Option<Value>,
 }
 
-async fn resolve_collaboration_modes(connection: &CodexConnection) -> CollaborationModes {
+async fn resolve_collaboration_modes(
+    connection: &CodexConnection,
+    preferred_model: Option<&str>,
+) -> CollaborationModes {
+    let default_model_id = if let Some(model) = preferred_model {
+        Some(model.to_owned())
+    } else {
+        resolve_default_model_id(connection).await.ok().flatten()
+    };
     let response = match connection
         .request(
             "collaborationMode/list",
@@ -1132,14 +1226,18 @@ async fn resolve_collaboration_modes(connection: &CodexConnection) -> Collaborat
                 error = %error,
                 "codex collaborationMode/list unavailable; falling back to built-in collaboration mode objects"
             );
-            return fallback_collaboration_modes();
+            return fallback_collaboration_modes(default_model_id.as_deref());
         }
     };
 
-    extract_collaboration_modes(&response).unwrap_or_else(fallback_collaboration_modes)
+    extract_collaboration_modes(&response, default_model_id.as_deref())
+        .unwrap_or_else(|| fallback_collaboration_modes(default_model_id.as_deref()))
 }
 
-fn extract_collaboration_modes(response: &Value) -> Option<CollaborationModes> {
+fn extract_collaboration_modes(
+    response: &Value,
+    default_model_id: Option<&str>,
+) -> Option<CollaborationModes> {
     let mut modes = CollaborationModes::default();
     let data = response.get("data").and_then(Value::as_array)?;
     for entry in data {
@@ -1148,54 +1246,156 @@ fn extract_collaboration_modes(response: &Value) -> Option<CollaborationModes> {
         };
         let normalized = mode.trim().to_ascii_lowercase();
         if normalized == PLAN_COLLABORATION_MODE_KIND {
-            modes.plan = Some(entry.clone());
+            modes.plan = collaboration_mode_payload(
+                PLAN_COLLABORATION_MODE_KIND,
+                entry,
+                default_model_id,
+            );
             continue;
         }
         if normalized == DEFAULT_COLLABORATION_MODE_KIND {
-            modes.default = Some(entry.clone());
+            modes.default = collaboration_mode_payload(
+                DEFAULT_COLLABORATION_MODE_KIND,
+                entry,
+                default_model_id,
+            );
         }
     }
 
     if modes.plan.is_none() {
-        modes.plan = Some(fallback_plan_collaboration_mode());
+        modes.plan = fallback_plan_collaboration_mode(default_model_id);
     }
     if modes.default.is_none() {
-        modes.default = Some(fallback_default_collaboration_mode());
+        modes.default = fallback_default_collaboration_mode(default_model_id);
     }
     Some(modes)
 }
 
-fn fallback_collaboration_modes() -> CollaborationModes {
+fn fallback_collaboration_modes(default_model_id: Option<&str>) -> CollaborationModes {
     CollaborationModes {
-        plan: Some(fallback_plan_collaboration_mode()),
-        default: Some(fallback_default_collaboration_mode()),
+        plan: fallback_plan_collaboration_mode(default_model_id),
+        default: fallback_default_collaboration_mode(default_model_id),
     }
 }
 
-fn fallback_plan_collaboration_mode() -> Value {
-    json!({
-        "name": "Plan",
+fn fallback_plan_collaboration_mode(default_model_id: Option<&str>) -> Option<Value> {
+    let model = default_model_id?;
+    Some(json!({
         "mode": PLAN_COLLABORATION_MODE_KIND,
-        "model": null,
-        "reasoning_effort": "medium",
-        "developer_instructions": null
-    })
+        "settings": {
+            "model": model,
+            "reasoning_effort": "medium",
+            "developer_instructions": Value::Null
+        }
+    }))
 }
 
-fn fallback_default_collaboration_mode() -> Value {
-    json!({
-        "name": "Default",
+fn fallback_default_collaboration_mode(default_model_id: Option<&str>) -> Option<Value> {
+    let model = default_model_id?;
+    Some(json!({
         "mode": DEFAULT_COLLABORATION_MODE_KIND,
-        "model": null,
-        "reasoning_effort": null,
-        "developer_instructions": null
-    })
+        "settings": {
+            "model": model,
+            "reasoning_effort": Value::Null,
+            "developer_instructions": Value::Null
+        }
+    }))
+}
+
+fn collaboration_mode_payload(
+    mode_kind: &str,
+    source: &Value,
+    default_model_id: Option<&str>,
+) -> Option<Value> {
+    let model = extract_collaboration_mode_model(source)
+        .or(default_model_id.map(str::to_owned))?;
+    let reasoning_effort = extract_collaboration_mode_reasoning_effort(source).unwrap_or(Value::Null);
+    let developer_instructions =
+        extract_collaboration_mode_developer_instructions(source).unwrap_or(Value::Null);
+
+    Some(json!({
+        "mode": mode_kind,
+        "settings": {
+            "model": model,
+            "reasoning_effort": reasoning_effort,
+            "developer_instructions": developer_instructions
+        }
+    }))
+}
+
+fn extract_collaboration_mode_model(value: &Value) -> Option<String> {
+    value
+        .get("settings")
+        .and_then(|settings| settings.get("model"))
+        .and_then(Value::as_str)
+        .map(|entry| entry.to_owned())
+        .or_else(|| {
+            value
+                .get("model")
+                .and_then(Value::as_str)
+                .map(|entry| entry.to_owned())
+        })
+}
+
+fn extract_collaboration_mode_reasoning_effort(value: &Value) -> Option<Value> {
+    value
+        .get("settings")
+        .and_then(|settings| settings.get("reasoning_effort"))
+        .cloned()
+        .or_else(|| value.get("reasoning_effort").cloned())
+}
+
+fn extract_collaboration_mode_developer_instructions(value: &Value) -> Option<Value> {
+    value
+        .get("settings")
+        .and_then(|settings| settings.get("developer_instructions"))
+        .cloned()
+        .or_else(|| value.get("developer_instructions").cloned())
+}
+
+async fn resolve_default_model_id(connection: &CodexConnection) -> RuntimeResult<Option<String>> {
+    let response = connection
+        .request(
+            "model/list",
+            json!({}),
+            Duration::from_secs(REQUEST_TIMEOUT_SECS),
+        )
+        .await?;
+
+    let data = response
+        .get("data")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    if data.is_empty() {
+        return Ok(None);
+    }
+
+    let preferred = data
+        .iter()
+        .find(|entry| entry.get("isDefault").and_then(Value::as_bool).unwrap_or(false))
+        .or_else(|| data.first());
+    Ok(preferred.and_then(model_identifier_from_entry))
+}
+
+fn model_identifier_from_entry(value: &Value) -> Option<String> {
+    value
+        .get("id")
+        .and_then(Value::as_str)
+        .map(|entry| entry.to_owned())
+        .or_else(|| {
+            value
+                .get("model")
+                .and_then(Value::as_str)
+                .map(|entry| entry.to_owned())
+        })
 }
 
 fn disables_planning_mode(input_text: &str) -> bool {
-    input_text
-        .to_ascii_lowercase()
-        .contains(PLAN_TO_IMPLEMENTATION_TRANSITION_MARKER)
+    let normalized = input_text.to_ascii_lowercase();
+    normalized.contains(PLAN_TO_IMPLEMENTATION_TRANSITION_MARKER)
+        || (normalized.contains("workflow transition approved")
+            && normalized.contains("planning -> implementation"))
 }
 
 fn is_collaboration_mode_error(error: &RuntimeError) -> bool {
@@ -1248,12 +1448,43 @@ fn maybe_log_raw_harness_line(line: &str) {
     if !harness_log_raw_events_enabled() {
         return;
     }
-    tracing::debug!(
-        target: "orchestrator_harness_events",
-        backend = "codex",
-        raw = sanitize_raw_log_line(line),
-        "raw harness event line"
-    );
+    let payload = json!({
+        "backend": "codex",
+        "raw": sanitize_raw_log_line(line),
+    });
+    append_harness_log_line(HARNESS_RAW_LOG_FILE, payload.to_string().as_str());
+}
+
+fn maybe_log_normalized_harness_event(thread_id: &str, terminal: bool, event: &BackendEvent) {
+    if !harness_log_normalized_events_enabled() {
+        return;
+    }
+    let payload = match event {
+        BackendEvent::Output(output) => json!({
+            "backend": "codex",
+            "thread_id": thread_id,
+            "terminal": terminal,
+            "event": "Output",
+            "stream": format!("{:?}", output.stream),
+            "text": String::from_utf8_lossy(&output.bytes).into_owned(),
+        }),
+        _ => json!({
+            "backend": "codex",
+            "thread_id": thread_id,
+            "terminal": terminal,
+            "event": format!("{event:?}"),
+        }),
+    };
+    append_harness_log_line(HARNESS_NORMALIZED_LOG_FILE, payload.to_string().as_str());
+}
+
+fn append_harness_log_line(path: &str, line: &str) {
+    if let Some(parent) = Path::new(path).parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path) {
+        let _ = writeln!(file, "{line}");
+    }
 }
 
 fn sanitize_raw_log_line(line: &str) -> String {

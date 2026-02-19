@@ -140,6 +140,7 @@ pub fn normalize_backend_event(
         BackendEvent::Artifact(artifact) => {
             normalize_artifact_event(&mut normalized, context, artifact);
         }
+        BackendEvent::TurnState(_turn_state) => {}
         BackendEvent::Done(done) => {
             normalize_done_event(&mut normalized, context, done);
         }

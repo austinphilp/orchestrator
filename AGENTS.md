@@ -37,9 +37,10 @@
 - `ORCHESTRATOR_OPENCODE_SERVER_BASE_URL` (backend-opencode): optional base URL override for OpenCode harness server (defaults to managed local server at `http://127.0.0.1:8787`).
 - `ORCHESTRATOR_CODEX_SERVER_BASE_URL` (backend-codex): deprecated/unsupported. Codex uses JSON-RPC app-server over stdio; setting this now causes a configuration error.
 - `ORCHESTRATOR_HARNESS_SERVER_STARTUP_TIMEOUT_SECS` (backend-opencode, backend-codex): optional startup health-check timeout in seconds for managed harness server processes.
-- `ORCHESTRATOR_HARNESS_LOG_RAW_EVENTS` (backend-opencode, backend-codex): optional boolean toggle to emit raw harness event payload lines to tracing logs.
-- `ORCHESTRATOR_HARNESS_LOG_NORMALIZED_EVENTS` (backend-opencode, backend-codex): optional boolean toggle to emit normalized `BackendEvent` payloads to tracing logs.
+- `ORCHESTRATOR_HARNESS_LOG_RAW_EVENTS` (backend-opencode, backend-codex): optional boolean toggle to append raw harness event payload lines to `.orchestrator/logs/harness-raw.log`.
+- `ORCHESTRATOR_HARNESS_LOG_NORMALIZED_EVENTS` (backend-opencode, backend-codex): optional boolean toggle to append normalized `BackendEvent` payloads to `.orchestrator/logs/harness-normalized.log`.
 - `ORCHESTRATOR_TICKET_PICKER_PRIORITY_STATES` (orchestrator-ui): optional comma-separated ticket state ordering.
+- `ORCHESTRATOR_UI_THEME` (orchestrator-ui): optional UI markdown theme override for terminal chat rendering (`nord` or `default`; defaults to `nord`).
 - `ORCHESTRATOR_UPDATE_GOLDENS` (orchestrator-ui): optional test helper toggle for golden snapshot updates.
 
 ## Development Policy
@@ -55,3 +56,46 @@
 - Supported transports are stdio and WebSocket.
 - Do not implement Codex session lifecycle against REST paths like `/v1/sessions` for app-server mode.
 - If a Codex session/create call returns HTML (for example Swagger docs), treat it as a wrong endpoint/protocol configuration issue.
+
+## Codex item types reference (app-server)
+
+- Canonical docs: `https://developers.openai.com/codex/app-server`
+- `ThreadItem` types currently documented:
+  - `userMessage`
+  - `agentMessage`
+  - `plan`
+  - `reasoning`
+  - `commandExecution`
+  - `fileChange`
+  - `mcpToolCall`
+  - `collabToolCall`
+  - `webSearch`
+  - `imageView`
+  - `enteredReviewMode`
+  - `exitedReviewMode`
+  - `contextCompaction`
+- Turn input item types currently documented:
+  - `text`
+  - `image`
+  - `localImage`
+  - `skill`
+
+## Codex -> orchestrator runtime mapping (current)
+
+- Source of truth: `crates/backend-codex/src/lib.rs`.
+- Message/plan deltas and completions (`item/agentMessage*`, `item/plan*`) map to plain `BackendEvent::Output` on `Stdout`.
+- Reasoning/file-change/command deltas map to foldable transcript meta markers in `BackendEvent::Output` (prefix `[[orchestrator-meta|...]]`) for UI collapsing.
+- Notification `error` maps to:
+  - retriable: `BackendEvent::Output` on `Stderr`
+  - non-retriable: `BackendEvent::Crashed`
+- Notification `turn/completed` maps to:
+  - failed turn: `BackendEvent::Crashed`
+  - successful turn: `BackendEvent::Done`
+- History hydration maps:
+  - `userMessage` -> `BackendEvent::Output` (`you: ...`)
+  - `agentMessage` and `plan` -> `BackendEvent::Output`
+- Approval/tool request notifications currently auto-responded in backend transport layer:
+  - `item/commandExecution/requestApproval` -> accept
+  - `item/fileChange/requestApproval` -> accept
+  - `item/tool/requestUserInput` -> empty answers
+  - `item/tool/call` -> unsupported tool-call stub response
