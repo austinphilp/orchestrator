@@ -1300,6 +1300,27 @@ fn render_review_merge_confirm_overlay(
     );
 }
 
+fn render_ticket_archive_confirm_overlay(
+    frame: &mut ratatui::Frame<'_>,
+    anchor_area: Rect,
+    ticket: &TicketSummary,
+) {
+    let content = format!(
+        "Archive ticket from start ticket window?\n\nTicket: {} - {}\n\nEnter/y: confirm archive\nEsc/n: cancel",
+        ticket.identifier,
+        compact_focus_card_text(ticket.title.as_str())
+    );
+    let Some(popup) = review_merge_confirm_popup(anchor_area) else {
+        return;
+    };
+    frame.render_widget(Clear, popup);
+    frame.render_widget(
+        Paragraph::new(content)
+            .block(Block::default().title("archive ticket").borders(Borders::ALL)),
+        popup,
+    );
+}
+
 fn review_merge_confirm_popup(anchor_area: Rect) -> Option<Rect> {
     if anchor_area.width < 40 || anchor_area.height < 8 {
         return None;
@@ -1596,4 +1617,3 @@ fn group_tickets_by_status(
     ordered.extend(groups);
     ordered
 }
-
