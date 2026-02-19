@@ -118,6 +118,7 @@ The repository is a Rust workspace with a layered design:
 - Main TUI in `orchestrator-ui/src/lib.rs`:
   - Modal interaction (`Normal`, `Insert`, `Terminal`).
   - Center stack views (`Inbox`, focus card, terminal, inspectors, supervisor chat).
+  - Terminal/session feed output scrolling is bounded by rendered wrapped line counts so manual scroll and follow-tail behavior stay in sync.
 - Keymap trie/which-key logic:
   - `orchestrator-ui/src/keymap.rs`
 - Golden snapshot testing helpers:

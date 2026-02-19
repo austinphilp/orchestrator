@@ -3213,6 +3213,52 @@ mod tests {
     }
 
     #[test]
+    fn terminal_stream_scroll_uses_rendered_line_count_without_initial_jump() {
+        let mut shell_state = UiShellState::new("ready".to_owned(), sample_projection(true));
+        handle_key_press(&mut shell_state, key(KeyCode::Char('i')));
+        assert_eq!(shell_state.mode, UiMode::Terminal);
+        let session_id = shell_state
+            .active_terminal_session_id()
+            .expect("active terminal session")
+            .clone();
+        shell_state
+            .terminal_session_states
+            .entry(session_id.clone())
+            .or_default();
+        handle_key_press(&mut shell_state, key(KeyCode::Esc));
+        assert_eq!(shell_state.mode, UiMode::Normal);
+
+        {
+            let view = shell_state
+                .terminal_session_states
+                .get_mut(&session_id)
+                .expect("terminal view state");
+            view.entries = vec![
+                TerminalTranscriptEntry::Message("line 1".to_owned()),
+                TerminalTranscriptEntry::Message("line 2".to_owned()),
+                TerminalTranscriptEntry::Message("line 3".to_owned()),
+                TerminalTranscriptEntry::Message("line 4".to_owned()),
+            ];
+            view.output_follow_tail = true;
+        }
+
+        shell_state.sync_terminal_output_viewport(120, 20);
+        let view = shell_state
+            .terminal_session_states
+            .get(&session_id)
+            .expect("terminal view state");
+        assert_eq!(view.output_scroll_line, 100);
+
+        handle_key_press(&mut shell_state, shift_key(KeyCode::Char('K')));
+        let view = shell_state
+            .terminal_session_states
+            .get(&session_id)
+            .expect("terminal view state");
+        assert_eq!(view.output_scroll_line, 99);
+        assert!(!view.output_follow_tail);
+    }
+
+    #[test]
     fn terminal_transcript_adds_padding_around_user_messages() {
         let state = TerminalViewState {
             entries: vec![
