@@ -313,6 +313,7 @@ struct TicketPickerOverlayState {
     visible: bool,
     loading: bool,
     starting_ticket_id: Option<TicketId>,
+    archiving_ticket_id: Option<TicketId>,
     creating: bool,
     new_ticket_mode: bool,
     new_ticket_brief: String,
@@ -324,6 +325,7 @@ struct TicketPickerOverlayState {
     repository_prompt_project_id: Option<String>,
     repository_prompt_input: String,
     repository_prompt_missing_mapping: bool,
+    archive_confirm_ticket: Option<TicketSummary>,
 }
 
 impl TicketPickerOverlayState {
@@ -358,6 +360,7 @@ impl TicketPickerOverlayState {
     fn open(&mut self) {
         self.visible = true;
         self.loading = true;
+        self.archiving_ticket_id = None;
         self.creating = false;
         self.new_ticket_mode = false;
         self.new_ticket_brief.clear();
@@ -366,12 +369,14 @@ impl TicketPickerOverlayState {
         self.repository_prompt_project_id = None;
         self.repository_prompt_input.clear();
         self.repository_prompt_missing_mapping = true;
+        self.archive_confirm_ticket = None;
     }
 
     fn close(&mut self) {
         self.visible = false;
         self.loading = false;
         self.starting_ticket_id = None;
+        self.archiving_ticket_id = None;
         self.creating = false;
         self.new_ticket_mode = false;
         self.new_ticket_brief.clear();
@@ -380,6 +385,7 @@ impl TicketPickerOverlayState {
         self.repository_prompt_project_id = None;
         self.repository_prompt_input.clear();
         self.repository_prompt_missing_mapping = true;
+        self.archive_confirm_ticket = None;
     }
 
     fn has_repository_prompt(&self) -> bool {
@@ -578,6 +584,16 @@ enum TicketPickerEvent {
     TicketStartFailed {
         message: String,
     },
+    TicketArchived {
+        archived_ticket: TicketSummary,
+        tickets: Option<Vec<TicketSummary>>,
+        warning: Option<String>,
+    },
+    TicketArchiveFailed {
+        ticket: TicketSummary,
+        message: String,
+        tickets: Option<Vec<TicketSummary>>,
+    },
     TicketCreatedAndStarted {
         created_ticket: TicketSummary,
         projection: Option<ProjectionState>,
@@ -641,4 +657,3 @@ enum MergeQueueEvent {
         error: Option<String>,
     },
 }
-
