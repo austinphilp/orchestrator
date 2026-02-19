@@ -596,17 +596,15 @@ impl UiShellState {
             return;
         };
 
-        let rendered = render_terminal_transcript_entries(view);
-        if rendered.is_empty() {
+        let rendered_line_count = terminal_output_line_count_for_scroll(view);
+        if rendered_line_count == 0 {
             view.output_scroll_line = 0;
             view.output_follow_tail = true;
             return;
         }
 
         view.output_follow_tail = true;
-        view.output_scroll_line = rendered
-            .len()
-            .saturating_sub(view.output_viewport_rows.max(1));
+        view.output_scroll_line = rendered_line_count.saturating_sub(view.output_viewport_rows.max(1));
     }
 
     fn sync_terminal_output_viewport(&mut self, rendered_line_count: usize, viewport_rows: usize) {
@@ -614,6 +612,7 @@ impl UiShellState {
             return;
         };
 
+        view.output_rendered_line_count = rendered_line_count;
         view.output_viewport_rows = viewport_rows.max(1);
         if rendered_line_count == 0 {
             view.output_scroll_line = 0;
@@ -634,14 +633,14 @@ impl UiShellState {
         let Some(view) = self.active_terminal_view_state_mut() else {
             return false;
         };
-        let rendered = render_terminal_transcript_entries(view);
-        if rendered.is_empty() {
+        let rendered_line_count = terminal_output_line_count_for_scroll(view);
+        if rendered_line_count == 0 {
             view.output_scroll_line = 0;
             view.output_follow_tail = true;
             return false;
         }
 
-        let max_scroll = rendered.len().saturating_sub(view.output_viewport_rows.max(1));
+        let max_scroll = rendered_line_count.saturating_sub(view.output_viewport_rows.max(1));
         let current = view.output_scroll_line.min(max_scroll);
         let next = if delta < 0 {
             current.saturating_sub(delta.unsigned_abs())
@@ -657,13 +656,13 @@ impl UiShellState {
         let Some(view) = self.active_terminal_view_state_mut() else {
             return false;
         };
-        let rendered = render_terminal_transcript_entries(view);
-        if rendered.is_empty() {
+        let rendered_line_count = terminal_output_line_count_for_scroll(view);
+        if rendered_line_count == 0 {
             view.output_scroll_line = 0;
             view.output_follow_tail = true;
             return false;
         }
-        let max_scroll = rendered.len().saturating_sub(view.output_viewport_rows.max(1));
+        let max_scroll = rendered_line_count.saturating_sub(view.output_viewport_rows.max(1));
         let previous = view.output_scroll_line.min(max_scroll);
         view.output_scroll_line = max_scroll;
         view.output_follow_tail = true;
@@ -3000,4 +2999,11 @@ impl UiShellState {
             hints,
         });
     }
+}
+
+fn terminal_output_line_count_for_scroll(view: &TerminalViewState) -> usize {
+    if view.output_rendered_line_count > 0 {
+        return view.output_rendered_line_count;
+    }
+    render_terminal_transcript_entries(view).len()
 }

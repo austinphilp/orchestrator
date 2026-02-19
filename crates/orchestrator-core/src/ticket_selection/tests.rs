@@ -235,6 +235,12 @@ mod tests {
         }
     }
 
+    fn seeded_resume_workdir() -> String {
+        let path = std::env::temp_dir().join("orchestrator-core-tests-ap126-resume");
+        std::fs::create_dir_all(&path).expect("create seeded resume workdir");
+        path.to_string_lossy().to_string()
+    }
+
     #[tokio::test]
     async fn start_flow_creates_worktree_spawns_session_and_persists_runtime_mapping() {
         let mut store = SqliteEventStore::in_memory().expect("in-memory store");
@@ -466,6 +472,7 @@ mod tests {
         status: WorkerSessionStatus,
         model: Option<&str>,
     ) -> RuntimeMappingRecord {
+        let workdir = seeded_resume_workdir();
         let mapping = RuntimeMappingRecord {
             ticket: TicketRecord {
                 ticket_id: TicketId::from("linear:issue-126"),
@@ -480,7 +487,7 @@ mod tests {
             worktree: WorktreeRecord {
                 worktree_id: WorktreeId::new("wt-linear-issue-126"),
                 work_item_id: WorkItemId::new("wi-linear-issue-126"),
-                path: "/workspace/.orchestrator/worktrees/ap-126-ticket".to_owned(),
+                path: workdir.clone(),
                 branch: "ap/AP-126-ticket".to_owned(),
                 base_branch: "main".to_owned(),
                 created_at: "2026-02-16T09:00:10Z".to_owned(),
@@ -489,7 +496,7 @@ mod tests {
                 session_id: WorkerSessionId::new("sess-linear-issue-126"),
                 work_item_id: WorkItemId::new("wi-linear-issue-126"),
                 backend_kind: BackendKind::OpenCode,
-                workdir: "/workspace/.orchestrator/worktrees/ap-126-ticket".to_owned(),
+                workdir,
                 model: model.map(str::to_owned),
                 status,
                 created_at: "2026-02-16T09:00:20Z".to_owned(),
@@ -499,6 +506,13 @@ mod tests {
         store
             .upsert_runtime_mapping(&mapping)
             .expect("seed runtime mapping");
+        store
+            .upsert_project_repository_mapping(&crate::store::ProjectRepositoryMappingRecord {
+                provider: TicketProvider::Linear,
+                project_id: ProjectId::new("proj-126"),
+                repository_path: "/workspace/repo".to_owned(),
+            })
+            .expect("seed repository mapping");
         mapping
     }
 
@@ -602,6 +616,7 @@ mod tests {
     #[tokio::test]
     async fn resume_respawn_for_codex_uses_persisted_harness_session_id() {
         let mut store = SqliteEventStore::in_memory().expect("in-memory store");
+        let workdir = seeded_resume_workdir();
         let mapping = RuntimeMappingRecord {
             ticket: TicketRecord {
                 ticket_id: TicketId::from("linear:issue-126"),
@@ -616,7 +631,7 @@ mod tests {
             worktree: WorktreeRecord {
                 worktree_id: WorktreeId::new("wt-linear-issue-126"),
                 work_item_id: WorkItemId::new("wi-linear-issue-126"),
-                path: "/workspace/.orchestrator/worktrees/ap-126-ticket".to_owned(),
+                path: workdir.clone(),
                 branch: "ap/AP-126-ticket".to_owned(),
                 base_branch: "main".to_owned(),
                 created_at: "2026-02-16T09:00:10Z".to_owned(),
@@ -625,7 +640,7 @@ mod tests {
                 session_id: WorkerSessionId::new("sess-linear-issue-126"),
                 work_item_id: WorkItemId::new("wi-linear-issue-126"),
                 backend_kind: BackendKind::Codex,
-                workdir: "/workspace/.orchestrator/worktrees/ap-126-ticket".to_owned(),
+                workdir,
                 model: Some("gpt-5-codex".to_owned()),
                 status: WorkerSessionStatus::Running,
                 created_at: "2026-02-16T09:00:20Z".to_owned(),
@@ -635,6 +650,13 @@ mod tests {
         store
             .upsert_runtime_mapping(&mapping)
             .expect("seed runtime mapping");
+        store
+            .upsert_project_repository_mapping(&crate::store::ProjectRepositoryMappingRecord {
+                provider: TicketProvider::Linear,
+                project_id: ProjectId::new("proj-126"),
+                repository_path: "/workspace/repo".to_owned(),
+            })
+            .expect("seed repository mapping");
         store
             .upsert_harness_session_binding(
                 &mapping.session.session_id,
