@@ -93,6 +93,11 @@ pub struct UpdateTicketDescriptionRequest {
     pub description: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArchiveTicketRequest {
+    pub ticket_id: TicketId,
+}
+
 #[async_trait]
 pub trait TicketingProvider: Send + Sync {
     fn provider(&self) -> TicketProvider;
@@ -114,6 +119,12 @@ pub trait TicketingProvider: Send + Sync {
     ) -> Result<(), CoreError> {
         Err(CoreError::DependencyUnavailable(format!(
             "update_ticket_description is not implemented by {:?} provider",
+            self.provider()
+        )))
+    }
+    async fn archive_ticket(&self, _request: ArchiveTicketRequest) -> Result<(), CoreError> {
+        Err(CoreError::DependencyUnavailable(format!(
+            "archive_ticket is not implemented by {:?} provider",
             self.provider()
         )))
     }

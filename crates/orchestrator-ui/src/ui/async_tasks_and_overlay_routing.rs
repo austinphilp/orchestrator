@@ -433,6 +433,45 @@ async fn run_ticket_picker_create_task(
         .await;
 }
 
+async fn run_ticket_picker_archive_task(
+    provider: Arc<dyn TicketPickerProvider>,
+    ticket: TicketSummary,
+    sender: mpsc::Sender<TicketPickerEvent>,
+) {
+    let archived_ticket = ticket.clone();
+    if let Err(error) = provider.archive_ticket(ticket).await {
+        let tickets = match provider.list_unfinished_tickets().await {
+            Ok(tickets) => Some(tickets),
+            Err(_) => None,
+        };
+        let _ = sender
+            .send(TicketPickerEvent::TicketArchiveFailed {
+                ticket: archived_ticket,
+                message: error.to_string(),
+                tickets,
+            })
+            .await;
+        return;
+    }
+
+    let mut warning = Vec::new();
+    let tickets = match provider.list_unfinished_tickets().await {
+        Ok(tickets) => Some(tickets),
+        Err(error) => {
+            warning.push(format!("failed to refresh tickets: {error}"));
+            None
+        }
+    };
+
+    let _ = sender
+        .send(TicketPickerEvent::TicketArchived {
+            archived_ticket,
+            tickets,
+            warning: (!warning.is_empty()).then(|| warning.join("; ")),
+        })
+        .await;
+}
+
 fn expand_tilde_path(raw: &str) -> Option<PathBuf> {
     if raw == "~" {
         return resolve_shell_home().map(PathBuf::from);
@@ -469,7 +508,7 @@ fn render_ticket_picker_overlay_text(overlay: &TicketPickerOverlayState) -> Stri
         ]
     } else {
         vec![
-            "j/k or arrows: move | h/Left: fold | l/Right: unfold | Enter: start | n: new ticket | Esc: close"
+            "j/k or arrows: move | h/Left: fold | l/Right: unfold | Enter: start | x: archive | n: new ticket | Esc: close"
                 .to_owned(),
         ]
     };
@@ -479,6 +518,9 @@ fn render_ticket_picker_overlay_text(overlay: &TicketPickerOverlayState) -> Stri
     }
     if let Some(starting_ticket_id) = overlay.starting_ticket_id.as_ref() {
         lines.push(format!("Starting {}...", starting_ticket_id.as_str()));
+    }
+    if let Some(archiving_ticket_id) = overlay.archiving_ticket_id.as_ref() {
+        lines.push(format!("Archiving {}...", archiving_ticket_id.as_str()));
     }
     if overlay.creating {
         lines.push("Creating ticket...".to_owned());
@@ -583,8 +625,18 @@ fn render_ticket_picker_overlay_text(overlay: &TicketPickerOverlayState) -> Stri
                 } else {
                     " "
                 };
+                let archive_marker = if overlay
+                    .archive_confirm_ticket
+                    .as_ref()
+                    .map(|selected| selected.ticket_id == ticket.ticket_id)
+                    .unwrap_or_default()
+                {
+                    "[X]"
+                } else {
+                    "[x]"
+                };
                 lines.push(format!(
-                    "{selected_prefix}{starting_prefix}    {}: {}",
+                    "{selected_prefix}{starting_prefix} {archive_marker} {}: {}",
                     ticket.identifier,
                     compact_focus_card_text(ticket.title.as_str())
                 ));
@@ -603,6 +655,27 @@ fn render_ticket_picker_overlay_text(overlay: &TicketPickerOverlayState) -> Stri
 fn route_ticket_picker_key(shell_state: &mut UiShellState, key: KeyEvent) -> RoutedInput {
     if shell_state.ticket_picker_overlay.has_repository_prompt() {
         return route_ticket_picker_repository_prompt_key(shell_state, key);
+    }
+
+    if shell_state.ticket_picker_overlay.archive_confirm_ticket.is_some() {
+        if is_escape_to_normal(key) {
+            shell_state.cancel_ticket_picker_archive_confirmation();
+            return RoutedInput::Ignore;
+        }
+        if key.modifiers.is_empty() {
+            match key.code {
+                KeyCode::Enter | KeyCode::Char('y') => {
+                    shell_state.submit_ticket_picker_archive_confirmation();
+                    return RoutedInput::Ignore;
+                }
+                KeyCode::Char('n') => {
+                    shell_state.cancel_ticket_picker_archive_confirmation();
+                    return RoutedInput::Ignore;
+                }
+                _ => {}
+            }
+        }
+        return RoutedInput::Ignore;
     }
 
     if shell_state.ticket_picker_overlay.new_ticket_mode {
@@ -650,6 +723,10 @@ fn route_ticket_picker_key(shell_state: &mut UiShellState, key: KeyEvent) -> Rou
             RoutedInput::Command(UiCommand::TicketPickerUnfoldProject)
         }
         KeyCode::Enter => RoutedInput::Command(UiCommand::TicketPickerStartSelected),
+        KeyCode::Char('x') => {
+            shell_state.begin_archive_selected_ticket_from_picker();
+            RoutedInput::Ignore
+        }
         KeyCode::Char('n') => {
             shell_state.begin_create_ticket_from_picker();
             RoutedInput::Ignore

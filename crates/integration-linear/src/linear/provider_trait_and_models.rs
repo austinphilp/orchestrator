@@ -253,6 +253,36 @@ impl TicketingProvider for LinearTicketingProvider {
         Ok(())
     }
 
+    async fn archive_ticket(&self, request: ArchiveTicketRequest) -> Result<(), CoreError> {
+        let issue_id = linear_provider_ticket_id(&request.ticket_id)?;
+        let response = self
+            .transport
+            .execute(GraphqlRequest::new(
+                ISSUE_ARCHIVE_MUTATION,
+                json!({
+                    "id": issue_id,
+                }),
+            ))
+            .await?;
+        let payload: IssueArchiveResponse = serde_json::from_value(response).map_err(|error| {
+            CoreError::DependencyUnavailable(format!(
+                "failed to decode Linear issueArchive payload: {error}"
+            ))
+        })?;
+        if !payload.issue_archive.success {
+            return Err(CoreError::DependencyUnavailable(
+                "Linear issueArchive mutation returned success=false.".to_owned(),
+            ));
+        }
+
+        {
+            let mut cache = self.cache.write().expect("linear ticket cache write lock");
+            cache.tickets.remove(issue_id);
+        }
+
+        Ok(())
+    }
+
     async fn add_comment(&self, request: AddTicketCommentRequest) -> Result<(), CoreError> {
         let issue_id = linear_provider_ticket_id(&request.ticket_id)?;
         let body = compose_linear_comment_body(request.comment.as_str(), &request.attachments)?;
@@ -418,6 +448,12 @@ struct CommentCreateResponse {
 }
 
 #[derive(Debug, Deserialize)]
+struct IssueArchiveResponse {
+    #[serde(rename = "issueArchive")]
+    issue_archive: MutationResult,
+}
+
+#[derive(Debug, Deserialize)]
 struct UpdateIssueDescriptionResponse {
     #[serde(rename = "issueUpdate")]
     issue_update: MutationResult,
@@ -486,4 +522,3 @@ struct LinearLabelConnection {
 struct LinearLabelNode {
     name: String,
 }
-

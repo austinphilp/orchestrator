@@ -2,9 +2,9 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use orchestrator_core::{
-    CoreError, CreateTicketRequest, GithubClient, LlmChatRequest, LlmMessage, LlmProvider,
-    LlmRole, ProjectionState, SelectedTicketFlowResult, Supervisor, TicketQuery, TicketSummary,
-    TicketingProvider, VcsProvider, WorkerBackend, WorkerSessionId,
+    ArchiveTicketRequest, CoreError, CreateTicketRequest, GithubClient, LlmChatRequest,
+    LlmMessage, LlmProvider, LlmRole, ProjectionState, SelectedTicketFlowResult, Supervisor,
+    TicketQuery, TicketSummary, TicketingProvider, VcsProvider, WorkerBackend, WorkerSessionId,
 };
 use orchestrator_ui::{SessionWorktreeDiff, TicketPickerProvider};
 use std::path::PathBuf;
@@ -175,6 +175,14 @@ where
         }
 
         Ok(ticket)
+    }
+
+    async fn archive_ticket(&self, ticket: TicketSummary) -> Result<(), CoreError> {
+        self.ticketing
+            .archive_ticket(ArchiveTicketRequest {
+                ticket_id: ticket.ticket_id,
+            })
+            .await
     }
 
     async fn mark_session_crashed(
