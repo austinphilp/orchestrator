@@ -187,6 +187,13 @@ impl Ui {
                 if shell_state.ticket_picker_overlay.visible {
                     render_ticket_picker_overlay(frame, main, &shell_state.ticket_picker_overlay);
                 }
+                if let Some(ticket) = shell_state
+                    .ticket_picker_overlay
+                    .archive_confirm_ticket
+                    .as_ref()
+                {
+                    render_ticket_archive_confirm_overlay(frame, main, ticket);
+                }
                 if let Some(modal) = shell_state.worktree_diff_modal.as_ref() {
                     render_worktree_diff_modal(frame, main, modal);
                 }

@@ -65,6 +65,11 @@ pub trait TicketPickerProvider: Send + Sync {
         &self,
         brief: String,
     ) -> Result<TicketSummary, CoreError>;
+    async fn archive_ticket(&self, _ticket: TicketSummary) -> Result<(), CoreError> {
+        Err(CoreError::DependencyUnavailable(
+            "ticket archiving is not supported by this ticket provider".to_owned(),
+        ))
+    }
     async fn reload_projection(&self) -> Result<ProjectionState, CoreError>;
     async fn mark_session_crashed(
         &self,

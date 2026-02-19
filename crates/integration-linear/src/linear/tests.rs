@@ -875,6 +875,98 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn list_tickets_query_excludes_archived_issues() {
+        let sync_query = TicketQuery::default();
+        let config = config_with(Duration::from_secs(60), sync_query.clone());
+        let transport = Arc::new(StubTransport::default());
+        transport
+            .push_response(list_payload(
+                "viewer-1",
+                vec![issue_json(
+                    "issue-121",
+                    "AP-121",
+                    "Visible issue",
+                    "Todo",
+                    "2026-02-16T12:10:00.000Z",
+                    Some("viewer-1"),
+                )],
+            ))
+            .await;
+        let provider = LinearTicketingProvider::with_transport(config, transport.clone());
+
+        let _ = provider
+            .list_tickets(sync_query)
+            .await
+            .expect("list tickets succeeds");
+
+        let requests = transport.requests().await;
+        assert_eq!(requests.len(), 1);
+        assert!(requests[0].query.contains("archivedAt: { null: true }"));
+    }
+
+    #[tokio::test]
+    async fn archive_ticket_uses_issue_archive_mutation_and_evicts_cache() {
+        let sync_query = TicketQuery::default();
+        let config = config_with(Duration::from_secs(60), sync_query.clone());
+        let transport = Arc::new(StubTransport::default());
+        transport
+            .push_response(list_payload(
+                "viewer-1",
+                vec![issue_json(
+                    "issue-131",
+                    "AP-131",
+                    "Archive me",
+                    "Todo",
+                    "2026-02-16T12:10:00.000Z",
+                    Some("viewer-1"),
+                )],
+            ))
+            .await;
+        transport
+            .push_response(json!({ "issueArchive": { "success": true } }))
+            .await;
+        let provider = LinearTicketingProvider::with_transport(config, transport.clone());
+
+        let tickets = provider
+            .list_tickets(sync_query)
+            .await
+            .expect("list tickets succeeds");
+        assert_eq!(tickets.len(), 1);
+
+        provider
+            .archive_ticket(ArchiveTicketRequest {
+                ticket_id: tickets[0].ticket_id.clone(),
+            })
+            .await
+            .expect("archive succeeds");
+
+        let requests = transport.requests().await;
+        assert_eq!(requests.len(), 2);
+        assert!(requests[1].query.contains("ArchiveIssue"));
+        assert!(provider.cache_snapshot().tickets.is_empty());
+    }
+
+    #[tokio::test]
+    async fn archive_ticket_returns_error_when_linear_archive_fails() {
+        let config = config_with(Duration::from_secs(60), TicketQuery::default());
+        let transport = Arc::new(StubTransport::default());
+        transport
+            .push_response(json!({ "issueArchive": { "success": false } }))
+            .await;
+        let provider = LinearTicketingProvider::with_transport(config, transport);
+
+        let error = provider
+            .archive_ticket(ArchiveTicketRequest {
+                ticket_id: TicketId::from_provider_uuid(TicketProvider::Linear, "issue-141"),
+            })
+            .await
+            .expect_err("archive should fail");
+        assert!(error
+            .to_string()
+            .contains("issueArchive mutation returned success=false"));
+    }
+
+    #[tokio::test]
     async fn add_comment_posts_comment_with_attachment_markdown() {
         let sync_query = TicketQuery::default();
         let config = config_with(Duration::from_secs(60), sync_query);
