@@ -877,60 +877,94 @@ fn render_worktree_diff_modal(
         return;
     };
 
-    let body = render_worktree_diff_body(modal);
-
     let title = format!(
         "diff | session: {} | base: {}",
         modal.session_id.as_str(),
         modal.base_branch
     );
     frame.render_widget(Clear, popup);
-    let viewport_rows = usize::from(popup.height.saturating_sub(2)).max(1);
-    let line_count = worktree_diff_modal_line_count(modal);
-    let center_line = selected_worktree_diff_addition_block_range(modal)
-        .map(|(start, end)| start + (end.saturating_sub(start) / 2))
-        .unwrap_or(modal.cursor_line);
-    let max_scroll = line_count.saturating_sub(viewport_rows);
-    let centered_scroll = center_line
-        .saturating_sub(viewport_rows / 2)
-        .min(max_scroll)
-        .min(u16::MAX as usize) as u16;
-    frame.render_widget(
-        Paragraph::new(body)
-            .scroll((centered_scroll, 0))
-            .block(Block::default().title(title).borders(Borders::ALL)),
-        popup,
-    );
-}
-
-fn render_worktree_diff_body(modal: &WorktreeDiffModalState) -> Text<'static> {
     if modal.loading {
-        return Text::from(Line::from(Span::styled(
-            "Loading diff...",
-            Style::default().fg(Color::LightBlue),
-        )));
+        frame.render_widget(
+            Paragraph::new(Text::from(Line::from(Span::styled(
+                "Loading diff...",
+                Style::default().fg(Color::LightBlue),
+            ))))
+            .block(Block::default().title(title).borders(Borders::ALL)),
+            popup,
+        );
+        return;
     }
 
     if let Some(error) = modal.error.as_deref() {
-        return Text::from(vec![
-            Line::from(Span::styled(
-                "Failed to load diff:",
-                Style::default()
-                    .fg(Color::LightRed)
-                    .add_modifier(Modifier::BOLD),
-            )),
-            Line::from(error.to_owned()),
-        ]);
+        frame.render_widget(
+            Paragraph::new(Text::from(vec![
+                Line::from(Span::styled(
+                    "Failed to load diff:",
+                    Style::default()
+                        .fg(Color::LightRed)
+                        .add_modifier(Modifier::BOLD),
+                )),
+                Line::from(error.to_owned()),
+            ]))
+            .block(Block::default().title(title).borders(Borders::ALL)),
+            popup,
+        );
+        return;
     }
 
     if modal.content.trim().is_empty() {
-        return Text::from(Line::from(Span::styled(
-            "(No diff against base branch.)",
-            Style::default().fg(Color::DarkGray),
-        )));
+        frame.render_widget(
+            Paragraph::new(Text::from(Line::from(Span::styled(
+                "(No diff against base branch.)",
+                Style::default().fg(Color::DarkGray),
+            ))))
+            .block(Block::default().title(title).borders(Borders::ALL)),
+            popup,
+        );
+        return;
     }
 
-    render_diff_with_line_numbers(modal)
+    let outer = Block::default().title(title).borders(Borders::ALL);
+    let inner = outer.inner(popup);
+    frame.render_widget(outer, popup);
+    if inner.width < 20 || inner.height < 6 {
+        return;
+    }
+
+    let panes = if inner.width < 90 {
+        Layout::default()
+            .direction(ratatui::layout::Direction::Vertical)
+            .constraints([Constraint::Percentage(35), Constraint::Percentage(65)])
+            .split(inner)
+    } else {
+        Layout::default()
+            .direction(ratatui::layout::Direction::Horizontal)
+            .constraints([Constraint::Percentage(32), Constraint::Percentage(68)])
+            .split(inner)
+    };
+    if panes.len() < 2 {
+        return;
+    }
+
+    let files = parse_diff_file_summaries(modal.content.as_str());
+    let left = render_diff_file_list(modal, files.as_slice());
+    frame.render_widget(
+        Paragraph::new(left).block(Block::default().title("files").borders(Borders::ALL)),
+        panes[0],
+    );
+
+    let right = render_selected_file_diff(modal, files.as_slice());
+    let selected_path = files
+        .get(modal.selected_file_index.min(files.len().saturating_sub(1)))
+        .map(|entry| entry.path.as_str())
+        .unwrap_or("(no file)");
+    let right_title = format!("diff | {selected_path}");
+    frame.render_widget(
+        Paragraph::new(right)
+            .scroll((worktree_diff_modal_scroll(modal, files.as_slice()), 0))
+            .block(Block::default().title(right_title).borders(Borders::ALL)),
+        panes[1],
+    );
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -960,30 +994,14 @@ struct DiffAdditionBlock {
     end_new_line: usize,
 }
 
-fn render_diff_with_line_numbers(modal: &WorktreeDiffModalState) -> Text<'static> {
-    let parsed_lines = parse_rendered_diff_lines(modal.content.as_str());
-    if parsed_lines.is_empty() {
-        return Text::raw(String::new());
-    }
-
-    let selection = selected_worktree_diff_addition_block_range(modal);
-    let cursor_line = modal.cursor_line.min(parsed_lines.len().saturating_sub(1));
-    let mut rendered = Vec::with_capacity(parsed_lines.len());
-
-    for (index, line) in parsed_lines.iter().enumerate() {
-        let mut style = diff_rendered_line_style(line.kind);
-        if let Some((start, end)) = selection {
-            if index >= start && index <= end {
-                style = style.bg(Color::Rgb(59, 66, 82));
-            }
-        }
-        if selection.is_none() && index == cursor_line {
-            style = style.add_modifier(Modifier::REVERSED);
-        }
-        rendered.push(Line::from(Span::styled(line.text.clone(), style)));
-    }
-
-    Text::from(rendered)
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DiffFileSummary {
+    path: String,
+    added: usize,
+    removed: usize,
+    start_index: usize,
+    end_index: usize,
+    addition_blocks: Vec<DiffAdditionBlock>,
 }
 
 fn parse_rendered_diff_lines(content: &str) -> Vec<DiffRenderedLine> {
@@ -1124,6 +1142,137 @@ fn parse_diff_addition_blocks(content: &str) -> Vec<DiffAdditionBlock> {
     blocks
 }
 
+fn parse_diff_file_summaries(content: &str) -> Vec<DiffFileSummary> {
+    let lines = parse_rendered_diff_lines(content);
+    if lines.is_empty() {
+        return Vec::new();
+    }
+
+    let blocks = parse_diff_addition_blocks(content);
+    let mut files = Vec::<DiffFileSummary>::new();
+
+    for (index, line) in lines.iter().enumerate() {
+        let Some(path) = line.file_path.as_deref() else {
+            continue;
+        };
+        let needs_new = files
+            .last()
+            .map(|entry| entry.path.as_str() != path)
+            .unwrap_or(true);
+        if needs_new {
+            files.push(DiffFileSummary {
+                path: path.to_owned(),
+                added: 0,
+                removed: 0,
+                start_index: index,
+                end_index: index,
+                addition_blocks: Vec::new(),
+            });
+        }
+        if let Some(current) = files.last_mut() {
+            current.end_index = index;
+            match line.kind {
+                DiffRenderedLineKind::Addition => current.added = current.added.saturating_add(1),
+                DiffRenderedLineKind::Deletion => {
+                    current.removed = current.removed.saturating_add(1)
+                }
+                _ => {}
+            }
+        }
+    }
+
+    for file in files.iter_mut() {
+        file.addition_blocks = blocks
+            .iter()
+            .filter(|block| block.file_path == file.path)
+            .cloned()
+            .collect();
+    }
+
+    files
+}
+
+fn render_diff_file_list(modal: &WorktreeDiffModalState, files: &[DiffFileSummary]) -> Text<'static> {
+    if files.is_empty() {
+        return Text::from(Line::from(Span::styled(
+            "(No changed files.)",
+            Style::default().fg(Color::DarkGray),
+        )));
+    }
+
+    let mut rendered = Vec::with_capacity(files.len());
+    let selected = modal.selected_file_index.min(files.len().saturating_sub(1));
+    for (index, file) in files.iter().enumerate() {
+        let mut base = Style::default().fg(Color::Gray);
+        if index == selected {
+            base = if modal.focus == DiffPaneFocus::Files {
+                base.bg(Color::Rgb(59, 66, 82)).add_modifier(Modifier::BOLD)
+            } else {
+                base.bg(Color::Rgb(47, 52, 63))
+            };
+        }
+        rendered.push(Line::from(vec![
+            Span::styled(format!("{:<36}", file.path), base),
+            Span::styled(format!(" +{}", file.added), base.fg(Color::LightGreen)),
+            Span::styled(format!(" -{}", file.removed), base.fg(Color::LightRed)),
+        ]));
+    }
+    Text::from(rendered)
+}
+
+fn selected_file_and_hunk_range(
+    modal: &WorktreeDiffModalState,
+    files: &[DiffFileSummary],
+) -> Option<(usize, usize, Option<(usize, usize)>)> {
+    let file = files.get(modal.selected_file_index.min(files.len().saturating_sub(1)))?;
+    let hunk = file
+        .addition_blocks
+        .get(
+            modal
+                .selected_hunk_index
+                .min(file.addition_blocks.len().saturating_sub(1)),
+        )
+        .map(|block| (block.start_index, block.end_index));
+    Some((file.start_index, file.end_index, hunk))
+}
+
+fn render_selected_file_diff(modal: &WorktreeDiffModalState, files: &[DiffFileSummary]) -> Text<'static> {
+    let parsed = parse_rendered_diff_lines(modal.content.as_str());
+    let Some((start, end, selected_hunk)) = selected_file_and_hunk_range(modal, files) else {
+        return Text::from(Line::from(Span::styled(
+            "(No diff content for selected file.)",
+            Style::default().fg(Color::DarkGray),
+        )));
+    };
+
+    let mut rendered = Vec::with_capacity(end.saturating_sub(start).saturating_add(1));
+    for (global_index, line) in parsed.iter().enumerate().skip(start).take(end - start + 1) {
+        let mut style = diff_rendered_line_style(line.kind);
+        if let Some((hunk_start, hunk_end)) = selected_hunk {
+            if global_index >= hunk_start && global_index <= hunk_end {
+                style = if modal.focus == DiffPaneFocus::Diff {
+                    style.bg(Color::Rgb(59, 66, 82)).add_modifier(Modifier::BOLD)
+                } else {
+                    style.bg(Color::Rgb(47, 52, 63))
+                };
+            }
+        }
+        rendered.push(Line::from(Span::styled(line.text.clone(), style)));
+    }
+    Text::from(rendered)
+}
+
+fn worktree_diff_modal_scroll(modal: &WorktreeDiffModalState, files: &[DiffFileSummary]) -> u16 {
+    let Some((file_start, _file_end, selected_hunk)) = selected_file_and_hunk_range(modal, files) else {
+        return 0;
+    };
+    let center = selected_hunk
+        .map(|(start, end)| start + (end.saturating_sub(start) / 2))
+        .unwrap_or(file_start);
+    let local_line = center.saturating_sub(file_start);
+    local_line.saturating_sub(3).min(u16::MAX as usize) as u16
+}
+
 fn diff_rendered_line_style(kind: DiffRenderedLineKind) -> Style {
     match kind {
         DiffRenderedLineKind::FileHeader => Style::default()
@@ -1181,21 +1330,11 @@ fn worktree_diff_modal_line_count(modal: &WorktreeDiffModalState) -> usize {
     if modal.loading || modal.error.is_some() || modal.content.trim().is_empty() {
         return 1;
     }
-    parse_rendered_diff_lines(modal.content.as_str())
-        .len()
-        .max(1)
-}
-
-fn selected_worktree_diff_addition_block_range(
-    modal: &WorktreeDiffModalState,
-) -> Option<(usize, usize)> {
-    let blocks = parse_diff_addition_blocks(modal.content.as_str());
-    let index = modal
-        .selected_addition_block
-        .min(blocks.len().saturating_sub(1));
-    blocks
-        .get(index)
-        .map(|block| (block.start_index, block.end_index))
+    let files = parse_diff_file_summaries(modal.content.as_str());
+    if let Some((start, end, _)) = selected_file_and_hunk_range(modal, files.as_slice()) {
+        return end.saturating_sub(start).saturating_add(1).max(1);
+    }
+    parse_rendered_diff_lines(modal.content.as_str()).len().max(1)
 }
 
 fn collect_selected_worktree_diff_refs(
@@ -1213,11 +1352,14 @@ fn collect_selected_worktree_diff_refs(
     if parse_rendered_diff_lines(modal.content.as_str()).is_empty() {
         return Err("diff selection unavailable: no diff content loaded".to_owned());
     }
-    let blocks = parse_diff_addition_blocks(modal.content.as_str());
-    let Some(block) = blocks.get(
+    let files = parse_diff_file_summaries(modal.content.as_str());
+    let Some(file) = files.get(modal.selected_file_index.min(files.len().saturating_sub(1))) else {
+        return Err("diff selection unavailable: no changed files in diff".to_owned());
+    };
+    let Some(block) = file.addition_blocks.get(
         modal
-            .selected_addition_block
-            .min(blocks.len().saturating_sub(1)),
+            .selected_hunk_index
+            .min(file.addition_blocks.len().saturating_sub(1)),
     ) else {
         return Err("diff selection unavailable: no addition blocks in diff".to_owned());
     };
