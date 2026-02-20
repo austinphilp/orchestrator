@@ -136,8 +136,12 @@ async fn run_session_merge_finalize_task(
         .await
     {
         Ok(()) => {
+            let projection = provider.reload_projection().await.ok();
             let _ = sender
-                .send(MergeQueueEvent::SessionFinalized { session_id })
+                .send(MergeQueueEvent::SessionFinalized {
+                    session_id,
+                    projection,
+                })
                 .await;
         }
         Err(error) => {
@@ -158,10 +162,12 @@ async fn run_session_archive_task(
 ) {
     match provider.archive_session(session_id.clone()).await {
         Ok(warning) => {
+            let projection = provider.reload_projection().await.ok();
             let _ = sender
                 .send(TicketPickerEvent::SessionArchived {
                     session_id,
                     warning,
+                    projection,
                 })
                 .await;
         }

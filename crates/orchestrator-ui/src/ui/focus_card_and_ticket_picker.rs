@@ -696,6 +696,7 @@ enum TicketPickerEvent {
     SessionArchived {
         session_id: WorkerSessionId,
         warning: Option<String>,
+        projection: Option<ProjectionState>,
     },
     SessionArchiveFailed {
         session_id: WorkerSessionId,
@@ -761,6 +762,7 @@ enum MergeQueueEvent {
     },
     SessionFinalized {
         session_id: WorkerSessionId,
+        projection: Option<ProjectionState>,
     },
     SessionFinalizeFailed {
         session_id: WorkerSessionId,
