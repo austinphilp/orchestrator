@@ -183,7 +183,7 @@ mod tests {
             ))
         }
 
-        async fn create_and_start_ticket_from_brief(
+        async fn create_ticket_from_brief(
             &self,
             _brief: String,
         ) -> Result<TicketSummary, CoreError> {
@@ -2736,6 +2736,7 @@ mod tests {
 
         let rendered = render_ticket_picker_overlay_text(&overlay);
         assert!(!rendered.contains("Brief:"));
+        assert!(rendered.contains("Enter: create"));
     }
 
     #[test]
@@ -2818,7 +2819,7 @@ mod tests {
 
         let event = receiver.recv().await.expect("ticket picker event");
         match event {
-            TicketPickerEvent::TicketCreatedAndStarted {
+            TicketPickerEvent::TicketCreated {
                 created_ticket,
                 projection,
                 tickets,
@@ -2831,6 +2832,69 @@ mod tests {
             }
             _ => panic!("expected ticket created event"),
         }
+    }
+
+    #[test]
+    fn ticket_created_event_focuses_created_ticket_and_updates_status() {
+        let mut shell_state = UiShellState::new("ready".to_owned(), triage_projection());
+        shell_state.ticket_picker_overlay.open();
+        shell_state.ticket_picker_overlay.loading = false;
+        shell_state.ticket_picker_overlay.apply_tickets(
+            vec![
+                sample_ticket_summary("issue-401", "AP-401", "Todo"),
+                sample_ticket_summary("issue-402", "AP-402", "Todo"),
+            ],
+            Vec::new(),
+            &["Todo".to_owned()],
+        );
+        shell_state.ticket_picker_overlay.move_selection(1);
+
+        let created = sample_ticket_summary("issue-499", "AP-499", "Todo");
+        shell_state.apply_ticket_picker_event(TicketPickerEvent::TicketCreated {
+            created_ticket: created.clone(),
+            projection: None,
+            tickets: Some(vec![
+                sample_ticket_summary("issue-401", "AP-401", "Todo"),
+                created,
+            ]),
+            warning: None,
+        });
+
+        let selected = shell_state
+            .ticket_picker_overlay
+            .selected_ticket()
+            .expect("selected ticket after create");
+        assert_eq!(selected.identifier, "AP-499");
+        assert_eq!(
+            shell_state.status_warning.as_deref(),
+            Some("created AP-499")
+        );
+    }
+
+    #[test]
+    fn ticket_created_event_inserts_created_ticket_when_refresh_misses_it() {
+        let mut shell_state = UiShellState::new("ready".to_owned(), triage_projection());
+        shell_state.ticket_picker_overlay.open();
+        shell_state.ticket_picker_overlay.loading = false;
+        shell_state.ticket_picker_overlay.apply_tickets(
+            vec![sample_ticket_summary("issue-501", "AP-501", "Todo")],
+            Vec::new(),
+            &["Todo".to_owned()],
+        );
+
+        let created = sample_ticket_summary("issue-599", "AP-599", "Todo");
+        shell_state.apply_ticket_picker_event(TicketPickerEvent::TicketCreated {
+            created_ticket: created,
+            projection: None,
+            tickets: Some(vec![sample_ticket_summary("issue-501", "AP-501", "Todo")]),
+            warning: None,
+        });
+
+        assert!(shell_state
+            .ticket_picker_overlay
+            .tickets_snapshot()
+            .iter()
+            .any(|ticket| ticket.identifier == "AP-599"));
     }
 
     #[tokio::test]
@@ -2898,7 +2962,7 @@ mod tests {
                 Err(CoreError::DependencyUnavailable("not used".to_owned()))
             }
 
-            async fn create_and_start_ticket_from_brief(
+            async fn create_ticket_from_brief(
                 &self,
                 _brief: String,
             ) -> Result<TicketSummary, CoreError> {
@@ -2980,7 +3044,7 @@ mod tests {
                 Err(CoreError::DependencyUnavailable("not used".to_owned()))
             }
 
-            async fn create_and_start_ticket_from_brief(
+            async fn create_ticket_from_brief(
                 &self,
                 _brief: String,
             ) -> Result<TicketSummary, CoreError> {

@@ -450,7 +450,7 @@ async fn run_ticket_picker_create_task(
     brief: String,
     sender: mpsc::Sender<TicketPickerEvent>,
 ) {
-    let created_ticket = match provider.create_and_start_ticket_from_brief(brief).await {
+    let created_ticket = match provider.create_ticket_from_brief(brief).await {
         Ok(ticket) => ticket,
         Err(error) => {
             let tickets = match provider.list_unfinished_tickets().await {
@@ -485,7 +485,7 @@ async fn run_ticket_picker_create_task(
     };
 
     let _ = sender
-        .send(TicketPickerEvent::TicketCreatedAndStarted {
+        .send(TicketPickerEvent::TicketCreated {
             created_ticket,
             projection,
             tickets,
@@ -565,7 +565,7 @@ fn resolve_shell_home() -> Option<String> {
 fn render_ticket_picker_overlay_text(overlay: &TicketPickerOverlayState) -> String {
     let mut lines = if overlay.new_ticket_mode {
         vec![
-            "Type brief | Enter: create + start | Backspace: edit | Esc: cancel".to_owned(),
+            "Type brief | Enter: create | Backspace: edit | Esc: cancel".to_owned(),
         ]
     } else {
         vec![

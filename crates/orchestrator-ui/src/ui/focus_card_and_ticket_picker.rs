@@ -364,6 +364,18 @@ impl TicketPickerOverlayState {
             .collect()
     }
 
+    fn tickets_snapshot(&self) -> Vec<TicketSummary> {
+        self.project_groups
+            .iter()
+            .flat_map(|project_group| {
+                project_group
+                    .status_groups
+                    .iter()
+                    .flat_map(|status_group| status_group.tickets.iter().cloned())
+            })
+            .collect()
+    }
+
     fn open(&mut self) {
         self.visible = true;
         self.loading = true;
@@ -455,10 +467,20 @@ impl TicketPickerOverlayState {
         project_names: Vec<String>,
         priority_states: &[String],
     ) {
+        self.apply_tickets_preferring(tickets, project_names, priority_states, None);
+    }
+
+    fn apply_tickets_preferring(
+        &mut self,
+        tickets: Vec<TicketSummary>,
+        project_names: Vec<String>,
+        priority_states: &[String],
+        preferred_ticket_id: Option<&TicketId>,
+    ) {
         let selected_project_index = self.selected_project_index();
-        let selected_ticket_id = self
-            .selected_ticket()
-            .map(|ticket| ticket.ticket_id.clone());
+        let selected_ticket_id = preferred_ticket_id
+            .cloned()
+            .or_else(|| self.selected_ticket().map(|ticket| ticket.ticket_id.clone()));
         let collapsed_projects = self
             .project_groups
             .iter()
@@ -615,7 +637,7 @@ enum TicketPickerEvent {
         message: String,
         tickets: Option<Vec<TicketSummary>>,
     },
-    TicketCreatedAndStarted {
+    TicketCreated {
         created_ticket: TicketSummary,
         projection: Option<ProjectionState>,
         tickets: Option<Vec<TicketSummary>>,

@@ -1778,7 +1778,7 @@ fn apply_ticket_picker_event(&mut self, event: TicketPickerEvent) {
                     compact_focus_card_text(message.as_str())
                 ));
             }
-            TicketPickerEvent::TicketCreatedAndStarted {
+            TicketPickerEvent::TicketCreated {
                 created_ticket,
                 projection,
                 tickets,
@@ -1791,13 +1791,23 @@ fn apply_ticket_picker_event(&mut self, event: TicketPickerEvent) {
                 if let Some(projection) = projection {
                     self.domain = projection;
                 }
-                if let Some(tickets) = tickets {
-                    let projects = self.ticket_picker_overlay.project_names();
-                    self.ticket_picker_overlay
-                        .apply_tickets(tickets, projects, &self.ticket_picker_priority_states);
+                let mut display_tickets = tickets
+                    .unwrap_or_else(|| self.ticket_picker_overlay.tickets_snapshot());
+                if !display_tickets
+                    .iter()
+                    .any(|ticket| ticket.ticket_id == created_ticket.ticket_id)
+                {
+                    display_tickets.push(created_ticket.clone());
                 }
+                let projects = self.ticket_picker_overlay.project_names();
+                self.ticket_picker_overlay.apply_tickets_preferring(
+                    display_tickets,
+                    projects,
+                    &self.ticket_picker_priority_states,
+                    Some(&created_ticket.ticket_id),
+                );
 
-                let mut status = format!("created and started {}", created_ticket.identifier);
+                let mut status = format!("created {}", created_ticket.identifier);
                 if let Some(message) = warning {
                     status.push_str(": ");
                     status.push_str(compact_focus_card_text(message.as_str()).as_str());

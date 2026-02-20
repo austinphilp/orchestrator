@@ -67,10 +67,7 @@ pub trait TicketPickerProvider: Send + Sync {
         ticket: TicketSummary,
         repository_override: Option<PathBuf>,
     ) -> Result<SelectedTicketFlowResult, CoreError>;
-    async fn create_and_start_ticket_from_brief(
-        &self,
-        brief: String,
-    ) -> Result<TicketSummary, CoreError>;
+    async fn create_ticket_from_brief(&self, brief: String) -> Result<TicketSummary, CoreError>;
     async fn archive_ticket(&self, _ticket: TicketSummary) -> Result<(), CoreError> {
         Err(CoreError::DependencyUnavailable(
             "ticket archiving is not supported by this ticket provider".to_owned(),
