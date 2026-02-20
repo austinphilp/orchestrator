@@ -704,6 +704,16 @@ fn apply_nord_markdown_theme(skin: &mut RatSkin) {
         .set_fg((129, 161, 193).into()); // nord9
 }
 
+fn nord_editor_theme<'a>(block: Block<'a>) -> EditorTheme<'a> {
+    EditorTheme::default()
+        .base(Style::default().bg(Color::Rgb(46, 52, 64)).fg(Color::Rgb(216, 222, 233)))
+        .cursor_style(Style::default().bg(Color::Rgb(236, 239, 244)).fg(Color::Rgb(46, 52, 64)))
+        .selection_style(Style::default().bg(Color::Rgb(94, 129, 172)).fg(Color::Rgb(236, 239, 244)))
+        .line_numbers_style(Style::default().bg(Color::Rgb(46, 52, 64)).fg(Color::Rgb(76, 86, 106)))
+        .block(block)
+        .hide_status_line()
+}
+
 fn estimate_wrapped_line_count(text: &Text<'_>, _area_width: u16) -> u16 {
     let count = text.lines.len();
     if count == 0 {
@@ -951,15 +961,11 @@ fn render_ticket_picker_overlay(
             );
             frame.render_widget(
                 EditorView::new(&mut overlay.new_ticket_brief_editor)
-                    .theme(
-                        EditorTheme::default()
-                            .block(
-                                Block::default()
-                                    .title("describe ticket")
-                                    .borders(Borders::ALL),
-                            )
-                            .hide_status_line(),
-                    )
+                    .theme(nord_editor_theme(
+                        Block::default()
+                            .title("describe ticket")
+                            .borders(Borders::ALL),
+                    ))
                     .wrap(true),
                 input_area,
             );
@@ -1216,18 +1222,22 @@ fn render_terminal_needs_input_panel(
         );
     }
 
-    let mut note_input_state = prompt.note_input_state.clone();
-    note_input_state.focused = prompt.interaction_active && prompt.note_insert_mode && focused;
-    let note_input = Input::new(&note_input_state)
-        .label("note")
-        .placeholder("Optional with selection; required when no options")
-        .with_border(true);
-    let _ = note_input.render_stateful(frame, note_area);
-    if prompt.interaction_active && prompt.note_insert_mode && focused {
-        if let Some((x, y)) = needs_input_note_cursor(note_area, prompt) {
-            frame.set_cursor_position((x, y));
-        }
-    }
+    let mut note_editor_state = prompt.note_editor_state.clone();
+    note_editor_state.mode = if prompt.interaction_active && prompt.note_insert_mode && focused {
+        EditorMode::Insert
+    } else {
+        EditorMode::Normal
+    };
+    frame.render_widget(
+        EditorView::new(&mut note_editor_state)
+            .theme(nord_editor_theme(
+                Block::default()
+                    .title("note (optional)")
+                    .borders(Borders::ALL),
+            ))
+            .wrap(true),
+        note_area,
+    );
 
     let mut index = 3usize;
     if let Some(error) = prompt.error.as_ref() {
@@ -1267,28 +1277,6 @@ fn render_terminal_needs_input_panel(
         Paragraph::new(help).wrap(Wrap { trim: false }),
         sections[index],
     );
-}
-
-fn needs_input_note_cursor(
-    note_area: Rect,
-    prompt: &NeedsInputComposerState,
-) -> Option<(u16, u16)> {
-    if !prompt.note_insert_mode {
-        return None;
-    }
-
-    let inner_x = note_area.x.saturating_add(1);
-    let inner_y = note_area.y.saturating_add(1);
-    let line_prefix = 1u16;
-    let note_len = prompt.note_input_state.text.chars().count();
-    let inner_width = note_area.width.saturating_sub(2);
-    let max_offset = usize::from(inner_width.saturating_sub(2));
-    let x_offset = note_len.min(max_offset);
-    let cursor_x = inner_x
-        .saturating_add(line_prefix)
-        .saturating_add(u16::try_from(x_offset).ok()?);
-    let cursor_y = inner_y;
-    Some((cursor_x, cursor_y))
 }
 
 fn render_worktree_diff_modal(
