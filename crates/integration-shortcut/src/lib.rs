@@ -328,9 +328,8 @@ impl TicketingProvider for ShortcutTicketingProvider {
             deduped_projects.push(project);
         }
 
-        deduped_projects.sort_by(|left, right| {
-            left.to_ascii_lowercase().cmp(&right.to_ascii_lowercase())
-        });
+        deduped_projects
+            .sort_by(|left, right| left.to_ascii_lowercase().cmp(&right.to_ascii_lowercase()));
         Ok(deduped_projects)
     }
 

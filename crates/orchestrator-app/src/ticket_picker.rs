@@ -189,6 +189,35 @@ where
             .await
     }
 
+    async fn archive_session(
+        &self,
+        session_id: WorkerSessionId,
+    ) -> Result<Option<String>, CoreError> {
+        let app = self.app.clone();
+        let worker_backend = self.worker_backend.clone();
+        tokio::task::spawn_blocking(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(|error| {
+                    CoreError::Configuration(format!(
+                        "failed to initialize session-archive runtime: {error}"
+                    ))
+                })?;
+
+            runtime.block_on(async {
+                app.archive_session(&session_id, worker_backend.as_ref())
+                    .await
+            })
+        })
+        .await
+        .map_err(|error| {
+            CoreError::Configuration(format!(
+                "ticket picker task failed while archiving session: {error}"
+            ))
+        })?
+    }
+
     async fn mark_session_crashed(
         &self,
         session_id: WorkerSessionId,

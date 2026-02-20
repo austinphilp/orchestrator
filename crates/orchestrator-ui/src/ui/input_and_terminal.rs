@@ -30,7 +30,7 @@ enum UiCommand {
     OpenFocusCard,
     ToggleWorktreeDiffModal,
     AdvanceTerminalWorkflowStage,
-    KillSelectedSession,
+    ArchiveSelectedSession,
     MinimizeCenterView,
 }
 
@@ -66,7 +66,7 @@ impl UiCommand {
         Self::OpenFocusCard,
         Self::ToggleWorktreeDiffModal,
         Self::AdvanceTerminalWorkflowStage,
-        Self::KillSelectedSession,
+        Self::ArchiveSelectedSession,
         Self::MinimizeCenterView,
     ];
 
@@ -102,7 +102,7 @@ impl UiCommand {
             Self::OpenFocusCard => "ui.open_focus_card_for_selected",
             Self::ToggleWorktreeDiffModal => "ui.worktree.diff.toggle",
             Self::AdvanceTerminalWorkflowStage => "ui.terminal.workflow.advance",
-            Self::KillSelectedSession => "ui.terminal.kill_selected_session",
+            Self::ArchiveSelectedSession => "ui.terminal.archive_selected_session",
             Self::MinimizeCenterView => "ui.center.pop",
         }
     }
@@ -139,7 +139,7 @@ impl UiCommand {
             Self::OpenFocusCard => "Open focus card for selected item",
             Self::ToggleWorktreeDiffModal => "Toggle worktree diff modal for selected session",
             Self::AdvanceTerminalWorkflowStage => "Advance terminal workflow stage",
-            Self::KillSelectedSession => "Kill selected terminal session",
+            Self::ArchiveSelectedSession => "Archive selected terminal session",
             Self::MinimizeCenterView => "Minimize active center view",
         }
     }
@@ -196,7 +196,7 @@ fn default_keymap_config() -> KeymapConfig {
                     binding(&["i"], UiCommand::OpenTerminalForSelected),
                     binding(&["D"], UiCommand::ToggleWorktreeDiffModal),
                     binding(&["n"], UiCommand::AdvanceTerminalWorkflowStage),
-                    binding(&["x"], UiCommand::KillSelectedSession),
+                    binding(&["x"], UiCommand::ArchiveSelectedSession),
                     binding(&["backspace"], UiCommand::MinimizeCenterView),
                     binding(&["z", "1"], UiCommand::JumpBatchDecideOrUnblock),
                     binding(&["z", "2"], UiCommand::JumpBatchApprovals),
@@ -250,7 +250,7 @@ enum RoutedInput {
 fn mode_help(mode: UiMode) -> &'static str {
     match mode {
         UiMode::Normal => {
-            "j/k: select | Tab/S-Tab: batch cycle | 1-4 or z{1-4}: batch jump | g/G: first/last | s: start ticket | c: supervisor chat | Enter: focus | i: terminal | Shift+J/K: scroll terminal stream | G (terminal): bottom | D: worktree diff modal | n: advance session workflow | x: kill selected session | v{d/t/p/c}: inspectors | q: quit"
+            "j/k: select | Tab/S-Tab: batch cycle | 1-4 or z{1-4}: batch jump | g/G: first/last | s: start ticket | c: supervisor chat | Enter: focus | i: terminal | Shift+J/K: scroll terminal stream | G (terminal): bottom | D: worktree diff modal | n: advance session workflow | x: archive selected session | v{d/t/p/c}: inspectors | q: quit"
         }
         UiMode::Insert => "Insert input active | Esc/Ctrl-[: Normal",
         UiMode::Terminal => "Terminal compose active | Enter send | Shift+Enter newline | Esc or Ctrl-\\ Ctrl-n: Normal | then n: advance workflow",
@@ -478,6 +478,9 @@ fn route_key_press(shell_state: &mut UiShellState, key: KeyEvent) -> RoutedInput
     }
     if shell_state.is_ticket_picker_visible() {
         return route_ticket_picker_key(shell_state, key);
+    }
+    if shell_state.archive_session_confirm_session.is_some() {
+        return route_archive_session_confirm_key(shell_state, key);
     }
     if shell_state.review_merge_confirm_session.is_some() {
         return route_review_merge_confirm_key(shell_state, key);
@@ -754,8 +757,8 @@ fn dispatch_command(shell_state: &mut UiShellState, command: UiCommand) -> bool 
             shell_state.advance_terminal_workflow_stage();
             false
         }
-        UiCommand::KillSelectedSession => {
-            shell_state.kill_selected_session();
+        UiCommand::ArchiveSelectedSession => {
+            shell_state.begin_archive_selected_session_confirmation();
             false
         }
         UiCommand::MinimizeCenterView => {

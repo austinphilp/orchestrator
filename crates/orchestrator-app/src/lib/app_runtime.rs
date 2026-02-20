@@ -109,66 +109,13 @@ impl<S: Supervisor, G: GithubClient> App<S, G> {
         session_id: &WorkerSessionId,
         worker_backend: &dyn WorkerBackend,
     ) -> Result<(), CoreError> {
-        let existing_mapping = {
-            let store = open_event_store(&self.config.event_store_path)?;
-            store
-                .find_runtime_mapping_by_session_id(session_id)?
-                .ok_or_else(|| {
-                    CoreError::Configuration(format!(
-                        "could not resolve runtime mapping for session '{}'",
-                        session_id.as_str()
-                    ))
-                })?
-        };
-
-        let mut cleanup_warnings = Vec::new();
-        let handle = SessionHandle {
-            session_id: RuntimeSessionId::new(session_id.as_str().to_owned()),
-            backend: existing_mapping.session.backend_kind.clone(),
-        };
-        if let Err(error) = worker_backend.kill(&handle).await {
-            if !matches!(error, orchestrator_core::RuntimeError::SessionNotFound(_)) {
-                cleanup_warnings.push(format!(
-                    "failed to archive runtime session '{}': {error}",
-                    session_id.as_str()
-                ));
-            }
-        }
-
-        if let Err(error) = cleanup_worktree_after_merge(
-            existing_mapping.worktree.path.as_str(),
-            existing_mapping.worktree.branch.as_str(),
-        ) {
-            cleanup_warnings.push(error.to_string());
-        }
-
-        let mut store = open_event_store(&self.config.event_store_path)?;
-        let mut mapping = store
-            .find_runtime_mapping_by_session_id(session_id)?
-            .ok_or_else(|| {
-                CoreError::Configuration(format!(
-                    "could not resolve runtime mapping for session '{}'",
-                    session_id.as_str()
-                ))
-            })?;
-        mapping.session.status = WorkerSessionStatus::Done;
-        mapping.session.updated_at = now_timestamp();
-        store.upsert_runtime_mapping(&mapping)?;
-        store.delete_harness_session_binding(
-            &mapping.session.session_id,
-            &mapping.session.backend_kind,
-        )?;
-        store.append(NewEventEnvelope {
-            event_id: format!("evt-session-completed-{}", now_nanos()),
-            occurred_at: now_timestamp(),
-            work_item_id: Some(mapping.work_item_id.clone()),
-            session_id: Some(session_id.clone()),
-            payload: OrchestrationEventPayload::SessionCompleted(SessionCompletedPayload {
-                session_id: session_id.clone(),
-                summary: Some("Session archived after PR merge.".to_owned()),
-            }),
-            schema_version: DOMAIN_EVENT_SCHEMA_VERSION,
-        })?;
+        let cleanup_warnings = self
+            .archive_session_internal(
+                session_id,
+                worker_backend,
+                "Session archived after PR merge.",
+            )
+            .await?;
 
         if cleanup_warnings.is_empty() {
             Ok(())
@@ -178,6 +125,25 @@ impl<S: Supervisor, G: GithubClient> App<S, G> {
                 session_id.as_str(),
                 cleanup_warnings.join("; ")
             )))
+        }
+    }
+
+    pub async fn archive_session(
+        &self,
+        session_id: &WorkerSessionId,
+        worker_backend: &dyn WorkerBackend,
+    ) -> Result<Option<String>, CoreError> {
+        let cleanup_warnings = self
+            .archive_session_internal(
+                session_id,
+                worker_backend,
+                "Session archived from terminal session panel.",
+            )
+            .await?;
+        if cleanup_warnings.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(cleanup_warnings.join("; ")))
         }
     }
 
@@ -350,6 +316,78 @@ impl<S: Supervisor, G: GithubClient> App<S, G> {
     ) -> Result<Vec<(WorkerSessionId, String)>, CoreError> {
         let store = open_event_store(&self.config.event_store_path)?;
         store.list_session_workflow_stages()
+    }
+}
+
+impl<S: Supervisor, G: GithubClient> App<S, G> {
+    async fn archive_session_internal(
+        &self,
+        session_id: &WorkerSessionId,
+        worker_backend: &dyn WorkerBackend,
+        summary: &str,
+    ) -> Result<Vec<String>, CoreError> {
+        let existing_mapping = {
+            let store = open_event_store(&self.config.event_store_path)?;
+            store
+                .find_runtime_mapping_by_session_id(session_id)?
+                .ok_or_else(|| {
+                    CoreError::Configuration(format!(
+                        "could not resolve runtime mapping for session '{}'",
+                        session_id.as_str()
+                    ))
+                })?
+        };
+
+        let mut cleanup_warnings = Vec::new();
+        let handle = SessionHandle {
+            session_id: RuntimeSessionId::new(session_id.as_str().to_owned()),
+            backend: existing_mapping.session.backend_kind.clone(),
+        };
+        if let Err(error) = worker_backend.kill(&handle).await {
+            if !matches!(error, orchestrator_core::RuntimeError::SessionNotFound(_)) {
+                cleanup_warnings.push(format!(
+                    "failed to archive runtime session '{}': {error}",
+                    session_id.as_str()
+                ));
+            }
+        }
+
+        if let Err(error) = cleanup_worktree_after_merge(
+            existing_mapping.worktree.path.as_str(),
+            existing_mapping.worktree.branch.as_str(),
+        ) {
+            cleanup_warnings.push(error.to_string());
+        }
+
+        let mut store = open_event_store(&self.config.event_store_path)?;
+        let mut mapping = store
+            .find_runtime_mapping_by_session_id(session_id)?
+            .ok_or_else(|| {
+                CoreError::Configuration(format!(
+                    "could not resolve runtime mapping for session '{}'",
+                    session_id.as_str()
+                ))
+            })?;
+        mapping.session.status = WorkerSessionStatus::Done;
+        mapping.session.updated_at = now_timestamp();
+        store.upsert_runtime_mapping(&mapping)?;
+        store.delete_harness_session_binding(
+            &mapping.session.session_id,
+            &mapping.session.backend_kind,
+        )?;
+        store.append(NewEventEnvelope {
+            event_id: format!("evt-session-completed-{}", now_nanos()),
+            occurred_at: now_timestamp(),
+            work_item_id: Some(mapping.work_item_id.clone()),
+            session_id: Some(session_id.clone()),
+            payload: OrchestrationEventPayload::SessionCompleted(SessionCompletedPayload {
+                session_id: session_id.clone(),
+                summary: Some(summary.to_owned()),
+            }),
+            schema_version: DOMAIN_EVENT_SCHEMA_VERSION,
+        })?;
+
+        Ok(cleanup_warnings)
     }
 }
 

@@ -1171,6 +1171,84 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn app_archive_session_marks_mapping_done_and_emits_completed_event() {
+        let temp_db = TestDbPath::new("app-archive-session");
+        let app = App {
+            config: AppConfig {
+                workspace: "/workspace".to_owned(),
+                event_store_path: temp_db.path().to_string_lossy().to_string(),
+                ticketing_provider: "linear".to_owned(),
+                harness_provider: "codex".to_owned(),
+            },
+            ticketing: MockTicketingProvider::service(),
+            supervisor: Healthy,
+            github: Healthy,
+        };
+        let session_id = WorkerSessionId::new("sess-archive-1");
+        {
+            let mut store = SqliteEventStore::open(temp_db.path()).expect("open store");
+            store
+                .upsert_runtime_mapping(&RuntimeMappingRecord {
+                    ticket: orchestrator_core::TicketRecord {
+                        ticket_id: TicketId::from_provider_uuid(TicketProvider::Linear, "issue-1"),
+                        provider: TicketProvider::Linear,
+                        provider_ticket_id: "issue-1".to_owned(),
+                        identifier: "AP-1".to_owned(),
+                        title: "Archive session".to_owned(),
+                        state: "In Progress".to_owned(),
+                        updated_at: "2026-02-20T00:00:00Z".to_owned(),
+                    },
+                    work_item_id: WorkItemId::new("wi-archive-1"),
+                    worktree: WorktreeRecord {
+                        worktree_id: WorktreeId::new("wt-archive-1"),
+                        work_item_id: WorkItemId::new("wi-archive-1"),
+                        path: "/tmp/nonexistent-worktree-archive-1".to_owned(),
+                        branch: "ap/AP-1-archive-session".to_owned(),
+                        base_branch: "main".to_owned(),
+                        created_at: "2026-02-20T00:00:00Z".to_owned(),
+                    },
+                    session: SessionRecord {
+                        session_id: session_id.clone(),
+                        work_item_id: WorkItemId::new("wi-archive-1"),
+                        backend_kind: BackendKind::OpenCode,
+                        workdir: "/tmp/nonexistent-worktree-archive-1".to_owned(),
+                        model: Some("gpt-5".to_owned()),
+                        status: WorkerSessionStatus::Running,
+                        created_at: "2026-02-20T00:00:00Z".to_owned(),
+                        updated_at: "2026-02-20T00:00:00Z".to_owned(),
+                    },
+                })
+                .expect("seed runtime mapping");
+        }
+
+        let backend = StubBackend {
+            spawn_calls: Mutex::new(Vec::new()),
+        };
+
+        let warning = app
+            .archive_session(&session_id, &backend)
+            .await
+            .expect("archive session");
+        assert!(warning.is_none());
+
+        let store = SqliteEventStore::open(temp_db.path()).expect("open store");
+        let mapping = store
+            .find_runtime_mapping_by_session_id(&session_id)
+            .expect("find mapping")
+            .expect("mapping exists");
+        assert_eq!(mapping.session.status, WorkerSessionStatus::Done);
+
+        let events = read_events(temp_db.path());
+        assert!(events.iter().any(|event| {
+            matches!(
+                &event.payload,
+                OrchestrationEventPayload::SessionCompleted(payload)
+                    if payload.session_id == session_id
+            )
+        }));
+    }
+
+    #[tokio::test]
     async fn app_start_and_stop_linear_polling_lifecycle() {
         let temp_db = TestDbPath::new("app-linear-polling-lifecycle");
         let transport = Arc::new(StubLinearTransport::new(vec![

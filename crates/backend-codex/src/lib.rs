@@ -176,7 +176,10 @@ impl CodexSession {
         &self,
         prompt_id: &str,
     ) -> Option<PendingUserInputRequest> {
-        self.pending_user_input_requests.lock().await.remove(prompt_id)
+        self.pending_user_input_requests
+            .lock()
+            .await
+            .remove(prompt_id)
     }
 
     async fn restore_pending_user_input_request(
@@ -869,14 +872,15 @@ async fn route_tool_request_user_input(
             .cloned()
     }
     .ok_or_else(|| {
-        RuntimeError::SessionNotFound(format!(
-            "no codex session found for thread '{}'",
-            thread_id
-        ))
+        RuntimeError::SessionNotFound(format!("no codex session found for thread '{}'", thread_id))
     })?;
 
     session
-        .register_pending_user_input_request(event.prompt_id.clone(), request_id.clone(), question_ids)
+        .register_pending_user_input_request(
+            event.prompt_id.clone(),
+            request_id.clone(),
+            question_ids,
+        )
         .await;
     session.emit_non_terminal_event(BackendEvent::NeedsInput(event));
     emit_codex_meta_output(
@@ -982,27 +986,29 @@ fn parse_tool_request_user_input_question(
         .and_then(Value::as_bool)
         .unwrap_or(false);
 
-    let options = value.get("options").and_then(Value::as_array).and_then(|raw| {
-        let options = raw
-            .iter()
-            .filter_map(|entry| {
-                let label = normalize_optional_string(
-                    entry
-                        .get("label")
-                        .and_then(Value::as_str)
-                        .or_else(|| entry.as_str()),
-                )?
-                .to_owned();
-                let description = normalize_optional_string(
-                    entry.get("description").and_then(Value::as_str),
-                )
-                .map(ToOwned::to_owned)
-                .unwrap_or_default();
-                Some(BackendNeedsInputOption { label, description })
-            })
-            .collect::<Vec<_>>();
-        (!options.is_empty()).then_some(options)
-    });
+    let options = value
+        .get("options")
+        .and_then(Value::as_array)
+        .and_then(|raw| {
+            let options = raw
+                .iter()
+                .filter_map(|entry| {
+                    let label = normalize_optional_string(
+                        entry
+                            .get("label")
+                            .and_then(Value::as_str)
+                            .or_else(|| entry.as_str()),
+                    )?
+                    .to_owned();
+                    let description =
+                        normalize_optional_string(entry.get("description").and_then(Value::as_str))
+                            .map(ToOwned::to_owned)
+                            .unwrap_or_default();
+                    Some(BackendNeedsInputOption { label, description })
+                })
+                .collect::<Vec<_>>();
+            (!options.is_empty()).then_some(options)
+        });
 
     BackendNeedsInputQuestion {
         id,
@@ -1051,12 +1057,15 @@ fn server_request_result(method: &str) -> Option<Value> {
     }
 }
 
-fn build_codex_tool_user_input_response(answers: &[BackendNeedsInputAnswer]) -> RuntimeResult<Value> {
+fn build_codex_tool_user_input_response(
+    answers: &[BackendNeedsInputAnswer],
+) -> RuntimeResult<Value> {
     let mut response_answers = serde_json::Map::new();
     for answer in answers {
-        let question_id = normalize_optional_string(Some(answer.question_id.as_str())).ok_or_else(
-            || RuntimeError::Protocol("codex needs-input answer requires a question id".to_owned()),
-        )?;
+        let question_id =
+            normalize_optional_string(Some(answer.question_id.as_str())).ok_or_else(|| {
+                RuntimeError::Protocol("codex needs-input answer requires a question id".to_owned())
+            })?;
         if response_answers.contains_key(question_id) {
             return Err(RuntimeError::Protocol(format!(
                 "codex needs-input response contains duplicate question id '{}'",

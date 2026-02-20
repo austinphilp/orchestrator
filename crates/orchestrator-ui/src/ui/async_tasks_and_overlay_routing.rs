@@ -151,6 +151,31 @@ async fn run_session_merge_finalize_task(
     }
 }
 
+async fn run_session_archive_task(
+    provider: Arc<dyn TicketPickerProvider>,
+    session_id: WorkerSessionId,
+    sender: mpsc::Sender<TicketPickerEvent>,
+) {
+    match provider.archive_session(session_id.clone()).await {
+        Ok(warning) => {
+            let _ = sender
+                .send(TicketPickerEvent::SessionArchived {
+                    session_id,
+                    warning,
+                })
+                .await;
+        }
+        Err(error) => {
+            let _ = sender
+                .send(TicketPickerEvent::SessionArchiveFailed {
+                    session_id,
+                    message: sanitize_terminal_display_text(error.to_string().as_str()),
+                })
+                .await;
+        }
+    }
+}
+
 #[derive(Debug, Default)]
 struct MergeQueueResponse {
     completed: bool,
@@ -895,6 +920,32 @@ fn route_review_merge_confirm_key(shell_state: &mut UiShellState, key: KeyEvent)
             }
             KeyCode::Char('n') => {
                 shell_state.cancel_review_merge_confirmation();
+                return RoutedInput::Ignore;
+            }
+            _ => {}
+        }
+    }
+
+    RoutedInput::Ignore
+}
+
+fn route_archive_session_confirm_key(
+    shell_state: &mut UiShellState,
+    key: KeyEvent,
+) -> RoutedInput {
+    if is_escape_to_normal(key) {
+        shell_state.cancel_archive_selected_session_confirmation();
+        return RoutedInput::Ignore;
+    }
+
+    if key.modifiers.is_empty() {
+        match key.code {
+            KeyCode::Enter | KeyCode::Char('y') => {
+                shell_state.confirm_archive_selected_session();
+                return RoutedInput::Ignore;
+            }
+            KeyCode::Char('n') => {
+                shell_state.cancel_archive_selected_session_confirmation();
                 return RoutedInput::Ignore;
             }
             _ => {}

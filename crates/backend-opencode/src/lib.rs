@@ -14,10 +14,9 @@ use futures_util::StreamExt;
 use orchestrator_runtime::{
     BackendArtifactEvent, BackendArtifactKind, BackendBlockedEvent, BackendCapabilities,
     BackendCheckpointEvent, BackendCrashedEvent, BackendDoneEvent, BackendEvent, BackendKind,
-    BackendNeedsInputEvent, BackendNeedsInputOption, BackendNeedsInputQuestion,
-    BackendOutputEvent, BackendOutputStream, RuntimeArtifactId, RuntimeError, RuntimeResult,
-    RuntimeSessionId, SessionHandle, SpawnSpec, WorkerBackend, WorkerEventStream,
-    WorkerEventSubscription,
+    BackendNeedsInputEvent, BackendNeedsInputOption, BackendNeedsInputQuestion, BackendOutputEvent,
+    BackendOutputStream, RuntimeArtifactId, RuntimeError, RuntimeResult, RuntimeSessionId,
+    SessionHandle, SpawnSpec, WorkerBackend, WorkerEventStream, WorkerEventSubscription,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -627,7 +626,9 @@ fn parse_server_event_line(line: &[u8]) -> Option<BackendEvent> {
         })),
         "needs_input" => {
             let prompt_id = event.prompt_id.unwrap_or_else(|| "prompt".to_owned());
-            let question = event.question.unwrap_or_else(|| "input required".to_owned());
+            let question = event
+                .question
+                .unwrap_or_else(|| "input required".to_owned());
             let options = event.options;
             let question_options = (!options.is_empty()).then(|| {
                 options

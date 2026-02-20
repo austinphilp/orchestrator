@@ -106,8 +106,7 @@ pub fn normalize_backend_event(
                 primary_needs_input_prompt(needs_input).as_str(),
                 "choose next action",
             );
-            let options =
-                normalize_needs_input_options(&primary_needs_input_options(needs_input));
+            let options = normalize_needs_input_options(&primary_needs_input_options(needs_input));
             let default_option = normalize_optional_text(needs_input.default_option.as_deref())
                 .map(ToOwned::to_owned);
             let prompt_id = Some(normalize_prompt_id(context, needs_input));

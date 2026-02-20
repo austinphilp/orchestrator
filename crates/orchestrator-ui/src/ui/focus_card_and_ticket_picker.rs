@@ -637,6 +637,14 @@ enum TicketPickerEvent {
         session_id: WorkerSessionId,
         message: String,
     },
+    SessionArchived {
+        session_id: WorkerSessionId,
+        warning: Option<String>,
+    },
+    SessionArchiveFailed {
+        session_id: WorkerSessionId,
+        message: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

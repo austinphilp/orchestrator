@@ -1592,6 +1592,26 @@ fn render_review_merge_confirm_overlay(
     );
 }
 
+fn render_archive_session_confirm_overlay(
+    frame: &mut ratatui::Frame<'_>,
+    anchor_area: Rect,
+    session_id: &WorkerSessionId,
+) {
+    let content = format!(
+        "Archive selected session and clean up worktree/branch?\n\nSession: {}\n\nEnter/y: confirm archive\nEsc/n: cancel",
+        session_id.as_str()
+    );
+    let Some(popup) = review_merge_confirm_popup(anchor_area) else {
+        return;
+    };
+    frame.render_widget(Clear, popup);
+    frame.render_widget(
+        Paragraph::new(content)
+            .block(Block::default().title("archive session").borders(Borders::ALL)),
+        popup,
+    );
+}
+
 fn render_ticket_archive_confirm_overlay(
     frame: &mut ratatui::Frame<'_>,
     anchor_area: Rect,
