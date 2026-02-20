@@ -308,7 +308,7 @@ enum TicketPickerRowRef {
     },
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 struct TicketPickerOverlayState {
     visible: bool,
     loading: bool,
@@ -316,7 +316,7 @@ struct TicketPickerOverlayState {
     archiving_ticket_id: Option<TicketId>,
     creating: bool,
     new_ticket_mode: bool,
-    new_ticket_brief_input: InputState,
+    new_ticket_brief_input: TextAreaState,
     error: Option<String>,
     project_groups: Vec<TicketProjectGroup>,
     ticket_rows: Vec<TicketPickerRowRef>,
@@ -326,6 +326,29 @@ struct TicketPickerOverlayState {
     repository_prompt_input: InputState,
     repository_prompt_missing_mapping: bool,
     archive_confirm_ticket: Option<TicketSummary>,
+}
+
+impl Default for TicketPickerOverlayState {
+    fn default() -> Self {
+        Self {
+            visible: false,
+            loading: false,
+            starting_ticket_id: None,
+            archiving_ticket_id: None,
+            creating: false,
+            new_ticket_mode: false,
+            new_ticket_brief_input: TextAreaState::empty().with_tab_config(TabConfig::Literal),
+            error: None,
+            project_groups: Vec::new(),
+            ticket_rows: Vec::new(),
+            selected_row_index: None,
+            repository_prompt_ticket: None,
+            repository_prompt_project_id: None,
+            repository_prompt_input: InputState::empty(),
+            repository_prompt_missing_mapping: false,
+            archive_confirm_ticket: None,
+        }
+    }
 }
 
 impl TicketPickerOverlayState {
@@ -451,6 +474,10 @@ impl TicketPickerOverlayState {
 
     fn append_new_ticket_brief_char(&mut self, ch: char) {
         self.new_ticket_brief_input.insert_char(ch);
+    }
+
+    fn append_new_ticket_brief_newline(&mut self) {
+        self.new_ticket_brief_input.insert_newline();
     }
 
     fn pop_new_ticket_brief_char(&mut self) {

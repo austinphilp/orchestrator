@@ -795,19 +795,26 @@ fn render_ticket_picker_overlay(
         popup,
     );
     if popup.width > 4 && popup.height > 4 {
+        let input_height: u16 = if overlay.new_ticket_mode { 5 } else { 3 };
+        if popup.height <= input_height.saturating_add(1) {
+            return;
+        }
         let input_area = Rect {
             x: popup.x.saturating_add(1),
-            y: popup.y.saturating_add(popup.height.saturating_sub(4)),
+            y: popup
+                .y
+                .saturating_add(popup.height.saturating_sub(input_height.saturating_add(1))),
             width: popup.width.saturating_sub(2),
-            height: 3,
+            height: input_height,
         };
         if overlay.new_ticket_mode {
             let mut state = overlay.new_ticket_brief_input.clone();
             state.focused = true;
-            Input::new(&state)
+            TextArea::new()
                 .label("brief")
                 .placeholder("ticket summary")
-                .render_stateful(frame, input_area);
+                .wrap_mode(WrapMode::Soft)
+                .render_stateful(frame, input_area, &mut state);
         } else if overlay.has_repository_prompt() {
             let mut state = overlay.repository_prompt_input.clone();
             state.focused = true;

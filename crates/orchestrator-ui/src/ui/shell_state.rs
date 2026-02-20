@@ -780,6 +780,13 @@ impl UiShellState {
         self.ticket_picker_overlay.append_new_ticket_brief_char(ch);
     }
 
+    fn append_create_ticket_brief_newline(&mut self) {
+        if !self.ticket_picker_overlay.visible || !self.ticket_picker_overlay.new_ticket_mode {
+            return;
+        }
+        self.ticket_picker_overlay.append_new_ticket_brief_newline();
+    }
+
     fn pop_create_ticket_brief_char(&mut self) {
         if !self.ticket_picker_overlay.visible || !self.ticket_picker_overlay.new_ticket_mode {
             return;
