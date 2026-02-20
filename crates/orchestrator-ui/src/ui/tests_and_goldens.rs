@@ -1221,7 +1221,7 @@ mod tests {
     }
 
     #[test]
-    fn active_terminal_session_auto_opens_needs_input_modal_on_event() {
+    fn active_terminal_session_tracks_inline_needs_input_on_event() {
         let backend = Arc::new(ManualTerminalBackend::default());
         let mut shell_state = UiShellState::new_with_integrations(
             "ready".to_owned(),
@@ -1236,7 +1236,7 @@ mod tests {
             shell_state.view_stack.active_center(),
             Some(CenterView::TerminalView { session_id }) if session_id.as_str() == "sess-1"
         ));
-        assert!(shell_state.needs_input_modal.is_none());
+        assert!(!shell_state.terminal_session_has_active_needs_input());
 
         let sender = shell_state
             .terminal_session_sender
@@ -1257,17 +1257,17 @@ mod tests {
 
         shell_state.poll_terminal_session_events();
 
-        let modal = shell_state
-            .needs_input_modal
-            .as_ref()
-            .expect("needs-input modal should open for active terminal session");
-        assert_eq!(modal.session_id.as_str(), "sess-1");
-        assert_eq!(modal.prompt_id.as_str(), "prompt-plan-gate");
+        let prompt = shell_state
+            .terminal_session_states
+            .get(&WorkerSessionId::new("sess-1"))
+            .and_then(|view| view.active_needs_input.as_ref())
+            .expect("needs-input prompt should activate for active terminal session");
+        assert_eq!(prompt.prompt_id.as_str(), "prompt-plan-gate");
         assert!(shell_state.mode == UiMode::Terminal);
     }
 
     #[test]
-    fn needs_input_modal_uses_jk_navigation_and_enter_selection() {
+    fn inline_needs_input_uses_jk_navigation_and_enter_selection() {
         let backend = Arc::new(ManualTerminalBackend::default());
         let mut shell_state = UiShellState::new_with_integrations(
             "ready".to_owned(),
@@ -1332,27 +1332,96 @@ mod tests {
             .expect("queue needs-input event");
         shell_state.poll_terminal_session_events();
 
-        let modal = shell_state
-            .needs_input_modal
-            .as_ref()
-            .expect("needs-input modal should be open");
-        assert_eq!(modal.current_question_index, 0);
-        assert_eq!(modal.select_state.highlighted_index, 0);
+        let prompt = shell_state
+            .terminal_session_states
+            .get(&WorkerSessionId::new("sess-1"))
+            .and_then(|view| view.active_needs_input.as_ref())
+            .expect("needs-input prompt should be active");
+        assert_eq!(prompt.current_question_index, 0);
+        assert_eq!(prompt.select_state.highlighted_index, 0);
 
         let _ = route_needs_input_modal_key(&mut shell_state, key(KeyCode::Char('j')));
-        let modal = shell_state
-            .needs_input_modal
-            .as_ref()
-            .expect("needs-input modal should remain open");
-        assert_eq!(modal.select_state.highlighted_index, 1);
+        let prompt = shell_state
+            .terminal_session_states
+            .get(&WorkerSessionId::new("sess-1"))
+            .and_then(|view| view.active_needs_input.as_ref())
+            .expect("needs-input prompt should remain active");
+        assert_eq!(prompt.select_state.highlighted_index, 1);
 
         let _ = route_needs_input_modal_key(&mut shell_state, key(KeyCode::Enter));
-        let modal = shell_state
-            .needs_input_modal
-            .as_ref()
-            .expect("needs-input modal should advance to next question");
-        assert_eq!(modal.current_question_index, 1);
-        assert_eq!(modal.answer_drafts[0].selected_option_index, Some(1));
+        let prompt = shell_state
+            .terminal_session_states
+            .get(&WorkerSessionId::new("sess-1"))
+            .and_then(|view| view.active_needs_input.as_ref())
+            .expect("needs-input prompt should advance to next question");
+        assert_eq!(prompt.current_question_index, 1);
+        assert_eq!(prompt.answer_drafts[0].selected_option_index, Some(1));
+    }
+
+    #[test]
+    fn offscreen_needs_input_does_not_auto_switch_terminal_view() {
+        let backend = Arc::new(ManualTerminalBackend::default());
+        let mut projection = sample_projection(true);
+        let second_work_item_id = WorkItemId::new("wi-2");
+        let second_session_id = WorkerSessionId::new("sess-2");
+        projection.work_items.insert(
+            second_work_item_id.clone(),
+            WorkItemProjection {
+                id: second_work_item_id,
+                ticket_id: None,
+                project_id: None,
+                workflow_state: Some(WorkflowState::Planning),
+                session_id: Some(second_session_id.clone()),
+                worktree_id: None,
+                inbox_items: Vec::new(),
+                artifacts: Vec::new(),
+            },
+        );
+        projection.sessions.insert(
+            second_session_id.clone(),
+            SessionProjection {
+                id: second_session_id.clone(),
+                work_item_id: Some(WorkItemId::new("wi-2")),
+                status: Some(WorkerSessionStatus::WaitingForUser),
+                latest_checkpoint: None,
+            },
+        );
+        let mut shell_state =
+            UiShellState::new_with_integrations("ready".to_owned(), projection, None, None, None, Some(backend));
+        shell_state.open_terminal_and_enter_mode();
+        assert!(matches!(
+            shell_state.view_stack.active_center(),
+            Some(CenterView::TerminalView { session_id }) if session_id.as_str() == "sess-1"
+        ));
+
+        let sender = shell_state
+            .terminal_session_sender
+            .clone()
+            .expect("terminal sender");
+        sender
+            .try_send(TerminalSessionEvent::NeedsInput {
+                session_id: WorkerSessionId::new("sess-2"),
+                needs_input: BackendNeedsInputEvent {
+                    prompt_id: "prompt-offscreen".to_owned(),
+                    question: "Choose branch strategy".to_owned(),
+                    options: vec!["Rebase".to_owned(), "Merge".to_owned()],
+                    default_option: Some("Rebase".to_owned()),
+                    questions: Vec::new(),
+                },
+            })
+            .expect("queue needs-input event");
+        shell_state.poll_terminal_session_events();
+
+        assert!(matches!(
+            shell_state.view_stack.active_center(),
+            Some(CenterView::TerminalView { session_id }) if session_id.as_str() == "sess-1"
+        ));
+        let offscreen_prompt = shell_state
+            .terminal_session_states
+            .get(&WorkerSessionId::new("sess-2"))
+            .and_then(|view| view.active_needs_input.as_ref())
+            .expect("offscreen session should store prompt");
+        assert_eq!(offscreen_prompt.prompt_id.as_str(), "prompt-offscreen");
     }
 
     #[test]

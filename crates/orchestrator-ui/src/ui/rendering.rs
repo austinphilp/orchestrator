@@ -354,7 +354,7 @@ fn fold_accent_style(kind: TerminalFoldKind, header: bool) -> Style {
 enum TerminalActivityIndicator {
     None,
     Working,
-    AwaitingPlanningInput,
+    AwaitingInput,
 }
 
 fn terminal_activity_indicator(
@@ -365,8 +365,8 @@ fn terminal_activity_indicator(
     if terminal_session_is_running(domain, terminal_session_states, session_id) {
         return TerminalActivityIndicator::Working;
     }
-    if terminal_session_is_awaiting_planning_input(domain, terminal_session_states, session_id) {
-        return TerminalActivityIndicator::AwaitingPlanningInput;
+    if terminal_session_is_awaiting_input(domain, terminal_session_states, session_id) {
+        return TerminalActivityIndicator::AwaitingInput;
     }
     TerminalActivityIndicator::None
 }
@@ -388,7 +388,7 @@ fn terminal_session_is_running(
     session_turn_is_active(terminal_session_states, session_id)
 }
 
-fn terminal_session_is_awaiting_planning_input(
+fn terminal_session_is_awaiting_input(
     domain: &ProjectionState,
     terminal_session_states: &HashMap<WorkerSessionId, TerminalViewState>,
     session_id: &WorkerSessionId,
@@ -403,24 +403,11 @@ fn terminal_session_is_awaiting_planning_input(
             .and_then(|session| session.status.as_ref()),
         Some(WorkerSessionStatus::WaitingForUser)
     );
-    waiting_for_user && session_is_in_planning_stage(domain, terminal_session_states, session_id)
-}
-
-fn session_is_in_planning_stage(
-    domain: &ProjectionState,
-    _terminal_session_states: &HashMap<WorkerSessionId, TerminalViewState>,
-    session_id: &WorkerSessionId,
-) -> bool {
-    let Some(workflow_state) = domain
-        .sessions
-        .get(session_id)
-        .and_then(|session| session.work_item_id.as_ref())
-        .and_then(|work_item_id| domain.work_items.get(work_item_id))
-        .and_then(|work_item| work_item.workflow_state.as_ref())
-    else {
-        return true;
-    };
-    matches!(workflow_state, WorkflowState::New | WorkflowState::Planning)
+    waiting_for_user
+        && terminal_session_states
+            .get(session_id)
+            .and_then(|state| state.active_needs_input.as_ref())
+            .is_some()
 }
 
 fn session_turn_is_active(
@@ -454,7 +441,7 @@ fn append_terminal_loading_indicator(
                     .add_modifier(Modifier::DIM),
             )));
         }
-        TerminalActivityIndicator::AwaitingPlanningInput => {
+        TerminalActivityIndicator::AwaitingInput => {
             text.lines.push(Line::from(Span::styled(
                 "󰥔 awaiting input",
                 Style::default().fg(Color::Yellow),
@@ -832,43 +819,70 @@ fn render_ticket_picker_overlay(
     }
 }
 
-fn render_needs_input_modal(
-    frame: &mut ratatui::Frame<'_>,
-    anchor_area: Rect,
-    modal: &NeedsInputModalState,
-) {
-    let Some(popup) = needs_input_modal_popup(anchor_area) else {
-        return;
+fn terminal_input_pane_height(center_height: u16, prompt: Option<&NeedsInputComposerState>) -> u16 {
+    const DEFAULT_INPUT_HEIGHT: u16 = 6;
+    let Some(prompt) = prompt else {
+        return DEFAULT_INPUT_HEIGHT;
     };
-    let Some(question) = modal.current_question() else {
+    let Some(question) = prompt.current_question() else {
+        return DEFAULT_INPUT_HEIGHT;
+    };
+    let options_len = question
+        .options
+        .as_ref()
+        .map(|options| options.len())
+        .unwrap_or(0);
+    let choice_rows = options_len.clamp(1, 4);
+    let choice_height = u16::try_from(choice_rows).unwrap_or(4).saturating_add(2);
+    let mut target_height = 3u16
+        .saturating_add(choice_height)
+        .saturating_add(3)
+        .saturating_add(2);
+    if prompt.error.is_some() {
+        target_height = target_height.saturating_add(1);
+    }
+    let max_height = center_height.saturating_sub(4).max(3);
+    target_height.clamp(3, max_height)
+}
+
+fn render_terminal_needs_input_panel(
+    frame: &mut ratatui::Frame<'_>,
+    input_area: Rect,
+    session_id: &WorkerSessionId,
+    prompt: &NeedsInputComposerState,
+    focused: bool,
+) {
+    if input_area.height < 3 {
+        return;
+    }
+    let Some(question) = prompt.current_question() else {
         return;
     };
 
-    frame.render_widget(Clear, popup);
     let title = format!(
         "input required | session {} | {} / {}",
-        modal.session_id.as_str(),
-        modal.current_question_index + 1,
-        modal.questions.len()
+        session_id.as_str(),
+        prompt.current_question_index + 1,
+        prompt.questions.len()
     );
     let block = Block::default().title(title).borders(Borders::ALL);
-    let inner = block.inner(popup);
-    frame.render_widget(block, popup);
+    let inner = block.inner(input_area);
+    frame.render_widget(block, input_area);
 
     let options_len = question
         .options
         .as_ref()
         .map(|options| options.len())
         .unwrap_or(0);
-    let choice_rows = options_len.clamp(1, 6);
-    let choice_height = u16::try_from(choice_rows).unwrap_or(6).saturating_add(2);
+    let choice_rows = options_len.clamp(1, 4);
+    let choice_height = u16::try_from(choice_rows).unwrap_or(4).saturating_add(2);
 
     let mut constraints = vec![
         Constraint::Length(3),
         Constraint::Length(choice_height),
         Constraint::Length(3),
     ];
-    if modal.error.is_some() {
+    if prompt.error.is_some() {
         constraints.push(Constraint::Length(1));
     }
     constraints.push(Constraint::Min(2));
@@ -888,8 +902,8 @@ fn render_needs_input_modal(
     );
 
     if let Some(options) = question.options.as_ref().filter(|options| !options.is_empty()) {
-        let selected_index = modal.select_state.selected_index;
-        let highlighted_index = modal
+        let selected_index = prompt.select_state.selected_index;
+        let highlighted_index = prompt
             .select_state
             .highlighted_index
             .min(options.len().saturating_sub(1));
@@ -942,21 +956,21 @@ fn render_needs_input_modal(
         );
     }
 
-    let mut note_input_state = modal.note_input_state.clone();
-    note_input_state.focused = modal.note_insert_mode;
+    let mut note_input_state = prompt.note_input_state.clone();
+    note_input_state.focused = prompt.note_insert_mode && focused;
     let note_input = Input::new(&note_input_state)
         .label("note")
         .placeholder("Optional with selection; required when no options")
         .with_border(true);
     let _ = note_input.render_stateful(frame, note_area);
-    if modal.note_insert_mode {
-        if let Some((x, y)) = needs_input_note_cursor(note_area, modal) {
+    if prompt.note_insert_mode && focused {
+        if let Some((x, y)) = needs_input_note_cursor(note_area, prompt) {
             frame.set_cursor_position((x, y));
         }
     }
 
     let mut index = 3usize;
-    if let Some(error) = modal.error.as_ref() {
+    if let Some(error) = prompt.error.as_ref() {
         frame.render_widget(
             Paragraph::new(Span::styled(
                 compact_focus_card_text(error.as_str()),
@@ -967,19 +981,19 @@ fn render_needs_input_modal(
         index += 1;
     }
     let help = format!(
-        "{}Enter: {} | Tab/S-Tab: question | i: note insert | Esc: close",
+        "{}Enter: {} | Tab/S-Tab: question | i: note insert | Esc: normal mode",
         if options_len > 0 {
             "j/k: option | "
         } else {
             ""
         },
         if options_len > 0 {
-            if modal.has_next_question() {
+            if prompt.has_next_question() {
                 "select option + next question"
             } else {
                 "select option + submit"
             }
-        } else if modal.has_next_question() {
+        } else if prompt.has_next_question() {
             "next question"
         } else {
             "submit"
@@ -991,31 +1005,18 @@ fn render_needs_input_modal(
     );
 }
 
-fn needs_input_modal_popup(anchor_area: Rect) -> Option<Rect> {
-    if anchor_area.width < 48 || anchor_area.height < 14 {
-        return None;
-    }
-    let width = ((anchor_area.width as f32) * 0.72).round() as u16;
-    let height = ((anchor_area.height as f32) * 0.60).round() as u16;
-    let width = width.clamp(48, anchor_area.width.saturating_sub(2));
-    let height = height.clamp(14, anchor_area.height.saturating_sub(2));
-    Some(Rect {
-        x: anchor_area.x + (anchor_area.width.saturating_sub(width)) / 2,
-        y: anchor_area.y + (anchor_area.height.saturating_sub(height)) / 2,
-        width,
-        height,
-    })
-}
-
-fn needs_input_note_cursor(note_area: Rect, modal: &NeedsInputModalState) -> Option<(u16, u16)> {
-    if !modal.note_insert_mode {
+fn needs_input_note_cursor(
+    note_area: Rect,
+    prompt: &NeedsInputComposerState,
+) -> Option<(u16, u16)> {
+    if !prompt.note_insert_mode {
         return None;
     }
 
     let inner_x = note_area.x.saturating_add(1);
     let inner_y = note_area.y.saturating_add(1);
     let line_prefix = 1u16;
-    let note_len = modal.note_input_state.text.chars().count();
+    let note_len = prompt.note_input_state.text.chars().count();
     let inner_width = note_area.width.saturating_sub(2);
     let max_offset = usize::from(inner_width.saturating_sub(2));
     let x_offset = note_len.min(max_offset);

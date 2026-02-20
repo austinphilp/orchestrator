@@ -28,8 +28,6 @@ struct UiShellState {
     terminal_session_receiver: Option<mpsc::Receiver<TerminalSessionEvent>>,
     terminal_session_states: HashMap<WorkerSessionId, TerminalViewState>,
     terminal_session_streamed: HashSet<WorkerSessionId>,
-    pending_needs_input_prompts: HashMap<WorkerSessionId, VecDeque<NeedsInputPromptState>>,
-    needs_input_modal: Option<NeedsInputModalState>,
     terminal_compose_input: TextAreaState,
     archive_session_confirm_session: Option<WorkerSessionId>,
     archiving_session_id: Option<WorkerSessionId>,
@@ -117,8 +115,6 @@ impl UiShellState {
             terminal_session_receiver,
             terminal_session_states: HashMap::new(),
             terminal_session_streamed: HashSet::new(),
-            pending_needs_input_prompts: HashMap::new(),
-            needs_input_modal: None,
             terminal_compose_input: TextAreaState::empty().with_tab_config(TabConfig::Literal),
             archive_session_confirm_session: None,
             archiving_session_id: None,
@@ -1086,32 +1082,9 @@ impl UiShellState {
                     session_id,
                     needs_input,
                 } => {
-                    let should_open_for_active_terminal = self
-                        .active_terminal_session_id()
-                        .map(|active_session_id| active_session_id == &session_id)
-                        .unwrap_or(false)
-                        && self.is_terminal_view_active();
                     let prompt = self.needs_input_prompt_from_event(needs_input);
-                    if self
-                        .needs_input_modal
-                        .as_ref()
-                        .map(|modal| {
-                            modal.session_id == session_id && modal.prompt_id == prompt.prompt_id
-                        })
-                        .unwrap_or(false)
-                    {
-                        continue;
-                    }
-                    let queue = self
-                        .pending_needs_input_prompts
-                        .entry(session_id)
-                        .or_default();
-                    if !queue.iter().any(|entry| entry.prompt_id == prompt.prompt_id) {
-                        queue.push_back(prompt);
-                    }
-                    if should_open_for_active_terminal {
-                        self.open_pending_needs_input_modal_for_active_session();
-                    }
+                    let view = self.terminal_session_states.entry(session_id).or_default();
+                    view.enqueue_needs_input_prompt(prompt);
                 }
                 TerminalSessionEvent::StreamFailed { session_id, error } => {
                     self.terminal_session_streamed.remove(&session_id);
@@ -1979,6 +1952,9 @@ fn apply_ticket_picker_event(&mut self, event: TicketPickerEvent) {
         if self.mode != UiMode::Terminal || !self.is_terminal_view_active() {
             return false;
         }
+        if self.terminal_session_has_active_needs_input() {
+            return false;
+        }
 
         match key.code {
             KeyCode::Enter
@@ -2585,7 +2561,6 @@ fn apply_ticket_picker_event(&mut self, event: TicketPickerEvent) {
             self.mode_key_buffer.clear();
             self.which_key_overlay = None;
             self.terminal_escape_pending = false;
-            self.open_pending_needs_input_modal_for_active_session();
         }
     }
 
@@ -2625,157 +2600,133 @@ fn apply_ticket_picker_event(&mut self, event: TicketPickerEvent) {
         }
     }
 
-    fn open_pending_needs_input_modal_for_active_session(&mut self) {
-        if self.needs_input_modal.is_some() {
-            return;
-        }
-        let Some(session_id) = self.active_terminal_session_id().cloned() else {
-            return;
-        };
-        let Some(queue) = self.pending_needs_input_prompts.get_mut(&session_id) else {
-            return;
-        };
-        let Some(prompt) = queue.pop_front() else {
-            return;
-        };
-        if queue.is_empty() {
-            self.pending_needs_input_prompts.remove(&session_id);
-        }
-        if prompt.questions.is_empty() {
-            self.status_warning = Some("input request ignored: prompt had no questions".to_owned());
-            return;
-        }
-        self.needs_input_modal = Some(NeedsInputModalState::new(
-            session_id,
-            prompt.prompt_id,
-            prompt.questions,
-        ));
-        self.mode = UiMode::Terminal;
-        self.terminal_escape_pending = false;
+    fn active_terminal_needs_input(&self) -> Option<&NeedsInputComposerState> {
+        let session_id = self.active_terminal_session_id()?;
+        self.terminal_session_states
+            .get(session_id)
+            .and_then(|view| view.active_needs_input.as_ref())
     }
 
-    fn close_needs_input_modal(&mut self) {
-        let Some(modal) = self.needs_input_modal.take() else {
-            return;
-        };
-        let queue = self
-            .pending_needs_input_prompts
-            .entry(modal.session_id)
-            .or_default();
-        queue.push_front(NeedsInputPromptState {
-            prompt_id: modal.prompt_id,
-            questions: modal.questions,
-        });
+    fn active_terminal_needs_input_mut(&mut self) -> Option<&mut NeedsInputComposerState> {
+        let session_id = self.active_terminal_session_id()?.clone();
+        self.terminal_session_states
+            .get_mut(&session_id)
+            .and_then(|view| view.active_needs_input.as_mut())
     }
 
-    fn complete_needs_input_modal(&mut self) {
-        self.needs_input_modal = None;
+    fn terminal_session_has_active_needs_input(&self) -> bool {
+        self.active_terminal_needs_input().is_some()
     }
 
-    fn needs_input_modal_is_note_insert_mode(&self) -> bool {
-        self.needs_input_modal
-            .as_ref()
-            .map(|modal| modal.note_insert_mode)
+    fn terminal_needs_input_is_note_insert_mode(&self) -> bool {
+        self.active_terminal_needs_input()
+            .map(|prompt| prompt.note_insert_mode)
             .unwrap_or(false)
     }
 
-    fn move_needs_input_question(&mut self, delta: isize) {
-        let Some(modal) = self.needs_input_modal.as_mut() else {
+    fn move_terminal_needs_input_question(&mut self, delta: isize) {
+        let Some(prompt) = self.active_terminal_needs_input_mut() else {
             return;
         };
-        let current = modal.current_question_index as isize;
-        let upper = modal.questions.len().saturating_sub(1) as isize;
+        let current = prompt.current_question_index as isize;
+        let upper = prompt.questions.len().saturating_sub(1) as isize;
         let next = (current + delta).clamp(0, upper) as usize;
-        modal.move_to_question(next);
+        prompt.move_to_question(next);
     }
 
-    fn toggle_needs_input_note_insert_mode(&mut self, enabled: bool) {
-        let Some(modal) = self.needs_input_modal.as_mut() else {
+    fn toggle_terminal_needs_input_note_insert_mode(&mut self, enabled: bool) {
+        let Some(prompt) = self.active_terminal_needs_input_mut() else {
             return;
         };
-        modal.note_insert_mode = enabled;
-        modal.note_input_state.focused = enabled;
-        modal.select_state.focused = !enabled && modal.current_question_requires_option_selection();
+        prompt.note_insert_mode = enabled;
+        prompt.note_input_state.focused = enabled;
+        prompt.select_state.focused = !enabled && prompt.current_question_requires_option_selection();
     }
 
-    fn apply_needs_input_note_key(&mut self, key: KeyEvent) -> bool {
-        let Some(modal) = self.needs_input_modal.as_mut() else {
+    fn apply_terminal_needs_input_note_key(&mut self, key: KeyEvent) -> bool {
+        let Some(prompt) = self.active_terminal_needs_input_mut() else {
             return false;
         };
-        if !modal.note_insert_mode {
+        if !prompt.note_insert_mode {
             return false;
         }
 
         match key.code {
             KeyCode::Esc => {
-                modal.note_insert_mode = false;
-                modal.note_input_state.focused = false;
-                modal.select_state.focused = modal.current_question_requires_option_selection();
+                prompt.note_insert_mode = false;
+                prompt.note_input_state.focused = false;
+                prompt.select_state.focused = prompt.current_question_requires_option_selection();
                 true
             }
             KeyCode::Enter if key.modifiers == KeyModifiers::SHIFT => {
-                modal.note_input_state.insert_char('\n');
+                prompt.note_input_state.insert_char('\n');
                 true
             }
             KeyCode::Enter if key.modifiers.is_empty() || key.modifiers == KeyModifiers::CONTROL => {
                 false
             }
             KeyCode::Backspace if key.modifiers.is_empty() => {
-                modal.note_input_state.delete_char_backward();
+                prompt.note_input_state.delete_char_backward();
                 true
             }
             KeyCode::Delete if key.modifiers.is_empty() => {
-                modal.note_input_state.delete_char_forward();
+                prompt.note_input_state.delete_char_forward();
                 true
             }
             KeyCode::Left if key.modifiers.is_empty() => {
-                modal.note_input_state.move_left();
+                prompt.note_input_state.move_left();
                 true
             }
             KeyCode::Right if key.modifiers.is_empty() => {
-                modal.note_input_state.move_right();
+                prompt.note_input_state.move_right();
                 true
             }
             KeyCode::Home if key.modifiers.is_empty() => {
-                modal.note_input_state.move_home();
+                prompt.note_input_state.move_home();
                 true
             }
             KeyCode::End if key.modifiers.is_empty() => {
-                modal.note_input_state.move_end();
+                prompt.note_input_state.move_end();
                 true
             }
             KeyCode::Char(ch)
                 if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT =>
             {
-                modal.note_input_state.insert_char(ch);
+                prompt.note_input_state.insert_char(ch);
                 true
             }
             _ => true,
         }
     }
 
-    fn submit_needs_input_modal(&mut self) {
+    fn submit_terminal_needs_input_response(&mut self) {
         let Some(backend) = self.worker_backend.clone() else {
-            if let Some(modal) = self.needs_input_modal.as_mut() {
-                modal.error = Some("input response unavailable: no worker backend configured".to_owned());
+            if let Some(prompt) = self.active_terminal_needs_input_mut() {
+                prompt.error = Some("input response unavailable: no worker backend configured".to_owned());
             }
             return;
         };
-        let Some(active_modal) = self.needs_input_modal.as_mut() else {
+        let Some(session_id) = self.active_terminal_session_id().cloned() else {
             return;
         };
-        let session_id = active_modal.session_id.clone();
-        let prompt_id = active_modal.prompt_id.clone();
-        let answers = match active_modal.build_runtime_answers() {
+        let Some(active_prompt) = self
+            .terminal_session_states
+            .get_mut(&session_id)
+            .and_then(|view| view.active_needs_input.as_mut())
+        else {
+            return;
+        };
+        let prompt_id = active_prompt.prompt_id.clone();
+        let answers = match active_prompt.build_runtime_answers() {
             Ok(answers) => answers,
             Err(error) => {
-                active_modal.error = Some(sanitize_terminal_display_text(error.to_string().as_str()));
+                active_prompt.error = Some(sanitize_terminal_display_text(error.to_string().as_str()));
                 return;
             }
         };
         let Some(handle) = self.terminal_session_handle(&session_id) else {
-            if let Some(modal) = self.needs_input_modal.as_mut() {
-                modal.error = Some(
+            if let Some(prompt) = self.active_terminal_needs_input_mut() {
+                prompt.error = Some(
                     "input response unavailable: cannot resolve backend session handle".to_owned(),
                 );
             }
@@ -2789,12 +2740,13 @@ fn apply_ticket_picker_event(&mut self, event: TicketPickerEvent) {
                         .respond_to_needs_input(&handle, prompt_id.as_str(), answers.as_slice())
                         .await;
                 });
-                self.complete_needs_input_modal();
-                self.open_pending_needs_input_modal_for_active_session();
+                if let Some(view) = self.terminal_session_states.get_mut(&session_id) {
+                    view.complete_active_needs_input_prompt();
+                }
             }
             Err(_) => {
-                if let Some(modal) = self.needs_input_modal.as_mut() {
-                    modal.error =
+                if let Some(prompt) = self.active_terminal_needs_input_mut() {
+                    prompt.error =
                         Some("input response unavailable: tokio runtime unavailable".to_owned());
                 }
             }

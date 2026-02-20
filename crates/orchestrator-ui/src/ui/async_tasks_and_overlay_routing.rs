@@ -708,49 +708,44 @@ fn render_ticket_picker_overlay_text(overlay: &TicketPickerOverlayState) -> Stri
 }
 
 fn route_needs_input_modal_key(shell_state: &mut UiShellState, key: KeyEvent) -> RoutedInput {
-    if shell_state.apply_needs_input_note_key(key) {
+    if shell_state.apply_terminal_needs_input_note_key(key) {
         return RoutedInput::Ignore;
     }
 
-    if is_escape_to_normal(key) {
-        shell_state.close_needs_input_modal();
+    if is_escape_to_normal(key) || !shell_state.is_terminal_view_active() {
         return RoutedInput::Ignore;
     }
     if !key.modifiers.is_empty() {
         if key.modifiers == KeyModifiers::SHIFT && matches!(key.code, KeyCode::BackTab) {
-            shell_state.move_needs_input_question(-1);
+            shell_state.move_terminal_needs_input_question(-1);
             return RoutedInput::Ignore;
         }
         return RoutedInput::Ignore;
     }
 
     match key.code {
-        KeyCode::Char('q') => {
-            shell_state.close_needs_input_modal();
-        }
         KeyCode::Char('i') => {
-            shell_state.toggle_needs_input_note_insert_mode(true);
+            shell_state.toggle_terminal_needs_input_note_insert_mode(true);
         }
         KeyCode::Tab | KeyCode::Right | KeyCode::Char('l') => {
-            shell_state.move_needs_input_question(1);
+            shell_state.move_terminal_needs_input_question(1);
         }
         KeyCode::BackTab | KeyCode::Left | KeyCode::Char('h') => {
-            shell_state.move_needs_input_question(-1);
+            shell_state.move_terminal_needs_input_question(-1);
         }
         KeyCode::Enter => {
             let should_advance = shell_state
-                .needs_input_modal
-                .as_mut()
-                .map(|modal| {
-                    if modal.current_question_requires_option_selection() {
-                        if modal.select_state.total_options == 0 {
+                .active_terminal_needs_input_mut()
+                .map(|prompt| {
+                    if prompt.current_question_requires_option_selection() {
+                        if prompt.select_state.total_options == 0 {
                             return false;
                         }
-                        let selected = modal
+                        let selected = prompt
                             .select_state
                             .highlighted_index
-                            .min(modal.select_state.total_options.saturating_sub(1));
-                        modal.select_state.selected_index = Some(selected);
+                            .min(prompt.select_state.total_options.saturating_sub(1));
+                        prompt.select_state.selected_index = Some(selected);
                     }
                     true
                 })
@@ -760,14 +755,13 @@ fn route_needs_input_modal_key(shell_state: &mut UiShellState, key: KeyEvent) ->
             }
 
             let should_submit = shell_state
-                .needs_input_modal
-                .as_ref()
-                .map(|modal| !modal.has_next_question())
+                .active_terminal_needs_input()
+                .map(|prompt| !prompt.has_next_question())
                 .unwrap_or(false);
             if should_submit {
-                shell_state.submit_needs_input_modal();
+                shell_state.submit_terminal_needs_input_response();
             } else {
-                shell_state.move_needs_input_question(1);
+                shell_state.move_terminal_needs_input_question(1);
             }
         }
         KeyCode::Up
@@ -779,13 +773,13 @@ fn route_needs_input_modal_key(shell_state: &mut UiShellState, key: KeyEvent) ->
         | KeyCode::Char(' ')
         | KeyCode::Char('j')
         | KeyCode::Char('k') => {
-            if let Some(modal) = shell_state.needs_input_modal.as_mut() {
+            if let Some(prompt) = shell_state.active_terminal_needs_input_mut() {
                 let select_code = match key.code {
                     KeyCode::Char('j') => KeyCode::Down,
                     KeyCode::Char('k') => KeyCode::Up,
                     other => other,
                 };
-                let select_state = &mut modal.select_state;
+                let select_state = &mut prompt.select_state;
                 if select_state.enabled && select_state.focused && select_state.total_options > 0 {
                     match select_code {
                         KeyCode::Char(' ') => {
