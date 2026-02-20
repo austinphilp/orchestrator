@@ -884,6 +884,7 @@ impl TerminalViewState {
                 prompt.prompt_id,
                 prompt.questions,
                 !prompt.requires_manual_activation,
+                prompt.is_structured_plan_request,
             ));
             return;
         }
@@ -945,6 +946,7 @@ struct NeedsInputPromptState {
     prompt_id: String,
     questions: Vec<BackendNeedsInputQuestion>,
     requires_manual_activation: bool,
+    is_structured_plan_request: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -958,6 +960,7 @@ struct NeedsInputComposerState {
     interaction_active: bool,
     note_insert_mode: bool,
     error: Option<String>,
+    is_structured_plan_request: bool,
 }
 
 impl NeedsInputComposerState {
@@ -965,6 +968,7 @@ impl NeedsInputComposerState {
         prompt_id: String,
         questions: Vec<BackendNeedsInputQuestion>,
         interaction_active: bool,
+        is_structured_plan_request: bool,
     ) -> Self {
         let answer_drafts = vec![NeedsInputAnswerDraft::default(); questions.len()];
         let mut state = Self {
@@ -977,6 +981,7 @@ impl NeedsInputComposerState {
             interaction_active,
             note_insert_mode: false,
             error: None,
+            is_structured_plan_request,
         };
         state.refresh_controls_from_current_question();
         state

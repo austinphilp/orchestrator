@@ -3285,6 +3285,7 @@ fn apply_ticket_picker_event(&mut self, event: TicketPickerEvent) {
         session_id: &WorkerSessionId,
         event: BackendNeedsInputEvent,
     ) -> NeedsInputPromptState {
+        let is_structured_plan_request = !event.questions.is_empty();
         let questions = if event.questions.is_empty() {
             vec![BackendNeedsInputQuestion {
                 id: event.prompt_id.clone(),
@@ -3311,6 +3312,7 @@ fn apply_ticket_picker_event(&mut self, event: TicketPickerEvent) {
             questions,
             requires_manual_activation: self
                 .session_requires_manual_needs_input_activation(session_id),
+            is_structured_plan_request,
         }
     }
 
