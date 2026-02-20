@@ -217,7 +217,6 @@ async fn run_resolve_inbox_item_task(
         }
     }
 }
-
 #[derive(Debug, Default)]
 struct MergeQueueResponse {
     completed: bool,

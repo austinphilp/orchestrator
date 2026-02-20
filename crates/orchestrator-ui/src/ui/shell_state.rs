@@ -787,7 +787,6 @@ impl UiShellState {
             work_item_id,
         });
     }
-
     fn publish_inbox_for_session(
         &mut self,
         session_id: &WorkerSessionId,

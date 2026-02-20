@@ -45,7 +45,6 @@ where
             worker_backend,
         }
     }
-
 }
 
 #[async_trait]
