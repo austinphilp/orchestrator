@@ -144,6 +144,55 @@ impl<S: Supervisor, G: GithubClient> App<S, G> {
         Ok(rebuild_projection(&events))
     }
 
+    pub fn resolve_inbox_item(
+        &self,
+        request: &InboxResolveRequest,
+    ) -> Result<ProjectionState, CoreError> {
+        let mut store = open_event_store(&self.config.event_store_path)?;
+        let projection = rebuild_projection(&store.read_ordered()?);
+        let Some(inbox_item) = projection.inbox_items.get(&request.inbox_item_id) else {
+            return Err(CoreError::InvalidCommandArgs {
+                command_id: "ui.resolve_inbox_item".to_owned(),
+                reason: format!(
+                    "inbox item '{}' was not found",
+                    request.inbox_item_id.as_str()
+                ),
+            });
+        };
+        if inbox_item.work_item_id != request.work_item_id {
+            return Err(CoreError::InvalidCommandArgs {
+                command_id: "ui.resolve_inbox_item".to_owned(),
+                reason: format!(
+                    "inbox item '{}' does not belong to work item '{}'",
+                    request.inbox_item_id.as_str(),
+                    request.work_item_id.as_str()
+                ),
+            });
+        }
+        if inbox_item.resolved {
+            return Ok(projection);
+        }
+
+        let session_id = projection
+            .work_items
+            .get(&request.work_item_id)
+            .and_then(|work_item| work_item.session_id.clone());
+        store.append(NewEventEnvelope {
+            event_id: format!("evt-inbox-resolved-{}", now_nanos()),
+            occurred_at: now_timestamp(),
+            work_item_id: Some(request.work_item_id.clone()),
+            session_id,
+            payload: OrchestrationEventPayload::InboxItemResolved(InboxItemResolvedPayload {
+                inbox_item_id: request.inbox_item_id.clone(),
+                work_item_id: request.work_item_id.clone(),
+            }),
+            schema_version: DOMAIN_EVENT_SCHEMA_VERSION,
+        })?;
+
+        let events = store.read_ordered()?;
+        Ok(rebuild_projection(&events))
+    }
+
     pub async fn start_linear_polling(
         &self,
         linear_ticketing_provider: Option<&LinearTicketingProvider>,

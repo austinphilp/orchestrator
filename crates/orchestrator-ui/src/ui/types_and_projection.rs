@@ -222,6 +222,14 @@ pub trait TicketPickerProvider: Send + Sync {
             "inbox publishing is not supported by this ticket provider".to_owned(),
         ))
     }
+    async fn resolve_inbox_item(
+        &self,
+        _request: InboxResolveRequest,
+    ) -> Result<ProjectionState, CoreError> {
+        Err(CoreError::DependencyUnavailable(
+            "inbox resolution is not supported by this ticket provider".to_owned(),
+        ))
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -231,6 +239,12 @@ pub struct InboxPublishRequest {
     pub kind: InboxItemKind,
     pub title: String,
     pub coalesce_key: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InboxResolveRequest {
+    pub inbox_item_id: InboxItemId,
+    pub work_item_id: WorkItemId,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -573,13 +587,15 @@ fn project_center_pane(
                     }),
             );
             lines.push("j/k or arrows: move selection".to_owned());
-            lines.push("Tab/Shift+Tab: cycle sidebar focus".to_owned());
+            lines.push("Tab: cycle inbox/sessions focus in left pane".to_owned());
+            lines.push("Shift+Tab: toggle left/right pane focus".to_owned());
             lines.push("[ / ]: cycle batch lanes".to_owned());
             lines.push("g/G: jump first/last item".to_owned());
             lines.push("Enter: open focus card".to_owned());
             lines.push("c: toggle global supervisor chat".to_owned());
-            lines.push("i: open terminal for selected item".to_owned());
-            lines.push("o: open session output for selected item".to_owned());
+            lines.push("i: enter insert mode (or notes/compose on right pane)".to_owned());
+            lines.push("I: open terminal for selected item".to_owned());
+            lines.push("o: open session output and acknowledge selected inbox item".to_owned());
             lines.push("v d/t/p/c: open diff/test/PR/chat inspector".to_owned());
             lines.push("Backspace: minimize top view".to_owned());
             CenterPaneState {

@@ -710,6 +710,12 @@ enum TicketPickerEvent {
     InboxItemPublishFailed {
         message: String,
     },
+    InboxItemResolved {
+        projection: ProjectionState,
+    },
+    InboxItemResolveFailed {
+        message: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

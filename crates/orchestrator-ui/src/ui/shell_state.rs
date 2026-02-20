@@ -4,6 +4,12 @@ enum SidebarFocus {
     Inbox,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PaneFocus {
+    Left,
+    Right,
+}
+
 struct UiShellState {
     base_status: String,
     status_warning: Option<String>,
@@ -31,6 +37,7 @@ struct UiShellState {
     worker_backend: Option<Arc<dyn WorkerBackend>>,
     selected_session_index: Option<usize>,
     sidebar_focus: SidebarFocus,
+    pane_focus: PaneFocus,
     terminal_session_sender: Option<mpsc::Sender<TerminalSessionEvent>>,
     terminal_session_receiver: Option<mpsc::Receiver<TerminalSessionEvent>>,
     terminal_session_states: HashMap<WorkerSessionId, TerminalViewState>,
@@ -119,6 +126,7 @@ impl UiShellState {
             worker_backend,
             selected_session_index: None,
             sidebar_focus: SidebarFocus::Inbox,
+            pane_focus: PaneFocus::Left,
             terminal_session_sender,
             terminal_session_receiver,
             terminal_session_states: HashMap::new(),
@@ -170,6 +178,9 @@ impl UiShellState {
     }
 
     fn move_selection(&mut self, delta: isize) {
+        if !self.is_left_pane_focused() {
+            return;
+        }
         if matches!(self.sidebar_focus, SidebarFocus::Sessions) {
             let _ = self.move_session_selection(delta);
             return;
@@ -188,6 +199,9 @@ impl UiShellState {
     }
 
     fn jump_to_first_item(&mut self) {
+        if !self.is_left_pane_focused() {
+            return;
+        }
         if matches!(self.sidebar_focus, SidebarFocus::Sessions) {
             let _ = self.move_to_first_session();
             return;
@@ -201,6 +215,9 @@ impl UiShellState {
     }
 
     fn jump_to_last_item(&mut self) {
+        if !self.is_left_pane_focused() {
+            return;
+        }
         if matches!(self.sidebar_focus, SidebarFocus::Sessions) {
             let _ = self.move_to_last_session();
             return;
@@ -214,6 +231,9 @@ impl UiShellState {
     }
 
     fn cycle_sidebar_focus(&mut self, delta: isize) {
+        if !self.is_left_pane_focused() {
+            return;
+        }
         if delta.rem_euclid(2) == 0 {
             return;
         }
@@ -221,6 +241,14 @@ impl UiShellState {
             SidebarFocus::Sessions => SidebarFocus::Inbox,
             SidebarFocus::Inbox => SidebarFocus::Sessions,
         };
+    }
+
+    fn cycle_pane_focus(&mut self) {
+        self.pane_focus = match self.pane_focus {
+            PaneFocus::Left => PaneFocus::Right,
+            PaneFocus::Right => PaneFocus::Left,
+        };
+        self.enter_normal_mode();
     }
 
     fn jump_to_batch(&mut self, target: InboxBatchKind) {
@@ -351,10 +379,12 @@ impl UiShellState {
                 Some("session output unavailable: select an inbox item first".to_owned());
             return;
         };
-        let Some(session_id) = ui_state
-            .inbox_rows
-            .get(selected_index)
-            .and_then(|row| row.session_id.clone())
+        let Some(selected_row) = ui_state.inbox_rows.get(selected_index).cloned() else {
+            self.status_warning =
+                Some("session output unavailable: select an inbox item first".to_owned());
+            return;
+        };
+        let Some(session_id) = selected_row.session_id.clone()
         else {
             self.status_warning =
                 Some("session output unavailable: selected inbox item has no active session".to_owned());
@@ -371,6 +401,7 @@ impl UiShellState {
             session_id: session_id.clone(),
         });
         self.ensure_terminal_stream(session_id);
+        self.acknowledge_inbox_item(selected_row.inbox_item_id, selected_row.work_item_id);
     }
 
     fn spawn_manual_terminal_session(&mut self) -> Result<Option<WorkerSessionId>, String> {
@@ -505,11 +536,19 @@ impl UiShellState {
     }
 
     fn is_sessions_sidebar_focused(&self) -> bool {
-        matches!(self.sidebar_focus, SidebarFocus::Sessions)
+        self.is_left_pane_focused() && matches!(self.sidebar_focus, SidebarFocus::Sessions)
     }
 
     fn is_inbox_sidebar_focused(&self) -> bool {
-        matches!(self.sidebar_focus, SidebarFocus::Inbox)
+        self.is_left_pane_focused() && matches!(self.sidebar_focus, SidebarFocus::Inbox)
+    }
+
+    fn is_left_pane_focused(&self) -> bool {
+        matches!(self.pane_focus, PaneFocus::Left)
+    }
+
+    fn is_right_pane_focused(&self) -> bool {
+        matches!(self.pane_focus, PaneFocus::Right)
     }
 
     fn move_session_selection(&mut self, delta: isize) -> bool {
@@ -669,6 +708,38 @@ impl UiShellState {
                 );
             }
         }
+    }
+
+    fn spawn_resolve_inbox_item(&mut self, request: InboxResolveRequest) {
+        let Some(provider) = self.ticket_picker_provider.clone() else {
+            return;
+        };
+        let Some(sender) = self.ticket_picker_sender.clone() else {
+            return;
+        };
+
+        match TokioHandle::try_current() {
+            Ok(handle) => {
+                handle.spawn(async move {
+                    run_resolve_inbox_item_task(provider, request, sender).await;
+                });
+            }
+            Err(_) => {
+                self.status_warning = Some(
+                    "inbox resolution unavailable: tokio runtime is not active".to_owned(),
+                );
+            }
+        }
+    }
+
+    fn acknowledge_inbox_item(&mut self, inbox_item_id: InboxItemId, work_item_id: WorkItemId) {
+        if let Some(item) = self.domain.inbox_items.get_mut(&inbox_item_id) {
+            item.resolved = true;
+        }
+        self.spawn_resolve_inbox_item(InboxResolveRequest {
+            inbox_item_id,
+            work_item_id,
+        });
     }
 
     fn publish_inbox_for_session(
@@ -2126,6 +2197,15 @@ fn apply_ticket_picker_event(&mut self, event: TicketPickerEvent) {
                     compact_focus_card_text(message.as_str())
                 ));
             }
+            TicketPickerEvent::InboxItemResolved { projection } => {
+                self.domain = projection;
+            }
+            TicketPickerEvent::InboxItemResolveFailed { message } => {
+                self.status_warning = Some(format!(
+                    "inbox resolve warning: {}",
+                    compact_focus_card_text(message.as_str())
+                ));
+            }
         }
     }
 
@@ -2819,8 +2899,22 @@ fn apply_ticket_picker_event(&mut self, event: TicketPickerEvent) {
         }
     }
 
+    fn enter_insert_mode_for_current_focus(&mut self) {
+        if self.is_right_pane_focused() && self.is_terminal_view_active() {
+            if self.terminal_session_has_any_needs_input() && !self.terminal_session_has_active_needs_input()
+            {
+                let _ = self.activate_terminal_needs_input(true);
+            } else {
+                self.enter_terminal_mode();
+            }
+            return;
+        }
+        self.enter_insert_mode();
+    }
+
     fn enter_terminal_mode(&mut self) {
         if self.is_terminal_view_active() {
+            self.pane_focus = PaneFocus::Right;
             self.snap_active_terminal_output_to_bottom();
             self.mode = UiMode::Terminal;
             self.mode_key_buffer.clear();

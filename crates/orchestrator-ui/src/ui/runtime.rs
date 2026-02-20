@@ -81,13 +81,12 @@ impl Ui {
                 } else {
                     "sessions"
                 };
+                let mut sessions_block = Block::default().title(sessions_title).borders(Borders::ALL);
+                if shell_state.is_sessions_sidebar_focused() {
+                    sessions_block = sessions_block.border_style(Style::default().fg(Color::LightBlue));
+                }
                 frame.render_widget(
-                    Paragraph::new(sessions_text)
-                        .block(
-                            Block::default()
-                                .title(sessions_title)
-                                .borders(Borders::ALL),
-                        ),
+                    Paragraph::new(sessions_text).block(sessions_block),
                     sessions_area,
                 );
 
@@ -97,13 +96,19 @@ impl Ui {
                 } else {
                     "inbox"
                 };
+                let mut inbox_block = Block::default().title(inbox_title).borders(Borders::ALL);
+                if shell_state.is_inbox_sidebar_focused() {
+                    inbox_block = inbox_block.border_style(Style::default().fg(Color::LightBlue));
+                }
                 frame.render_widget(
-                    Paragraph::new(inbox_text)
-                        .block(Block::default().title(inbox_title).borders(Borders::ALL)),
+                    Paragraph::new(inbox_text).block(inbox_block),
                     inbox_area,
                 );
 
                 let center_text = render_center_panel(&ui_state);
+                let center_focused_style = shell_state
+                    .is_right_pane_focused()
+                    .then_some(Style::default().fg(Color::LightBlue));
                 if let Some(session_id) = shell_state.active_terminal_session_id().cloned() {
                     let active_needs_input = shell_state.active_terminal_needs_input().cloned();
                     let terminal_input_height = terminal_input_pane_height(
@@ -119,9 +124,12 @@ impl Ui {
                     let [terminal_meta_area, terminal_output_area, terminal_input_area] =
                         center_layout.areas(center_area);
                     let meta_text = render_terminal_top_bar(&shell_state.domain, &session_id);
+                    let mut terminal_meta_block = Block::default().title("terminal").borders(Borders::ALL);
+                    if let Some(style) = center_focused_style {
+                        terminal_meta_block = terminal_meta_block.border_style(style);
+                    }
                     frame.render_widget(
-                        Paragraph::new(meta_text)
-                            .block(Block::default().title("terminal").borders(Borders::ALL)),
+                        Paragraph::new(meta_text).block(terminal_meta_block),
                         terminal_meta_area,
                     );
 
@@ -152,11 +160,15 @@ impl Ui {
                             (view.output_scroll_line as u16).min(max_scroll)
                         })
                         .unwrap_or(0);
+                    let mut terminal_output_block = Block::default().title("output").borders(Borders::ALL);
+                    if let Some(style) = center_focused_style {
+                        terminal_output_block = terminal_output_block.border_style(style);
+                    }
                     frame.render_widget(
                         Paragraph::new(output_text)
                             .wrap(Wrap { trim: false })
                             .scroll((scroll_y, 0))
-                            .block(Block::default().title("output").borders(Borders::ALL)),
+                            .block(terminal_output_block),
                         terminal_output_area,
                     );
 
@@ -189,11 +201,15 @@ impl Ui {
                         ])
                         .areas(center_area);
                         frame.render_widget(
-                            Paragraph::new(center_text).block(
-                                Block::default()
+                            Paragraph::new(center_text).block({
+                                let mut block = Block::default()
                                     .title(ui_state.center_pane.title.as_str())
-                                    .borders(Borders::ALL),
-                            ),
+                                    .borders(Borders::ALL);
+                                if let Some(style) = center_focused_style {
+                                    block = block.border_style(style);
+                                }
+                                block
+                            }),
                             chat_output_area,
                         );
                         shell_state.global_supervisor_chat_input.focused =
@@ -204,11 +220,15 @@ impl Ui {
                             .render_stateful(frame, chat_input_area);
                     } else {
                         frame.render_widget(
-                            Paragraph::new(center_text).block(
-                                Block::default()
+                            Paragraph::new(center_text).block({
+                                let mut block = Block::default()
                                     .title(ui_state.center_pane.title.as_str())
-                                    .borders(Borders::ALL),
-                            ),
+                                    .borders(Borders::ALL);
+                                if let Some(style) = center_focused_style {
+                                    block = block.border_style(style);
+                                }
+                                block
+                            }),
                             center_area,
                         );
                     }

@@ -2844,7 +2844,11 @@ mod tests {
         assert_eq!(shell_state.ui_state().selected_inbox_index, initial_inbox_index);
 
         handle_key_press(&mut shell_state, key(KeyCode::BackTab));
-        assert!(shell_state.is_inbox_sidebar_focused());
+        assert!(shell_state.is_right_pane_focused());
+
+        handle_key_press(&mut shell_state, key(KeyCode::BackTab));
+        assert!(shell_state.is_left_pane_focused());
+        assert!(shell_state.is_sessions_sidebar_focused());
     }
 
     #[test]
@@ -2858,6 +2862,14 @@ mod tests {
             Some(CenterView::TerminalView { session_id }) if session_id.as_str() == "sess-1"
         ));
         assert_eq!(shell_state.mode, UiMode::Normal);
+        assert!(
+            shell_state
+                .domain
+                .inbox_items
+                .get(&InboxItemId::new("inbox-1"))
+                .map(|item| item.resolved)
+                .unwrap_or(false)
+        );
     }
 
     #[test]
@@ -2869,6 +2881,14 @@ mod tests {
         assert!(!shell_state.is_terminal_view_active());
         let status = shell_state.ui_state().status;
         assert!(status.contains("selected inbox item has no active session"));
+        assert!(
+            !shell_state
+                .domain
+                .inbox_items
+                .get(&InboxItemId::new("inbox-1"))
+                .map(|item| item.resolved)
+                .unwrap_or(false)
+        );
     }
 
     #[test]
@@ -3633,7 +3653,7 @@ mod tests {
     #[test]
     fn insert_mode_is_not_entered_while_terminal_view_is_active() {
         let mut shell_state = UiShellState::new("ready".to_owned(), sample_projection(true));
-        handle_key_press(&mut shell_state, key(KeyCode::Char('i')));
+        handle_key_press(&mut shell_state, key(KeyCode::Char('I')));
         assert_eq!(shell_state.mode, UiMode::Terminal);
         assert!(shell_state.is_terminal_view_active());
 
@@ -3659,7 +3679,7 @@ mod tests {
     #[test]
     fn terminal_mode_supports_escape_chord_with_compose_buffer() {
         let mut shell_state = UiShellState::new("ready".to_owned(), sample_projection(true));
-        handle_key_press(&mut shell_state, key(KeyCode::Char('i')));
+        handle_key_press(&mut shell_state, key(KeyCode::Char('I')));
         assert_eq!(shell_state.mode, UiMode::Terminal);
         assert!(shell_state.is_terminal_view_active());
 
@@ -3699,7 +3719,7 @@ mod tests {
     #[test]
     fn terminal_escape_prefix_replays_when_chord_not_completed() {
         let mut shell_state = UiShellState::new("ready".to_owned(), sample_projection(true));
-        handle_key_press(&mut shell_state, key(KeyCode::Char('i')));
+        handle_key_press(&mut shell_state, key(KeyCode::Char('I')));
         assert_eq!(shell_state.mode, UiMode::Terminal);
 
         handle_key_press(&mut shell_state, ctrl_key(KeyCode::Char('\\')));
@@ -3734,7 +3754,7 @@ mod tests {
     #[test]
     fn terminal_compose_supports_multiline_input() {
         let mut shell_state = UiShellState::new("ready".to_owned(), sample_projection(true));
-        handle_key_press(&mut shell_state, key(KeyCode::Char('i')));
+        handle_key_press(&mut shell_state, key(KeyCode::Char('I')));
         assert_eq!(shell_state.mode, UiMode::Terminal);
 
         handle_key_press(&mut shell_state, key(KeyCode::Char('h')));
@@ -3819,7 +3839,7 @@ mod tests {
     #[test]
     fn entering_terminal_mode_snaps_stream_view_to_bottom() {
         let mut shell_state = UiShellState::new("ready".to_owned(), sample_projection(true));
-        handle_key_press(&mut shell_state, key(KeyCode::Char('i')));
+        handle_key_press(&mut shell_state, key(KeyCode::Char('I')));
         assert_eq!(shell_state.mode, UiMode::Terminal);
         let session_id = shell_state
             .active_terminal_session_id()
@@ -3849,7 +3869,7 @@ mod tests {
         handle_key_press(&mut shell_state, key(KeyCode::Esc));
         assert_eq!(shell_state.mode, UiMode::Normal);
 
-        handle_key_press(&mut shell_state, key(KeyCode::Char('i')));
+        handle_key_press(&mut shell_state, key(KeyCode::Char('I')));
         assert_eq!(shell_state.mode, UiMode::Terminal);
 
         let view = shell_state
@@ -3865,9 +3885,9 @@ mod tests {
     }
 
     #[test]
-    fn terminal_stream_normal_mode_scrolls_with_shift_jk_and_g() {
+    fn terminal_stream_normal_mode_scrolls_with_jk_and_g() {
         let mut shell_state = UiShellState::new("ready".to_owned(), sample_projection(true));
-        handle_key_press(&mut shell_state, key(KeyCode::Char('i')));
+        handle_key_press(&mut shell_state, key(KeyCode::Char('I')));
         assert_eq!(shell_state.mode, UiMode::Terminal);
         let session_id = shell_state
             .active_terminal_session_id()
@@ -3897,14 +3917,14 @@ mod tests {
             view.output_follow_tail = false;
         }
 
-        handle_key_press(&mut shell_state, shift_key(KeyCode::Char('J')));
+        handle_key_press(&mut shell_state, key(KeyCode::Char('j')));
         let view = shell_state
             .terminal_session_states
             .get_mut(&session_id)
             .expect("terminal view state");
         assert_eq!(view.output_scroll_line, 1);
 
-        handle_key_press(&mut shell_state, shift_key(KeyCode::Char('K')));
+        handle_key_press(&mut shell_state, key(KeyCode::Char('k')));
         let view = shell_state
             .terminal_session_states
             .get_mut(&session_id)
@@ -3927,7 +3947,7 @@ mod tests {
     #[test]
     fn terminal_stream_scroll_uses_rendered_line_count_without_initial_jump() {
         let mut shell_state = UiShellState::new("ready".to_owned(), sample_projection(true));
-        handle_key_press(&mut shell_state, key(KeyCode::Char('i')));
+        handle_key_press(&mut shell_state, key(KeyCode::Char('I')));
         assert_eq!(shell_state.mode, UiMode::Terminal);
         let session_id = shell_state
             .active_terminal_session_id()
@@ -3961,7 +3981,7 @@ mod tests {
             .expect("terminal view state");
         assert_eq!(view.output_scroll_line, 100);
 
-        handle_key_press(&mut shell_state, shift_key(KeyCode::Char('K')));
+        handle_key_press(&mut shell_state, key(KeyCode::Char('k')));
         let view = shell_state
             .terminal_session_states
             .get(&session_id)
@@ -4058,6 +4078,10 @@ mod tests {
         );
         assert_eq!(
             routed_command(route_key_press(&mut shell_state, key(KeyCode::Char('i')))),
+            Some(UiCommand::EnterInsertMode)
+        );
+        assert_eq!(
+            routed_command(route_key_press(&mut shell_state, key(KeyCode::Char('I')))),
             Some(UiCommand::OpenTerminalForSelected)
         );
         assert_eq!(

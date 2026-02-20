@@ -7,7 +7,7 @@ use orchestrator_core::{
     TicketQuery, TicketSummary, TicketingProvider, VcsProvider, WorkerBackend, WorkerSessionId,
 };
 use orchestrator_ui::{
-    CreateTicketFromPickerRequest, InboxPublishRequest, SessionWorktreeDiff,
+    CreateTicketFromPickerRequest, InboxPublishRequest, InboxResolveRequest, SessionWorktreeDiff,
     SessionWorkflowAdvanceOutcome, TicketPickerProvider,
 };
 use std::path::PathBuf;
@@ -271,6 +271,20 @@ where
             .map_err(|error| {
                 CoreError::Configuration(format!(
                     "ticket picker task failed while publishing inbox item: {error}"
+                ))
+            })?
+    }
+
+    async fn resolve_inbox_item(
+        &self,
+        request: InboxResolveRequest,
+    ) -> Result<ProjectionState, CoreError> {
+        let app = self.app.clone();
+        tokio::task::spawn_blocking(move || app.resolve_inbox_item(&request))
+            .await
+            .map_err(|error| {
+                CoreError::Configuration(format!(
+                    "ticket picker task failed while resolving inbox item: {error}"
                 ))
             })?
     }

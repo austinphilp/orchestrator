@@ -197,6 +197,27 @@ async fn run_publish_inbox_item_task(
     }
 }
 
+async fn run_resolve_inbox_item_task(
+    provider: Arc<dyn TicketPickerProvider>,
+    request: InboxResolveRequest,
+    sender: mpsc::Sender<TicketPickerEvent>,
+) {
+    match provider.resolve_inbox_item(request).await {
+        Ok(projection) => {
+            let _ = sender
+                .send(TicketPickerEvent::InboxItemResolved { projection })
+                .await;
+        }
+        Err(error) => {
+            let _ = sender
+                .send(TicketPickerEvent::InboxItemResolveFailed {
+                    message: sanitize_terminal_display_text(error.to_string().as_str()),
+                })
+                .await;
+        }
+    }
+}
+
 #[derive(Debug, Default)]
 struct MergeQueueResponse {
     completed: bool,
@@ -744,14 +765,15 @@ fn route_needs_input_modal_key(shell_state: &mut UiShellState, key: KeyEvent) ->
         return RoutedInput::Ignore;
     }
 
+    if matches!(key.code, KeyCode::BackTab) {
+        shell_state.cycle_pane_focus();
+        return RoutedInput::Ignore;
+    }
+
     if is_escape_to_normal(key) || !shell_state.is_terminal_view_active() {
         return RoutedInput::Ignore;
     }
     if !key.modifiers.is_empty() {
-        if key.modifiers == KeyModifiers::SHIFT && matches!(key.code, KeyCode::BackTab) {
-            shell_state.move_terminal_needs_input_question(-1);
-            return RoutedInput::Ignore;
-        }
         return RoutedInput::Ignore;
     }
 
@@ -762,7 +784,7 @@ fn route_needs_input_modal_key(shell_state: &mut UiShellState, key: KeyEvent) ->
         KeyCode::Tab | KeyCode::Right | KeyCode::Char('l') => {
             shell_state.move_terminal_needs_input_question(1);
         }
-        KeyCode::BackTab | KeyCode::Left | KeyCode::Char('h') => {
+        KeyCode::Left | KeyCode::Char('h') => {
             shell_state.move_terminal_needs_input_question(-1);
         }
         KeyCode::Enter => {

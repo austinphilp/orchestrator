@@ -27,13 +27,15 @@ Stack: Inbox
 [3] PR Reviews: 1 unresolved / 1 total
 [4] FYI Digest: 1 unresolved / 1 total
 j/k or arrows: move selection
-Tab/Shift+Tab: cycle sidebar focus
+Tab: cycle inbox/sessions focus in left pane
+Shift+Tab: toggle left/right pane focus
 [ / ]: cycle batch lanes
 g/G: jump first/last item
 Enter: open focus card
 c: toggle global supervisor chat
-i: open terminal for selected item
-o: open session output for selected item
+i: enter insert mode (or notes/compose on right pane)
+I: open terminal for selected item
+o: open session output and acknowledge selected inbox item
 v d/t/p/c: open diff/test/PR/chat inspector
 Backspace: minimize top view
 

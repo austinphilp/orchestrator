@@ -211,7 +211,8 @@ fn default_keymap_config() -> KeymapConfig {
                     binding(&["s"], UiCommand::OpenTicketPicker),
                     binding(&["c"], UiCommand::ToggleGlobalSupervisorChat),
                     binding(&["enter"], UiCommand::OpenFocusCard),
-                    binding(&["i"], UiCommand::OpenTerminalForSelected),
+                    binding(&["i"], UiCommand::EnterInsertMode),
+                    binding(&["I"], UiCommand::OpenTerminalForSelected),
                     binding(&["o"], UiCommand::OpenSessionOutputForSelectedInbox),
                     binding(&["D"], UiCommand::ToggleWorktreeDiffModal),
                     binding(&["n"], UiCommand::AdvanceTerminalWorkflowStage),
@@ -269,7 +270,7 @@ enum RoutedInput {
 fn mode_help(mode: UiMode) -> &'static str {
     match mode {
         UiMode::Normal => {
-            "j/k: move in focused panel | Tab/S-Tab: panel focus | [ ]: batch cycle | 1-4 or z{1-4}: batch jump | g/G: first/last in focused panel | s: start ticket | c: supervisor chat | Enter: focus | i: terminal | o: open associated session output | Shift+J/K: scroll terminal stream | G (terminal): bottom | D: worktree diff modal | n: advance session workflow | x: archive selected session | v{d/t/p/c}: inspectors | q: quit"
+            "j/k: move in focused panel (right pane scrolls session output) | Tab: cycle left-panel focus | Shift+Tab: toggle left/right pane focus | [ ]: batch cycle | 1-4 or z{1-4}: batch jump | g/G: first/last in focused panel (G in right pane: bottom) | s: start ticket | c: supervisor chat | Enter: focus | i: insert/notes mode | I: open terminal | o: open associated session output + acknowledge inbox item | D: worktree diff modal | n: advance session workflow | x: archive selected session | v{d/t/p/c}: inspectors | q: quit"
         }
         UiMode::Insert => "Insert input active | Esc/Ctrl-[: Normal",
         UiMode::Terminal => "Terminal compose active | Enter send | Shift+Enter newline | Esc or Ctrl-\\ Ctrl-n: Normal | then n: advance workflow",
@@ -489,7 +490,7 @@ fn handle_key_press(shell_state: &mut UiShellState, key: KeyEvent) -> bool {
 }
 
 fn route_key_press(shell_state: &mut UiShellState, key: KeyEvent) -> RoutedInput {
-    if shell_state.terminal_session_has_active_needs_input() {
+    if shell_state.terminal_session_has_active_needs_input() && shell_state.is_right_pane_focused() {
         return route_needs_input_modal_key(shell_state, key);
     }
     if shell_state.worktree_diff_modal.is_some() {
@@ -505,13 +506,21 @@ fn route_key_press(shell_state: &mut UiShellState, key: KeyEvent) -> RoutedInput
         return route_review_merge_confirm_key(shell_state, key);
     }
 
-    if shell_state.mode == UiMode::Normal && shell_state.is_terminal_view_active() {
+    if matches!(key.code, KeyCode::BackTab) {
+        shell_state.cycle_pane_focus();
+        return RoutedInput::Ignore;
+    }
+
+    if shell_state.mode == UiMode::Normal
+        && shell_state.is_right_pane_focused()
+        && shell_state.is_terminal_view_active()
+    {
         match key.code {
-            KeyCode::Char('J') => {
+            KeyCode::Char('j') | KeyCode::Char('J') => {
                 shell_state.scroll_terminal_output_view(1);
                 return RoutedInput::Ignore;
             }
-            KeyCode::Char('K') => {
+            KeyCode::Char('k') | KeyCode::Char('K') => {
                 shell_state.scroll_terminal_output_view(-1);
                 return RoutedInput::Ignore;
             }
@@ -541,12 +550,13 @@ fn route_key_press(shell_state: &mut UiShellState, key: KeyEvent) -> RoutedInput
     if shell_state.mode == UiMode::Terminal && shell_state.terminal_escape_pending {
         return route_terminal_mode_key(shell_state, key);
     }
-    if shell_state.mode == UiMode::Terminal
-        && shell_state.is_terminal_view_active()
+    if shell_state.is_terminal_view_active()
         && shell_state.terminal_session_has_any_needs_input()
         && !shell_state.terminal_session_has_active_needs_input()
         && key.modifiers.is_empty()
         && matches!(key.code, KeyCode::Char('i'))
+        && (shell_state.mode == UiMode::Terminal
+            || (shell_state.mode == UiMode::Normal && shell_state.is_right_pane_focused()))
     {
         let _ = shell_state.activate_terminal_needs_input(true);
         return RoutedInput::Ignore;
@@ -674,7 +684,7 @@ fn dispatch_command(shell_state: &mut UiShellState, command: UiCommand) -> bool 
             false
         }
         UiCommand::EnterInsertMode => {
-            shell_state.enter_insert_mode();
+            shell_state.enter_insert_mode_for_current_focus();
             false
         }
         UiCommand::ToggleGlobalSupervisorChat => {

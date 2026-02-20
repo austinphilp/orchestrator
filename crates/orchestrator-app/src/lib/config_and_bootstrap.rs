@@ -1,7 +1,7 @@
 use integration_linear::LinearTicketingProvider;
 use orchestrator_core::{
     apply_workflow_transition, rebuild_projection, CodeHostProvider, CoreError, EventStore,
-    GithubClient, InboxItemCreatedPayload, InboxItemId, LlmProvider,
+    GithubClient, InboxItemCreatedPayload, InboxItemId, InboxItemResolvedPayload, LlmProvider,
     NewEventEnvelope, OrchestrationEventPayload, ProjectionState, RuntimeSessionId,
     SelectedTicketFlowConfig, SelectedTicketFlowResult, SessionCompletedPayload,
     SessionCrashedPayload, SessionHandle, SqliteEventStore, Supervisor, TicketSummary,
@@ -10,7 +10,7 @@ use orchestrator_core::{
     WorkflowTransitionPayload, WorkflowTransitionReason, DOMAIN_EVENT_SCHEMA_VERSION,
 };
 use orchestrator_ui::{
-    InboxPublishRequest, SessionWorkflowAdvanceOutcome, SupervisorCommandContext,
+    InboxPublishRequest, InboxResolveRequest, SessionWorkflowAdvanceOutcome, SupervisorCommandContext,
     SupervisorCommandDispatcher,
 };
 use serde::{Deserialize, Serialize};
