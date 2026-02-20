@@ -16,12 +16,13 @@ mod tests {
     };
     use orchestrator_runtime::{
         BackendCapabilities, BackendEvent, BackendKind, BackendNeedsInputEvent,
-        BackendNeedsInputOption, BackendNeedsInputQuestion, RuntimeResult, RuntimeSessionId,
-        SessionHandle, SessionLifecycle, WorkerEventStream,
+        BackendNeedsInputOption, BackendNeedsInputQuestion, BackendOutputEvent,
+        BackendOutputStream, RuntimeResult, RuntimeSessionId, SessionHandle, SessionLifecycle,
+        WorkerEventStream,
     };
     use std::collections::VecDeque;
     use std::sync::{Arc, Mutex};
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     #[derive(Debug)]
     struct TestLlmStream {
@@ -2687,6 +2688,155 @@ mod tests {
             .and_then(|view| view.active_needs_input.as_ref())
             .expect("offscreen session should store prompt");
         assert_eq!(offscreen_prompt.prompt_id.as_str(), "prompt-offscreen");
+    }
+
+    #[test]
+    fn offscreen_output_is_deferred_until_session_becomes_active() {
+        let backend = Arc::new(ManualTerminalBackend::default());
+        let mut projection = sample_projection(true);
+        let second_session_id = WorkerSessionId::new("sess-2");
+        projection.work_items.insert(
+            WorkItemId::new("wi-2"),
+            WorkItemProjection {
+                id: WorkItemId::new("wi-2"),
+                ticket_id: None,
+                project_id: None,
+                workflow_state: Some(WorkflowState::Implementing),
+                session_id: Some(second_session_id.clone()),
+                worktree_id: None,
+                inbox_items: Vec::new(),
+                artifacts: Vec::new(),
+            },
+        );
+        projection.sessions.insert(
+            second_session_id.clone(),
+            SessionProjection {
+                id: second_session_id.clone(),
+                work_item_id: Some(WorkItemId::new("wi-2")),
+                status: Some(WorkerSessionStatus::Running),
+                latest_checkpoint: None,
+            },
+        );
+        let mut shell_state = UiShellState::new_with_integrations(
+            "ready".to_owned(),
+            projection,
+            None,
+            None,
+            None,
+            Some(backend),
+        );
+        shell_state.open_terminal_and_enter_mode();
+
+        let sender = shell_state
+            .terminal_session_sender
+            .clone()
+            .expect("terminal sender");
+        sender
+            .try_send(TerminalSessionEvent::Output {
+                session_id: WorkerSessionId::new("sess-2"),
+                output: BackendOutputEvent {
+                    stream: BackendOutputStream::Stdout,
+                    bytes: b"background line\n".to_vec(),
+                },
+            })
+            .expect("queue offscreen output event");
+        shell_state.poll_terminal_session_events();
+
+        let offscreen_before_focus = shell_state
+            .terminal_session_states
+            .get(&WorkerSessionId::new("sess-2"))
+            .expect("offscreen state should exist");
+        assert!(offscreen_before_focus.entries.is_empty());
+        assert_eq!(offscreen_before_focus.deferred_output, b"background line\n".to_vec());
+
+        shell_state.view_stack.replace_center(CenterView::TerminalView {
+            session_id: WorkerSessionId::new("sess-2"),
+        });
+        shell_state.tick_terminal_view_and_report();
+
+        let offscreen_after_focus = shell_state
+            .terminal_session_states
+            .get(&WorkerSessionId::new("sess-2"))
+            .expect("offscreen state should still exist");
+        assert!(offscreen_after_focus.deferred_output.is_empty());
+        let rendered = render_terminal_transcript_entries(offscreen_after_focus)
+            .into_iter()
+            .map(|line| line.text)
+            .collect::<Vec<_>>();
+        assert!(rendered
+            .iter()
+            .any(|line| line.contains("background line")));
+    }
+
+    #[test]
+    fn background_output_flushes_when_refresh_interval_elapses() {
+        let backend = Arc::new(ManualTerminalBackend::default());
+        let mut projection = sample_projection(true);
+        let second_session_id = WorkerSessionId::new("sess-2");
+        projection.work_items.insert(
+            WorkItemId::new("wi-2"),
+            WorkItemProjection {
+                id: WorkItemId::new("wi-2"),
+                ticket_id: None,
+                project_id: None,
+                workflow_state: Some(WorkflowState::Implementing),
+                session_id: Some(second_session_id.clone()),
+                worktree_id: None,
+                inbox_items: Vec::new(),
+                artifacts: Vec::new(),
+            },
+        );
+        projection.sessions.insert(
+            second_session_id.clone(),
+            SessionProjection {
+                id: second_session_id.clone(),
+                work_item_id: Some(WorkItemId::new("wi-2")),
+                status: Some(WorkerSessionStatus::Running),
+                latest_checkpoint: None,
+            },
+        );
+        let mut shell_state = UiShellState::new_with_integrations(
+            "ready".to_owned(),
+            projection,
+            None,
+            None,
+            None,
+            Some(backend),
+        );
+        shell_state.open_terminal_and_enter_mode();
+
+        let sender = shell_state
+            .terminal_session_sender
+            .clone()
+            .expect("terminal sender");
+        sender
+            .try_send(TerminalSessionEvent::Output {
+                session_id: WorkerSessionId::new("sess-2"),
+                output: BackendOutputEvent {
+                    stream: BackendOutputStream::Stdout,
+                    bytes: b"deferred payload\n".to_vec(),
+                },
+            })
+            .expect("queue offscreen output event");
+        shell_state.poll_terminal_session_events();
+
+        let offscreen_state = shell_state
+            .terminal_session_states
+            .get_mut(&WorkerSessionId::new("sess-2"))
+            .expect("offscreen state should exist");
+        offscreen_state.last_background_flush_at = Some(Instant::now() - Duration::from_secs(16));
+
+        assert!(shell_state.flush_background_terminal_output_and_report());
+        let flushed = shell_state
+            .terminal_session_states
+            .get(&WorkerSessionId::new("sess-2"))
+            .expect("offscreen state should still exist");
+        assert!(flushed.deferred_output.is_empty());
+        let rendered = render_terminal_transcript_entries(flushed)
+            .into_iter()
+            .map(|line| line.text)
+            .collect::<Vec<_>>();
+        assert!(rendered.iter().any(|line| line.contains("deferred payload")));
     }
 
     #[test]

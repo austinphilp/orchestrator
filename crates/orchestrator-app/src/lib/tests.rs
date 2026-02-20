@@ -528,6 +528,7 @@ mod tests {
                     config.event_store_path,
                     expected_event_store.to_string_lossy()
                 );
+                assert_eq!(config.ui.background_session_refresh_secs, 15);
                 assert!(Path::new(&config.workspace).is_absolute());
                 assert!(Path::new(&config.event_store_path).is_absolute());
                 assert_eq!(
@@ -542,6 +543,7 @@ mod tests {
                     parsed.event_store_path,
                     expected_event_store.to_string_lossy()
                 );
+                assert_eq!(parsed.ui.background_session_refresh_secs, 15);
             },
         );
 
@@ -574,6 +576,7 @@ mod tests {
                     config.event_store_path,
                     expected_event_store.to_string_lossy()
                 );
+                assert_eq!(config.ui.background_session_refresh_secs, 15);
                 assert!(expected.exists());
                 let contents = std::fs::read_to_string(expected.clone()).unwrap();
                 let parsed: AppConfig = toml::from_str(&contents).unwrap();
@@ -582,6 +585,7 @@ mod tests {
                     parsed.event_store_path,
                     expected_event_store.to_string_lossy()
                 );
+                assert_eq!(parsed.ui.background_session_refresh_secs, 15);
             },
         );
 
@@ -604,6 +608,7 @@ mod tests {
                 let config = AppConfig::from_env().expect("parse config");
                 assert_eq!(config.workspace, "/tmp/work");
                 assert_eq!(config.event_store_path, "/tmp/events.db");
+                assert_eq!(config.ui.background_session_refresh_secs, 15);
             },
         );
 
@@ -724,6 +729,41 @@ mod tests {
                 let err = AppConfig::from_env().expect_err("invalid toml should fail");
                 let message = err.to_string();
                 assert!(message.contains("Failed to parse ORCHESTRATOR_CONFIG"));
+            },
+        );
+
+        remove_temp_path(&home);
+    }
+
+    #[test]
+    fn config_clamps_background_session_refresh_secs_to_supported_bounds() {
+        let home = unique_temp_dir("ui-refresh-clamp");
+        let config_path = home.join("config.toml");
+        write_config_file(
+            &config_path,
+            "workspace = '/tmp/work'\nevent_store_path = '/tmp/events.db'\n[ui]\nbackground_session_refresh_secs = 99\n",
+        );
+
+        with_env_var(
+            "ORCHESTRATOR_CONFIG",
+            Some(config_path.to_str().unwrap()),
+            || {
+                let config = AppConfig::from_env().expect("parse and normalize config");
+                assert_eq!(config.ui.background_session_refresh_secs, 15);
+            },
+        );
+
+        write_config_file(
+            &config_path,
+            "workspace = '/tmp/work'\nevent_store_path = '/tmp/events.db'\n[ui]\nbackground_session_refresh_secs = 1\n",
+        );
+
+        with_env_var(
+            "ORCHESTRATOR_CONFIG",
+            Some(config_path.to_str().unwrap()),
+            || {
+                let config = AppConfig::from_env().expect("parse and normalize low config");
+                assert_eq!(config.ui.background_session_refresh_secs, 2);
             },
         );
 

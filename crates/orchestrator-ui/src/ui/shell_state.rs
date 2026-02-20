@@ -371,7 +371,8 @@ impl UiShellState {
         }
 
         if let Some(session_id) = terminal_session_id {
-            self.ensure_terminal_stream(session_id);
+            self.ensure_terminal_stream(session_id.clone());
+            let _ = self.flush_deferred_terminal_output_for_session(&session_id);
         }
     }
 
@@ -407,7 +408,8 @@ impl UiShellState {
         self.view_stack.replace_center(CenterView::TerminalView {
             session_id: session_id.clone(),
         });
-        self.ensure_terminal_stream(session_id);
+        self.ensure_terminal_stream(session_id.clone());
+        let _ = self.flush_deferred_terminal_output_for_session(&session_id);
         self.acknowledge_inbox_item(selected_row.inbox_item_id, selected_row.work_item_id);
     }
 
@@ -659,7 +661,8 @@ impl UiShellState {
                 session_id: session_id.clone(),
             });
         }
-        self.ensure_terminal_stream(session_id);
+        self.ensure_terminal_stream(session_id.clone());
+        let _ = self.flush_deferred_terminal_output_for_session(&session_id);
     }
 
     fn ensure_startup_session_feed_opened_and_report(&mut self) -> bool {
@@ -700,7 +703,8 @@ impl UiShellState {
             });
         }
 
-        self.ensure_terminal_stream(session_id);
+        self.ensure_terminal_stream(session_id.clone());
+        let _ = self.flush_deferred_terminal_output_for_session(&session_id);
     }
 
     fn inbox_item_id_for_session(&self, session_id: &WorkerSessionId) -> Option<InboxItemId> {
@@ -1524,13 +1528,70 @@ impl UiShellState {
     fn tick_terminal_view_and_report(&mut self) -> bool {
         let mut changed = false;
         changed |= self.poll_terminal_session_events();
+        changed |= self.flush_background_terminal_output_and_report();
         changed |= self.poll_merge_queue_events();
         changed |= self.enqueue_merge_reconcile_polls();
         changed |= self.dispatch_merge_queue_requests();
         if let Some(session_id) = self.active_terminal_session_id().cloned() {
+            changed |= self.flush_deferred_terminal_output_for_session(&session_id);
             changed |= self.ensure_terminal_stream_and_report(session_id);
         }
         changed
+    }
+
+    fn flush_deferred_terminal_output_for_session(&mut self, session_id: &WorkerSessionId) -> bool {
+        let Some(view) = self.terminal_session_states.get_mut(session_id) else {
+            return false;
+        };
+        if view.deferred_output.is_empty() {
+            return false;
+        }
+        let bytes = std::mem::take(&mut view.deferred_output);
+        append_terminal_assistant_output(view, bytes);
+        view.last_background_flush_at = Some(Instant::now());
+        true
+    }
+
+    fn flush_background_terminal_output_and_report(&mut self) -> bool {
+        let active_session_id = self.active_terminal_session_id().cloned();
+        let now = Instant::now();
+        let interval = background_session_refresh_interval_config_value();
+        let mut flushed_any = false;
+
+        let session_ids = self
+            .terminal_session_states
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>();
+        for session_id in session_ids {
+            if active_session_id.as_ref() == Some(&session_id) {
+                continue;
+            }
+            let should_flush = self
+                .terminal_session_states
+                .get(&session_id)
+                .map(|view| {
+                    !view.deferred_output.is_empty()
+                        && view
+                            .last_background_flush_at
+                            .map(|previous| now.duration_since(previous) >= interval)
+                            .unwrap_or(true)
+                })
+                .unwrap_or(false);
+            if !should_flush {
+                continue;
+            }
+
+            let Some(view) = self.terminal_session_states.get_mut(&session_id) else {
+                continue;
+            };
+            let bytes = std::mem::take(&mut view.deferred_output);
+            append_terminal_assistant_output(view, bytes);
+            view.last_background_flush_at = Some(now);
+            flushed_any = true;
+        }
+
+        flushed_any
     }
 
     fn poll_terminal_session_events(&mut self) -> bool {
@@ -1558,8 +1619,26 @@ impl UiShellState {
         for event in events {
             match event {
                 TerminalSessionEvent::Output { session_id, output } => {
+                    let is_active_session = self.active_terminal_session_id() == Some(&session_id);
                     let view = self.terminal_session_states.entry(session_id).or_default();
-                    append_terminal_assistant_output(view, output.bytes);
+                    if is_active_session {
+                        if !view.deferred_output.is_empty() {
+                            let deferred = std::mem::take(&mut view.deferred_output);
+                            append_terminal_assistant_output(view, deferred);
+                            view.last_background_flush_at = Some(Instant::now());
+                        }
+                        append_terminal_assistant_output(view, output.bytes);
+                    } else {
+                        view.deferred_output.extend_from_slice(output.bytes.as_slice());
+                        if view.deferred_output.len() >= BACKGROUND_SESSION_DEFERRED_OUTPUT_MAX_BYTES
+                        {
+                            let deferred = std::mem::take(&mut view.deferred_output);
+                            append_terminal_assistant_output(view, deferred);
+                            view.last_background_flush_at = Some(Instant::now());
+                        } else if view.last_background_flush_at.is_none() {
+                            view.last_background_flush_at = Some(Instant::now());
+                        }
+                    }
                     view.error = None;
                 }
                 TerminalSessionEvent::TurnState {
@@ -1603,6 +1682,8 @@ impl UiShellState {
                         .entry(session_id.clone())
                         .or_default();
                     view.error = Some(error.to_string());
+                    view.deferred_output.clear();
+                    view.last_background_flush_at = None;
                     view.entries.clear();
                     view.output_fragment.clear();
                     view.output_scroll_line = 0;
@@ -1622,6 +1703,11 @@ impl UiShellState {
                     self.terminal_session_streamed.remove(&session_id);
                     let persisted_session_id = session_id.clone();
                     let view = self.terminal_session_states.entry(session_id).or_default();
+                    if !view.deferred_output.is_empty() {
+                        let deferred = std::mem::take(&mut view.deferred_output);
+                        append_terminal_assistant_output(view, deferred);
+                    }
+                    view.last_background_flush_at = None;
                     flush_terminal_output_fragment(view);
                     view.turn_active = false;
                     self.spawn_set_session_working_state(persisted_session_id, false);

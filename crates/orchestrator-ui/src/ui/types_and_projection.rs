@@ -52,15 +52,20 @@ const TICKET_PICKER_PRIORITY_STATES_DEFAULT: &[&str] =
     &["In Progress", "Final Approval", "Todo", "Backlog"];
 const DEFAULT_UI_THEME: &str = "nord";
 const DEFAULT_SUPERVISOR_MODEL: &str = "openai/gpt-4o-mini";
+const DEFAULT_BACKGROUND_SESSION_REFRESH_SECS: u64 = 15;
+const MIN_BACKGROUND_SESSION_REFRESH_SECS: u64 = 2;
+const MAX_BACKGROUND_SESSION_REFRESH_SECS: u64 = 15;
 const MERGE_POLL_INTERVAL: Duration = Duration::from_secs(60);
 const MERGE_REQUEST_RATE_LIMIT: Duration = Duration::from_secs(1);
 const TICKET_PICKER_CREATE_REFRESH_INTERVAL: Duration = Duration::from_secs(1);
+const BACKGROUND_SESSION_DEFERRED_OUTPUT_MAX_BYTES: usize = 64 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct UiRuntimeConfig {
     theme: String,
     ticket_picker_priority_states: Vec<String>,
     supervisor_model: String,
+    background_session_refresh_secs: u64,
 }
 
 impl Default for UiRuntimeConfig {
@@ -72,6 +77,7 @@ impl Default for UiRuntimeConfig {
                 .map(|value| (*value).to_owned())
                 .collect(),
             supervisor_model: DEFAULT_SUPERVISOR_MODEL.to_owned(),
+            background_session_refresh_secs: DEFAULT_BACKGROUND_SESSION_REFRESH_SECS,
         }
     }
 }
@@ -86,6 +92,7 @@ pub fn set_ui_runtime_config(
     theme: String,
     ticket_picker_priority_states: Vec<String>,
     supervisor_model: String,
+    background_session_refresh_secs: u64,
 ) {
     let mut parsed_states = ticket_picker_priority_states
         .into_iter()
@@ -117,6 +124,11 @@ pub fn set_ui_runtime_config(
                 trimmed.to_owned()
             }
         },
+        background_session_refresh_secs: background_session_refresh_secs
+            .clamp(
+                MIN_BACKGROUND_SESSION_REFRESH_SECS,
+                MAX_BACKGROUND_SESSION_REFRESH_SECS,
+            ),
     };
 
     if let Ok(mut guard) = ui_runtime_config_store().write() {
@@ -148,6 +160,18 @@ fn supervisor_model_config_value() -> String {
         .read()
         .map(|guard| guard.supervisor_model.clone())
         .unwrap_or_else(|_| DEFAULT_SUPERVISOR_MODEL.to_owned())
+}
+
+fn background_session_refresh_interval_config_value() -> Duration {
+    let secs = ui_runtime_config_store()
+        .read()
+        .map(|guard| guard.background_session_refresh_secs)
+        .unwrap_or(DEFAULT_BACKGROUND_SESSION_REFRESH_SECS)
+        .clamp(
+            MIN_BACKGROUND_SESSION_REFRESH_SECS,
+            MAX_BACKGROUND_SESSION_REFRESH_SECS,
+        );
+    Duration::from_secs(secs)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -824,6 +848,8 @@ struct TerminalViewState {
     entries: Vec<TerminalTranscriptEntry>,
     error: Option<String>,
     output_fragment: String,
+    deferred_output: Vec<u8>,
+    last_background_flush_at: Option<Instant>,
     output_rendered_line_count: usize,
     output_scroll_line: usize,
     output_viewport_rows: usize,
@@ -840,6 +866,8 @@ impl Default for TerminalViewState {
             entries: Vec::new(),
             error: None,
             output_fragment: String::new(),
+            deferred_output: Vec::new(),
+            last_background_flush_at: None,
             output_rendered_line_count: 0,
             output_scroll_line: 0,
             output_viewport_rows: 1,
