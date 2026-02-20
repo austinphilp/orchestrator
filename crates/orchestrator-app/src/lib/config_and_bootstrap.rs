@@ -1,13 +1,16 @@
 use integration_linear::LinearTicketingProvider;
 use orchestrator_core::{
-    rebuild_projection, CodeHostProvider, CoreError, EventStore, GithubClient, LlmProvider,
-    NewEventEnvelope, OrchestrationEventPayload, ProjectionState, SelectedTicketFlowConfig,
-    SelectedTicketFlowResult, SessionCompletedPayload, SessionCrashedPayload, SqliteEventStore,
-    SessionHandle, Supervisor, TicketSummary, TicketingProvider, UntypedCommandInvocation,
-    VcsProvider, WorkerBackend, WorkerSessionId, WorkerSessionStatus, RuntimeSessionId,
-    DOMAIN_EVENT_SCHEMA_VERSION,
+    apply_workflow_transition, rebuild_projection, CodeHostProvider, CoreError, EventStore,
+    GithubClient, LlmProvider, NewEventEnvelope, OrchestrationEventPayload, ProjectionState,
+    SelectedTicketFlowConfig, SelectedTicketFlowResult, SessionCompletedPayload,
+    SessionCrashedPayload, SqliteEventStore, SessionHandle, Supervisor, TicketSummary,
+    TicketingProvider, UntypedCommandInvocation, VcsProvider, WorkItemId, WorkerBackend,
+    WorkerSessionId, WorkerSessionStatus, WorkflowGuardContext, WorkflowState,
+    WorkflowTransitionPayload, WorkflowTransitionReason, RuntimeSessionId, DOMAIN_EVENT_SCHEMA_VERSION,
 };
-use orchestrator_ui::{SupervisorCommandContext, SupervisorCommandDispatcher};
+use orchestrator_ui::{
+    SessionWorkflowAdvanceOutcome, SupervisorCommandContext, SupervisorCommandDispatcher,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::path::PathBuf;

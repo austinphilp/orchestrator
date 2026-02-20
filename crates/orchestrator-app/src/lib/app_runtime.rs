@@ -6,6 +6,80 @@ pub struct App<S: Supervisor, G: GithubClient> {
 }
 
 impl<S: Supervisor, G: GithubClient> App<S, G> {
+    fn latest_workflow_state_for_work_item(
+        store: &SqliteEventStore,
+        work_item_id: &WorkItemId,
+    ) -> Result<WorkflowState, CoreError> {
+        let mut current = WorkflowState::New;
+        let events = store.read_ordered()?;
+        for event in events {
+            if event.work_item_id.as_ref() != Some(work_item_id) {
+                continue;
+            }
+            if let OrchestrationEventPayload::WorkflowTransition(payload) = event.payload {
+                current = payload.to;
+            }
+        }
+        Ok(current)
+    }
+
+    fn workflow_advance_target(
+        from: &WorkflowState,
+    ) -> Result<
+        (
+            WorkflowState,
+            WorkflowTransitionReason,
+            WorkflowGuardContext,
+            Option<&'static str>,
+        ),
+        CoreError,
+    > {
+        match from {
+            WorkflowState::New => Ok((
+                WorkflowState::Planning,
+                WorkflowTransitionReason::TicketAccepted,
+                WorkflowGuardContext::default(),
+                Some("Workflow transition approved: New -> Planning. Begin planning mode for this ticket and produce a concrete implementation plan before coding."),
+            )),
+            WorkflowState::Planning => Ok((
+                WorkflowState::Implementing,
+                WorkflowTransitionReason::PlanCommitted,
+                WorkflowGuardContext {
+                    has_active_session: true,
+                    plan_ready: true,
+                    ..WorkflowGuardContext::default()
+                },
+                Some("Workflow transition approved: Planning -> Implementing. End planning mode and begin implementation in this worktree now. Before moving out of implementation, run the full test suite for this repository and verify it passes."),
+            )),
+            WorkflowState::Implementing | WorkflowState::Testing => Ok((
+                WorkflowState::PRDrafted,
+                WorkflowTransitionReason::DraftPullRequestCreated,
+                WorkflowGuardContext {
+                    tests_passed: true,
+                    has_draft_pr: true,
+                    ..WorkflowGuardContext::default()
+                },
+                Some("Workflow transition approved: Implementation/Testing -> PR Drafted. Pause implementation, run the build and fix all errors and warnings, run the full test suite and verify it passes, then open a GitHub PR using the gh CLI and provide a review-ready summary with PR link, evidence, tests, and open risks."),
+            )),
+            WorkflowState::PRDrafted => Ok((
+                WorkflowState::AwaitingYourReview,
+                WorkflowTransitionReason::AwaitingApproval,
+                WorkflowGuardContext::default(),
+                Some("Workflow transition approved: PR Drafted -> Awaiting Your Review. Keep the PR and branch up to date while awaiting review and merge."),
+            )),
+            WorkflowState::AwaitingYourReview
+            | WorkflowState::ReadyForReview
+            | WorkflowState::InReview
+            | WorkflowState::Merging => Err(CoreError::Configuration(
+                "workflow advance in review stages is merge-driven; use merge confirm/reconcile"
+                    .to_owned(),
+            )),
+            WorkflowState::Done | WorkflowState::Abandoned => Err(CoreError::Configuration(
+                "workflow is already complete and cannot be advanced".to_owned(),
+            )),
+        }
+    }
+
     pub async fn startup_state(&self) -> Result<StartupState, CoreError> {
         self.supervisor.health_check().await?;
         self.github.health_check().await?;
@@ -302,20 +376,50 @@ impl<S: Supervisor, G: GithubClient> App<S, G> {
         })
     }
 
-    pub fn set_session_workflow_stage(
+    pub fn advance_session_workflow(
         &self,
         session_id: &WorkerSessionId,
-        workflow_stage: &str,
-    ) -> Result<(), CoreError> {
-        let store = open_event_store(&self.config.event_store_path)?;
-        store.upsert_session_workflow_stage(session_id, workflow_stage)
-    }
+    ) -> Result<SessionWorkflowAdvanceOutcome, CoreError> {
+        let mut store = open_event_store(&self.config.event_store_path)?;
+        let mapping = store
+            .find_runtime_mapping_by_session_id(session_id)?
+            .ok_or_else(|| {
+                CoreError::Configuration(format!(
+                    "could not resolve runtime mapping for session '{}'",
+                    session_id.as_str()
+                ))
+            })?;
 
-    pub fn list_session_workflow_stages(
-        &self,
-    ) -> Result<Vec<(WorkerSessionId, String)>, CoreError> {
-        let store = open_event_store(&self.config.event_store_path)?;
-        store.list_session_workflow_stages()
+        let from = Self::latest_workflow_state_for_work_item(&store, &mapping.work_item_id)?;
+        let (to, reason, guards, instruction) = Self::workflow_advance_target(&from)?;
+        let next = apply_workflow_transition(&from, &to, &reason, &guards).map_err(|error| {
+            CoreError::Configuration(format!(
+                "workflow transition validation failed for work item '{}': {error}",
+                mapping.work_item_id.as_str()
+            ))
+        })?;
+
+        store.append(NewEventEnvelope {
+            event_id: format!("evt-workflow-transition-{}", now_nanos()),
+            occurred_at: now_timestamp(),
+            work_item_id: Some(mapping.work_item_id.clone()),
+            session_id: Some(mapping.session.session_id.clone()),
+            payload: OrchestrationEventPayload::WorkflowTransition(WorkflowTransitionPayload {
+                work_item_id: mapping.work_item_id.clone(),
+                from: from.clone(),
+                to: next.clone(),
+                reason: Some(reason),
+            }),
+            schema_version: DOMAIN_EVENT_SCHEMA_VERSION,
+        })?;
+
+        Ok(SessionWorkflowAdvanceOutcome {
+            session_id: mapping.session.session_id,
+            work_item_id: mapping.work_item_id,
+            from,
+            to: next,
+            instruction: instruction.map(str::to_owned),
+        })
     }
 }
 

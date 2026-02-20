@@ -589,10 +589,12 @@ enum TicketPickerEvent {
     TicketsLoadFailed {
         message: String,
     },
-    SessionWorkflowStagesLoaded {
-        stages: Vec<(WorkerSessionId, String)>,
+    SessionWorkflowAdvanced {
+        outcome: SessionWorkflowAdvanceOutcome,
+        projection: Option<ProjectionState>,
     },
-    SessionWorkflowStagesLoadFailed {
+    SessionWorkflowAdvanceFailed {
+        session_id: WorkerSessionId,
         message: String,
     },
     TicketStarted {

@@ -408,12 +408,9 @@ fn terminal_session_is_awaiting_planning_input(
 
 fn session_is_in_planning_stage(
     domain: &ProjectionState,
-    terminal_session_states: &HashMap<WorkerSessionId, TerminalViewState>,
+    _terminal_session_states: &HashMap<WorkerSessionId, TerminalViewState>,
     session_id: &WorkerSessionId,
 ) -> bool {
-    if let Some(view) = terminal_session_states.get(session_id) {
-        return view.workflow_stage == TerminalWorkflowStage::Planning;
-    }
     let Some(workflow_state) = domain
         .sessions
         .get(session_id)
@@ -757,20 +754,15 @@ fn workflow_badge_for_session(
     domain: &ProjectionState,
     terminal_session_states: &HashMap<WorkerSessionId, TerminalViewState>,
 ) -> String {
-    let workflow = terminal_session_states
-        .get(&session.id)
-        .map(|state| state.workflow_stage.label().to_owned())
-        .or_else(|| {
-            session
-                .work_item_id
-                .as_ref()
-                .and_then(|work_item_id| domain.work_items.get(work_item_id))
-                .and_then(|work_item| work_item.workflow_state.as_ref())
-                .map(workflow_state_to_badge_label)
-        })
+    let workflow = session
+        .work_item_id
+        .as_ref()
+        .and_then(|work_item_id| domain.work_items.get(work_item_id))
+        .and_then(|work_item| work_item.workflow_state.as_ref())
+        .map(workflow_state_to_badge_label)
         .or_else(|| {
             if matches!(session.status.as_ref(), Some(WorkerSessionStatus::Running)) {
-                Some(TerminalWorkflowStage::Planning.label().to_owned())
+                Some("planning".to_owned())
             } else {
                 None
             }
@@ -787,15 +779,15 @@ fn workflow_badge_for_session(
 
 fn workflow_state_to_badge_label(state: &WorkflowState) -> String {
     match state {
-        WorkflowState::New | WorkflowState::Planning => TerminalWorkflowStage::Planning.label(),
+        WorkflowState::New | WorkflowState::Planning => "planning",
         WorkflowState::Implementing | WorkflowState::Testing | WorkflowState::PRDrafted => {
-            TerminalWorkflowStage::Implementation.label()
+            "implementation"
         }
         WorkflowState::AwaitingYourReview
         | WorkflowState::ReadyForReview
         | WorkflowState::InReview
-        | WorkflowState::Merging => TerminalWorkflowStage::Review.label(),
-        WorkflowState::Done | WorkflowState::Abandoned => TerminalWorkflowStage::Complete.label(),
+        | WorkflowState::Merging => "review",
+        WorkflowState::Done | WorkflowState::Abandoned => "complete",
     }
     .to_owned()
 }

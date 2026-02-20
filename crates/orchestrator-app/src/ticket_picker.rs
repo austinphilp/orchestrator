@@ -6,7 +6,7 @@ use orchestrator_core::{
     LlmMessage, LlmProvider, LlmRole, ProjectionState, SelectedTicketFlowResult, Supervisor,
     TicketQuery, TicketSummary, TicketingProvider, VcsProvider, WorkerBackend, WorkerSessionId,
 };
-use orchestrator_ui::{SessionWorktreeDiff, TicketPickerProvider};
+use orchestrator_ui::{SessionWorktreeDiff, SessionWorkflowAdvanceOutcome, TicketPickerProvider};
 use std::path::PathBuf;
 
 use crate::App;
@@ -247,32 +247,16 @@ where
             })?
     }
 
-    async fn set_session_workflow_stage(
+    async fn advance_session_workflow(
         &self,
         session_id: WorkerSessionId,
-        workflow_stage: String,
-    ) -> Result<(), CoreError> {
+    ) -> Result<SessionWorkflowAdvanceOutcome, CoreError> {
         let app = self.app.clone();
-        tokio::task::spawn_blocking(move || {
-            app.set_session_workflow_stage(&session_id, workflow_stage.as_str())
-        })
-        .await
-        .map_err(|error| {
-            CoreError::Configuration(format!(
-                "ticket picker task failed while persisting workflow stage: {error}"
-            ))
-        })?
-    }
-
-    async fn list_session_workflow_stages(
-        &self,
-    ) -> Result<Vec<(WorkerSessionId, String)>, CoreError> {
-        let app = self.app.clone();
-        tokio::task::spawn_blocking(move || app.list_session_workflow_stages())
+        tokio::task::spawn_blocking(move || app.advance_session_workflow(&session_id))
             .await
             .map_err(|error| {
                 CoreError::Configuration(format!(
-                    "ticket picker task failed while loading workflow stages: {error}"
+                    "ticket picker task failed while advancing session workflow: {error}"
                 ))
             })?
     }

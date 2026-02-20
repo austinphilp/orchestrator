@@ -64,7 +64,7 @@ fn migration_from_schema_v1_adds_runtime_mapping_tables() {
     drop(conn);
 
     let store = SqliteEventStore::open(db.path()).expect("open and migrate");
-    assert_eq!(store.schema_version().expect("schema version"), 6);
+    assert_eq!(store.schema_version().expect("schema version"), 7);
     drop(store);
 
     let conn = rusqlite::Connection::open(db.path()).expect("open sqlite for inspection");
@@ -91,7 +91,17 @@ fn migration_from_schema_v1_adds_runtime_mapping_tables() {
             row.get(0)
         })
         .expect("count migrations");
-    assert_eq!(migration_count, 6);
+    assert_eq!(migration_count, 7);
+
+    let deprecated_table_exists: Option<i64> = conn
+        .query_row(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'session_workflow_stages'",
+            [],
+            |row| row.get(0),
+        )
+        .optional()
+        .expect("query deprecated table existence");
+    assert_eq!(deprecated_table_exists, None);
 
     let indexes = ["idx_worktrees_path_unique", "idx_sessions_workdir_unique"];
     for index in indexes {

@@ -37,7 +37,7 @@ const REQUEST_TIMEOUT_SECS: u64 = 120;
 const PLAN_COLLABORATION_MODE_KIND: &str = "plan";
 const DEFAULT_COLLABORATION_MODE_KIND: &str = "default";
 const PLAN_TO_IMPLEMENTATION_TRANSITION_MARKER: &str =
-    "workflow transition approved: planning -> implementation";
+    "workflow transition approved: planning -> implement";
 const TERMINAL_META_PREFIX: &str = "[[orchestrator-meta|";
 
 #[derive(Debug, Clone)]
@@ -1752,8 +1752,6 @@ fn model_identifier_from_entry(value: &Value) -> Option<String> {
 fn disables_planning_mode(input_text: &str) -> bool {
     let normalized = input_text.to_ascii_lowercase();
     normalized.contains(PLAN_TO_IMPLEMENTATION_TRANSITION_MARKER)
-        || (normalized.contains("workflow transition approved")
-            && normalized.contains("planning -> implementation"))
 }
 
 fn is_collaboration_mode_error(error: &RuntimeError) -> bool {
@@ -1968,5 +1966,26 @@ mod tests {
     fn extracts_thread_id_from_app_server_result_shapes() {
         let value = json!({ "thread": { "id": "thread-1" } });
         assert_eq!(extract_thread_id(&value).as_deref(), Some("thread-1"));
+    }
+
+    #[test]
+    fn planning_to_implementing_transition_disables_planning_mode() {
+        assert!(disables_planning_mode(
+            "Workflow transition approved: Planning -> Implementing. End planning mode now."
+        ));
+    }
+
+    #[test]
+    fn planning_to_implementation_transition_disables_planning_mode() {
+        assert!(disables_planning_mode(
+            "Workflow transition approved: Planning -> Implementation. End planning mode now."
+        ));
+    }
+
+    #[test]
+    fn non_transition_instruction_does_not_disable_planning_mode() {
+        assert!(!disables_planning_mode(
+            "Workflow transition approved: New -> Planning. Begin planning mode."
+        ));
     }
 }

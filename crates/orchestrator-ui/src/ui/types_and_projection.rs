@@ -100,17 +100,13 @@ pub trait TicketPickerProvider: Send + Sync {
             "session worktree diff is not supported by this ticket provider".to_owned(),
         ))
     }
-    async fn set_session_workflow_stage(
+    async fn advance_session_workflow(
         &self,
         _session_id: WorkerSessionId,
-        _workflow_stage: String,
-    ) -> Result<(), CoreError> {
-        Ok(())
-    }
-    async fn list_session_workflow_stages(
-        &self,
-    ) -> Result<Vec<(WorkerSessionId, String)>, CoreError> {
-        Ok(Vec::new())
+    ) -> Result<SessionWorkflowAdvanceOutcome, CoreError> {
+        Err(CoreError::Configuration(
+            "session workflow advance is not supported by this ticket provider".to_owned(),
+        ))
     }
     async fn complete_session_after_merge(
         &self,
@@ -125,6 +121,15 @@ pub struct SessionWorktreeDiff {
     pub session_id: WorkerSessionId,
     pub base_branch: String,
     pub diff: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionWorkflowAdvanceOutcome {
+    pub session_id: WorkerSessionId,
+    pub work_item_id: WorkItemId,
+    pub from: WorkflowState,
+    pub to: WorkflowState,
+    pub instruction: Option<String>,
 }
 
 pub type SupervisorCommandContext = SupervisorQueryContextArgs;
@@ -575,7 +580,6 @@ struct TerminalViewState {
     entries: Vec<TerminalTranscriptEntry>,
     error: Option<String>,
     output_fragment: String,
-    workflow_stage: TerminalWorkflowStage,
     output_rendered_line_count: usize,
     output_scroll_line: usize,
     output_viewport_rows: usize,
@@ -590,7 +594,6 @@ impl Default for TerminalViewState {
             entries: Vec::new(),
             error: None,
             output_fragment: String::new(),
-            workflow_stage: TerminalWorkflowStage::Planning,
             output_rendered_line_count: 0,
             output_scroll_line: 0,
             output_viewport_rows: 1,
@@ -636,54 +639,6 @@ impl TerminalFoldKind {
             Self::ToolCall => "tool-call",
             Self::CommandExecution => "command",
             Self::Other => "meta",
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-enum TerminalWorkflowStage {
-    #[default]
-    Planning,
-    Implementation,
-    Review,
-    Complete,
-}
-
-impl TerminalWorkflowStage {
-    const fn label(self) -> &'static str {
-        match self {
-            Self::Planning => "planning",
-            Self::Implementation => "implementation",
-            Self::Review => "review",
-            Self::Complete => "complete",
-        }
-    }
-
-    fn parse(raw: &str) -> Option<Self> {
-        match raw.trim().to_ascii_lowercase().as_str() {
-            "planning" => Some(Self::Planning),
-            "implementation" => Some(Self::Implementation),
-            "review" => Some(Self::Review),
-            "complete" => Some(Self::Complete),
-            _ => None,
-        }
-    }
-
-    fn advance_instruction(self) -> Option<(Self, &'static str)> {
-        match self {
-            Self::Planning => Some((
-                Self::Implementation,
-                "Workflow transition approved: Planning -> Implementation. End planning mode and begin implementation in this worktree now. Before moving out of implementation, run the full test suite for this repository and verify it passes.",
-            )),
-            Self::Implementation => Some((
-                Self::Review,
-                "Workflow transition approved: Implementation -> Review. Pause implementation, run the build and fix all errors and warnings, run the full test suite and verify it passes, then open a GitHub PR using the gh CLI and provide a review-ready summary with PR link, evidence, tests, and open risks. While in review, keep the worktree synced with remote/base while merge checks run automatically.",
-            )),
-            Self::Review => Some((
-                Self::Complete,
-                "Workflow transition approved: Review -> Complete. Finalize the session with a completion summary, verification status, and remaining follow-ups.",
-            )),
-            Self::Complete => None,
         }
     }
 }

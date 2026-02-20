@@ -9,7 +9,7 @@ use crate::events::{NewEventEnvelope, OrchestrationEventPayload, StoredEventEnve
 use crate::identifiers::{ArtifactId, TicketId, TicketProvider, WorkItemId, WorkerSessionId};
 use crate::status::{ArtifactKind, WorkerSessionStatus};
 
-const CURRENT_SCHEMA_VERSION: u32 = 6;
+const CURRENT_SCHEMA_VERSION: u32 = 7;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RetrievalScope {
@@ -101,4 +101,3 @@ pub trait EventStore {
 pub struct SqliteEventStore {
     conn: Connection,
 }
-

@@ -233,7 +233,14 @@ fn transition_guards(
             WorkflowTransitionReason::ReviewStarted,
         ) => Some(REQUIRES_PR),
         (
-            WorkflowState::InReview,
+            WorkflowState::New
+            | WorkflowState::Planning
+            | WorkflowState::Implementing
+            | WorkflowState::Testing
+            | WorkflowState::PRDrafted
+            | WorkflowState::AwaitingYourReview
+            | WorkflowState::ReadyForReview
+            | WorkflowState::InReview,
             WorkflowState::Done,
             WorkflowTransitionReason::ReviewApprovedAndMerged,
         ) => Some(REQUIRES_MERGE_COMPLETED),
@@ -528,13 +535,43 @@ mod tests {
     }
 
     #[test]
-    fn invalid_transition_reports_invalid_transition_error() {
-        let err = validate_workflow_transition(
-            &WorkflowState::ReadyForReview,
+    fn planning_to_done_requires_merge_completed() {
+        let failed = validate_workflow_transition(
+            &WorkflowState::Planning,
+            &WorkflowState::Done,
+            &WorkflowTransitionReason::ReviewApprovedAndMerged,
+            &WorkflowGuardContext::default(),
+        )
+        .expect_err("merge guard should fail");
+        assert!(matches!(
+            failed,
+            WorkflowTransitionError::GuardFailed {
+                guard: WorkflowGuard::MergeCompleted,
+                ..
+            }
+        ));
+
+        let success = apply_workflow_transition(
+            &WorkflowState::Planning,
             &WorkflowState::Done,
             &WorkflowTransitionReason::ReviewApprovedAndMerged,
             &WorkflowGuardContext {
                 merge_completed: true,
+                ..WorkflowGuardContext::default()
+            },
+        )
+        .expect("transition should pass");
+        assert_eq!(success, WorkflowState::Done);
+    }
+
+    #[test]
+    fn invalid_transition_reports_invalid_transition_error() {
+        let err = validate_workflow_transition(
+            &WorkflowState::ReadyForReview,
+            &WorkflowState::Done,
+            &WorkflowTransitionReason::ApprovalGranted,
+            &WorkflowGuardContext {
+                approval_granted: true,
                 ..WorkflowGuardContext::default()
             },
         )

@@ -21,7 +21,6 @@ struct UiShellState {
     ticket_picker_receiver: Option<mpsc::Receiver<TicketPickerEvent>>,
     ticket_picker_overlay: TicketPickerOverlayState,
     ticket_picker_priority_states: Vec<String>,
-    session_workflow_hydration_requested: bool,
     startup_session_feed_opened: bool,
     worker_backend: Option<Arc<dyn WorkerBackend>>,
     selected_session_index: Option<usize>,
@@ -111,7 +110,6 @@ impl UiShellState {
             ticket_picker_receiver,
             ticket_picker_overlay: TicketPickerOverlayState::default(),
             ticket_picker_priority_states: ticket_picker_priority_states_from_env(),
-            session_workflow_hydration_requested: false,
             startup_session_feed_opened: false,
             worker_backend,
             selected_session_index: None,
@@ -1036,29 +1034,7 @@ impl UiShellState {
     }
 
     fn tick_ticket_picker(&mut self) {
-        self.ensure_session_workflow_hydration();
         self.poll_ticket_picker_events();
-    }
-
-    fn ensure_session_workflow_hydration(&mut self) {
-        if self.session_workflow_hydration_requested {
-            return;
-        }
-        let Some(provider) = self.ticket_picker_provider.clone() else {
-            return;
-        };
-        let Some(sender) = self.ticket_picker_sender.clone() else {
-            return;
-        };
-        match TokioHandle::try_current() {
-            Ok(runtime) => {
-                self.session_workflow_hydration_requested = true;
-                runtime.spawn(async move {
-                    run_session_workflow_stage_load_task(provider, sender).await;
-                });
-            }
-            Err(_) => {}
-        }
     }
 
     fn tick_terminal_view(&mut self) {
@@ -1251,13 +1227,6 @@ impl UiShellState {
                         if let Some(session) = self.domain.sessions.get_mut(&session_id) {
                             session.status = Some(WorkerSessionStatus::Done);
                         }
-                        if let Some(view) = self.terminal_session_states.get_mut(&session_id) {
-                            view.workflow_stage = TerminalWorkflowStage::Complete;
-                        }
-                        self.persist_terminal_workflow_stage(
-                            session_id.clone(),
-                            TerminalWorkflowStage::Complete,
-                        );
                         if let Some(work_item_id) = self
                             .domain
                             .sessions
@@ -1394,14 +1363,6 @@ impl UiShellState {
     }
 
     fn session_is_in_review_stage(&self, session_id: &WorkerSessionId) -> bool {
-        if let Some(view) = self.terminal_session_states.get(session_id) {
-            if view.workflow_stage == TerminalWorkflowStage::Review {
-                return true;
-            }
-            if view.workflow_stage == TerminalWorkflowStage::Complete {
-                return false;
-            }
-        }
         self.domain
             .sessions
             .get(session_id)
@@ -1700,12 +1661,35 @@ fn apply_ticket_picker_event(&mut self, event: TicketPickerEvent) {
                     compact_focus_card_text(message.as_str())
                 ));
             }
-            TicketPickerEvent::SessionWorkflowStagesLoaded { stages } => {
-                self.apply_persisted_session_workflow_stages(stages);
-            }
-            TicketPickerEvent::SessionWorkflowStagesLoadFailed { message } => {
+            TicketPickerEvent::SessionWorkflowAdvanced {
+                outcome,
+                projection,
+            } => {
+                if let Some(projection) = projection {
+                    self.domain = projection;
+                } else if let Some(work_item) = self.domain.work_items.get_mut(&outcome.work_item_id)
+                {
+                    work_item.workflow_state = Some(outcome.to.clone());
+                }
+
+                if let Some(instruction) = outcome.instruction.as_deref() {
+                    self.send_terminal_instruction_to_session(&outcome.session_id, instruction);
+                }
+
                 self.status_warning = Some(format!(
-                    "workflow stage hydration warning: {}",
+                    "workflow advanced for session {}: {:?} -> {:?}",
+                    outcome.session_id.as_str(),
+                    outcome.from,
+                    outcome.to
+                ));
+            }
+            TicketPickerEvent::SessionWorkflowAdvanceFailed {
+                session_id,
+                message,
+            } => {
+                self.status_warning = Some(format!(
+                    "workflow advance warning for {}: {}",
+                    session_id.as_str(),
                     compact_focus_card_text(message.as_str())
                 ));
             }
@@ -1909,37 +1893,6 @@ fn apply_ticket_picker_event(&mut self, event: TicketPickerEvent) {
                     compact_focus_card_text(message.as_str())
                 ));
             }
-        }
-    }
-
-    fn apply_persisted_session_workflow_stages(&mut self, stages: Vec<(WorkerSessionId, String)>) {
-        for (session_id, raw_stage) in stages {
-            let Some(stage) = TerminalWorkflowStage::parse(raw_stage.as_str()) else {
-                continue;
-            };
-            let view = self.terminal_session_states.entry(session_id).or_default();
-            view.workflow_stage = stage;
-        }
-    }
-
-    fn persist_terminal_workflow_stage(
-        &mut self,
-        session_id: WorkerSessionId,
-        stage: TerminalWorkflowStage,
-    ) {
-        let Some(provider) = self.ticket_picker_provider.clone() else {
-            return;
-        };
-        let workflow_stage = stage.label().to_owned();
-        match TokioHandle::try_current() {
-            Ok(runtime) => {
-                runtime.spawn(async move {
-                    let _ = provider
-                        .set_session_workflow_stage(session_id, workflow_stage)
-                        .await;
-                });
-            }
-            Err(_) => {}
         }
     }
 
@@ -3042,6 +2995,33 @@ fn apply_ticket_picker_event(&mut self, event: TicketPickerEvent) {
         }
     }
 
+    fn spawn_session_workflow_advance(&mut self, session_id: WorkerSessionId) {
+        let Some(provider) = self.ticket_picker_provider.clone() else {
+            self.status_warning =
+                Some("workflow advance unavailable: ticket provider is not configured".to_owned());
+            return;
+        };
+        let Some(sender) = self.ticket_picker_sender.clone() else {
+            self.status_warning = Some(
+                "workflow advance unavailable: ticket picker event channel is not available"
+                    .to_owned(),
+            );
+            return;
+        };
+
+        match TokioHandle::try_current() {
+            Ok(handle) => {
+                handle.spawn(async move {
+                    run_session_workflow_advance_task(provider, session_id, sender).await;
+                });
+            }
+            Err(_) => {
+                self.status_warning =
+                    Some("workflow advance unavailable: tokio runtime is not active".to_owned());
+            }
+        }
+    }
+
     fn spawn_session_merge_finalize(&mut self, session_id: WorkerSessionId) {
         if !self.merge_finalizing_sessions.insert(session_id.clone()) {
             return;
@@ -3152,61 +3132,45 @@ fn apply_ticket_picker_event(&mut self, event: TicketPickerEvent) {
             );
             return;
         };
-        let current_stage = self.inferred_terminal_workflow_stage(&session_id);
-        self.terminal_session_states
-            .entry(session_id.clone())
-            .or_default()
-            .workflow_stage = current_stage;
-        if current_stage == TerminalWorkflowStage::Review {
+
+        let current_state = self
+            .domain
+            .sessions
+            .get(&session_id)
+            .and_then(|session| session.work_item_id.as_ref())
+            .and_then(|work_item_id| self.domain.work_items.get(work_item_id))
+            .and_then(|work_item| work_item.workflow_state.clone());
+
+        let Some(current_state) = current_state else {
+            self.status_warning = Some(format!(
+                "workflow advance unavailable: session {} has no canonical workflow state",
+                session_id.as_str()
+            ));
+            return;
+        };
+
+        if matches!(
+            current_state,
+            WorkflowState::AwaitingYourReview
+                | WorkflowState::ReadyForReview
+                | WorkflowState::InReview
+        ) {
             self.review_merge_confirm_session = Some(session_id);
             self.status_warning = None;
             return;
         }
-        let Some(backend) = self.worker_backend.clone() else {
-            self.status_warning =
-                Some("workflow advance unavailable: no worker backend configured".to_owned());
-            return;
-        };
-        let Some(handle) = self.terminal_session_handle(&session_id) else {
-            self.status_warning = Some(
-                "workflow advance unavailable: cannot resolve backend session handle".to_owned(),
-            );
-            return;
-        };
 
-        let (instruction, next_stage) = {
-            let view = self
-                .terminal_session_states
-                .entry(session_id.clone())
-                .or_default();
-            let Some((next_stage, instruction)) = view.workflow_stage.advance_instruction() else {
-                self.status_warning =
-                    Some("workflow advance ignored: session is already in Complete".to_owned());
-                return;
-            };
-            append_terminal_system_message(view, instruction);
-            view.error = None;
-            view.workflow_stage = next_stage;
-            (instruction.to_owned(), next_stage)
-        };
-        self.persist_terminal_workflow_stage(session_id.clone(), next_stage);
+        if matches!(current_state, WorkflowState::Done | WorkflowState::Abandoned) {
+            self.status_warning = Some("workflow advance ignored: session is already complete".to_owned());
+            return;
+        }
 
-        let mut payload = instruction;
-        if !payload.ends_with('\n') {
-            payload.push('\n');
-        }
-        let bytes = payload.into_bytes();
-        match TokioHandle::try_current() {
-            Ok(runtime) => {
-                runtime.spawn(async move {
-                    let _ = backend.send_input(&handle, bytes.as_slice()).await;
-                });
-            }
-            Err(_) => {
-                self.status_warning =
-                    Some("workflow advance unavailable: tokio runtime unavailable".to_owned());
-            }
-        }
+        self.status_warning = Some(format!(
+            "advancing workflow for session {} from {:?}",
+            session_id.as_str(),
+            current_state
+        ));
+        self.spawn_session_workflow_advance(session_id);
     }
 
     fn is_terminal_view_active(&self) -> bool {
@@ -3214,38 +3178,6 @@ fn apply_ticket_picker_event(&mut self, event: TicketPickerEvent) {
             self.view_stack.active_center(),
             Some(CenterView::TerminalView { .. })
         )
-    }
-
-    fn inferred_terminal_workflow_stage(
-        &self,
-        session_id: &WorkerSessionId,
-    ) -> TerminalWorkflowStage {
-        if let Some(state) = self.terminal_session_states.get(session_id) {
-            return state.workflow_stage;
-        }
-
-        let from_domain = self
-            .domain
-            .sessions
-            .get(session_id)
-            .and_then(|session| session.work_item_id.as_ref())
-            .and_then(|work_item_id| self.domain.work_items.get(work_item_id))
-            .and_then(|work_item| work_item.workflow_state.as_ref());
-
-        match from_domain {
-            Some(WorkflowState::New | WorkflowState::Planning) => TerminalWorkflowStage::Planning,
-            Some(
-                WorkflowState::Implementing | WorkflowState::Testing | WorkflowState::PRDrafted,
-            ) => TerminalWorkflowStage::Implementation,
-            Some(
-                WorkflowState::AwaitingYourReview
-                | WorkflowState::ReadyForReview
-                | WorkflowState::InReview
-                | WorkflowState::Merging,
-            ) => TerminalWorkflowStage::Review,
-            Some(WorkflowState::Done | WorkflowState::Abandoned) => TerminalWorkflowStage::Complete,
-            None => TerminalWorkflowStage::Planning,
-        }
     }
 
     fn cancel_review_merge_confirmation(&mut self) {

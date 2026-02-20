@@ -439,87 +439,35 @@ where
 
     let mut transitions = Vec::new();
     let mut current = latest_workflow_state_for_work_item(&store, &runtime.work_item_id)?;
-
-    loop {
-        if current == WorkflowState::Done {
-            break;
+    let current_state_before = current.clone();
+    let completion_mode = if current == WorkflowState::Done {
+        "already_done"
+    } else {
+        let next = append_workflow_transition_event_for_runtime(
+            &mut store,
+            &runtime,
+            &current,
+            &WorkflowState::Done,
+            WorkflowTransitionReason::ReviewApprovedAndMerged,
+            &WorkflowGuardContext {
+                merge_completed: true,
+                ..WorkflowGuardContext::default()
+            },
+            command_id,
+        )?;
+        transitions.push(format!("{current:?}->{next:?}"));
+        current = next;
+        if matches!(
+            current_state_before,
+            WorkflowState::AwaitingYourReview
+                | WorkflowState::ReadyForReview
+                | WorkflowState::InReview
+        ) {
+            "normal_review_path"
+        } else {
+            "forced_from_non_review_state"
         }
-
-        if current == WorkflowState::AwaitingYourReview {
-            let next = append_workflow_transition_event_for_runtime(
-                &mut store,
-                &runtime,
-                &current,
-                &WorkflowState::ReadyForReview,
-                WorkflowTransitionReason::ApprovalGranted,
-                &WorkflowGuardContext {
-                    has_draft_pr: true,
-                    approval_granted: true,
-                    ..WorkflowGuardContext::default()
-                },
-                command_id,
-            )?;
-            transitions.push("AwaitingYourReview->ReadyForReview".to_owned());
-            current = next;
-            continue;
-        }
-
-        if current == WorkflowState::ReadyForReview {
-            let next = append_workflow_transition_event_for_runtime(
-                &mut store,
-                &runtime,
-                &current,
-                &WorkflowState::InReview,
-                WorkflowTransitionReason::ReviewStarted,
-                &WorkflowGuardContext {
-                    has_draft_pr: true,
-                    ..WorkflowGuardContext::default()
-                },
-                command_id,
-            )?;
-            transitions.push("ReadyForReview->InReview".to_owned());
-            current = next;
-            continue;
-        }
-
-        if current == WorkflowState::InReview {
-            let next = append_workflow_transition_event_for_runtime(
-                &mut store,
-                &runtime,
-                &current,
-                &WorkflowState::Done,
-                WorkflowTransitionReason::ReviewApprovedAndMerged,
-                &WorkflowGuardContext {
-                    merge_completed: true,
-                    ..WorkflowGuardContext::default()
-                },
-                command_id,
-            )?;
-            transitions.push("InReview->Done".to_owned());
-            current = next;
-            continue;
-        }
-
-        if current == WorkflowState::Merging {
-            let next = append_workflow_transition_event_for_runtime(
-                &mut store,
-                &runtime,
-                &current,
-                &WorkflowState::Done,
-                WorkflowTransitionReason::ReviewApprovedAndMerged,
-                &WorkflowGuardContext {
-                    merge_completed: true,
-                    ..WorkflowGuardContext::default()
-                },
-                command_id,
-            )?;
-            transitions.push("Merging->Done".to_owned());
-            current = next;
-            continue;
-        }
-
-        break;
-    }
+    };
 
     let message = json!({
         "command": command_id,
@@ -529,6 +477,8 @@ where
         "merge_conflict": merge_state.merge_conflict,
         "base_branch": merge_state.base_branch,
         "head_branch": merge_state.head_branch,
+        "current_state_before": current_state_before,
+        "completion_mode": completion_mode,
         "completed": current == WorkflowState::Done,
         "transitions": transitions
     })

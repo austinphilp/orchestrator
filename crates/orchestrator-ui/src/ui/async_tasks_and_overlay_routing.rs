@@ -322,19 +322,25 @@ async fn run_ticket_picker_load_task(
     }
 }
 
-async fn run_session_workflow_stage_load_task(
+async fn run_session_workflow_advance_task(
     provider: Arc<dyn TicketPickerProvider>,
+    session_id: WorkerSessionId,
     sender: mpsc::Sender<TicketPickerEvent>,
 ) {
-    match provider.list_session_workflow_stages().await {
-        Ok(stages) => {
+    match provider.advance_session_workflow(session_id.clone()).await {
+        Ok(outcome) => {
+            let projection = provider.reload_projection().await.ok();
             let _ = sender
-                .send(TicketPickerEvent::SessionWorkflowStagesLoaded { stages })
+                .send(TicketPickerEvent::SessionWorkflowAdvanced {
+                    outcome,
+                    projection,
+                })
                 .await;
         }
         Err(error) => {
             let _ = sender
-                .send(TicketPickerEvent::SessionWorkflowStagesLoadFailed {
+                .send(TicketPickerEvent::SessionWorkflowAdvanceFailed {
+                    session_id,
                     message: error.to_string(),
                 })
                 .await;
@@ -437,8 +443,6 @@ async fn run_ticket_picker_start_task(
             warning: (!warning.is_empty()).then(|| warning.join("; ")),
         })
         .await;
-
-    run_session_workflow_stage_load_task(provider, sender).await;
 }
 
 async fn run_ticket_picker_create_task(
