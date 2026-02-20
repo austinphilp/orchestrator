@@ -3628,8 +3628,8 @@ mod tests {
         let rendered = render_ticket_picker_overlay_text(&overlay);
         assert!(!rendered.contains("Brief:"));
         assert!(rendered.contains("Enter: create"));
-        assert!(rendered.contains("Shift+Enter: newline"));
-        assert!(rendered.contains("Assigned project: Core"));
+        assert!(rendered.contains("Shift+Enter: create + start"));
+        assert!(!rendered.contains("Assigned project: Core"));
     }
 
     #[test]
@@ -3654,17 +3654,22 @@ mod tests {
     }
 
     #[test]
-    fn ticket_picker_new_ticket_mode_shift_enter_inserts_newline() {
+    fn ticket_picker_new_ticket_mode_shift_enter_submits_create_and_start() {
         let mut shell_state = UiShellState::new("ready".to_owned(), triage_projection());
         shell_state.ticket_picker_overlay.open();
         shell_state.ticket_picker_overlay.begin_new_ticket_mode();
 
-        route_ticket_picker_key(&mut shell_state, shift_key(KeyCode::Char('a')));
+        route_ticket_picker_key(&mut shell_state, key(KeyCode::Char('a')));
         route_ticket_picker_key(&mut shell_state, shift_key(KeyCode::Enter));
-        route_ticket_picker_key(&mut shell_state, key(KeyCode::Char('b')));
 
-        assert_eq!(shell_state.ticket_picker_overlay.new_ticket_brief_input.text(), "a\nb");
-        assert!(!shell_state.ticket_picker_overlay.creating);
+        assert!(shell_state.ticket_picker_overlay.new_ticket_brief_input.text().is_empty());
+        assert!(!shell_state.ticket_picker_overlay.new_ticket_mode);
+        assert!(shell_state
+            .ticket_picker_overlay
+            .error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("ticket provider unavailable"));
     }
 
     #[test]
@@ -3731,6 +3736,7 @@ mod tests {
             CreateTicketFromPickerRequest {
                 brief: "brief".to_owned(),
                 selected_project: Some("Core".to_owned()),
+                submit_mode: TicketCreateSubmitMode::CreateOnly,
             },
             sender,
         )
@@ -3740,11 +3746,13 @@ mod tests {
         match event {
             TicketPickerEvent::TicketCreated {
                 created_ticket,
+                submit_mode,
                 projection,
                 tickets,
                 warning,
             } => {
                 assert_eq!(created_ticket.identifier, created.identifier);
+                assert_eq!(submit_mode, TicketCreateSubmitMode::CreateOnly);
                 assert!(projection.is_some());
                 assert_eq!(tickets.unwrap_or_default(), refreshed);
                 assert!(warning.is_none());
@@ -3771,6 +3779,7 @@ mod tests {
         let created = sample_ticket_summary("issue-499", "AP-499", "Todo");
         shell_state.apply_ticket_picker_event(TicketPickerEvent::TicketCreated {
             created_ticket: created.clone(),
+            submit_mode: TicketCreateSubmitMode::CreateOnly,
             projection: None,
             tickets: Some(vec![
                 sample_ticket_summary("issue-401", "AP-401", "Todo"),
@@ -3804,6 +3813,7 @@ mod tests {
         let created = sample_ticket_summary("issue-599", "AP-599", "Todo");
         shell_state.apply_ticket_picker_event(TicketPickerEvent::TicketCreated {
             created_ticket: created,
+            submit_mode: TicketCreateSubmitMode::CreateOnly,
             projection: None,
             tickets: Some(vec![sample_ticket_summary("issue-501", "AP-501", "Todo")]),
             warning: None,
@@ -3814,6 +3824,148 @@ mod tests {
             .tickets_snapshot()
             .iter()
             .any(|ticket| ticket.identifier == "AP-599"));
+    }
+
+    #[test]
+    fn ticket_picker_hides_tickets_with_active_sessions() {
+        let mut projection = ProjectionState::default();
+
+        let ticket_running = TicketId::from_provider_uuid(TicketProvider::Linear, "issue-running");
+        let ticket_waiting = TicketId::from_provider_uuid(TicketProvider::Linear, "issue-waiting");
+        let ticket_blocked = TicketId::from_provider_uuid(TicketProvider::Linear, "issue-blocked");
+        let ticket_done = TicketId::from_provider_uuid(TicketProvider::Linear, "issue-done");
+        let ticket_visible = TicketId::from_provider_uuid(TicketProvider::Linear, "issue-visible");
+
+        for (work_item_id, ticket_id, session_id, status) in [
+            (
+                WorkItemId::new("wi-running"),
+                ticket_running.clone(),
+                WorkerSessionId::new("sess-running"),
+                WorkerSessionStatus::Running,
+            ),
+            (
+                WorkItemId::new("wi-waiting"),
+                ticket_waiting.clone(),
+                WorkerSessionId::new("sess-waiting"),
+                WorkerSessionStatus::WaitingForUser,
+            ),
+            (
+                WorkItemId::new("wi-blocked"),
+                ticket_blocked.clone(),
+                WorkerSessionId::new("sess-blocked"),
+                WorkerSessionStatus::Blocked,
+            ),
+            (
+                WorkItemId::new("wi-done"),
+                ticket_done.clone(),
+                WorkerSessionId::new("sess-done"),
+                WorkerSessionStatus::Done,
+            ),
+        ] {
+            projection.work_items.insert(
+                work_item_id.clone(),
+                WorkItemProjection {
+                    id: work_item_id.clone(),
+                    ticket_id: Some(ticket_id),
+                    project_id: None,
+                    workflow_state: Some(WorkflowState::Implementing),
+                    session_id: Some(session_id.clone()),
+                    worktree_id: None,
+                    inbox_items: Vec::new(),
+                    artifacts: Vec::new(),
+                },
+            );
+            projection.sessions.insert(
+                session_id.clone(),
+                SessionProjection {
+                    id: session_id,
+                    work_item_id: Some(work_item_id),
+                    status: Some(status),
+                    latest_checkpoint: None,
+                },
+            );
+        }
+
+        let mut shell_state = UiShellState::new("ready".to_owned(), projection);
+        shell_state.ticket_picker_overlay.open();
+        shell_state.ticket_picker_overlay.loading = false;
+        shell_state.apply_ticket_picker_event(TicketPickerEvent::TicketsLoaded {
+            tickets: vec![
+                TicketSummary {
+                    ticket_id: ticket_running,
+                    identifier: "AP-610".to_owned(),
+                    title: "running".to_owned(),
+                    project: Some("Core".to_owned()),
+                    state: "Todo".to_owned(),
+                    url: "https://example/running".to_owned(),
+                    assignee: None,
+                    priority: None,
+                    labels: Vec::new(),
+                    updated_at: "2026-02-19T00:00:00Z".to_owned(),
+                },
+                TicketSummary {
+                    ticket_id: ticket_waiting,
+                    identifier: "AP-611".to_owned(),
+                    title: "waiting".to_owned(),
+                    project: Some("Core".to_owned()),
+                    state: "Todo".to_owned(),
+                    url: "https://example/waiting".to_owned(),
+                    assignee: None,
+                    priority: None,
+                    labels: Vec::new(),
+                    updated_at: "2026-02-19T00:00:00Z".to_owned(),
+                },
+                TicketSummary {
+                    ticket_id: ticket_blocked,
+                    identifier: "AP-612".to_owned(),
+                    title: "blocked".to_owned(),
+                    project: Some("Core".to_owned()),
+                    state: "Todo".to_owned(),
+                    url: "https://example/blocked".to_owned(),
+                    assignee: None,
+                    priority: None,
+                    labels: Vec::new(),
+                    updated_at: "2026-02-19T00:00:00Z".to_owned(),
+                },
+                TicketSummary {
+                    ticket_id: ticket_done,
+                    identifier: "AP-613".to_owned(),
+                    title: "done".to_owned(),
+                    project: Some("Core".to_owned()),
+                    state: "Todo".to_owned(),
+                    url: "https://example/done".to_owned(),
+                    assignee: None,
+                    priority: None,
+                    labels: Vec::new(),
+                    updated_at: "2026-02-19T00:00:00Z".to_owned(),
+                },
+                TicketSummary {
+                    ticket_id: ticket_visible,
+                    identifier: "AP-614".to_owned(),
+                    title: "visible".to_owned(),
+                    project: Some("Core".to_owned()),
+                    state: "Todo".to_owned(),
+                    url: "https://example/visible".to_owned(),
+                    assignee: None,
+                    priority: None,
+                    labels: Vec::new(),
+                    updated_at: "2026-02-19T00:00:00Z".to_owned(),
+                },
+            ],
+            projects: Vec::new(),
+        });
+
+        let identifiers = shell_state
+            .ticket_picker_overlay
+            .tickets_snapshot()
+            .into_iter()
+            .map(|ticket| ticket.identifier)
+            .collect::<Vec<_>>();
+        assert!(!identifiers.contains(&"AP-610".to_owned()));
+        assert!(!identifiers.contains(&"AP-611".to_owned()));
+        assert!(!identifiers.contains(&"AP-612".to_owned()));
+        assert!(identifiers.contains(&"AP-613".to_owned()));
+        assert!(identifiers.contains(&"AP-614".to_owned()));
     }
 
     #[tokio::test]
