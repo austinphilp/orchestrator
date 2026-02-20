@@ -5178,4 +5178,34 @@ mod tests {
             Some(UiCommand::EnterNormalMode)
         );
     }
+
+    #[test]
+    fn mode_help_normal_groups_and_consolidates_expected_hints() {
+        let help = mode_help(UiMode::Normal);
+        assert!(help.contains("Navigate: j/k, g/G"));
+        assert!(help.contains("Views: i/I"));
+        assert!(!help.contains("i: "));
+        assert!(!help.contains("I: "));
+
+        let nav_pos = help.find("Navigate:").expect("navigation section");
+        let views_pos = help.find("Views:").expect("views section");
+        assert!(nav_pos < views_pos, "navigation hints should appear before views");
+    }
+
+    #[test]
+    fn bottom_bar_styles_are_mode_specific_and_readable() {
+        let normal = bottom_bar_style(UiMode::Normal);
+        let insert = bottom_bar_style(UiMode::Insert);
+        let terminal = bottom_bar_style(UiMode::Terminal);
+
+        assert_ne!(normal, insert);
+        assert_ne!(insert, terminal);
+        assert_ne!(normal, terminal);
+
+        for style in [normal, insert, terminal] {
+            assert!(style.fg.is_some(), "foreground color should be set");
+            assert!(style.bg.is_some(), "background color should be set");
+            assert_ne!(style.fg, style.bg, "foreground and background must differ");
+        }
+    }
 }

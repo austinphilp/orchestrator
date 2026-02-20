@@ -271,14 +271,65 @@ enum RoutedInput {
     Ignore,
 }
 
-fn mode_help(mode: UiMode) -> &'static str {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct BottomBarHintGroup {
+    label: &'static str,
+    hints: &'static [&'static str],
+}
+
+fn bottom_bar_hint_groups(mode: UiMode) -> &'static [BottomBarHintGroup] {
     match mode {
-        UiMode::Normal => {
-            "j/k: move in focused panel (right pane scrolls session output) | Tab: toggle left/right pane focus | Shift+Tab: cycle left-panel focus | [ ]: batch cycle | 1-4 or z{1-4}: batch jump | g/G: first/last in focused panel (G in right pane: bottom) | s: start ticket | c: supervisor chat | Enter: focus | i: insert/notes mode | I: open terminal | o: open associated session output + acknowledge inbox item | D: worktree diff modal | w n: advance session workflow | x: archive selected session | v{d/t/p/c}: inspectors | q: quit"
-        }
-        UiMode::Insert => "Insert input active | Esc/Ctrl-[: Normal",
-        UiMode::Terminal => "Terminal compose active | Enter send | Shift+Enter newline | Esc or Ctrl-\\ Ctrl-n: Normal | then w n: advance workflow",
+        UiMode::Normal => &[
+            BottomBarHintGroup {
+                label: "Navigate:",
+                hints: &["j/k", "g/G", "1-4 or z{1-4}", "[ ]"],
+            },
+            BottomBarHintGroup {
+                label: "Focus:",
+                hints: &["Tab", "Shift+Tab", "Enter"],
+            },
+            BottomBarHintGroup {
+                label: "Views:",
+                hints: &["i/I", "o", "s", "c", "v{d/t/p/c}", "D"],
+            },
+            BottomBarHintGroup {
+                label: "Workflow:",
+                hints: &["w n", "x", "q"],
+            },
+        ],
+        UiMode::Insert => &[
+            BottomBarHintGroup {
+                label: "Insert:",
+                hints: &["type/edit input"],
+            },
+            BottomBarHintGroup {
+                label: "Back:",
+                hints: &["Esc", "Ctrl-["],
+            },
+        ],
+        UiMode::Terminal => &[
+            BottomBarHintGroup {
+                label: "Terminal:",
+                hints: &["Enter send", "Shift+Enter newline"],
+            },
+            BottomBarHintGroup {
+                label: "Back:",
+                hints: &["Esc", "Ctrl-\\ Ctrl-n"],
+            },
+            BottomBarHintGroup {
+                label: "Workflow:",
+                hints: &["w n"],
+            },
+        ],
     }
+}
+
+fn mode_help(mode: UiMode) -> String {
+    bottom_bar_hint_groups(mode)
+        .iter()
+        .map(|group| format!("{} {}", group.label, group.hints.join(", ")))
+        .collect::<Vec<_>>()
+        .join(" | ")
 }
 
 fn append_terminal_output(state: &mut TerminalViewState, bytes: Vec<u8>) {
