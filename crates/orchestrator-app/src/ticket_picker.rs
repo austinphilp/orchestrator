@@ -7,8 +7,8 @@ use orchestrator_core::{
     TicketQuery, TicketSummary, TicketingProvider, VcsProvider, WorkerBackend, WorkerSessionId,
 };
 use orchestrator_ui::{
-    CreateTicketFromPickerRequest, SessionWorktreeDiff, SessionWorkflowAdvanceOutcome,
-    TicketPickerProvider,
+    CreateTicketFromPickerRequest, InboxPublishRequest, SessionWorktreeDiff,
+    SessionWorkflowAdvanceOutcome, TicketPickerProvider,
 };
 use std::path::PathBuf;
 
@@ -110,7 +110,14 @@ where
     }
 
     async fn reload_projection(&self) -> Result<ProjectionState, CoreError> {
-        self.app.startup_state().await.map(|state| state.projection)
+        let app = self.app.clone();
+        tokio::task::spawn_blocking(move || app.projection_state())
+            .await
+            .map_err(|error| {
+                CoreError::Configuration(format!(
+                    "ticket picker task failed while reloading projection: {error}"
+                ))
+            })?
     }
 
     async fn create_ticket_from_brief(
@@ -252,6 +259,20 @@ where
                 "ticket picker task failed while finalizing merged session: {error}"
             ))
         })?
+    }
+
+    async fn publish_inbox_item(
+        &self,
+        request: InboxPublishRequest,
+    ) -> Result<ProjectionState, CoreError> {
+        let app = self.app.clone();
+        tokio::task::spawn_blocking(move || app.publish_inbox_item(&request))
+            .await
+            .map_err(|error| {
+                CoreError::Configuration(format!(
+                    "ticket picker task failed while publishing inbox item: {error}"
+                ))
+            })?
     }
 }
 

@@ -176,6 +176,27 @@ async fn run_session_archive_task(
     }
 }
 
+async fn run_publish_inbox_item_task(
+    provider: Arc<dyn TicketPickerProvider>,
+    request: InboxPublishRequest,
+    sender: mpsc::Sender<TicketPickerEvent>,
+) {
+    match provider.publish_inbox_item(request).await {
+        Ok(projection) => {
+            let _ = sender
+                .send(TicketPickerEvent::InboxItemPublished { projection })
+                .await;
+        }
+        Err(error) => {
+            let _ = sender
+                .send(TicketPickerEvent::InboxItemPublishFailed {
+                    message: sanitize_terminal_display_text(error.to_string().as_str()),
+                })
+                .await;
+        }
+    }
+}
+
 #[derive(Debug, Default)]
 struct MergeQueueResponse {
     completed: bool,

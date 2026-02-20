@@ -214,6 +214,23 @@ pub trait TicketPickerProvider: Send + Sync {
     ) -> Result<(), CoreError> {
         Ok(())
     }
+    async fn publish_inbox_item(
+        &self,
+        _request: InboxPublishRequest,
+    ) -> Result<ProjectionState, CoreError> {
+        Err(CoreError::DependencyUnavailable(
+            "inbox publishing is not supported by this ticket provider".to_owned(),
+        ))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InboxPublishRequest {
+    pub work_item_id: WorkItemId,
+    pub session_id: Option<WorkerSessionId>,
+    pub kind: InboxItemKind,
+    pub title: String,
+    pub coalesce_key: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

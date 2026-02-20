@@ -571,6 +571,107 @@ impl UiShellState {
             })
     }
 
+    fn work_item_id_for_session(&self, session_id: &WorkerSessionId) -> Option<WorkItemId> {
+        self.domain
+            .sessions
+            .get(session_id)
+            .and_then(|session| session.work_item_id.clone())
+    }
+
+    fn session_id_for_work_item(&self, work_item_id: &WorkItemId) -> Option<WorkerSessionId> {
+        self.domain
+            .work_items
+            .get(work_item_id)
+            .and_then(|work_item| work_item.session_id.clone())
+    }
+
+    fn spawn_publish_inbox_item(&mut self, request: InboxPublishRequest) {
+        if request.title.trim().is_empty() || request.coalesce_key.trim().is_empty() {
+            return;
+        }
+        let Some(provider) = self.ticket_picker_provider.clone() else {
+            return;
+        };
+        let Some(sender) = self.ticket_picker_sender.clone() else {
+            return;
+        };
+
+        match TokioHandle::try_current() {
+            Ok(handle) => {
+                handle.spawn(async move {
+                    run_publish_inbox_item_task(provider, request, sender).await;
+                });
+            }
+            Err(_) => {
+                self.status_warning = Some(
+                    "inbox publish unavailable: tokio runtime is not active".to_owned(),
+                );
+            }
+        }
+    }
+
+    fn publish_inbox_for_session(
+        &mut self,
+        session_id: &WorkerSessionId,
+        kind: InboxItemKind,
+        title: String,
+        coalesce_key: &str,
+    ) {
+        let Some(work_item_id) = self.work_item_id_for_session(session_id) else {
+            return;
+        };
+        self.spawn_publish_inbox_item(InboxPublishRequest {
+            work_item_id,
+            session_id: Some(session_id.clone()),
+            kind,
+            title,
+            coalesce_key: coalesce_key.to_owned(),
+        });
+    }
+
+    fn publish_error_for_session(
+        &mut self,
+        session_id: &WorkerSessionId,
+        source_key: &str,
+        message: &str,
+    ) {
+        self.publish_inbox_for_session(
+            session_id,
+            InboxItemKind::Blocked,
+            format!("Error: {}", compact_focus_card_text(message)),
+            format!("error-{source_key}").as_str(),
+        );
+    }
+
+    fn publish_error_for_work_item(
+        &mut self,
+        work_item_id: &WorkItemId,
+        session_id: Option<WorkerSessionId>,
+        source_key: &str,
+        message: &str,
+    ) {
+        self.spawn_publish_inbox_item(InboxPublishRequest {
+            work_item_id: work_item_id.clone(),
+            session_id,
+            kind: InboxItemKind::Blocked,
+            title: format!("Error: {}", compact_focus_card_text(message)),
+            coalesce_key: format!("error-{source_key}"),
+        });
+    }
+
+    fn needs_input_summary(event: &BackendNeedsInputEvent) -> String {
+        let summary = event
+            .questions
+            .first()
+            .map(|question| question.question.as_str())
+            .unwrap_or_else(|| event.question.as_str());
+        compact_focus_card_text(summary)
+    }
+
+    fn needs_input_is_structured_plan_request(event: &BackendNeedsInputEvent) -> bool {
+        !event.questions.is_empty()
+    }
+
     fn active_terminal_session_id(&self) -> Option<&WorkerSessionId> {
         match self.view_stack.active_center() {
             Some(CenterView::TerminalView { session_id }) => Some(session_id),
@@ -1115,6 +1216,23 @@ impl UiShellState {
                     session_id,
                     needs_input,
                 } => {
+                    let needs_input_summary = Self::needs_input_summary(&needs_input);
+                    let is_structured_plan_request =
+                        Self::needs_input_is_structured_plan_request(&needs_input);
+                    self.publish_inbox_for_session(
+                        &session_id,
+                        InboxItemKind::NeedsDecision,
+                        format!("Worker waiting for input: {needs_input_summary}"),
+                        "needs-input",
+                    );
+                    if is_structured_plan_request {
+                        self.publish_inbox_for_session(
+                            &session_id,
+                            InboxItemKind::NeedsDecision,
+                            format!("Plan input request: {needs_input_summary}"),
+                            "plan-input-request",
+                        );
+                    }
                     let prompt = self.needs_input_prompt_from_event(&session_id, needs_input);
                     let view = self.terminal_session_states.entry(session_id).or_default();
                     view.enqueue_needs_input_prompt(prompt);
@@ -1131,6 +1249,11 @@ impl UiShellState {
                     view.output_scroll_line = 0;
                     view.output_follow_tail = true;
                     view.turn_active = false;
+                    self.publish_error_for_session(
+                        &session_id,
+                        "terminal-stream",
+                        error.to_string().as_str(),
+                    );
                     if let RuntimeError::SessionNotFound(_) = error {
                         self.recover_terminal_session_on_not_found(&session_id);
                     }
@@ -1176,6 +1299,7 @@ impl UiShellState {
                     error,
                 } => {
                     if let Some(error) = error {
+                        self.publish_error_for_session(&session_id, "merge-queue", error.as_str());
                         if kind == MergeQueueCommandKind::Merge {
                             self.merge_pending_sessions.remove(&session_id);
                         }
@@ -1229,6 +1353,12 @@ impl UiShellState {
                     }
 
                     if completed {
+                        self.publish_inbox_for_session(
+                            &session_id,
+                            InboxItemKind::FYI,
+                            format!("Ticket merge completed for session {}", session_id.as_str()),
+                            "merge-completed",
+                        );
                         self.merge_pending_sessions.remove(&session_id);
                         if let Some(session) = self.domain.sessions.get_mut(&session_id) {
                             session.status = Some(WorkerSessionStatus::Done);
@@ -1263,6 +1393,7 @@ impl UiShellState {
                     message,
                 } => {
                     self.merge_finalizing_sessions.remove(&session_id);
+                    self.publish_error_for_session(&session_id, "merge-finalize", message.as_str());
                     self.status_warning = Some(format!(
                         "merged session {} finalized with warnings: {}",
                         session_id.as_str(),
@@ -1704,6 +1835,7 @@ fn apply_ticket_picker_event(&mut self, event: TicketPickerEvent) {
                 session_id,
                 message,
             } => {
+                self.publish_error_for_session(&session_id, "workflow-advance", message.as_str());
                 self.status_warning = Some(format!(
                     "workflow advance warning for {}: {}",
                     session_id.as_str(),
@@ -1881,6 +2013,7 @@ fn apply_ticket_picker_event(&mut self, event: TicketPickerEvent) {
                         modal.error = Some(message.clone());
                     }
                 }
+                self.publish_error_for_session(&session_id, "diff-load", message.as_str());
                 self.status_warning = Some(format!(
                     "diff load warning: {}",
                     compact_focus_card_text(message.as_str())
@@ -1916,9 +2049,19 @@ fn apply_ticket_picker_event(&mut self, event: TicketPickerEvent) {
             } => {
                 self.archiving_session_id = None;
                 self.archive_session_confirm_session = None;
+                self.publish_error_for_session(&session_id, "session-archive", message.as_str());
                 self.status_warning = Some(format!(
                     "session archive warning ({}): {}",
                     session_id.as_str(),
+                    compact_focus_card_text(message.as_str())
+                ));
+            }
+            TicketPickerEvent::InboxItemPublished { projection } => {
+                self.domain = projection;
+            }
+            TicketPickerEvent::InboxItemPublishFailed { message } => {
+                self.status_warning = Some(format!(
+                    "inbox publish warning: {}",
                     compact_focus_card_text(message.as_str())
                 ));
             }
@@ -2516,6 +2659,21 @@ fn apply_ticket_picker_event(&mut self, event: TicketPickerEvent) {
             self.spawn_supervisor_cancel(stream_id);
         }
         if let Some(message) = warning_message {
+            let inspector_context = self.supervisor_chat_stream.as_ref().and_then(|stream| {
+                if let SupervisorStreamTarget::Inspector { work_item_id } = &stream.target {
+                    Some((work_item_id.clone(), self.session_id_for_work_item(work_item_id)))
+                } else {
+                    None
+                }
+            });
+            if let Some((work_item_id, session_id)) = inspector_context {
+                self.publish_error_for_work_item(
+                    &work_item_id,
+                    session_id,
+                    "supervisor-stream",
+                    message.as_str(),
+                );
+            }
             let state = classify_supervisor_stream_error(message.as_str());
             self.status_warning = Some(format!(
                 "supervisor {} warning: {}",

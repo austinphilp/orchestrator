@@ -170,7 +170,9 @@ pub fn apply_event(state: &mut ProjectionState, event: StoredEventEnvelope) {
                 .work_items
                 .entry(payload.work_item_id.clone())
                 .or_insert_with(|| empty_work_item_projection(payload.work_item_id.clone()));
-            work_item.inbox_items.push(payload.inbox_item_id.clone());
+            if !work_item.inbox_items.contains(&payload.inbox_item_id) {
+                work_item.inbox_items.push(payload.inbox_item_id.clone());
+            }
         }
         OrchestrationEventPayload::InboxItemResolved(payload) => {
             if let Some(item) = state.inbox_items.get_mut(&payload.inbox_item_id) {

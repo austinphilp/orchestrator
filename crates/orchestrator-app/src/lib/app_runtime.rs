@@ -84,14 +84,64 @@ impl<S: Supervisor, G: GithubClient> App<S, G> {
         self.supervisor.health_check().await?;
         self.github.health_check().await?;
 
-        let store = open_event_store(&self.config.event_store_path)?;
-        let events = store.read_ordered()?;
-        let projection = rebuild_projection(&events);
+        let projection = self.projection_state()?;
 
         Ok(StartupState {
             status: format!("ready ({})", self.config.workspace),
             projection,
         })
+    }
+
+    pub fn projection_state(&self) -> Result<ProjectionState, CoreError> {
+        let store = open_event_store(&self.config.event_store_path)?;
+        let events = store.read_ordered()?;
+        Ok(rebuild_projection(&events))
+    }
+
+    pub fn publish_inbox_item(
+        &self,
+        request: &InboxPublishRequest,
+    ) -> Result<ProjectionState, CoreError> {
+        let title = request.title.trim();
+        if title.is_empty() {
+            return Err(CoreError::InvalidCommandArgs {
+                command_id: "ui.publish_inbox_item".to_owned(),
+                reason: "inbox publish requires a non-empty title".to_owned(),
+            });
+        }
+
+        let coalesce_key = normalize_inbox_coalesce_key(request.coalesce_key.as_str());
+        if coalesce_key.is_empty() {
+            return Err(CoreError::InvalidCommandArgs {
+                command_id: "ui.publish_inbox_item".to_owned(),
+                reason: "inbox publish requires a non-empty coalesce key".to_owned(),
+            });
+        }
+
+        let coalesce_scope = request
+            .session_id
+            .as_ref()
+            .map(|session_id| session_id.as_str())
+            .unwrap_or_else(|| request.work_item_id.as_str());
+        let inbox_item_id = InboxItemId::new(format!("inbox-{coalesce_scope}-{coalesce_key}"));
+
+        let mut store = open_event_store(&self.config.event_store_path)?;
+        store.append(NewEventEnvelope {
+            event_id: format!("evt-inbox-fanout-{}", now_nanos()),
+            occurred_at: now_timestamp(),
+            work_item_id: Some(request.work_item_id.clone()),
+            session_id: request.session_id.clone(),
+            payload: OrchestrationEventPayload::InboxItemCreated(InboxItemCreatedPayload {
+                inbox_item_id,
+                work_item_id: request.work_item_id.clone(),
+                kind: request.kind.clone(),
+                title: title.to_owned(),
+            }),
+            schema_version: DOMAIN_EVENT_SCHEMA_VERSION,
+        })?;
+
+        let events = store.read_ordered()?;
+        Ok(rebuild_projection(&events))
     }
 
     pub async fn start_linear_polling(
@@ -505,6 +555,25 @@ fn now_nanos() -> u128 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_nanos()
+}
+
+fn normalize_inbox_coalesce_key(raw: &str) -> String {
+    let mut key = String::new();
+    let mut previous_was_dash = false;
+    for ch in raw.trim().chars() {
+        let mapped = if ch.is_ascii_alphanumeric() {
+            previous_was_dash = false;
+            ch.to_ascii_lowercase()
+        } else {
+            if previous_was_dash {
+                continue;
+            }
+            previous_was_dash = true;
+            '-'
+        };
+        key.push(mapped);
+    }
+    key.trim_matches('-').to_owned()
 }
 
 fn cleanup_worktree_after_merge(worktree_path_raw: &str, branch: &str) -> Result<(), CoreError> {
