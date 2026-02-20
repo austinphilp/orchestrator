@@ -833,30 +833,132 @@ fn render_ticket_picker_overlay(
     }
 }
 
-fn terminal_input_pane_height(center_height: u16, prompt: Option<&NeedsInputComposerState>) -> u16 {
-    const DEFAULT_INPUT_HEIGHT: u16 = 6;
+const DEFAULT_TERMINAL_INPUT_HEIGHT: u16 = 6;
+const INPUT_PANEL_OUTER_BORDER_HEIGHT: u16 = 2;
+const NEEDS_INPUT_NOTE_HEIGHT: u16 = 3;
+const NEEDS_INPUT_HELP_HEIGHT: u16 = 1;
+const NEEDS_INPUT_ERROR_HEIGHT: u16 = 1;
+const NEEDS_INPUT_QUESTION_MIN_HEIGHT: u16 = 3;
+const NEEDS_INPUT_QUESTION_MAX_EXPANDED_HEIGHT: u16 = 7;
+const NEEDS_INPUT_QUESTION_MAX_DEFAULT_HEIGHT: u16 = 4;
+const NEEDS_INPUT_CHOICE_MIN_ROWS_DEFAULT: usize = 1;
+const NEEDS_INPUT_CHOICE_MAX_ROWS_DEFAULT: usize = 4;
+const NEEDS_INPUT_CHOICE_MAX_ROWS_EXPANDED: usize = 12;
+
+fn terminal_input_pane_height(
+    center_height: u16,
+    center_width: u16,
+    prompt: Option<&NeedsInputComposerState>,
+) -> u16 {
     let Some(prompt) = prompt else {
-        return DEFAULT_INPUT_HEIGHT;
+        return DEFAULT_TERMINAL_INPUT_HEIGHT;
     };
     let Some(question) = prompt.current_question() else {
-        return DEFAULT_INPUT_HEIGHT;
+        return DEFAULT_TERMINAL_INPUT_HEIGHT;
     };
-    let options_len = question
-        .options
-        .as_ref()
-        .map(|options| options.len())
-        .unwrap_or(0);
-    let choice_rows = options_len.clamp(1, 4);
-    let choice_height = u16::try_from(choice_rows).unwrap_or(4).saturating_add(2);
-    let mut target_height = 3u16
+    let is_plan_prompt = expanded_needs_input_layout_active(prompt);
+    let question_height = needs_input_question_height(question, center_width, is_plan_prompt);
+    let choice_height = needs_input_choice_height(question, center_width, is_plan_prompt);
+    let mut inner_required = question_height
         .saturating_add(choice_height)
-        .saturating_add(3)
-        .saturating_add(2);
+        .saturating_add(NEEDS_INPUT_NOTE_HEIGHT)
+        .saturating_add(NEEDS_INPUT_HELP_HEIGHT);
     if prompt.error.is_some() {
-        target_height = target_height.saturating_add(1);
+        inner_required = inner_required.saturating_add(NEEDS_INPUT_ERROR_HEIGHT);
+    }
+    let mut target_height = inner_required.saturating_add(INPUT_PANEL_OUTER_BORDER_HEIGHT);
+    if is_plan_prompt {
+        target_height = target_height.max(DEFAULT_TERMINAL_INPUT_HEIGHT.saturating_mul(2));
     }
     let max_height = center_height.saturating_sub(4).max(3);
     target_height.clamp(3, max_height)
+}
+
+fn expanded_needs_input_layout_active(prompt: &NeedsInputComposerState) -> bool {
+    if prompt.questions.len() > 1 {
+        return true;
+    }
+
+    if prompt
+        .prompt_id
+        .to_ascii_lowercase()
+        .contains("plan")
+    {
+        return true;
+    }
+
+    prompt.questions.iter().any(|question| {
+        let id_has_plan = question.id.to_ascii_lowercase().contains("plan");
+        let header_has_plan = question.header.to_ascii_lowercase().contains("plan");
+        let question_has_plan = question.question.to_ascii_lowercase().contains("plan");
+        id_has_plan || header_has_plan || question_has_plan
+    })
+}
+
+fn needs_input_question_height(
+    question: &BackendNeedsInputQuestion,
+    panel_width: u16,
+    expanded_layout: bool,
+) -> u16 {
+    let question_text = format!("{} | {}", question.header, question.question);
+    let content_width = panel_width.saturating_sub(6);
+    let wrapped_rows = wrapped_row_count(question_text.as_str(), content_width);
+    let max_height = if expanded_layout {
+        NEEDS_INPUT_QUESTION_MAX_EXPANDED_HEIGHT
+    } else {
+        NEEDS_INPUT_QUESTION_MAX_DEFAULT_HEIGHT
+    };
+    wrapped_rows
+        .saturating_add(2)
+        .clamp(NEEDS_INPUT_QUESTION_MIN_HEIGHT, max_height)
+}
+
+fn needs_input_choice_height(
+    question: &BackendNeedsInputQuestion,
+    panel_width: u16,
+    expanded_layout: bool,
+) -> u16 {
+    let content_width = panel_width.saturating_sub(10);
+    let Some(options) = question.options.as_ref().filter(|options| !options.is_empty()) else {
+        return 3;
+    };
+
+    let mut rows = 0usize;
+    for option in options {
+        let label = compact_focus_card_text(option.label.as_str());
+        let line = if option.description.trim().is_empty() {
+            format!("> [ ] {label}")
+        } else {
+            let description = compact_focus_card_text(option.description.as_str());
+            format!("> [ ] {label} - {description}")
+        };
+        rows = rows.saturating_add(usize::from(wrapped_row_count(line.as_str(), content_width)));
+    }
+    let max_rows = if expanded_layout {
+        NEEDS_INPUT_CHOICE_MAX_ROWS_EXPANDED
+    } else {
+        NEEDS_INPUT_CHOICE_MAX_ROWS_DEFAULT
+    };
+    let clamped_rows = rows.clamp(NEEDS_INPUT_CHOICE_MIN_ROWS_DEFAULT, max_rows);
+    u16::try_from(clamped_rows).unwrap_or(NEEDS_INPUT_CHOICE_MAX_EXPANDED_HEIGHT_U16)
+        .saturating_add(2)
+}
+
+const NEEDS_INPUT_CHOICE_MAX_EXPANDED_HEIGHT_U16: u16 = 12;
+
+fn wrapped_row_count(text: &str, width: u16) -> u16 {
+    let width = width.max(1) as usize;
+    let mut rows = 0usize;
+    for segment in text.split('\n') {
+        let chars = segment.chars().count();
+        let wrapped = if chars == 0 {
+            1
+        } else {
+            chars.div_ceil(width)
+        };
+        rows = rows.saturating_add(wrapped.max(1));
+    }
+    u16::try_from(rows).unwrap_or(u16::MAX)
 }
 
 fn render_terminal_needs_input_panel(
@@ -888,18 +990,19 @@ fn render_terminal_needs_input_panel(
         .as_ref()
         .map(|options| options.len())
         .unwrap_or(0);
-    let choice_rows = options_len.clamp(1, 4);
-    let choice_height = u16::try_from(choice_rows).unwrap_or(4).saturating_add(2);
+    let is_plan_prompt = expanded_needs_input_layout_active(prompt);
+    let question_height = needs_input_question_height(question, input_area.width, is_plan_prompt);
+    let choice_height = needs_input_choice_height(question, input_area.width, is_plan_prompt);
 
     let mut constraints = vec![
-        Constraint::Length(3),
-        Constraint::Length(choice_height),
-        Constraint::Length(3),
+        Constraint::Length(question_height),
+        Constraint::Min(choice_height),
+        Constraint::Length(NEEDS_INPUT_NOTE_HEIGHT),
     ];
     if prompt.error.is_some() {
-        constraints.push(Constraint::Length(1));
+        constraints.push(Constraint::Length(NEEDS_INPUT_ERROR_HEIGHT));
     }
-    constraints.push(Constraint::Min(2));
+    constraints.push(Constraint::Length(NEEDS_INPUT_HELP_HEIGHT));
     let sections = Layout::vertical(constraints).split(inner);
     let question_area = sections[0];
     let choice_area = sections[1];

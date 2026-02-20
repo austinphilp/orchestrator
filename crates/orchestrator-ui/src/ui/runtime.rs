@@ -92,8 +92,11 @@ impl Ui {
                 let center_text = render_center_panel(&ui_state);
                 if let Some(session_id) = shell_state.active_terminal_session_id().cloned() {
                     let active_needs_input = shell_state.active_terminal_needs_input().cloned();
-                    let terminal_input_height =
-                        terminal_input_pane_height(center_area.height, active_needs_input.as_ref());
+                    let terminal_input_height = terminal_input_pane_height(
+                        center_area.height,
+                        center_area.width,
+                        active_needs_input.as_ref(),
+                    );
                     let center_layout = Layout::vertical([
                         Constraint::Length(3),
                         Constraint::Min(1),
