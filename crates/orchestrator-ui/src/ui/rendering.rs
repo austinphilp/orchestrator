@@ -1125,9 +1125,13 @@ fn render_worktree_diff_modal(
         .map(|entry| entry.path.as_str())
         .unwrap_or("(no file)");
     let right_title = format!("diff | {selected_path}");
+    let diff_viewport_rows = usize::from(panes[1].height.saturating_sub(2)).max(1);
     frame.render_widget(
         Paragraph::new(right)
-            .scroll((worktree_diff_modal_scroll(modal, files.as_slice()), 0))
+            .scroll((
+                worktree_diff_modal_scroll(modal, files.as_slice(), diff_viewport_rows),
+                0,
+            ))
             .block(Block::default().title(right_title).borders(Borders::ALL)),
         panes[1],
     );
@@ -1428,15 +1432,22 @@ fn render_selected_file_diff(modal: &WorktreeDiffModalState, files: &[DiffFileSu
     Text::from(rendered)
 }
 
-fn worktree_diff_modal_scroll(modal: &WorktreeDiffModalState, files: &[DiffFileSummary]) -> u16 {
-    let Some((file_start, _file_end, selected_hunk)) = selected_file_and_hunk_range(modal, files) else {
+fn worktree_diff_modal_scroll(
+    modal: &WorktreeDiffModalState,
+    files: &[DiffFileSummary],
+    viewport_rows: usize,
+) -> u16 {
+    let Some((file_start, file_end, selected_hunk)) = selected_file_and_hunk_range(modal, files) else {
         return 0;
     };
     let center = selected_hunk
         .map(|(start, end)| start + (end.saturating_sub(start) / 2))
         .unwrap_or(file_start);
     let local_line = center.saturating_sub(file_start);
-    local_line.saturating_sub(3).min(u16::MAX as usize) as u16
+    let preferred_scroll = local_line.saturating_sub(3);
+    let line_count = file_end.saturating_sub(file_start).saturating_add(1);
+    let max_scroll = line_count.saturating_sub(viewport_rows.max(1));
+    preferred_scroll.min(max_scroll).min(u16::MAX as usize) as u16
 }
 
 fn diff_rendered_line_style(kind: DiffRenderedLineKind) -> Style {
