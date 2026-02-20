@@ -522,6 +522,16 @@ fn route_key_press(shell_state: &mut UiShellState, key: KeyEvent) -> RoutedInput
     if shell_state.mode == UiMode::Terminal && shell_state.terminal_escape_pending {
         return route_terminal_mode_key(shell_state, key);
     }
+    if shell_state.mode == UiMode::Terminal
+        && shell_state.is_terminal_view_active()
+        && shell_state.terminal_session_has_any_needs_input()
+        && !shell_state.terminal_session_has_active_needs_input()
+        && key.modifiers.is_empty()
+        && matches!(key.code, KeyCode::Char('i'))
+    {
+        let _ = shell_state.activate_terminal_needs_input(true);
+        return RoutedInput::Ignore;
+    }
     if shell_state.apply_terminal_compose_key(key) {
         return RoutedInput::Ignore;
     }

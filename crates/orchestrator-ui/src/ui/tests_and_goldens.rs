@@ -1313,7 +1313,78 @@ mod tests {
             .and_then(|view| view.active_needs_input.as_ref())
             .expect("needs-input prompt should activate for active terminal session");
         assert_eq!(prompt.prompt_id.as_str(), "prompt-plan-gate");
+        assert!(prompt.interaction_active);
+        assert!(shell_state.terminal_session_has_active_needs_input());
         assert!(shell_state.mode == UiMode::Terminal);
+    }
+
+    #[test]
+    fn planning_needs_input_requires_second_i_to_activate_note_entry() {
+        let backend = Arc::new(ManualTerminalBackend::default());
+        let mut projection = sample_projection(true);
+        projection
+            .work_items
+            .get_mut(&WorkItemId::new("wi-1"))
+            .expect("work item")
+            .workflow_state = Some(WorkflowState::Planning);
+        let mut shell_state = UiShellState::new_with_integrations(
+            "ready".to_owned(),
+            projection,
+            None,
+            None,
+            None,
+            Some(backend),
+        );
+        shell_state.open_terminal_and_enter_mode();
+
+        let sender = shell_state
+            .terminal_session_sender
+            .clone()
+            .expect("terminal sender");
+        sender
+            .try_send(TerminalSessionEvent::NeedsInput {
+                session_id: WorkerSessionId::new("sess-1"),
+                needs_input: BackendNeedsInputEvent {
+                    prompt_id: "prompt-planning".to_owned(),
+                    question: "Add planning note".to_owned(),
+                    options: vec!["Continue".to_owned(), "Revise".to_owned()],
+                    default_option: Some("Continue".to_owned()),
+                    questions: Vec::new(),
+                },
+            })
+            .expect("queue needs-input event");
+
+        shell_state.poll_terminal_session_events();
+        assert!(!shell_state.terminal_session_has_active_needs_input());
+
+        let prompt = shell_state
+            .terminal_session_states
+            .get(&WorkerSessionId::new("sess-1"))
+            .and_then(|view| view.active_needs_input.as_ref())
+            .expect("planning prompt should exist");
+        assert_eq!(prompt.prompt_id.as_str(), "prompt-planning");
+        assert!(!prompt.interaction_active);
+
+        handle_key_press(&mut shell_state, key(KeyCode::Char('h')));
+        assert!(shell_state.terminal_compose_input.is_empty());
+
+        handle_key_press(&mut shell_state, key(KeyCode::Char('i')));
+        let prompt = shell_state
+            .terminal_session_states
+            .get(&WorkerSessionId::new("sess-1"))
+            .and_then(|view| view.active_needs_input.as_ref())
+            .expect("planning prompt should become active");
+        assert!(prompt.interaction_active);
+        assert!(prompt.note_insert_mode);
+        assert!(shell_state.terminal_session_has_active_needs_input());
+
+        handle_key_press(&mut shell_state, key(KeyCode::Char('n')));
+        let prompt = shell_state
+            .terminal_session_states
+            .get(&WorkerSessionId::new("sess-1"))
+            .and_then(|view| view.active_needs_input.as_ref())
+            .expect("planning prompt should stay active");
+        assert_eq!(prompt.note_input_state.text.as_str(), "n");
     }
 
     #[test]
