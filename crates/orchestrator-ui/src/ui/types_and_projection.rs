@@ -602,8 +602,8 @@ fn project_center_pane(
                     }),
             );
             lines.push("j/k or arrows: move selection".to_owned());
-            lines.push("Tab: cycle inbox/sessions focus in left pane".to_owned());
-            lines.push("Shift+Tab: toggle left/right pane focus".to_owned());
+            lines.push("Tab: toggle left/right pane focus".to_owned());
+            lines.push("Shift+Tab: cycle inbox/sessions focus in left pane".to_owned());
             lines.push("[ / ]: cycle batch lanes".to_owned());
             lines.push("g/G: jump first/last item".to_owned());
             lines.push("Enter: open focus card".to_owned());

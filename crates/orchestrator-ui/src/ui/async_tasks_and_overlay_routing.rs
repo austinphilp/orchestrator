@@ -768,7 +768,7 @@ fn route_needs_input_modal_key(shell_state: &mut UiShellState, key: KeyEvent) ->
         return RoutedInput::Ignore;
     }
 
-    if matches!(key.code, KeyCode::BackTab) {
+    if matches!(key.code, KeyCode::Tab) {
         shell_state.cycle_pane_focus();
         return RoutedInput::Ignore;
     }
@@ -784,7 +784,7 @@ fn route_needs_input_modal_key(shell_state: &mut UiShellState, key: KeyEvent) ->
         KeyCode::Char('i') => {
             shell_state.toggle_terminal_needs_input_note_insert_mode(true);
         }
-        KeyCode::Tab | KeyCode::Right | KeyCode::Char('l') => {
+        KeyCode::Right | KeyCode::Char('l') => {
             shell_state.move_terminal_needs_input_question(1);
         }
         KeyCode::Left | KeyCode::Char('h') => {
