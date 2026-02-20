@@ -2,8 +2,8 @@ status: ready
 mode: Normal
 selected_inbox_index: 0
 selected_inbox_item_id: inbox-decision
-center_stack: Inbox
-center_title: Inbox View
+center_stack: Terminal
+center_title: Terminal
 
 [inbox]
 Batch lanes: [1] Decide / Unblock 1 | [2] Approvals 1 | [3] PR Reviews 1 | [4] FYI Digest 1
@@ -19,25 +19,9 @@ Background:
   [ ] FYI: FYI: background agent progress
 
 [center]
-Stack: Inbox
+Stack: Terminal
 
-4 unresolved inbox items
-[1] Decide / Unblock: 1 unresolved / 1 total
-[2] Approvals: 1 unresolved / 1 total
-[3] PR Reviews: 1 unresolved / 1 total
-[4] FYI Digest: 1 unresolved / 1 total
-j/k or arrows: move selection
-Tab: toggle left/right pane focus
-Shift+Tab: cycle inbox/sessions focus in left pane
-[ / ]: cycle batch lanes
-g/G: jump first/last item
-Enter: open focus card
-c: toggle global supervisor chat
-i: enter insert mode (or notes/compose on right pane)
-I: open terminal for selected item
-o: open session output and acknowledge selected inbox item
-v d/t/p/c: open diff/test/PR/chat inspector
-Backspace: minimize top view
+No terminal output available yet.
 
 [which-key]
 (none)

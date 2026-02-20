@@ -316,7 +316,6 @@ pub trait SupervisorCommandDispatcher: Send + Sync {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CenterView {
-    InboxView,
     FocusCardView {
         inbox_item_id: InboxItemId,
     },
@@ -361,7 +360,6 @@ impl ArtifactInspectorKind {
 impl CenterView {
     fn label(&self) -> String {
         match self {
-            Self::InboxView => "Inbox".to_owned(),
             Self::FocusCardView { inbox_item_id } => {
                 format!("FocusCard({})", inbox_item_id.as_str())
             }
@@ -404,9 +402,7 @@ pub struct ViewStack {
 
 impl Default for ViewStack {
     fn default() -> Self {
-        Self {
-            center: vec![CenterView::InboxView],
-        }
+        Self { center: Vec::new() }
     }
 }
 
@@ -438,6 +434,10 @@ impl ViewStack {
         }
         self.center.pop();
         true
+    }
+
+    pub fn clear_center(&mut self) {
+        self.center.clear();
     }
 }
 
@@ -495,11 +495,17 @@ pub struct UiState {
 
 impl UiState {
     pub fn center_stack_label(&self) -> String {
-        self.center_view_stack
+        let label = self
+            .center_view_stack
             .iter()
             .map(CenterView::label)
             .collect::<Vec<_>>()
-            .join(" > ")
+            .join(" > ");
+        if label.is_empty() {
+            "Terminal".to_owned()
+        } else {
+            label
+        }
     }
 }
 
@@ -647,17 +653,26 @@ pub(crate) fn project_ui_state(
     let selected_session_id = selected_row.and_then(|row| row.session_id.clone());
 
     let center_view_stack = view_stack.center_views().to_vec();
-    let active_center = view_stack
-        .active_center()
-        .cloned()
-        .unwrap_or(CenterView::InboxView);
-    let center_pane = project_center_pane(
-        &active_center,
-        &inbox_rows,
-        &inbox_batch_surfaces,
-        domain,
-        terminal_view_state,
-    );
+    let active_center = view_stack.active_center().cloned().or_else(|| {
+        selected_session_id
+            .as_ref()
+            .cloned()
+            .map(|session_id| CenterView::TerminalView { session_id })
+    });
+    let center_pane = active_center
+        .as_ref()
+        .map(|center| {
+            project_center_pane(
+                center,
+                &inbox_rows,
+                domain,
+                terminal_view_state,
+            )
+        })
+        .unwrap_or_else(|| CenterPaneState {
+            title: "Terminal".to_owned(),
+            lines: vec!["No terminal output available yet.".to_owned()],
+        });
 
     UiState {
         status: status.to_owned(),
@@ -696,45 +711,10 @@ fn resolve_selected_inbox(
 fn project_center_pane(
     active_center: &CenterView,
     inbox_rows: &[UiInboxRow],
-    inbox_batch_surfaces: &[UiBatchSurface],
     domain: &ProjectionState,
     terminal_view_state: Option<&TerminalViewState>,
 ) -> CenterPaneState {
     match active_center {
-        CenterView::InboxView => {
-            let unresolved = inbox_rows.iter().filter(|item| !item.resolved).count();
-            let mut lines = vec![format!("{unresolved} unresolved inbox items")];
-            lines.extend(
-                inbox_batch_surfaces
-                    .iter()
-                    .filter(|surface| surface.total_count > 0)
-                    .map(|surface| {
-                        format!(
-                            "[{}] {}: {} unresolved / {} total",
-                            surface.kind.hotkey(),
-                            surface.kind.label(),
-                            surface.unresolved_count,
-                            surface.total_count
-                        )
-                    }),
-            );
-            lines.push("j/k or arrows: move selection".to_owned());
-            lines.push("Tab: toggle left/right pane focus".to_owned());
-            lines.push("Shift+Tab: cycle inbox/sessions focus in left pane".to_owned());
-            lines.push("[ / ]: cycle batch lanes".to_owned());
-            lines.push("g/G: jump first/last item".to_owned());
-            lines.push("Enter: open focus card".to_owned());
-            lines.push("c: toggle global supervisor chat".to_owned());
-            lines.push("i: enter insert mode (or notes/compose on right pane)".to_owned());
-            lines.push("I: open terminal for selected item".to_owned());
-            lines.push("o: open session output and acknowledge selected inbox item".to_owned());
-            lines.push("v d/t/p/c: open diff/test/PR/chat inspector".to_owned());
-            lines.push("Backspace: minimize top view".to_owned());
-            CenterPaneState {
-                title: "Inbox View".to_owned(),
-                lines,
-            }
-        }
         CenterView::FocusCardView { inbox_item_id } => {
             project_focus_card_pane(inbox_item_id, inbox_rows, domain)
         }

@@ -33,7 +33,7 @@ Evidence:
 - LogSnippet artifact 'Test output tail' -> artifact://logs/wi-focus?tail=2+failures+in+ui+snapshot+tests
 - PR artifact 'Draft PR #138' -> https://github.com/example/orchestrator/pull/138
 
-Shortcuts: t terminal | v d diff | v t tests | v p PR | v c chat
+Shortcuts: v d diff | v t tests | v p PR | v c chat
 Backspace: minimize top view
 
 [which-key]
