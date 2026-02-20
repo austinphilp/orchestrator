@@ -123,6 +123,10 @@ The repository is a Rust workspace with a layered design:
   - Modal interaction (`Normal`, `Insert`, `Terminal`).
   - Center stack views (`Inbox`, focus card, terminal, inspectors, supervisor chat).
   - Active overlay dialogs (ticket picker, confirm dialogs, diff modal) take keyboard priority over terminal needs-input prompts; plan input remains pending until the user returns to session interaction.
+  - Inbox lane routing rules:
+    - Plan-input prompts in `New`/`Planning` route to `NeedsDecision`.
+    - Non-planning prompts that require user progression route to `NeedsApproval`.
+    - Idle review-stage tickets (`AwaitingYourReview`/`ReadyForReview`/`InReview`) route to `ReadyForReview` (PR lane).
   - Terminal/session feed output scrolling is bounded by rendered wrapped line counts so manual scroll and follow-tail behavior stay in sync.
 - Keymap trie/which-key logic:
   - `orchestrator-ui/src/keymap.rs`
