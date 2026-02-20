@@ -8,6 +8,7 @@ use orchestrator_core::{
     TicketingProvider, UntypedCommandInvocation, VcsProvider, WorkItemId, WorkerBackend,
     WorkerSessionId, WorkerSessionStatus, WorkflowGuardContext, WorkflowState,
     WorkflowTransitionPayload, WorkflowTransitionReason, DOMAIN_EVENT_SCHEMA_VERSION,
+    SessionRuntimeProjection,
 };
 use orchestrator_ui::{
     InboxPublishRequest, InboxResolveRequest, SessionWorkflowAdvanceOutcome, SupervisorCommandContext,

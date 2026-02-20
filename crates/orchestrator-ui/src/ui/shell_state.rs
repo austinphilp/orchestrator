@@ -57,6 +57,7 @@ struct UiShellState {
     merge_queue: VecDeque<MergeQueueRequest>,
     merge_last_dispatched_at: Option<Instant>,
     merge_last_poll_at: Option<Instant>,
+    approval_reconcile_last_poll_at: Option<Instant>,
     merge_event_sender: Option<mpsc::Sender<MergeQueueEvent>>,
     merge_event_receiver: Option<mpsc::Receiver<MergeQueueEvent>>,
     merge_pending_sessions: HashSet<WorkerSessionId>,
@@ -161,6 +162,7 @@ impl UiShellState {
             merge_queue: VecDeque::new(),
             merge_last_dispatched_at: None,
             merge_last_poll_at: None,
+            approval_reconcile_last_poll_at: None,
             merge_event_sender,
             merge_event_receiver,
             merge_pending_sessions: HashSet::new(),
@@ -877,6 +879,135 @@ impl UiShellState {
         });
     }
 
+    fn progression_approval_coalesce_key() -> &'static str {
+        "workflow-awaiting-progression"
+    }
+
+    fn progression_approval_title_prefix() -> &'static str {
+        "Approval needed to progress this ticket"
+    }
+
+    fn expected_progression_approval_inbox_id(
+        session_id: &WorkerSessionId,
+    ) -> InboxItemId {
+        InboxItemId::new(format!(
+            "inbox-{}-{}",
+            session_id.as_str(),
+            Self::progression_approval_coalesce_key()
+        ))
+    }
+
+    fn session_is_actively_working(&self, session_id: &WorkerSessionId) -> bool {
+        if self
+            .terminal_session_states
+            .get(session_id)
+            .map(|state| state.turn_active)
+            .unwrap_or(false)
+        {
+            return true;
+        }
+
+        self.domain
+            .session_runtime
+            .get(session_id)
+            .map(|runtime| runtime.is_working)
+            .unwrap_or(true)
+    }
+
+    fn session_waiting_for_plan_input(&self, session_id: &WorkerSessionId) -> bool {
+        if !matches!(
+            self.workflow_state_for_session(session_id),
+            Some(WorkflowState::Planning)
+        ) {
+            return false;
+        }
+
+        if matches!(
+            self.domain
+                .sessions
+                .get(session_id)
+                .and_then(|session| session.status.as_ref()),
+            Some(WorkerSessionStatus::WaitingForUser)
+        ) {
+            return true;
+        }
+
+        self.terminal_session_states
+            .get(session_id)
+            .map(|state| {
+                state.active_needs_input.is_some() || !state.pending_needs_input_prompts.is_empty()
+            })
+            .unwrap_or(false)
+    }
+
+    fn session_requires_progression_approval(&self, session_id: &WorkerSessionId) -> bool {
+        if !matches!(
+            self.workflow_state_for_session(session_id),
+            Some(WorkflowState::Planning | WorkflowState::Implementing)
+        ) {
+            return false;
+        }
+
+        if self.session_is_actively_working(session_id) {
+            return false;
+        }
+
+        !self.session_waiting_for_plan_input(session_id)
+    }
+
+    fn find_progression_approval_inbox_for_session(
+        &self,
+        session_id: &WorkerSessionId,
+    ) -> Option<(InboxItemId, WorkItemId)> {
+        let expected_id = Self::expected_progression_approval_inbox_id(session_id);
+        let work_item_id = self.work_item_id_for_session(session_id)?;
+        self.domain
+            .inbox_items
+            .get(&expected_id)
+            .filter(|item| item.kind == InboxItemKind::NeedsApproval && !item.resolved)
+            .map(|_| (expected_id, work_item_id))
+    }
+
+    fn reconcile_progression_approval_inbox_for_session(
+        &mut self,
+        session_id: &WorkerSessionId,
+    ) -> bool {
+        if !is_open_session_status(
+            self.domain
+                .sessions
+                .get(session_id)
+                .and_then(|session| session.status.as_ref()),
+        ) {
+            return false;
+        }
+
+        if self.session_requires_progression_approval(session_id) {
+            self.publish_inbox_for_session(
+                session_id,
+                InboxItemKind::NeedsApproval,
+                format!(
+                    "{}: {}",
+                    Self::progression_approval_title_prefix(),
+                    session_display_labels(&self.domain, session_id).compact_label
+                ),
+                Self::progression_approval_coalesce_key(),
+            );
+            return true;
+        }
+
+        if let Some((inbox_item_id, work_item_id)) =
+            self.find_progression_approval_inbox_for_session(session_id)
+        {
+            self.spawn_resolve_inbox_item(InboxResolveRequest {
+                inbox_item_id,
+                work_item_id,
+            });
+            return true;
+        }
+
+        false
+    }
+
     fn workflow_state_for_session(&self, session_id: &WorkerSessionId) -> Option<WorkflowState> {
         self.domain
             .sessions
@@ -909,7 +1040,7 @@ impl UiShellState {
             Some(WorkflowState::Implementing | WorkflowState::Testing | WorkflowState::PRDrafted)
             | None => Some((
                 InboxItemKind::NeedsApproval,
-                "workflow-awaiting-progression",
+                Self::progression_approval_coalesce_key(),
                 "Worker waiting for progression",
             )),
         }
@@ -921,7 +1052,7 @@ impl UiShellState {
         match workflow_state {
             WorkflowState::PRDrafted => Some((
                 InboxItemKind::NeedsApproval,
-                "workflow-awaiting-progression",
+                Self::progression_approval_coalesce_key(),
                 "Approval needed to progress this ticket",
             )),
             WorkflowState::AwaitingYourReview
@@ -1523,6 +1654,7 @@ impl UiShellState {
         let mut changed = false;
         changed |= self.poll_terminal_session_events();
         changed |= self.flush_background_terminal_output_and_report();
+        changed |= self.enqueue_progression_approval_reconcile_polls();
         changed |= self.poll_merge_queue_events();
         changed |= self.poll_session_info_summary_events();
         changed |= self.tick_session_info_summary_refresh();
@@ -1658,6 +1790,7 @@ impl UiShellState {
                             self.schedule_session_info_summary_refresh_for_active_session();
                         }
                     }
+                    self.reconcile_progression_approval_inbox_for_session(&session_id);
                 }
                 TerminalSessionEvent::NeedsInput {
                     session_id,
@@ -1675,9 +1808,13 @@ impl UiShellState {
                         );
                     }
                     let prompt = self.needs_input_prompt_from_event(&session_id, needs_input);
-                    let view = self.terminal_session_states.entry(session_id).or_default();
+                    let view = self
+                        .terminal_session_states
+                        .entry(session_id.clone())
+                        .or_default();
                     view.enqueue_needs_input_prompt(prompt);
                     self.schedule_session_info_summary_refresh_for_active_session();
+                    self.reconcile_progression_approval_inbox_for_session(&session_id);
                 }
                 TerminalSessionEvent::StreamFailed { session_id, error } => {
                     self.terminal_session_streamed.remove(&session_id);
@@ -1699,6 +1836,7 @@ impl UiShellState {
                         "terminal-stream",
                         error.to_string().as_str(),
                     );
+                    self.reconcile_progression_approval_inbox_for_session(&session_id);
                     if let RuntimeError::SessionNotFound(_) = error {
                         self.recover_terminal_session_on_not_found(&session_id);
                     }
@@ -1724,6 +1862,7 @@ impl UiShellState {
                     if self.active_terminal_session_id() == Some(&session_id) {
                         self.schedule_session_info_summary_refresh_for_active_session();
                     }
+                    self.reconcile_progression_approval_inbox_for_session(&session_id);
                 }
             }
         }
@@ -1930,6 +2069,37 @@ impl UiShellState {
             self.publish_review_idle_inbox_for_session(&session_id);
             changed |= self.ensure_review_sync_instruction(&session_id);
             changed |= self.enqueue_merge_queue_request(session_id, MergeQueueCommandKind::Reconcile);
+        }
+        changed
+    }
+
+    fn enqueue_progression_approval_reconcile_polls(&mut self) -> bool {
+        let now = Instant::now();
+        if self
+            .approval_reconcile_last_poll_at
+            .map(|previous| now.duration_since(previous) < APPROVAL_RECONCILE_POLL_INTERVAL)
+            .unwrap_or(false)
+        {
+            return false;
+        }
+        self.approval_reconcile_last_poll_at = Some(now);
+
+        let session_ids = self
+            .domain
+            .sessions
+            .iter()
+            .filter_map(|(session_id, session)| {
+                if is_open_session_status(session.status.as_ref()) {
+                    Some(session_id.clone())
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>();
+
+        let mut changed = false;
+        for session_id in session_ids {
+            changed |= self.reconcile_progression_approval_inbox_for_session(&session_id);
         }
         changed
     }
@@ -2333,6 +2503,7 @@ fn apply_ticket_picker_event(&mut self, event: TicketPickerEvent) {
                         coalesce_key,
                     );
                 }
+                self.reconcile_progression_approval_inbox_for_session(&outcome.session_id);
 
                 let labels = session_display_labels(&self.domain, &outcome.session_id);
                 self.status_warning = Some(format!(
@@ -3607,6 +3778,7 @@ fn apply_ticket_picker_event(&mut self, event: TicketPickerEvent) {
                 if let Some(work_item_id) = self.work_item_id_for_session(&session_id) {
                     self.acknowledge_needs_decision_for_work_item(&work_item_id);
                 }
+                self.reconcile_progression_approval_inbox_for_session(&session_id);
             }
             Err(_) => {
                 if let Some(prompt) = self.active_terminal_needs_input_mut() {
