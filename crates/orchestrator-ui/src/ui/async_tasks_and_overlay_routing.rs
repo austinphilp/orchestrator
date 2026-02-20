@@ -567,7 +567,8 @@ fn resolve_shell_home() -> Option<String> {
 fn render_ticket_picker_overlay_text(overlay: &TicketPickerOverlayState) -> String {
     let mut lines = if overlay.new_ticket_mode {
         vec![
-            "Type brief | Enter: create | Backspace: edit | Esc: cancel".to_owned(),
+            "Type brief | Enter: create | Shift+Enter: newline | Backspace: edit | Esc: cancel"
+                .to_owned(),
         ]
     } else {
         vec![
@@ -862,6 +863,9 @@ fn route_ticket_picker_key(shell_state: &mut UiShellState, key: KeyEvent) -> Rou
         match key.code {
             KeyCode::Enter if key.modifiers.is_empty() => {
                 shell_state.submit_created_ticket_from_picker();
+            }
+            KeyCode::Enter if key.modifiers == KeyModifiers::SHIFT => {
+                shell_state.append_create_ticket_brief_newline();
             }
             KeyCode::Backspace if key.modifiers.is_empty() => {
                 shell_state.pop_create_ticket_brief_char();

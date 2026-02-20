@@ -2856,6 +2856,7 @@ mod tests {
         let rendered = render_ticket_picker_overlay_text(&overlay);
         assert!(!rendered.contains("Brief:"));
         assert!(rendered.contains("Enter: create"));
+        assert!(rendered.contains("Shift+Enter: newline"));
     }
 
     #[test]
@@ -2880,6 +2881,20 @@ mod tests {
     }
 
     #[test]
+    fn ticket_picker_new_ticket_mode_shift_enter_inserts_newline() {
+        let mut shell_state = UiShellState::new("ready".to_owned(), triage_projection());
+        shell_state.ticket_picker_overlay.open();
+        shell_state.ticket_picker_overlay.begin_new_ticket_mode();
+
+        route_ticket_picker_key(&mut shell_state, shift_key(KeyCode::Char('a')));
+        route_ticket_picker_key(&mut shell_state, shift_key(KeyCode::Enter));
+        route_ticket_picker_key(&mut shell_state, key(KeyCode::Char('b')));
+
+        assert_eq!(shell_state.ticket_picker_overlay.new_ticket_brief_input.text(), "a\nb");
+        assert!(!shell_state.ticket_picker_overlay.creating);
+    }
+
+    #[test]
     fn ticket_picker_esc_cancels_new_ticket_mode_without_closing_overlay() {
         let mut shell_state = UiShellState::new("ready".to_owned(), triage_projection());
         shell_state.ticket_picker_overlay.open();
@@ -2892,7 +2907,11 @@ mod tests {
         route_ticket_picker_key(&mut shell_state, key(KeyCode::Esc));
         assert!(shell_state.ticket_picker_overlay.visible);
         assert!(!shell_state.ticket_picker_overlay.new_ticket_mode);
-        assert!(shell_state.ticket_picker_overlay.new_ticket_brief_input.is_empty());
+        assert!(shell_state
+            .ticket_picker_overlay
+            .new_ticket_brief_input
+            .text()
+            .is_empty());
     }
 
     #[test]
