@@ -8,8 +8,8 @@ use integration_linear::{
 use integration_shortcut::{ShortcutConfig, ShortcutTicketingProvider};
 use orchestrator_app::{App, AppConfig, AppTicketPickerProvider};
 use orchestrator_core::{
-    BackendKind, CoreError, SpawnSpec, SqliteEventStore, TicketProvider, TicketRecord,
-    TicketingProvider, WorkerBackend,
+    BackendKind, CoreError, OrchestrationEventPayload, SpawnSpec, SqliteEventStore, TicketProvider,
+    TicketRecord, TicketingProvider, WorkItemId, WorkerBackend, WorkflowState,
 };
 use orchestrator_github::{GhCliClient, ProcessCommandRunner as GhProcessCommandRunner};
 use orchestrator_supervisor::OpenRouterSupervisor;
@@ -21,6 +21,8 @@ const ENV_HARNESS_SESSION_ID: &str = "ORCHESTRATOR_HARNESS_SESSION_ID";
 const ENV_OPENROUTER_API_KEY: &str = "OPENROUTER_API_KEY";
 const ENV_LINEAR_API_KEY: &str = "LINEAR_API_KEY";
 const ENV_SHORTCUT_API_KEY: &str = "ORCHESTRATOR_SHORTCUT_API_KEY";
+const STARTUP_RESUME_NUDGE: &str =
+    "Sorry, we got interrupted, please continue from where we last left off.";
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -315,6 +317,7 @@ async fn rehydrate_inflight_sessions(
         if mapping.session.backend_kind != active_backend_kind {
             continue;
         }
+        let workflow_state = latest_workflow_state_for_work_item(&store, &mapping.work_item_id)?;
 
         let mut environment = Vec::new();
         if mapping.session.backend_kind == BackendKind::Codex {
@@ -326,7 +329,7 @@ async fn rehydrate_inflight_sessions(
             }
         }
 
-        let instruction = resume_instruction_from_ticket(&mapping.ticket);
+        let instruction = resume_instruction_from_ticket(&mapping.ticket, &workflow_state);
         let spawn_result = worker_backend
             .spawn(SpawnSpec {
                 session_id: mapping.session.session_id.clone().into(),
@@ -354,6 +357,21 @@ async fn rehydrate_inflight_sessions(
                         );
                     }
                 }
+
+                let nudge = startup_rehydrate_nudge(&workflow_state);
+                let mut nudge_bytes = nudge.as_bytes().to_vec();
+                if !nudge_bytes.ends_with(b"\n") {
+                    nudge_bytes.push(b'\n');
+                }
+                if let Err(error) = worker_backend.send_input(&handle, &nudge_bytes).await {
+                    tracing::warn!(
+                        session_id = mapping.session.session_id.as_str(),
+                        backend = ?mapping.session.backend_kind,
+                        state = ?workflow_state,
+                        error = %error,
+                        "failed to send startup resume nudge to rehydrated session"
+                    );
+                }
             }
             Err(error) => {
                 tracing::warn!(
@@ -369,13 +387,99 @@ async fn rehydrate_inflight_sessions(
     Ok(())
 }
 
-fn resume_instruction_from_ticket(ticket: &TicketRecord) -> String {
+fn latest_workflow_state_for_work_item(
+    store: &SqliteEventStore,
+    work_item_id: &WorkItemId,
+) -> Result<WorkflowState, CoreError> {
+    let mut current = WorkflowState::New;
+    let events = store.read_events_for_work_item(work_item_id)?;
+    for event in events {
+        if let OrchestrationEventPayload::WorkflowTransition(payload) = event.payload {
+            current = payload.to;
+        }
+    }
+    Ok(current)
+}
+
+fn is_past_planning_state(state: &WorkflowState) -> bool {
+    !matches!(state, WorkflowState::New | WorkflowState::Planning)
+}
+
+fn resume_instruction_from_ticket(ticket: &TicketRecord, workflow_state: &WorkflowState) -> String {
     let provider_name = match ticket.provider {
         TicketProvider::Linear => "linear",
         TicketProvider::Shortcut => "shortcut",
     };
+    if is_past_planning_state(workflow_state) {
+        return format!(
+            "Ticket provider: {provider_name}. Resume work on {}: {}. Current workflow state is {:?}. Planning is already complete for this ticket, so continue from the current workflow state. For ticket operations, use the {provider_name} ticketing integration/skill.",
+            ticket.identifier, ticket.title, workflow_state
+        );
+    }
     format!(
         "Ticket provider: {provider_name}. Resume work on {}: {} in Planning mode. Reconcile the current state, refresh the plan, and wait for an explicit workflow transition command before implementation. For ticket operations, use the {provider_name} ticketing integration/skill.",
         ticket.identifier, ticket.title
     )
+}
+
+fn startup_rehydrate_nudge(workflow_state: &WorkflowState) -> String {
+    if is_past_planning_state(workflow_state) {
+        return format!(
+            "Planning is already complete for this ticket. End planning mode now. Current workflow state: {:?}. {STARTUP_RESUME_NUDGE}",
+            workflow_state
+        );
+    }
+
+    format!(
+        "Current workflow state: {:?}. {STARTUP_RESUME_NUDGE}",
+        workflow_state
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample_ticket() -> TicketRecord {
+        TicketRecord {
+            ticket_id: "linear-1".into(),
+            provider: TicketProvider::Linear,
+            provider_ticket_id: "1".to_owned(),
+            identifier: "AP-1".to_owned(),
+            title: "Implement startup rehydrate resume logic".to_owned(),
+            state: "In Progress".to_owned(),
+            updated_at: "2026-02-20T00:00:00Z".to_owned(),
+        }
+    }
+
+    #[test]
+    fn past_planning_state_detection_is_correct() {
+        assert!(!is_past_planning_state(&WorkflowState::New));
+        assert!(!is_past_planning_state(&WorkflowState::Planning));
+        assert!(is_past_planning_state(&WorkflowState::Implementing));
+        assert!(is_past_planning_state(&WorkflowState::Testing));
+        assert!(is_past_planning_state(&WorkflowState::PRDrafted));
+    }
+
+    #[test]
+    fn post_planning_resume_instruction_does_not_force_planning_mode() {
+        let instruction =
+            resume_instruction_from_ticket(&sample_ticket(), &WorkflowState::Implementing);
+        assert!(instruction.contains("Planning is already complete"));
+        assert!(!instruction.contains("in Planning mode"));
+    }
+
+    #[test]
+    fn post_planning_nudge_requests_exit_from_planning_mode() {
+        let nudge = startup_rehydrate_nudge(&WorkflowState::Testing);
+        assert!(nudge.contains("End planning mode now."));
+        assert!(nudge.contains(STARTUP_RESUME_NUDGE));
+    }
+
+    #[test]
+    fn planning_nudge_keeps_planning_mode_active() {
+        let nudge = startup_rehydrate_nudge(&WorkflowState::Planning);
+        assert!(!nudge.contains("End planning mode now."));
+        assert!(nudge.contains(STARTUP_RESUME_NUDGE));
+    }
 }

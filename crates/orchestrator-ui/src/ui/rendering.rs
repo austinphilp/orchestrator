@@ -1118,7 +1118,7 @@ fn render_terminal_needs_input_panel(
             },
         )
     } else {
-        "Press i to activate input | Esc: normal mode".to_owned()
+        "Press i or use j/k + Enter to activate input | Esc: normal mode".to_owned()
     };
     frame.render_widget(
         Paragraph::new(help).wrap(Wrap { trim: false }),

@@ -493,6 +493,16 @@ fn route_key_press(shell_state: &mut UiShellState, key: KeyEvent) -> RoutedInput
     if shell_state.terminal_session_has_active_needs_input() && shell_state.is_right_pane_focused() {
         return route_needs_input_modal_key(shell_state, key);
     }
+    if shell_state.terminal_session_has_any_needs_input()
+        && !shell_state.terminal_session_has_active_needs_input()
+        && shell_state.is_right_pane_focused()
+        && shell_state.is_terminal_view_active()
+        && key.modifiers.is_empty()
+        && is_needs_input_interaction_key(key.code)
+    {
+        let _ = shell_state.activate_terminal_needs_input(false);
+        return route_needs_input_modal_key(shell_state, key);
+    }
     if shell_state.worktree_diff_modal.is_some() {
         return route_worktree_diff_modal_key(shell_state, key);
     }
@@ -550,17 +560,6 @@ fn route_key_press(shell_state: &mut UiShellState, key: KeyEvent) -> RoutedInput
     if shell_state.mode == UiMode::Terminal && shell_state.terminal_escape_pending {
         return route_terminal_mode_key(shell_state, key);
     }
-    if shell_state.is_terminal_view_active()
-        && shell_state.terminal_session_has_any_needs_input()
-        && !shell_state.terminal_session_has_active_needs_input()
-        && key.modifiers.is_empty()
-        && matches!(key.code, KeyCode::Char('i'))
-        && (shell_state.mode == UiMode::Terminal
-            || (shell_state.mode == UiMode::Normal && shell_state.is_right_pane_focused()))
-    {
-        let _ = shell_state.activate_terminal_needs_input(true);
-        return RoutedInput::Ignore;
-    }
     if shell_state.apply_terminal_compose_key(key) {
         return RoutedInput::Ignore;
     }
@@ -575,6 +574,29 @@ fn route_key_press(shell_state: &mut UiShellState, key: KeyEvent) -> RoutedInput
             }
         }
     }
+}
+
+fn is_needs_input_interaction_key(code: KeyCode) -> bool {
+    matches!(
+        code,
+        KeyCode::Char('i')
+            | KeyCode::Tab
+            | KeyCode::BackTab
+            | KeyCode::Right
+            | KeyCode::Char('l')
+            | KeyCode::Left
+            | KeyCode::Char('h')
+            | KeyCode::Enter
+            | KeyCode::Up
+            | KeyCode::Down
+            | KeyCode::Home
+            | KeyCode::End
+            | KeyCode::PageUp
+            | KeyCode::PageDown
+            | KeyCode::Char(' ')
+            | KeyCode::Char('j')
+            | KeyCode::Char('k')
+    )
 }
 
 fn route_worktree_diff_modal_key(shell_state: &mut UiShellState, key: KeyEvent) -> RoutedInput {

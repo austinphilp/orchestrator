@@ -36,6 +36,7 @@ struct UiShellState {
     startup_session_feed_opened: bool,
     worker_backend: Option<Arc<dyn WorkerBackend>>,
     selected_session_index: Option<usize>,
+    selected_session_id: Option<WorkerSessionId>,
     sidebar_focus: SidebarFocus,
     pane_focus: PaneFocus,
     terminal_session_sender: Option<mpsc::Sender<TerminalSessionEvent>>,
@@ -125,6 +126,7 @@ impl UiShellState {
             startup_session_feed_opened: false,
             worker_backend,
             selected_session_index: None,
+            selected_session_id: None,
             sidebar_focus: SidebarFocus::Inbox,
             pane_focus: PaneFocus::Left,
             terminal_session_sender,
@@ -397,6 +399,7 @@ impl UiShellState {
         {
             self.selected_session_index = Some(index);
         }
+        self.selected_session_id = Some(session_id.clone());
         self.view_stack.replace_center(CenterView::TerminalView {
             session_id: session_id.clone(),
         });
@@ -528,11 +531,45 @@ impl UiShellState {
         if session_ids.is_empty() {
             return None;
         }
+        if let Some(selected_session_id) = self.selected_session_id.as_ref() {
+            if session_ids
+                .iter()
+                .any(|candidate| candidate == selected_session_id)
+            {
+                return Some(selected_session_id.clone());
+            }
+        }
         let index = self
             .selected_session_index
             .unwrap_or(0)
             .min(session_ids.len() - 1);
         session_ids.get(index).cloned()
+    }
+
+    fn sync_selected_session_panel_state(&mut self) {
+        let session_ids = self.session_ids_for_navigation();
+        if session_ids.is_empty() {
+            self.selected_session_index = None;
+            self.selected_session_id = None;
+            return;
+        }
+
+        if let Some(selected_session_id) = self.selected_session_id.as_ref() {
+            if let Some(index) = session_ids
+                .iter()
+                .position(|candidate| candidate == selected_session_id)
+            {
+                self.selected_session_index = Some(index);
+                return;
+            }
+        }
+
+        let index = self
+            .selected_session_index
+            .unwrap_or(0)
+            .min(session_ids.len() - 1);
+        self.selected_session_index = Some(index);
+        self.selected_session_id = session_ids.get(index).cloned();
     }
 
     fn is_sessions_sidebar_focused(&self) -> bool {
@@ -552,10 +589,12 @@ impl UiShellState {
     }
 
     fn move_session_selection(&mut self, delta: isize) -> bool {
+        self.sync_selected_session_panel_state();
         let session_ids = self.session_ids_for_navigation();
         let len = session_ids.len();
         if len == 0 {
             self.selected_session_index = None;
+            self.selected_session_id = None;
             return false;
         }
 
@@ -565,34 +604,42 @@ impl UiShellState {
         }
         let next = (index as isize + delta).rem_euclid(len as isize) as usize;
         self.selected_session_index = Some(next);
+        self.selected_session_id = session_ids.get(next).cloned();
         self.show_selected_session_output();
         true
     }
 
     fn move_to_first_session(&mut self) -> bool {
-        if self.session_ids_for_navigation().is_empty() {
+        let session_ids = self.session_ids_for_navigation();
+        if session_ids.is_empty() {
             self.selected_session_index = None;
+            self.selected_session_id = None;
             false
         } else {
             self.selected_session_index = Some(0);
+            self.selected_session_id = session_ids.first().cloned();
             self.show_selected_session_output();
             true
         }
     }
 
     fn move_to_last_session(&mut self) -> bool {
-        let len = self.session_ids_for_navigation().len();
+        let session_ids = self.session_ids_for_navigation();
+        let len = session_ids.len();
         if len == 0 {
             self.selected_session_index = None;
+            self.selected_session_id = None;
             false
         } else {
             self.selected_session_index = Some(len - 1);
+            self.selected_session_id = session_ids.last().cloned();
             self.show_selected_session_output();
             true
         }
     }
 
     fn show_selected_session_output(&mut self) {
+        self.sync_selected_session_panel_state();
         let Some(session_id) = self.selected_session_id_for_panel() else {
             return;
         };
@@ -622,14 +669,13 @@ impl UiShellState {
         if session_ids.is_empty() {
             return;
         }
-        if self.selected_session_index.is_none() {
-            self.selected_session_index = Some(0);
-        }
+        self.sync_selected_session_panel_state();
         self.show_selected_session_output();
         self.startup_session_feed_opened = true;
     }
 
     fn focus_and_stream_session(&mut self, session_id: WorkerSessionId) {
+        self.selected_session_id = Some(session_id.clone());
         let session_ids = self.session_ids_for_navigation();
         if let Some(index) = session_ids.iter().position(|candidate| candidate == &session_id) {
             self.selected_session_index = Some(index);

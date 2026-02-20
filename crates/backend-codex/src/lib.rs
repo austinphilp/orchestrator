@@ -32,6 +32,7 @@ const PLAN_COLLABORATION_MODE_KIND: &str = "plan";
 const DEFAULT_COLLABORATION_MODE_KIND: &str = "default";
 const PLAN_TO_IMPLEMENTATION_TRANSITION_MARKER: &str =
     "workflow transition approved: planning -> implement";
+const END_PLANNING_MODE_MARKER: &str = "end planning mode now";
 const TERMINAL_META_PREFIX: &str = "[[orchestrator-meta|";
 
 #[derive(Debug, Clone)]
@@ -1753,6 +1754,7 @@ fn model_identifier_from_entry(value: &Value) -> Option<String> {
 fn disables_planning_mode(input_text: &str) -> bool {
     let normalized = input_text.to_ascii_lowercase();
     normalized.contains(PLAN_TO_IMPLEMENTATION_TRANSITION_MARKER)
+        || normalized.contains(END_PLANNING_MODE_MARKER)
 }
 
 fn is_collaboration_mode_error(error: &RuntimeError) -> bool {
@@ -1963,6 +1965,13 @@ mod tests {
     fn planning_to_implementation_transition_disables_planning_mode() {
         assert!(disables_planning_mode(
             "Workflow transition approved: Planning -> Implementation. End planning mode now."
+        ));
+    }
+
+    #[test]
+    fn explicit_end_planning_mode_instruction_disables_planning_mode() {
+        assert!(disables_planning_mode(
+            "Planning is already complete for this ticket. End planning mode now."
         ));
     }
 

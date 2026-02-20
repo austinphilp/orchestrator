@@ -1097,6 +1097,81 @@ mod tests {
     }
 
     #[test]
+    fn session_panel_selection_tracks_session_id_when_rows_reorder() {
+        let mut projection = ProjectionState::default();
+        let work_item_a = WorkItemId::new("wi-a");
+        let work_item_b = WorkItemId::new("wi-b");
+        let session_a = WorkerSessionId::new("sess-a");
+        let session_b = WorkerSessionId::new("sess-b");
+
+        projection.work_items.insert(
+            work_item_a.clone(),
+            WorkItemProjection {
+                id: work_item_a.clone(),
+                ticket_id: None,
+                project_id: Some(ProjectId::new("Orchestrator")),
+                workflow_state: Some(WorkflowState::Implementing),
+                session_id: Some(session_a.clone()),
+                worktree_id: None,
+                inbox_items: vec![],
+                artifacts: vec![],
+            },
+        );
+        projection.work_items.insert(
+            work_item_b.clone(),
+            WorkItemProjection {
+                id: work_item_b.clone(),
+                ticket_id: None,
+                project_id: Some(ProjectId::new("Orchestrator")),
+                workflow_state: Some(WorkflowState::Planning),
+                session_id: Some(session_b.clone()),
+                worktree_id: None,
+                inbox_items: vec![],
+                artifacts: vec![],
+            },
+        );
+
+        projection.sessions.insert(
+            session_a.clone(),
+            SessionProjection {
+                id: session_a.clone(),
+                work_item_id: Some(work_item_a.clone()),
+                status: Some(WorkerSessionStatus::Running),
+                latest_checkpoint: None,
+            },
+        );
+        projection.sessions.insert(
+            session_b.clone(),
+            SessionProjection {
+                id: session_b.clone(),
+                work_item_id: Some(work_item_b.clone()),
+                status: Some(WorkerSessionStatus::Running),
+                latest_checkpoint: None,
+            },
+        );
+
+        let mut shell_state = UiShellState::new("ready".to_owned(), projection);
+        assert!(shell_state.move_to_first_session());
+        assert_eq!(shell_state.selected_session_id_for_panel(), Some(session_a.clone()));
+        assert_eq!(
+            shell_state.session_ids_for_navigation(),
+            vec![session_a.clone(), session_b.clone()]
+        );
+
+        shell_state
+            .domain
+            .work_items
+            .get_mut(&work_item_a)
+            .expect("work item a")
+            .workflow_state = Some(WorkflowState::InReview);
+        assert_eq!(
+            shell_state.session_ids_for_navigation(),
+            vec![session_b, session_a.clone()]
+        );
+        assert_eq!(shell_state.selected_session_id_for_panel(), Some(session_a));
+    }
+
+    #[test]
     fn center_stack_replace_push_and_pop_behavior() {
         let mut stack = ViewStack::default();
         assert_eq!(stack.active_center(), Some(&CenterView::InboxView));
@@ -1350,7 +1425,7 @@ mod tests {
     }
 
     #[test]
-    fn planning_needs_input_requires_second_i_to_activate_note_entry() {
+    fn planning_needs_input_option_navigation_activates_from_normal_mode() {
         let backend = Arc::new(ManualTerminalBackend::default());
         let mut projection = sample_projection(true);
         projection
@@ -1387,6 +1462,8 @@ mod tests {
 
         shell_state.poll_terminal_session_events();
         assert!(!shell_state.terminal_session_has_active_needs_input());
+        shell_state.enter_normal_mode();
+        assert_eq!(shell_state.mode, UiMode::Normal);
 
         let prompt = shell_state
             .terminal_session_states
@@ -1396,8 +1473,15 @@ mod tests {
         assert_eq!(prompt.prompt_id.as_str(), "prompt-planning");
         assert!(!prompt.interaction_active);
 
-        handle_key_press(&mut shell_state, key(KeyCode::Char('h')));
-        assert!(shell_state.terminal_compose_input.is_empty());
+        handle_key_press(&mut shell_state, key(KeyCode::Char('j')));
+        let prompt = shell_state
+            .terminal_session_states
+            .get(&WorkerSessionId::new("sess-1"))
+            .and_then(|view| view.active_needs_input.as_ref())
+            .expect("planning prompt should become active for option navigation");
+        assert!(prompt.interaction_active);
+        assert!(!prompt.note_insert_mode);
+        assert_eq!(prompt.select_state.highlighted_index, 1);
 
         handle_key_press(&mut shell_state, key(KeyCode::Char('i')));
         let prompt = shell_state
