@@ -1021,27 +1021,6 @@ fn route_ticket_picker_key(shell_state: &mut UiShellState, key: KeyEvent) -> Rou
     }
 }
 
-fn is_unmodified_enter(key: KeyEvent) -> bool {
-    matches!(key.code, KeyCode::Enter) && key.modifiers.is_empty()
-}
-
-fn is_shift_enter_without_other_modifiers(key: KeyEvent) -> bool {
-    if !matches!(key.code, KeyCode::Enter) {
-        return false;
-    }
-    key.modifiers.contains(KeyModifiers::SHIFT) && only_shift_modifier(key.modifiers)
-}
-
-fn allows_text_input_modifiers(modifiers: KeyModifiers) -> bool {
-    modifiers.is_empty() || only_shift_modifier(modifiers)
-}
-
-fn only_shift_modifier(modifiers: KeyModifiers) -> bool {
-    let mut non_shift = modifiers;
-    non_shift.remove(KeyModifiers::SHIFT);
-    non_shift.is_empty()
-}
-
 fn route_review_merge_confirm_key(shell_state: &mut UiShellState, key: KeyEvent) -> RoutedInput {
     if is_escape_to_normal(key) {
         shell_state.cancel_review_merge_confirmation();

@@ -4006,10 +4006,10 @@ mod tests {
         let mut shell_state = UiShellState::new("ready".to_owned(), triage_projection());
         shell_state.ticket_picker_overlay.open();
         shell_state.ticket_picker_overlay.begin_new_ticket_mode();
-        shell_state
-            .ticket_picker_overlay
-            .new_ticket_brief_input
-            .set_text("draft");
+        set_editor_state_text(
+            &mut shell_state.ticket_picker_overlay.new_ticket_brief_editor,
+            "draft",
+        );
 
         route_ticket_picker_key(
             &mut shell_state,
@@ -4017,7 +4017,7 @@ mod tests {
         );
 
         assert_eq!(
-            shell_state.ticket_picker_overlay.new_ticket_brief_input.text(),
+            editor_state_text(&shell_state.ticket_picker_overlay.new_ticket_brief_editor),
             "draft"
         );
         assert!(shell_state.ticket_picker_overlay.new_ticket_mode);

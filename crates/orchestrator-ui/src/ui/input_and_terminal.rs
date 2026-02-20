@@ -279,7 +279,6 @@ struct BottomBarHintGroup {
 
 fn bottom_bar_hint_groups(mode: UiMode) -> &'static [BottomBarHintGroup] {
     match mode {
-    match mode {
         UiMode::Normal => &[
             BottomBarHintGroup {
                 label: "Navigate:",
@@ -322,8 +321,6 @@ fn bottom_bar_hint_groups(mode: UiMode) -> &'static [BottomBarHintGroup] {
                 hints: &["w n"],
             },
         ],
-    }
-}
     }
 }
 
