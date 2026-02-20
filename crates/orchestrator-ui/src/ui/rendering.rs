@@ -550,18 +550,12 @@ enum UiTheme {
 }
 
 fn ui_theme_from_env() -> UiTheme {
-    static THEME: OnceLock<UiTheme> = OnceLock::new();
-    *THEME.get_or_init(|| {
-        let value = std::env::var(UI_THEME_ENV)
-            .ok()
-            .map(|entry| entry.trim().to_ascii_lowercase())
-            .unwrap_or_else(|| "nord".to_owned());
-        match value.as_str() {
-            "default" => UiTheme::Default,
-            "nord" => UiTheme::Nord,
-            _ => UiTheme::Nord,
-        }
-    })
+    let value = ui_theme_config_value().trim().to_ascii_lowercase();
+    match value.as_str() {
+        "default" => UiTheme::Default,
+        "nord" => UiTheme::Nord,
+        _ => UiTheme::Nord,
+    }
 }
 
 fn apply_nord_markdown_theme(skin: &mut RatSkin) {
@@ -1769,28 +1763,7 @@ fn render_which_key_overlay_text(overlay: &WhichKeyOverlayState) -> String {
 }
 
 fn ticket_picker_priority_states_from_env() -> Vec<String> {
-    match std::env::var(TICKET_PICKER_PRIORITY_STATES_ENV) {
-        Ok(raw) => {
-            let parsed = raw
-                .split(',')
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .map(ToOwned::to_owned)
-                .collect::<Vec<_>>();
-            if parsed.is_empty() {
-                TICKET_PICKER_PRIORITY_STATES_DEFAULT
-                    .iter()
-                    .map(|value| (*value).to_owned())
-                    .collect()
-            } else {
-                parsed
-            }
-        }
-        Err(_) => TICKET_PICKER_PRIORITY_STATES_DEFAULT
-            .iter()
-            .map(|value| (*value).to_owned())
-            .collect(),
-    }
+    ticket_picker_priority_states_config_value()
 }
 
 fn normalize_ticket_state(value: &str) -> String {

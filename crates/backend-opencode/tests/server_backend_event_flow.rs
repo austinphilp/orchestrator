@@ -130,6 +130,9 @@ fn backend_with_server(base_url: String) -> OpenCodeBackend {
         output_buffer: 128,
         server_base_url: Some(base_url),
         server_startup_timeout: Duration::from_secs(1),
+        allow_unsafe_command_paths: false,
+        harness_log_raw_events: false,
+        harness_log_normalized_events: false,
     })
 }
 

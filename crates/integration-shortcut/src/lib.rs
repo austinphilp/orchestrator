@@ -14,9 +14,6 @@ use tracing::warn;
 const DEFAULT_SHORTCUT_API_URL: &str = "https://api.app.shortcut.com/api/v3";
 const DEFAULT_SHORTCUT_FETCH_LIMIT: u32 = 100;
 const DEFAULT_SHORTCUT_REQUEST_TIMEOUT_SECS: u64 = 20;
-const ENV_SHORTCUT_API_KEY: &str = "ORCHESTRATOR_SHORTCUT_API_KEY";
-const ENV_SHORTCUT_API_URL: &str = "ORCHESTRATOR_SHORTCUT_API_URL";
-const ENV_SHORTCUT_FETCH_LIMIT: &str = "ORCHESTRATOR_SHORTCUT_FETCH_LIMIT";
 
 #[derive(Debug, Clone)]
 pub struct ShortcutConfig {
@@ -36,50 +33,29 @@ impl Default for ShortcutConfig {
 }
 
 impl ShortcutConfig {
-    pub fn from_env() -> Result<Self, CoreError> {
-        let api_key = std::env::var(ENV_SHORTCUT_API_KEY).map_err(|_| {
-            CoreError::Configuration(
-                "ORCHESTRATOR_SHORTCUT_API_KEY is not set. Export a valid API key before using integration-shortcut."
-                    .to_owned(),
-            )
-        })?;
-        let api_key = api_key.trim().to_owned();
+    pub fn from_settings(
+        api_key: impl Into<String>,
+        api_url: impl Into<String>,
+        fetch_limit: u32,
+    ) -> Result<Self, CoreError> {
+        let api_key = api_key.into().trim().to_owned();
         if api_key.is_empty() {
             return Err(CoreError::Configuration(
                 "ORCHESTRATOR_SHORTCUT_API_KEY is empty. Provide a non-empty API key.".to_owned(),
             ));
         }
 
-        let api_url = std::env::var(ENV_SHORTCUT_API_URL)
-            .ok()
-            .map(|value| value.trim().to_owned())
-            .filter(|value| !value.is_empty())
-            .unwrap_or_else(|| DEFAULT_SHORTCUT_API_URL.to_owned());
-
-        let fetch_limit = std::env::var(ENV_SHORTCUT_FETCH_LIMIT)
-            .ok()
-            .and_then(|raw| {
-                let value = raw.trim();
-                if value.is_empty() {
-                    return None;
-                }
-                Some(value.to_owned())
-            })
-            .map(|raw| {
-                let value = raw.parse::<u32>().map_err(|_| {
-                    CoreError::Configuration(
-                        "ORCHESTRATOR_SHORTCUT_FETCH_LIMIT must be a non-zero integer.".to_owned(),
-                    )
-                })?;
-                if value == 0 {
-                    return Err(CoreError::Configuration(
-                        "ORCHESTRATOR_SHORTCUT_FETCH_LIMIT must be greater than zero.".to_owned(),
-                    ));
-                }
-                Ok(value)
-            })
-            .transpose()?
-            .unwrap_or(DEFAULT_SHORTCUT_FETCH_LIMIT);
+        let api_url = api_url.into().trim().to_owned();
+        let api_url = if api_url.is_empty() {
+            DEFAULT_SHORTCUT_API_URL.to_owned()
+        } else {
+            api_url
+        };
+        if fetch_limit == 0 {
+            return Err(CoreError::Configuration(
+                "ORCHESTRATOR_SHORTCUT_FETCH_LIMIT must be greater than zero.".to_owned(),
+            ));
+        }
 
         Ok(Self {
             api_url,
@@ -96,9 +72,7 @@ pub struct ShortcutTicketingProvider {
 }
 
 impl ShortcutTicketingProvider {
-    pub fn from_env() -> Result<Self, CoreError> {
-        let config = ShortcutConfig::from_env()?;
-
+    pub fn new(config: ShortcutConfig) -> Result<Self, CoreError> {
         let mut headers = header::HeaderMap::new();
         let token = header::HeaderValue::from_str(&config.api_key).map_err(|error| {
             CoreError::Configuration(format!("ORCHESTRATOR_SHORTCUT_API_KEY is invalid: {error}"))

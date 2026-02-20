@@ -333,13 +333,11 @@ impl Default for LinearConfig {
 }
 
 impl LinearConfig {
-    pub fn from_env() -> Result<Self, CoreError> {
-        let api_key = std::env::var("LINEAR_API_KEY").map_err(|_| {
-            CoreError::Configuration(
-                "LINEAR_API_KEY is not set. Export a valid key before using integration-linear."
-                    .to_owned(),
-            )
-        })?;
+    pub fn from_settings(
+        api_key: impl Into<String>,
+        settings: LinearRuntimeSettings,
+    ) -> Result<Self, CoreError> {
+        let api_key = api_key.into();
         let api_key = api_key.trim();
         if api_key.is_empty() {
             return Err(CoreError::Configuration(
@@ -351,73 +349,50 @@ impl LinearConfig {
             api_key: api_key.to_owned(),
             ..Self::default()
         };
-        if let Ok(api_url) = std::env::var("ORCHESTRATOR_LINEAR_API_URL") {
-            let api_url = api_url.trim();
-            if !api_url.is_empty() {
-                config.api_url = api_url.to_owned();
-            }
+        let api_url = settings.api_url.trim();
+        if !api_url.is_empty() {
+            config.api_url = api_url.to_owned();
         }
-        if let Ok(raw) = std::env::var("ORCHESTRATOR_LINEAR_SYNC_INTERVAL_SECS") {
-            config.poll_interval = parse_sync_interval_secs(&raw)?;
+        config.poll_interval = parse_sync_interval_secs(settings.sync_interval_secs)?;
+        let fetch_limit = settings.fetch_limit;
+        if fetch_limit == 0 {
+            return Err(CoreError::Configuration(
+                "ORCHESTRATOR_LINEAR_FETCH_LIMIT must be greater than zero.".to_owned(),
+            ));
         }
-        if let Ok(raw) = std::env::var("ORCHESTRATOR_LINEAR_FETCH_LIMIT") {
-            let value = raw.parse::<u32>().map_err(|_| {
-                CoreError::Configuration(
-                    "ORCHESTRATOR_LINEAR_FETCH_LIMIT must be an unsigned integer.".to_owned(),
-                )
-            })?;
-            if value == 0 {
-                return Err(CoreError::Configuration(
-                    "ORCHESTRATOR_LINEAR_FETCH_LIMIT must be greater than zero.".to_owned(),
-                ));
-            }
-            config.fetch_limit = value;
-            config.sync_query.limit = Some(value);
-        }
-        if let Ok(raw) = std::env::var("ORCHESTRATOR_LINEAR_SYNC_ASSIGNED_TO_ME") {
-            config.sync_query.assigned_to_me =
-                parse_bool_env("ORCHESTRATOR_LINEAR_SYNC_ASSIGNED_TO_ME", &raw)?;
-        }
-        if let Ok(raw_states) = std::env::var("ORCHESTRATOR_LINEAR_SYNC_STATES") {
-            config.sync_query.states = raw_states
-                .split(',')
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .map(ToOwned::to_owned)
-                .collect();
-        }
-        if let Ok(raw_mapping) = std::env::var("ORCHESTRATOR_LINEAR_WORKFLOW_STATE_MAP") {
-            config.workflow_sync.state_mappings = parse_workflow_state_map_env(&raw_mapping)?;
-        }
-        if let Ok(raw) = std::env::var("ORCHESTRATOR_LINEAR_WORKFLOW_COMMENT_SUMMARIES") {
-            config.workflow_sync.comment_summaries =
-                parse_bool_env("ORCHESTRATOR_LINEAR_WORKFLOW_COMMENT_SUMMARIES", &raw)?;
-        }
-        if let Ok(raw) = std::env::var("ORCHESTRATOR_LINEAR_WORKFLOW_ATTACH_PR_LINKS") {
-            config.workflow_sync.attach_pr_links =
-                parse_bool_env("ORCHESTRATOR_LINEAR_WORKFLOW_ATTACH_PR_LINKS", &raw)?;
-        }
+        config.fetch_limit = fetch_limit;
+        config.sync_query.limit = Some(fetch_limit);
+        config.sync_query.assigned_to_me = settings.sync_assigned_to_me;
+        config.sync_query.states = settings.sync_states;
+        config.workflow_sync.state_mappings = parse_workflow_state_map_settings(
+            settings.workflow_state_map.as_slice(),
+        )?;
+        config.workflow_sync.comment_summaries = settings.workflow_comment_summaries;
+        config.workflow_sync.attach_pr_links = settings.workflow_attach_pr_links;
 
         Ok(config)
     }
 }
 
-fn parse_bool_env(name: &str, value: &str) -> Result<bool, CoreError> {
-    match value.trim().to_ascii_lowercase().as_str() {
-        "1" | "true" | "yes" | "on" => Ok(true),
-        "0" | "false" | "no" | "off" => Ok(false),
-        _ => Err(CoreError::Configuration(format!(
-            "{name} must be a boolean (true/false)."
-        ))),
-    }
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkflowStateMapSetting {
+    pub workflow_state: String,
+    pub linear_state: String,
 }
 
-fn parse_sync_interval_secs(value: &str) -> Result<Duration, CoreError> {
-    let seconds = value.parse::<u64>().map_err(|_| {
-        CoreError::Configuration(
-            "ORCHESTRATOR_LINEAR_SYNC_INTERVAL_SECS must be an unsigned integer.".to_owned(),
-        )
-    })?;
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LinearRuntimeSettings {
+    pub api_url: String,
+    pub sync_interval_secs: u64,
+    pub fetch_limit: u32,
+    pub sync_assigned_to_me: bool,
+    pub sync_states: Vec<String>,
+    pub workflow_state_map: Vec<WorkflowStateMapSetting>,
+    pub workflow_comment_summaries: bool,
+    pub workflow_attach_pr_links: bool,
+}
+
+fn parse_sync_interval_secs(seconds: u64) -> Result<Duration, CoreError> {
     if seconds == 0 {
         return Err(CoreError::Configuration(
             "ORCHESTRATOR_LINEAR_SYNC_INTERVAL_SECS must be greater than zero.".to_owned(),
@@ -427,22 +402,14 @@ fn parse_sync_interval_secs(value: &str) -> Result<Duration, CoreError> {
     Ok(Duration::from_secs(seconds))
 }
 
-fn parse_workflow_state_map_env(value: &str) -> Result<Vec<WorkflowStateMapping>, CoreError> {
+fn parse_workflow_state_map_settings(
+    value: &[WorkflowStateMapSetting],
+) -> Result<Vec<WorkflowStateMapping>, CoreError> {
     let mut mappings = Vec::new();
     let mut seen = BTreeSet::new();
-    for raw_pair in value
-        .split(',')
-        .map(str::trim)
-        .filter(|item| !item.is_empty())
-    {
-        let (raw_workflow_state, raw_linear_state) = raw_pair.split_once('=').ok_or_else(|| {
-            CoreError::Configuration(
-                "ORCHESTRATOR_LINEAR_WORKFLOW_STATE_MAP entries must use `WorkflowState=LinearState` format."
-                    .to_owned(),
-            )
-        })?;
-        let workflow_state = parse_workflow_state_name(raw_workflow_state.trim())?;
-        let linear_state = raw_linear_state.trim();
+    for entry in value {
+        let workflow_state = parse_workflow_state_name(entry.workflow_state.trim())?;
+        let linear_state = entry.linear_state.trim();
         if linear_state.is_empty() {
             return Err(CoreError::Configuration(
                 "ORCHESTRATOR_LINEAR_WORKFLOW_STATE_MAP target Linear state cannot be empty."

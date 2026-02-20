@@ -23,16 +23,10 @@ const DEFAULT_CODEX_BINARY: &str = "codex";
 const DEFAULT_OUTPUT_BUFFER: usize = 256;
 const MAX_SESSION_HISTORY_EVENTS: usize = 2048;
 const DEFAULT_SERVER_STARTUP_TIMEOUT_SECS: u64 = 10;
-const ENV_CODEX_BIN: &str = "ORCHESTRATOR_CODEX_BIN";
-const ENV_CODEX_SERVER_BASE_URL: &str = "ORCHESTRATOR_CODEX_SERVER_BASE_URL";
-const ENV_HARNESS_LOG_RAW_EVENTS: &str = "ORCHESTRATOR_HARNESS_LOG_RAW_EVENTS";
-const ENV_HARNESS_LOG_NORMALIZED_EVENTS: &str = "ORCHESTRATOR_HARNESS_LOG_NORMALIZED_EVENTS";
 const HARNESS_LOG_DIR_NAME: &str = "logs";
 const HARNESS_RAW_LOG_FILE_NAME: &str = "harness-raw.log";
 const HARNESS_NORMALIZED_LOG_FILE_NAME: &str = "harness-normalized.log";
 const ENV_HARNESS_SESSION_ID: &str = "ORCHESTRATOR_HARNESS_SESSION_ID";
-const ENV_HARNESS_SERVER_STARTUP_TIMEOUT_SECS: &str =
-    "ORCHESTRATOR_HARNESS_SERVER_STARTUP_TIMEOUT_SECS";
 const REQUEST_TIMEOUT_SECS: u64 = 120;
 const PLAN_COLLABORATION_MODE_KIND: &str = "plan";
 const DEFAULT_COLLABORATION_MODE_KIND: &str = "default";
@@ -46,22 +40,19 @@ pub struct CodexBackendConfig {
     pub base_args: Vec<String>,
     pub server_startup_timeout: Duration,
     pub legacy_server_base_url: Option<String>,
+    pub harness_log_raw_events: bool,
+    pub harness_log_normalized_events: bool,
 }
 
 impl Default for CodexBackendConfig {
     fn default() -> Self {
         Self {
-            binary: std::env::var_os(ENV_CODEX_BIN)
-                .map(PathBuf::from)
-                .unwrap_or_else(|| PathBuf::from(DEFAULT_CODEX_BINARY)),
+            binary: PathBuf::from(DEFAULT_CODEX_BINARY),
             base_args: Vec::new(),
-            server_startup_timeout: Duration::from_secs(
-                std::env::var(ENV_HARNESS_SERVER_STARTUP_TIMEOUT_SECS)
-                    .ok()
-                    .and_then(|value| value.trim().parse::<u64>().ok())
-                    .unwrap_or(DEFAULT_SERVER_STARTUP_TIMEOUT_SECS),
-            ),
-            legacy_server_base_url: std::env::var(ENV_CODEX_SERVER_BASE_URL).ok(),
+            server_startup_timeout: Duration::from_secs(DEFAULT_SERVER_STARTUP_TIMEOUT_SECS),
+            legacy_server_base_url: None,
+            harness_log_raw_events: false,
+            harness_log_normalized_events: false,
         }
     }
 }
@@ -75,6 +66,7 @@ pub struct CodexBackend {
 
 struct CodexSession {
     thread_id: String,
+    harness_log_normalized_events: bool,
     model: Option<String>,
     cwd: String,
     initial_instruction: Option<String>,
@@ -135,7 +127,12 @@ impl CodexSession {
 
     fn emit_non_terminal_event(&self, event: BackendEvent) {
         self.record_event(&event);
-        maybe_log_normalized_harness_event(self.thread_id.as_str(), false, &event);
+        maybe_log_normalized_harness_event(
+            self.harness_log_normalized_events,
+            self.thread_id.as_str(),
+            false,
+            &event,
+        );
         let _ = self.event_tx.send(event);
     }
 
@@ -153,7 +150,12 @@ impl CodexSession {
         }
         self.set_turn_active(false);
         self.record_event(&event);
-        maybe_log_normalized_harness_event(self.thread_id.as_str(), true, &event);
+        maybe_log_normalized_harness_event(
+            self.harness_log_normalized_events,
+            self.thread_id.as_str(),
+            true,
+            &event,
+        );
         let _ = self.event_tx.send(event);
     }
 
@@ -288,14 +290,10 @@ impl CodexBackend {
         }
     }
 
-    pub fn from_env() -> Self {
-        Self::new(CodexBackendConfig::default())
-    }
-
     async fn ensure_connection(&self) -> RuntimeResult<Arc<CodexConnection>> {
         if let Some(base_url) = self.config.legacy_server_base_url.as_ref() {
             return Err(RuntimeError::Configuration(format!(
-                "{ENV_CODEX_SERVER_BASE_URL} is no longer supported for Codex. Remove it and use `codex app-server` transport (configured value: {base_url})."
+                "legacy Codex server base URL is no longer supported. Remove it and use `codex app-server` transport (configured value: {base_url})."
             )));
         }
 
@@ -342,6 +340,7 @@ impl CodexBackend {
             Arc::clone(&connection.stdin),
             Arc::clone(&connection.pending),
             Arc::clone(&self.sessions),
+            self.config.harness_log_raw_events,
         ));
 
         let initialize_params = json!({
@@ -479,6 +478,7 @@ impl SessionLifecycle for CodexBackend {
         let (event_tx, _drop_rx) = broadcast::channel(DEFAULT_OUTPUT_BUFFER);
         let session = Arc::new(CodexSession {
             thread_id,
+            harness_log_normalized_events: self.config.harness_log_normalized_events,
             model: spec.model.clone(),
             cwd: spec.workdir.to_string_lossy().into_owned(),
             initial_instruction: spec.instruction_prelude.clone(),
@@ -760,6 +760,7 @@ async fn run_reader_loop(
     stdin: Arc<AsyncMutex<ChildStdin>>,
     pending: Arc<AsyncMutex<HashMap<String, oneshot::Sender<RuntimeResult<Value>>>>>,
     sessions: Arc<AsyncMutex<HashMap<RuntimeSessionId, Arc<CodexSession>>>>,
+    harness_log_raw_events: bool,
 ) {
     let mut reader = BufReader::new(stdout).lines();
     let reason = loop {
@@ -771,7 +772,7 @@ async fn run_reader_loop(
         if line.trim().is_empty() {
             continue;
         }
-        maybe_log_raw_harness_line(line.as_str());
+        maybe_log_raw_harness_line(harness_log_raw_events, line.as_str());
 
         let message = match serde_json::from_str::<Value>(line.as_str()) {
             Ok(value) => value,
@@ -1775,30 +1776,8 @@ fn harness_session_id_from_environment(environment: &[(String, String)]) -> Opti
     })
 }
 
-fn harness_log_raw_events_enabled() -> bool {
-    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ENABLED.get_or_init(|| env_flag_enabled(ENV_HARNESS_LOG_RAW_EVENTS))
-}
-
-fn harness_log_normalized_events_enabled() -> bool {
-    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ENABLED.get_or_init(|| env_flag_enabled(ENV_HARNESS_LOG_NORMALIZED_EVENTS))
-}
-
-fn env_flag_enabled(name: &str) -> bool {
-    std::env::var(name)
-        .ok()
-        .map(|value| {
-            matches!(
-                value.trim().to_ascii_lowercase().as_str(),
-                "1" | "true" | "yes" | "on"
-            )
-        })
-        .unwrap_or(false)
-}
-
-fn maybe_log_raw_harness_line(line: &str) {
-    if !harness_log_raw_events_enabled() {
+fn maybe_log_raw_harness_line(enabled: bool, line: &str) {
+    if !enabled {
         return;
     }
     let payload = json!({
@@ -1811,8 +1790,13 @@ fn maybe_log_raw_harness_line(line: &str) {
     );
 }
 
-fn maybe_log_normalized_harness_event(thread_id: &str, terminal: bool, event: &BackendEvent) {
-    if !harness_log_normalized_events_enabled() {
+fn maybe_log_normalized_harness_event(
+    enabled: bool,
+    thread_id: &str,
+    terminal: bool,
+    event: &BackendEvent,
+) {
+    if !enabled {
         return;
     }
     let payload = match event {
@@ -1951,14 +1935,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn defaults_use_codex_binary_from_env_or_codex() {
+    fn defaults_use_codex_binary() {
         let config = CodexBackendConfig::default();
         assert!(!config.binary.as_os_str().is_empty());
     }
 
     #[test]
     fn backend_reports_codex_kind() {
-        let backend = CodexBackend::from_env();
+        let backend = CodexBackend::new(CodexBackendConfig::default());
         assert_eq!(backend.kind(), BackendKind::Codex);
     }
 
