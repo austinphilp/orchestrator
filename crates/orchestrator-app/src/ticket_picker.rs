@@ -43,24 +43,6 @@ where
         }
     }
 
-    fn repository_fallback_candidates(&self) -> Vec<PathBuf> {
-        let mut candidates = Vec::new();
-
-        if let Ok(current_dir) = std::env::current_dir() {
-            if !current_dir.as_os_str().is_empty() {
-                candidates.push(current_dir);
-            }
-        }
-
-        let configured_workspace = PathBuf::from(self.app.config.workspace.trim());
-        if !configured_workspace.as_os_str().is_empty()
-            && !candidates.iter().any(|path| path == &configured_workspace)
-        {
-            candidates.push(configured_workspace);
-        }
-
-        candidates.into_iter().filter(|path| path.exists()).collect()
-    }
 }
 
 #[async_trait]
@@ -128,10 +110,7 @@ where
         self.app.startup_state().await.map(|state| state.projection)
     }
 
-    async fn create_and_start_ticket_from_brief(
-        &self,
-        brief: String,
-    ) -> Result<TicketSummary, CoreError> {
+    async fn create_ticket_from_brief(&self, brief: String) -> Result<TicketSummary, CoreError> {
         let brief = brief.trim();
         if brief.is_empty() {
             return Err(CoreError::InvalidCommandArgs {
@@ -151,32 +130,6 @@ where
                 labels: Vec::new(),
             })
             .await?;
-
-        if let Err(error) = self.start_or_resume_ticket(ticket.clone(), None).await {
-            if matches!(error, CoreError::MissingProjectRepositoryMapping { .. }) {
-                for repository_override in self.repository_fallback_candidates() {
-                    match self
-                        .start_or_resume_ticket(ticket.clone(), Some(repository_override.clone()))
-                        .await
-                    {
-                        Ok(_) => return Ok(ticket),
-                        Err(retry_error) => {
-                            tracing::warn!(
-                                ticket_identifier = %ticket.identifier,
-                                repository = %repository_override.display(),
-                                error = %retry_error,
-                                "ticket create/start fallback repository attempt failed"
-                            );
-                        }
-                    }
-                }
-            }
-
-            return Err(CoreError::DependencyUnavailable(format!(
-                "created ticket {} but failed to start session: {}",
-                ticket.identifier, error
-            )));
-        }
 
         Ok(ticket)
     }
