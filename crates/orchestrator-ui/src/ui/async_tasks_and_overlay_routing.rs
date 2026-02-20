@@ -631,7 +631,7 @@ fn resolve_shell_home() -> Option<String> {
 fn render_ticket_picker_overlay_text(overlay: &TicketPickerOverlayState) -> String {
     let mut lines = if overlay.new_ticket_mode {
         vec![
-            "Describe ticket | Enter: create | Shift+Enter: create + start | Backspace: edit | Esc: cancel"
+            "Describe ticket | Vim editor (i/Esc) | Enter: create (normal mode) | Shift+Enter: create + start (normal mode) | Esc: cancel"
                 .to_owned(),
         ]
     } else {
@@ -917,7 +917,20 @@ fn route_ticket_picker_key(shell_state: &mut UiShellState, key: KeyEvent) -> Rou
 
     if shell_state.ticket_picker_overlay.new_ticket_mode {
         if is_escape_to_normal(key) {
-            shell_state.cancel_create_ticket_from_picker();
+            if shell_state.ticket_picker_overlay.new_ticket_brief_editor.mode != EditorMode::Normal
+            {
+                if let Some(key_input) = map_edtui_key_input(key) {
+                    shell_state
+                        .ticket_picker_overlay
+                        .new_ticket_brief_event_handler
+                        .on_key_event(
+                            key_input,
+                            &mut shell_state.ticket_picker_overlay.new_ticket_brief_editor,
+                        );
+                }
+            } else {
+                shell_state.cancel_create_ticket_from_picker();
+            }
             return RoutedInput::Ignore;
         }
 
@@ -926,20 +939,52 @@ fn route_ticket_picker_key(shell_state: &mut UiShellState, key: KeyEvent) -> Rou
         }
 
         match key.code {
-            KeyCode::Enter if is_unmodified_enter(key) => {
-                shell_state.submit_created_ticket_from_picker(TicketCreateSubmitMode::CreateOnly);
+            KeyCode::Enter if key.modifiers.is_empty() => {
+                if shell_state.ticket_picker_overlay.new_ticket_brief_editor.mode
+                    == EditorMode::Normal
+                {
+                    shell_state.submit_created_ticket_from_picker(TicketCreateSubmitMode::CreateOnly);
+                } else {
+                    let enter =
+                        edtui_key_input(KeyCode::Enter, KeyModifiers::NONE).expect("enter key conversion");
+                    shell_state
+                        .ticket_picker_overlay
+                        .new_ticket_brief_event_handler
+                        .on_key_event(
+                            enter,
+                            &mut shell_state.ticket_picker_overlay.new_ticket_brief_editor,
+                        );
+                }
             }
-            KeyCode::Enter if is_shift_enter_without_other_modifiers(key) => {
-                shell_state
-                    .submit_created_ticket_from_picker(TicketCreateSubmitMode::CreateAndStart);
+            KeyCode::Enter if key.modifiers == KeyModifiers::SHIFT => {
+                if shell_state.ticket_picker_overlay.new_ticket_brief_editor.mode
+                    == EditorMode::Normal
+                {
+                    shell_state
+                        .submit_created_ticket_from_picker(TicketCreateSubmitMode::CreateAndStart);
+                } else {
+                    let enter =
+                        edtui_key_input(KeyCode::Enter, KeyModifiers::NONE).expect("enter key conversion");
+                    shell_state
+                        .ticket_picker_overlay
+                        .new_ticket_brief_event_handler
+                        .on_key_event(
+                            enter,
+                            &mut shell_state.ticket_picker_overlay.new_ticket_brief_editor,
+                        );
+                }
             }
-            KeyCode::Backspace if key.modifiers.is_empty() => {
-                shell_state.pop_create_ticket_brief_char();
+            _ => {
+                if let Some(key_input) = map_edtui_key_input(key) {
+                    shell_state
+                        .ticket_picker_overlay
+                        .new_ticket_brief_event_handler
+                        .on_key_event(
+                            key_input,
+                            &mut shell_state.ticket_picker_overlay.new_ticket_brief_editor,
+                        );
+                }
             }
-            KeyCode::Char(ch) if allows_text_input_modifiers(key.modifiers) => {
-                shell_state.append_create_ticket_brief_char(ch);
-            }
-            _ => {}
         }
         return RoutedInput::Ignore;
     }

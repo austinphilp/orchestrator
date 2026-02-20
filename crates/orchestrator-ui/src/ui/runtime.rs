@@ -217,17 +217,20 @@ impl Ui {
                                 shell_state.mode == UiMode::Terminal,
                             );
                         } else {
-                            shell_state.terminal_compose_input.focused =
-                                shell_state.mode == UiMode::Terminal;
-                            TextArea::new()
-                                .label("input (Enter send, Shift+Enter newline)")
-                                .placeholder("Type a message to the harness here.\nPress Enter to send.")
-                                .wrap_mode(WrapMode::Soft)
-                                .render_stateful(
-                                    frame,
-                                    terminal_input_area,
-                                    &mut shell_state.terminal_compose_input,
-                                );
+                            frame.render_widget(
+                                EditorView::new(&mut shell_state.terminal_compose_editor)
+                                    .theme(
+                                        EditorTheme::default()
+                                            .block(
+                                                Block::default()
+                                                    .title("input (Normal+Enter send)")
+                                                    .borders(Borders::ALL),
+                                            )
+                                            .hide_status_line(),
+                                    )
+                                    .wrap(true),
+                                terminal_input_area,
+                            );
                         }
                     } else {
                         if shell_state.is_global_supervisor_chat_active() {
@@ -296,7 +299,11 @@ impl Ui {
                         render_which_key_overlay(frame, center_area, which_key);
                     }
                     if shell_state.ticket_picker_overlay.visible {
-                        render_ticket_picker_overlay(frame, main, &shell_state.ticket_picker_overlay);
+                        render_ticket_picker_overlay(
+                            frame,
+                            main,
+                            &mut shell_state.ticket_picker_overlay,
+                        );
                     }
                     if let Some(ticket) = shell_state
                         .ticket_picker_overlay

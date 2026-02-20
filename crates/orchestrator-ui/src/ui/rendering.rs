@@ -878,7 +878,7 @@ fn workflow_state_to_badge_label(state: &WorkflowState) -> String {
 fn render_ticket_picker_overlay(
     frame: &mut ratatui::Frame<'_>,
     anchor_area: Rect,
-    overlay: &TicketPickerOverlayState,
+    overlay: &mut TicketPickerOverlayState,
 ) {
     let content = render_ticket_picker_overlay_text(overlay);
     let Some(popup) = ticket_picker_popup(anchor_area) else {
@@ -917,13 +917,20 @@ fn render_ticket_picker_overlay(
                 Paragraph::new(format!("Assigned project: {selected_project}")),
                 project_area,
             );
-            let mut state = overlay.new_ticket_brief_input.clone();
-            state.focused = true;
-            TextArea::new()
-                .label("describe ticket")
-                .placeholder("ticket summary")
-                .wrap_mode(WrapMode::Soft)
-                .render_stateful(frame, input_area, &mut state);
+            frame.render_widget(
+                EditorView::new(&mut overlay.new_ticket_brief_editor)
+                    .theme(
+                        EditorTheme::default()
+                            .block(
+                                Block::default()
+                                    .title("describe ticket")
+                                    .borders(Borders::ALL),
+                            )
+                            .hide_status_line(),
+                    )
+                    .wrap(true),
+                input_area,
+            );
         } else if overlay.has_repository_prompt() {
             let mut state = overlay.repository_prompt_input.clone();
             state.focused = true;

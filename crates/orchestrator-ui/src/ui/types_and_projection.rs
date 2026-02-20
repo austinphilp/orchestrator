@@ -11,6 +11,7 @@ use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
 use crossterm::ExecutableCommand;
+use edtui::{EditorEventHandler, EditorMode, EditorState, EditorTheme, EditorView, Lines};
 use orchestrator_core::{
     attention_inbox_snapshot, command_ids, ArtifactKind, ArtifactProjection, AttentionBatchKind,
     AttentionEngineConfig, AttentionPriorityBand, Command, CommandRegistry, CoreError, InboxItemId,
@@ -31,9 +32,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 use ratatui::Terminal;
-use ratatui_interact::components::{
-    Input, InputState, SelectState, TabConfig, TextArea, TextAreaState, WrapMode,
-};
+use ratatui_interact::components::{Input, InputState, SelectState};
 use ratskin::RatSkin;
 use tokio::runtime::Handle as TokioHandle;
 use tokio::sync::mpsc;

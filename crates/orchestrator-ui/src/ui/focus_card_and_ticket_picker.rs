@@ -309,7 +309,7 @@ enum TicketPickerRowRef {
     },
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 struct TicketPickerOverlayState {
     visible: bool,
     loading: bool,
@@ -317,7 +317,8 @@ struct TicketPickerOverlayState {
     archiving_ticket_id: Option<TicketId>,
     creating: bool,
     new_ticket_mode: bool,
-    new_ticket_brief_input: TextAreaState,
+    new_ticket_brief_editor: EditorState,
+    new_ticket_brief_event_handler: EditorEventHandler,
     error: Option<String>,
     project_groups: Vec<TicketProjectGroup>,
     ticket_rows: Vec<TicketPickerRowRef>,
@@ -338,7 +339,8 @@ impl Default for TicketPickerOverlayState {
             archiving_ticket_id: None,
             creating: false,
             new_ticket_mode: false,
-            new_ticket_brief_input: TextAreaState::empty().with_tab_config(TabConfig::Literal),
+            new_ticket_brief_editor: EditorState::default(),
+            new_ticket_brief_event_handler: EditorEventHandler::default(),
             error: None,
             project_groups: Vec::new(),
             ticket_rows: Vec::new(),
@@ -413,7 +415,7 @@ impl TicketPickerOverlayState {
         self.archiving_ticket_id = None;
         self.creating = false;
         self.new_ticket_mode = false;
-        self.new_ticket_brief_input.clear();
+        clear_editor_state(&mut self.new_ticket_brief_editor);
         self.error = None;
         self.repository_prompt_ticket = None;
         self.repository_prompt_project_id = None;
@@ -429,7 +431,7 @@ impl TicketPickerOverlayState {
         self.archiving_ticket_id = None;
         self.creating = false;
         self.new_ticket_mode = false;
-        self.new_ticket_brief_input.clear();
+        clear_editor_state(&mut self.new_ticket_brief_editor);
         self.error = None;
         self.repository_prompt_ticket = None;
         self.repository_prompt_project_id = None;
@@ -476,20 +478,12 @@ impl TicketPickerOverlayState {
 
     fn cancel_new_ticket_mode(&mut self) {
         self.new_ticket_mode = false;
-        self.new_ticket_brief_input.clear();
+        clear_editor_state(&mut self.new_ticket_brief_editor);
         self.creating = false;
     }
 
-    fn append_new_ticket_brief_char(&mut self, ch: char) {
-        self.new_ticket_brief_input.insert_char(ch);
-    }
-
-    fn pop_new_ticket_brief_char(&mut self) {
-        self.new_ticket_brief_input.delete_char_backward();
-    }
-
     fn can_submit_new_ticket(&self) -> bool {
-        !self.creating && !self.new_ticket_brief_input.text().trim().is_empty()
+        !self.creating && !editor_state_text(&self.new_ticket_brief_editor).trim().is_empty()
     }
 
     fn apply_tickets(

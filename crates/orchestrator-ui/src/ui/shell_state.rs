@@ -44,7 +44,8 @@ struct UiShellState {
     terminal_session_receiver: Option<mpsc::Receiver<TerminalSessionEvent>>,
     terminal_session_states: HashMap<WorkerSessionId, TerminalViewState>,
     terminal_session_streamed: HashSet<WorkerSessionId>,
-    terminal_compose_input: TextAreaState,
+    terminal_compose_editor: EditorState,
+    terminal_compose_event_handler: EditorEventHandler,
     archive_session_confirm_session: Option<WorkerSessionId>,
     archiving_session_id: Option<WorkerSessionId>,
     review_merge_confirm_session: Option<WorkerSessionId>,
@@ -135,7 +136,8 @@ impl UiShellState {
             terminal_session_receiver,
             terminal_session_states: HashMap::new(),
             terminal_session_streamed: HashSet::new(),
-            terminal_compose_input: TextAreaState::empty().with_tab_config(TabConfig::Literal),
+            terminal_compose_editor: EditorState::default(),
+            terminal_compose_event_handler: EditorEventHandler::default(),
             archive_session_confirm_session: None,
             archiving_session_id: None,
             review_merge_confirm_session: None,
@@ -1190,20 +1192,6 @@ impl UiShellState {
         self.ticket_picker_overlay.cancel_new_ticket_mode();
     }
 
-    fn append_create_ticket_brief_char(&mut self, ch: char) {
-        if !self.ticket_picker_overlay.visible || !self.ticket_picker_overlay.new_ticket_mode {
-            return;
-        }
-        self.ticket_picker_overlay.append_new_ticket_brief_char(ch);
-    }
-
-    fn pop_create_ticket_brief_char(&mut self) {
-        if !self.ticket_picker_overlay.visible || !self.ticket_picker_overlay.new_ticket_mode {
-            return;
-        }
-        self.ticket_picker_overlay.pop_new_ticket_brief_char();
-    }
-
     fn move_ticket_picker_selection(&mut self, delta: isize) {
         if !self.ticket_picker_overlay.visible {
             return;
@@ -1339,14 +1327,15 @@ impl UiShellState {
 
         let brief = self
             .ticket_picker_overlay
-            .new_ticket_brief_input
-            .text()
+            .new_ticket_brief_editor
+            .lines
+            .to_string()
             .trim()
             .to_owned();
         let selected_project = self.ticket_picker_overlay.selected_project_name();
         self.ticket_picker_overlay.error = None;
         self.ticket_picker_overlay.new_ticket_mode = false;
-        self.ticket_picker_overlay.new_ticket_brief_input.clear();
+        clear_editor_state(&mut self.ticket_picker_overlay.new_ticket_brief_editor);
         self.ticket_picker_overlay.creating = true;
         if !self.ticket_picker_overlay.loading {
             self.spawn_ticket_picker_load();
@@ -2597,33 +2586,52 @@ fn apply_ticket_picker_event(&mut self, event: TicketPickerEvent) {
         if self.terminal_session_has_any_needs_input() {
             return false;
         }
+        if is_ctrl_char(key, '\\') || is_ctrl_char(key, 'n') {
+            return false;
+        }
 
         match key.code {
-            KeyCode::Enter
-                if key.modifiers.is_empty() || key.modifiers == KeyModifiers::CONTROL =>
-            {
+            KeyCode::Esc if key.modifiers.is_empty() => {
+                if self.terminal_compose_editor.mode == EditorMode::Normal {
+                    return false;
+                }
+                if let Some(key_input) = map_edtui_key_input(key) {
+                    self.terminal_compose_event_handler
+                        .on_key_event(key_input, &mut self.terminal_compose_editor);
+                }
+                true
+            }
+            KeyCode::Enter if key.modifiers == KeyModifiers::CONTROL => {
                 self.submit_terminal_compose_input();
                 true
             }
+            KeyCode::Enter if key.modifiers.is_empty() => {
+                if self.terminal_compose_editor.mode == EditorMode::Normal {
+                    self.submit_terminal_compose_input();
+                } else {
+                    let enter = edtui_key_input(KeyCode::Enter, KeyModifiers::NONE)
+                        .expect("enter key conversion");
+                    self.terminal_compose_event_handler
+                        .on_key_event(enter, &mut self.terminal_compose_editor);
+                }
+                true
+            }
             KeyCode::Enter if key.modifiers == KeyModifiers::SHIFT => {
-                self.terminal_compose_input.insert_newline();
+                let enter = edtui_key_input(KeyCode::Enter, KeyModifiers::NONE)
+                    .expect("enter key conversion");
+                self.terminal_compose_event_handler
+                    .on_key_event(enter, &mut self.terminal_compose_editor);
                 true
             }
-            KeyCode::Backspace if key.modifiers.is_empty() => {
-                self.terminal_compose_input.delete_char_backward();
-                true
+            _ => {
+                if let Some(key_input) = map_edtui_key_input(key) {
+                    self.terminal_compose_event_handler
+                        .on_key_event(key_input, &mut self.terminal_compose_editor);
+                    true
+                } else {
+                    false
+                }
             }
-            KeyCode::Tab if key.modifiers.is_empty() => {
-                self.terminal_compose_input.insert_tab();
-                true
-            }
-            KeyCode::Char(ch)
-                if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT =>
-            {
-                self.terminal_compose_input.insert_char(ch);
-                true
-            }
-            _ => false,
         }
     }
 
@@ -3654,7 +3662,7 @@ fn apply_ticket_picker_event(&mut self, event: TicketPickerEvent) {
         }
 
         let insertion = refs.join(" ");
-        let mut current = self.terminal_compose_input.text();
+        let mut current = editor_state_text(&self.terminal_compose_editor);
         if !current.is_empty() && !current.ends_with(char::is_whitespace) {
             current.push(' ');
         }
@@ -3662,7 +3670,7 @@ fn apply_ticket_picker_event(&mut self, event: TicketPickerEvent) {
         if !current.ends_with(char::is_whitespace) {
             current.push(' ');
         }
-        self.terminal_compose_input.set_text(current);
+        set_editor_state_text(&mut self.terminal_compose_editor, current.as_str());
         self.status_warning = Some(format!(
             "added {} diff reference{} to compose input",
             refs.len(),
@@ -3773,7 +3781,7 @@ fn apply_ticket_picker_event(&mut self, event: TicketPickerEvent) {
             return;
         }
 
-        if self.terminal_compose_input.text().trim().is_empty() {
+        if editor_state_text(&self.terminal_compose_editor).trim().is_empty() {
             self.status_warning = Some(
                 "terminal input unavailable: compose a non-empty message before sending".to_owned(),
             );
@@ -3797,7 +3805,7 @@ fn apply_ticket_picker_event(&mut self, event: TicketPickerEvent) {
             return;
         };
 
-        let user_message = self.terminal_compose_input.text();
+        let user_message = editor_state_text(&self.terminal_compose_editor);
         let mut payload = user_message.clone();
         if !payload.ends_with('\n') {
             payload.push('\n');
@@ -3818,7 +3826,7 @@ fn apply_ticket_picker_event(&mut self, event: TicketPickerEvent) {
                 runtime.spawn(async move {
                     let _ = backend.send_input(&handle, bytes.as_slice()).await;
                 });
-                self.terminal_compose_input.clear();
+                clear_editor_state(&mut self.terminal_compose_editor);
                 self.enter_normal_mode();
             }
             Err(_) => {
@@ -3944,4 +3952,54 @@ fn terminal_output_line_count_for_scroll(view: &TerminalViewState) -> usize {
         return view.output_rendered_line_count;
     }
     render_terminal_transcript_entries(view).len()
+}
+
+fn editor_state_text(state: &EditorState) -> String {
+    state.lines.to_string()
+}
+
+fn set_editor_state_text(state: &mut EditorState, text: &str) {
+    let mode = state.mode;
+    *state = EditorState::new(Lines::from(text));
+    state.mode = mode;
+}
+
+fn clear_editor_state(state: &mut EditorState) {
+    *state = EditorState::default();
+}
+
+fn map_edtui_key_input(key: KeyEvent) -> Option<edtui::events::KeyInput> {
+    edtui_key_input(key.code, key.modifiers)
+}
+
+fn edtui_key_input(code: KeyCode, modifiers: KeyModifiers) -> Option<edtui::events::KeyInput> {
+    let code = match code {
+        KeyCode::Char(ch) => ratatui::crossterm::event::KeyCode::Char(ch),
+        KeyCode::Enter => ratatui::crossterm::event::KeyCode::Enter,
+        KeyCode::Esc => ratatui::crossterm::event::KeyCode::Esc,
+        KeyCode::Backspace => ratatui::crossterm::event::KeyCode::Backspace,
+        KeyCode::Delete => ratatui::crossterm::event::KeyCode::Delete,
+        KeyCode::Tab => ratatui::crossterm::event::KeyCode::Tab,
+        KeyCode::Left => ratatui::crossterm::event::KeyCode::Left,
+        KeyCode::Right => ratatui::crossterm::event::KeyCode::Right,
+        KeyCode::Up => ratatui::crossterm::event::KeyCode::Up,
+        KeyCode::Down => ratatui::crossterm::event::KeyCode::Down,
+        KeyCode::Home => ratatui::crossterm::event::KeyCode::Home,
+        KeyCode::End => ratatui::crossterm::event::KeyCode::End,
+        _ => return None,
+    };
+    let mut mapped_modifiers = ratatui::crossterm::event::KeyModifiers::empty();
+    if modifiers.contains(KeyModifiers::SHIFT) {
+        mapped_modifiers |= ratatui::crossterm::event::KeyModifiers::SHIFT;
+    }
+    if modifiers.contains(KeyModifiers::CONTROL) {
+        mapped_modifiers |= ratatui::crossterm::event::KeyModifiers::CONTROL;
+    }
+    if modifiers.contains(KeyModifiers::ALT) {
+        mapped_modifiers |= ratatui::crossterm::event::KeyModifiers::ALT;
+    }
+    Some(edtui::events::KeyInput::with_modifiers(
+        code,
+        mapped_modifiers,
+    ))
 }
