@@ -3315,6 +3315,15 @@ mod tests {
         assert!(rendered.contains("2  Jump to Approvals lane"));
         assert!(rendered.contains("3  Jump to PR Reviews lane"));
         assert!(rendered.contains("4  Jump to FYI Digest lane"));
+
+        handle_key_press(&mut shell_state, key(KeyCode::Char('w')));
+        let overlay = shell_state
+            .which_key_overlay
+            .as_ref()
+            .expect("overlay is shown for workflow prefix");
+        let rendered = render_which_key_overlay_text(overlay);
+        assert!(rendered.contains("w  (Workflow Actions)"));
+        assert!(rendered.contains("n  Advance terminal workflow stage"));
     }
 
     #[test]
@@ -4485,6 +4494,18 @@ mod tests {
         assert_eq!(
             routed_command(route_key_press(&mut shell_state, key(KeyCode::Char('d')))),
             Some(UiCommand::OpenDiffInspectorForSelected)
+        );
+        assert_eq!(
+            routed_command(route_key_press(&mut shell_state, key(KeyCode::Char('n')))),
+            None
+        );
+        assert_eq!(
+            routed_command(route_key_press(&mut shell_state, key(KeyCode::Char('w')))),
+            None
+        );
+        assert_eq!(
+            routed_command(route_key_press(&mut shell_state, key(KeyCode::Char('n')))),
+            Some(UiCommand::AdvanceTerminalWorkflowStage)
         );
         assert_eq!(
             routed_command(route_key_press(&mut shell_state, key(KeyCode::Esc))),
