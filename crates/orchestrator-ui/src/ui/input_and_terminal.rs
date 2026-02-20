@@ -490,6 +490,19 @@ fn handle_key_press(shell_state: &mut UiShellState, key: KeyEvent) -> bool {
 }
 
 fn route_key_press(shell_state: &mut UiShellState, key: KeyEvent) -> RoutedInput {
+    if shell_state.worktree_diff_modal.is_some() {
+        return route_worktree_diff_modal_key(shell_state, key);
+    }
+    if shell_state.is_ticket_picker_visible() {
+        return route_ticket_picker_key(shell_state, key);
+    }
+    if shell_state.archive_session_confirm_session.is_some() {
+        return route_archive_session_confirm_key(shell_state, key);
+    }
+    if shell_state.review_merge_confirm_session.is_some() {
+        return route_review_merge_confirm_key(shell_state, key);
+    }
+
     if shell_state.terminal_session_has_active_needs_input() && shell_state.is_right_pane_focused() {
         return route_needs_input_modal_key(shell_state, key);
     }
@@ -502,18 +515,6 @@ fn route_key_press(shell_state: &mut UiShellState, key: KeyEvent) -> RoutedInput
     {
         let _ = shell_state.activate_terminal_needs_input(false);
         return route_needs_input_modal_key(shell_state, key);
-    }
-    if shell_state.worktree_diff_modal.is_some() {
-        return route_worktree_diff_modal_key(shell_state, key);
-    }
-    if shell_state.is_ticket_picker_visible() {
-        return route_ticket_picker_key(shell_state, key);
-    }
-    if shell_state.archive_session_confirm_session.is_some() {
-        return route_archive_session_confirm_key(shell_state, key);
-    }
-    if shell_state.review_merge_confirm_session.is_some() {
-        return route_review_merge_confirm_key(shell_state, key);
     }
 
     if matches!(key.code, KeyCode::BackTab) {
