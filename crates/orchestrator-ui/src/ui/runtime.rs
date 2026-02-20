@@ -76,16 +76,30 @@ impl Ui {
                     &shell_state.terminal_session_states,
                     shell_state.selected_session_id_for_panel().as_ref(),
                 );
+                let sessions_title = if shell_state.is_sessions_sidebar_focused() {
+                    "sessions *"
+                } else {
+                    "sessions"
+                };
                 frame.render_widget(
                     Paragraph::new(sessions_text)
-                        .block(Block::default().title("sessions").borders(Borders::ALL)),
+                        .block(
+                            Block::default()
+                                .title(sessions_title)
+                                .borders(Borders::ALL),
+                        ),
                     sessions_area,
                 );
 
                 let inbox_text = render_inbox_panel(&ui_state);
+                let inbox_title = if shell_state.is_inbox_sidebar_focused() {
+                    "inbox *"
+                } else {
+                    "inbox"
+                };
                 frame.render_widget(
                     Paragraph::new(inbox_text)
-                        .block(Block::default().title("inbox").borders(Borders::ALL)),
+                        .block(Block::default().title(inbox_title).borders(Borders::ALL)),
                     inbox_area,
                 );
 

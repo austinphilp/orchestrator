@@ -1,3 +1,9 @@
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SidebarFocus {
+    Sessions,
+    Inbox,
+}
+
 struct UiShellState {
     base_status: String,
     status_warning: Option<String>,
@@ -24,6 +30,7 @@ struct UiShellState {
     startup_session_feed_opened: bool,
     worker_backend: Option<Arc<dyn WorkerBackend>>,
     selected_session_index: Option<usize>,
+    sidebar_focus: SidebarFocus,
     terminal_session_sender: Option<mpsc::Sender<TerminalSessionEvent>>,
     terminal_session_receiver: Option<mpsc::Receiver<TerminalSessionEvent>>,
     terminal_session_states: HashMap<WorkerSessionId, TerminalViewState>,
@@ -111,6 +118,7 @@ impl UiShellState {
             startup_session_feed_opened: false,
             worker_backend,
             selected_session_index: None,
+            sidebar_focus: SidebarFocus::Inbox,
             terminal_session_sender,
             terminal_session_receiver,
             terminal_session_states: HashMap::new(),
@@ -162,10 +170,11 @@ impl UiShellState {
     }
 
     fn move_selection(&mut self, delta: isize) {
-        let ui_state = self.ui_state();
-        if ui_state.selected_inbox_item_id.is_none() && self.move_session_selection(delta) {
+        if matches!(self.sidebar_focus, SidebarFocus::Sessions) {
+            let _ = self.move_session_selection(delta);
             return;
         }
+        let ui_state = self.ui_state();
         if ui_state.inbox_rows.is_empty() {
             self.selected_inbox_index = None;
             self.selected_inbox_item_id = None;
@@ -179,11 +188,12 @@ impl UiShellState {
     }
 
     fn jump_to_first_item(&mut self) {
+        if matches!(self.sidebar_focus, SidebarFocus::Sessions) {
+            let _ = self.move_to_first_session();
+            return;
+        }
         let ui_state = self.ui_state();
         if ui_state.inbox_rows.is_empty() {
-            if self.move_to_first_session() {
-                return;
-            }
             self.set_selection(None, &ui_state.inbox_rows);
             return;
         }
@@ -191,15 +201,26 @@ impl UiShellState {
     }
 
     fn jump_to_last_item(&mut self) {
+        if matches!(self.sidebar_focus, SidebarFocus::Sessions) {
+            let _ = self.move_to_last_session();
+            return;
+        }
         let ui_state = self.ui_state();
         if ui_state.inbox_rows.is_empty() {
-            if self.move_to_last_session() {
-                return;
-            }
             self.set_selection(None, &ui_state.inbox_rows);
             return;
         }
         self.set_selection(Some(ui_state.inbox_rows.len() - 1), &ui_state.inbox_rows);
+    }
+
+    fn cycle_sidebar_focus(&mut self, delta: isize) {
+        if delta.rem_euclid(2) == 0 {
+            return;
+        }
+        self.sidebar_focus = match self.sidebar_focus {
+            SidebarFocus::Sessions => SidebarFocus::Inbox,
+            SidebarFocus::Inbox => SidebarFocus::Sessions,
+        };
     }
 
     fn jump_to_batch(&mut self, target: InboxBatchKind) {
@@ -318,6 +339,38 @@ impl UiShellState {
         if let Some(session_id) = terminal_session_id {
             self.ensure_terminal_stream(session_id);
         }
+    }
+
+    fn open_session_output_for_selected_inbox(&mut self) {
+        if !matches!(self.sidebar_focus, SidebarFocus::Inbox) {
+            return;
+        }
+        let ui_state = self.ui_state();
+        let Some(selected_index) = ui_state.selected_inbox_index else {
+            self.status_warning =
+                Some("session output unavailable: select an inbox item first".to_owned());
+            return;
+        };
+        let Some(session_id) = ui_state
+            .inbox_rows
+            .get(selected_index)
+            .and_then(|row| row.session_id.clone())
+        else {
+            self.status_warning =
+                Some("session output unavailable: selected inbox item has no active session".to_owned());
+            return;
+        };
+        if let Some(index) = self
+            .session_ids_for_navigation()
+            .iter()
+            .position(|candidate| candidate == &session_id)
+        {
+            self.selected_session_index = Some(index);
+        }
+        self.view_stack.replace_center(CenterView::TerminalView {
+            session_id: session_id.clone(),
+        });
+        self.ensure_terminal_stream(session_id);
     }
 
     fn spawn_manual_terminal_session(&mut self) -> Result<Option<WorkerSessionId>, String> {
@@ -449,6 +502,14 @@ impl UiShellState {
             .unwrap_or(0)
             .min(session_ids.len() - 1);
         session_ids.get(index).cloned()
+    }
+
+    fn is_sessions_sidebar_focused(&self) -> bool {
+        matches!(self.sidebar_focus, SidebarFocus::Sessions)
+    }
+
+    fn is_inbox_sidebar_focused(&self) -> bool {
+        matches!(self.sidebar_focus, SidebarFocus::Inbox)
     }
 
     fn move_session_selection(&mut self, delta: isize) -> bool {

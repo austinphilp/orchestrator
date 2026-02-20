@@ -2789,12 +2789,86 @@ mod tests {
             .clone();
         assert_eq!(selected_kind, InboxItemKind::FYI);
 
-        handle_key_press(&mut shell_state, key(KeyCode::BackTab));
+        handle_key_press(&mut shell_state, key(KeyCode::Char('[')));
         let selected = shell_state.ui_state();
         let selected_kind = selected.inbox_rows[selected.selected_inbox_index.expect("selected")]
             .kind
             .clone();
         assert_eq!(selected_kind, InboxItemKind::ReadyForReview);
+    }
+
+    #[test]
+    fn tab_cycles_sidebar_focus_and_moves_selection_in_focused_panel() {
+        let mut projection = sample_projection(true);
+        let extra_work_item_id = WorkItemId::new("wi-extra");
+        let extra_session_id = WorkerSessionId::new("sess-extra");
+        projection.work_items.insert(
+            extra_work_item_id.clone(),
+            WorkItemProjection {
+                id: extra_work_item_id.clone(),
+                ticket_id: None,
+                project_id: None,
+                workflow_state: Some(WorkflowState::Implementing),
+                session_id: Some(extra_session_id.clone()),
+                worktree_id: None,
+                inbox_items: vec![],
+                artifacts: vec![],
+            },
+        );
+        projection.sessions.insert(
+            extra_session_id.clone(),
+            SessionProjection {
+                id: extra_session_id,
+                work_item_id: Some(extra_work_item_id),
+                status: Some(WorkerSessionStatus::WaitingForUser),
+                latest_checkpoint: None,
+            },
+        );
+        let mut shell_state = UiShellState::new("ready".to_owned(), projection);
+        let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
+
+        let initial_inbox_index = shell_state.ui_state().selected_inbox_index;
+        assert!(shell_state.is_inbox_sidebar_focused());
+
+        handle_key_press(&mut shell_state, key(KeyCode::Tab));
+        assert!(shell_state.is_sessions_sidebar_focused());
+
+        let before_session = shell_state
+            .selected_session_id_for_panel()
+            .expect("selected session before move");
+        handle_key_press(&mut shell_state, key(KeyCode::Char('j')));
+        let after_session = shell_state
+            .selected_session_id_for_panel()
+            .expect("selected session after move");
+        assert_ne!(before_session, after_session);
+        assert_eq!(shell_state.ui_state().selected_inbox_index, initial_inbox_index);
+
+        handle_key_press(&mut shell_state, key(KeyCode::BackTab));
+        assert!(shell_state.is_inbox_sidebar_focused());
+    }
+
+    #[test]
+    fn open_session_output_for_selected_inbox_shortcut_opens_terminal_view() {
+        let mut shell_state = UiShellState::new("ready".to_owned(), sample_projection(true));
+        let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
+
+        handle_key_press(&mut shell_state, key(KeyCode::Char('o')));
+        assert!(matches!(
+            shell_state.view_stack.active_center(),
+            Some(CenterView::TerminalView { session_id }) if session_id.as_str() == "sess-1"
+        ));
+        assert_eq!(shell_state.mode, UiMode::Normal);
+    }
+
+    #[test]
+    fn open_session_output_shortcut_warns_when_selected_inbox_has_no_session() {
+        let mut shell_state = UiShellState::new("ready".to_owned(), sample_projection(false));
+        let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
+
+        handle_key_press(&mut shell_state, key(KeyCode::Char('o')));
+        assert!(!shell_state.is_terminal_view_active());
+        let status = shell_state.ui_state().status;
+        assert!(status.contains("selected inbox item has no active session"));
     }
 
     #[test]
@@ -3467,12 +3541,24 @@ mod tests {
             command_ids::UI_FOCUS_NEXT_INBOX
         );
         assert_eq!(
+            command_id(UiCommand::CycleSidebarFocusNext),
+            "ui.sidebar.focus_next"
+        );
+        assert_eq!(
+            command_id(UiCommand::CycleSidebarFocusPrevious),
+            "ui.sidebar.focus_previous"
+        );
+        assert_eq!(
             command_id(UiCommand::AdvanceTerminalWorkflowStage),
             "ui.terminal.workflow.advance"
         );
         assert_eq!(
             command_id(UiCommand::ArchiveSelectedSession),
             "ui.terminal.archive_selected_session"
+        );
+        assert_eq!(
+            command_id(UiCommand::OpenSessionOutputForSelectedInbox),
+            "ui.open_session_output_for_selected_inbox"
         );
     }
 
@@ -3491,6 +3577,8 @@ mod tests {
             UiCommand::QuitShell,
             UiCommand::FocusNextInbox,
             UiCommand::FocusPreviousInbox,
+            UiCommand::CycleSidebarFocusNext,
+            UiCommand::CycleSidebarFocusPrevious,
             UiCommand::CycleBatchNext,
             UiCommand::CycleBatchPrevious,
             UiCommand::JumpFirstInbox,
@@ -3503,6 +3591,7 @@ mod tests {
             UiCommand::AdvanceTerminalWorkflowStage,
             UiCommand::ArchiveSelectedSession,
             UiCommand::MinimizeCenterView,
+            UiCommand::OpenSessionOutputForSelectedInbox,
         ];
 
         for command in all_commands {

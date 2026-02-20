@@ -573,11 +573,13 @@ fn project_center_pane(
                     }),
             );
             lines.push("j/k or arrows: move selection".to_owned());
-            lines.push("Tab/Shift+Tab: cycle batch lanes".to_owned());
+            lines.push("Tab/Shift+Tab: cycle sidebar focus".to_owned());
+            lines.push("[ / ]: cycle batch lanes".to_owned());
             lines.push("g/G: jump first/last item".to_owned());
             lines.push("Enter: open focus card".to_owned());
             lines.push("c: toggle global supervisor chat".to_owned());
             lines.push("i: open terminal for selected item".to_owned());
+            lines.push("o: open session output for selected item".to_owned());
             lines.push("v d/t/p/c: open diff/test/PR/chat inspector".to_owned());
             lines.push("Backspace: minimize top view".to_owned());
             CenterPaneState {
