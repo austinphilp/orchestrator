@@ -355,6 +355,11 @@ fn render_terminal_output_with_accents(lines: &[String], width: u16) -> Text<'st
             continue;
         }
 
+        if !line_looks_like_markdown(line.as_str()) {
+            rendered.push(Line::from(line));
+            continue;
+        }
+
         let markdown = render_markdown_for_terminal(line.as_str(), width);
         if markdown.lines.is_empty() {
             rendered.push(Line::from(String::new()));
@@ -364,6 +369,20 @@ fn render_terminal_output_with_accents(lines: &[String], width: u16) -> Text<'st
     }
 
     Text::from(rendered)
+}
+
+fn line_looks_like_markdown(line: &str) -> bool {
+    let trimmed = line.trim_start();
+    trimmed.starts_with('#')
+        || trimmed.starts_with("- ")
+        || trimmed.starts_with("* ")
+        || trimmed.starts_with("> ")
+        || trimmed.starts_with("```")
+        || trimmed.starts_with('`')
+        || trimmed.contains("**")
+        || trimmed.contains("__")
+        || trimmed.contains("`")
+        || (trimmed.contains('[') && trimmed.contains("]("))
 }
 
 fn parse_fold_header_line(line: &str) -> Option<(TerminalFoldKind, bool)> {

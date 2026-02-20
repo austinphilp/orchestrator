@@ -318,6 +318,7 @@ async fn rehydrate_inflight_sessions(
             continue;
         }
         let workflow_state = latest_workflow_state_for_work_item(&store, &mapping.work_item_id)?;
+        let was_working = store.is_session_working(&mapping.session.session_id)?;
 
         let mut environment = Vec::new();
         if mapping.session.backend_kind == BackendKind::Codex {
@@ -358,7 +359,7 @@ async fn rehydrate_inflight_sessions(
                     }
                 }
 
-                let nudge = startup_rehydrate_nudge(&workflow_state);
+                let nudge = startup_rehydrate_nudge(&workflow_state, was_working);
                 let mut nudge_bytes = nudge.as_bytes().to_vec();
                 if !nudge_bytes.ends_with(b"\n") {
                     nudge_bytes.push(b'\n');
@@ -422,17 +423,23 @@ fn resume_instruction_from_ticket(ticket: &TicketRecord, workflow_state: &Workfl
     )
 }
 
-fn startup_rehydrate_nudge(workflow_state: &WorkflowState) -> String {
+fn startup_rehydrate_nudge(workflow_state: &WorkflowState, was_working: bool) -> String {
+    let interruption_suffix = if was_working {
+        format!(" {STARTUP_RESUME_NUDGE}")
+    } else {
+        String::new()
+    };
+
     if is_past_planning_state(workflow_state) {
         return format!(
-            "Planning is already complete for this ticket. End planning mode now. Current workflow state: {:?}. {STARTUP_RESUME_NUDGE}",
-            workflow_state
+            "Planning is already complete for this ticket. End planning mode now. Current workflow state: {:?}.{}",
+            workflow_state, interruption_suffix
         );
     }
 
     format!(
-        "Current workflow state: {:?}. {STARTUP_RESUME_NUDGE}",
-        workflow_state
+        "Current workflow state: {:?}.{}",
+        workflow_state, interruption_suffix
     )
 }
 
@@ -470,16 +477,27 @@ mod tests {
     }
 
     #[test]
-    fn post_planning_nudge_requests_exit_from_planning_mode() {
-        let nudge = startup_rehydrate_nudge(&WorkflowState::Testing);
+    fn post_planning_nudge_requests_exit_from_planning_mode_when_interrupted() {
+        let nudge = startup_rehydrate_nudge(&WorkflowState::Testing, true);
         assert!(nudge.contains("End planning mode now."));
         assert!(nudge.contains(STARTUP_RESUME_NUDGE));
     }
 
     #[test]
-    fn planning_nudge_keeps_planning_mode_active() {
-        let nudge = startup_rehydrate_nudge(&WorkflowState::Planning);
+    fn planning_nudge_keeps_planning_mode_active_when_interrupted() {
+        let nudge = startup_rehydrate_nudge(&WorkflowState::Planning, true);
         assert!(!nudge.contains("End planning mode now."));
         assert!(nudge.contains(STARTUP_RESUME_NUDGE));
+    }
+
+    #[test]
+    fn startup_rehydrate_nudge_omits_interruption_message_when_not_working() {
+        let post_planning = startup_rehydrate_nudge(&WorkflowState::Testing, false);
+        assert!(post_planning.contains("End planning mode now."));
+        assert!(!post_planning.contains(STARTUP_RESUME_NUDGE));
+
+        let planning = startup_rehydrate_nudge(&WorkflowState::Planning, false);
+        assert!(!planning.contains("End planning mode now."));
+        assert!(!planning.contains(STARTUP_RESUME_NUDGE));
     }
 }

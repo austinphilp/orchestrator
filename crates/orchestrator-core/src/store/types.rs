@@ -9,7 +9,7 @@ use crate::events::{NewEventEnvelope, OrchestrationEventPayload, StoredEventEnve
 use crate::identifiers::{ArtifactId, TicketId, TicketProvider, WorkItemId, WorkerSessionId};
 use crate::status::{ArtifactKind, WorkerSessionStatus};
 
-const CURRENT_SCHEMA_VERSION: u32 = 7;
+const CURRENT_SCHEMA_VERSION: u32 = 8;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RetrievalScope {

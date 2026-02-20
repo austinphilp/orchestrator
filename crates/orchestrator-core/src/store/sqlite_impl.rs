@@ -89,17 +89,74 @@ impl SqliteEventStore {
         &self,
         work_item_id: &WorkItemId,
     ) -> Result<Vec<StoredEventWithArtifacts>, CoreError> {
-        let events = self.read_events_for_work_item(work_item_id)?;
-        events
-            .into_iter()
-            .map(|event| {
-                self.read_artifact_refs_for_event(&event.event_id)
-                    .map(|artifact_ids| StoredEventWithArtifacts {
-                        event,
-                        artifact_ids,
-                    })
-            })
-            .collect()
+        let mut stmt = self
+            .conn
+            .prepare(
+                "
+                SELECT
+                    e.event_id,
+                    e.sequence,
+                    e.occurred_at,
+                    e.work_item_id,
+                    e.session_id,
+                    e.event_type,
+                    e.payload,
+                    e.schema_version,
+                    r.artifact_id
+                FROM events e
+                LEFT JOIN event_artifact_refs r ON r.event_id = e.event_id
+                WHERE e.work_item_id = ?1
+                ORDER BY e.sequence ASC, r.rowid ASC
+                ",
+            )
+            .map_err(|err| CoreError::Persistence(err.to_string()))?;
+
+        let mut rows = stmt
+            .query(params![work_item_id.as_str()])
+            .map_err(|err| CoreError::Persistence(err.to_string()))?;
+
+        let mut output = Vec::<StoredEventWithArtifacts>::new();
+        let mut current_event: Option<StoredEventEnvelope> = None;
+        let mut current_artifact_ids = Vec::<ArtifactId>::new();
+
+        while let Some(row) = rows
+            .next()
+            .map_err(|err| CoreError::Persistence(err.to_string()))?
+        {
+            let event = Self::map_row(row)?;
+            let artifact_id = row
+                .get::<_, Option<String>>(8)
+                .map_err(|err| CoreError::Persistence(err.to_string()))?
+                .map(ArtifactId::from);
+
+            let same_event = current_event
+                .as_ref()
+                .map(|existing| existing.event_id == event.event_id)
+                .unwrap_or(false);
+
+            if !same_event {
+                if let Some(previous_event) = current_event.take() {
+                    output.push(StoredEventWithArtifacts {
+                        event: previous_event,
+                        artifact_ids: std::mem::take(&mut current_artifact_ids),
+                    });
+                }
+                current_event = Some(event);
+            }
+
+            if let Some(artifact_id) = artifact_id {
+                current_artifact_ids.push(artifact_id);
+            }
+        }
+
+        if let Some(previous_event) = current_event.take() {
+            output.push(StoredEventWithArtifacts {
+                event: previous_event,
+                artifact_ids: current_artifact_ids,
+            });
+        }
+
+        Ok(output)
     }
 
     pub fn upsert_ticket(&self, ticket: &TicketRecord) -> Result<(), CoreError> {
@@ -267,6 +324,17 @@ impl SqliteEventStore {
             )
             .map_err(|err| CoreError::Persistence(err.to_string()))?;
 
+        self.conn
+            .execute(
+                "
+                INSERT INTO session_runtime_flags (session_id, is_working, updated_at)
+                VALUES (?1, 0, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+                ON CONFLICT(session_id) DO NOTHING
+                ",
+                params![session.session_id.as_str()],
+            )
+            .map_err(|err| CoreError::Persistence(err.to_string()))?;
+
         Ok(())
     }
 
@@ -297,6 +365,55 @@ impl SqliteEventStore {
             )
             .optional()
             .map_err(|err| CoreError::Persistence(err.to_string()))
+    }
+
+    pub fn set_session_working_state(
+        &self,
+        session_id: &WorkerSessionId,
+        is_working: bool,
+    ) -> Result<(), CoreError> {
+        let working = if is_working { 1_i64 } else { 0_i64 };
+        self.conn
+            .execute(
+                "
+                INSERT OR IGNORE INTO session_runtime_flags (session_id, is_working, updated_at)
+                SELECT session_id, ?2, strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                FROM sessions
+                WHERE session_id = ?1
+                ",
+                params![session_id.as_str(), working],
+            )
+            .map_err(|err| CoreError::Persistence(err.to_string()))?;
+        self.conn
+            .execute(
+                "
+                UPDATE session_runtime_flags
+                SET is_working = ?2,
+                    updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                WHERE session_id = ?1
+                ",
+                params![session_id.as_str(), working],
+            )
+            .map_err(|err| CoreError::Persistence(err.to_string()))?;
+        Ok(())
+    }
+
+    pub fn is_session_working(&self, session_id: &WorkerSessionId) -> Result<bool, CoreError> {
+        let working = self
+            .conn
+            .query_row(
+                "
+                SELECT COALESCE((
+                    SELECT is_working
+                    FROM session_runtime_flags
+                    WHERE session_id = ?1
+                ), 0)
+                ",
+                params![session_id.as_str()],
+                |row| row.get::<_, i64>(0),
+            )
+            .map_err(|err| CoreError::Persistence(err.to_string()))?;
+        Ok(working != 0)
     }
 
     pub fn upsert_harness_session_binding(
@@ -505,6 +622,13 @@ impl SqliteEventStore {
             )
             .optional()
             .map_err(|err| CoreError::Persistence(err.to_string()))
+    }
+
+    pub fn find_runtime_mapping_by_work_item_id(
+        &self,
+        work_item_id: &WorkItemId,
+    ) -> Result<Option<RuntimeMappingRecord>, CoreError> {
+        self.find_runtime_mapping_by_work_item(work_item_id)
     }
 
     pub fn find_inflight_runtime_mapping_by_ticket(
@@ -917,6 +1041,13 @@ impl SqliteEventStore {
                     FOREIGN KEY(work_item_id) REFERENCES work_items(work_item_id)
                 );
 
+                CREATE TABLE IF NOT EXISTS session_runtime_flags (
+                    session_id TEXT PRIMARY KEY,
+                    is_working INTEGER NOT NULL DEFAULT 0,
+                    updated_at TEXT NOT NULL,
+                    FOREIGN KEY(session_id) REFERENCES sessions(session_id)
+                );
+
                 CREATE TABLE IF NOT EXISTS event_artifact_refs (
                     event_id TEXT NOT NULL,
                     artifact_id TEXT NOT NULL,
@@ -940,6 +1071,10 @@ impl SqliteEventStore {
                     PRIMARY KEY (session_id, backend_kind),
                     FOREIGN KEY(session_id) REFERENCES sessions(session_id)
                 );
+
+                INSERT OR IGNORE INTO session_runtime_flags (session_id, is_working, updated_at)
+                SELECT session_id, 0, strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                FROM sessions;
 
                 CREATE INDEX IF NOT EXISTS idx_events_work_item_sequence ON events(work_item_id, sequence ASC);
                 CREATE INDEX IF NOT EXISTS idx_events_session ON events(session_id, sequence DESC);
@@ -1128,6 +1263,22 @@ impl SqliteEventStore {
                 .execute_batch(
                     "
                     DROP TABLE IF EXISTS session_workflow_stages;
+                    ",
+                )
+                .map_err(|err| CoreError::Persistence(err.to_string())),
+            8 => tx
+                .execute_batch(
+                    "
+                    CREATE TABLE IF NOT EXISTS session_runtime_flags (
+                        session_id TEXT PRIMARY KEY,
+                        is_working INTEGER NOT NULL DEFAULT 0,
+                        updated_at TEXT NOT NULL,
+                        FOREIGN KEY(session_id) REFERENCES sessions(session_id)
+                    );
+
+                    INSERT OR IGNORE INTO session_runtime_flags (session_id, is_working, updated_at)
+                    SELECT session_id, 0, strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                    FROM sessions;
                     ",
                 )
                 .map_err(|err| CoreError::Persistence(err.to_string())),
@@ -1546,6 +1697,16 @@ impl SqliteEventStore {
                 session.created_at,
                 session.updated_at,
             ],
+        )
+        .map_err(|err| CoreError::Persistence(err.to_string()))?;
+
+        tx.execute(
+            "
+            INSERT INTO session_runtime_flags (session_id, is_working, updated_at)
+            VALUES (?1, 0, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+            ON CONFLICT(session_id) DO NOTHING
+            ",
+            params![session.session_id.as_str()],
         )
         .map_err(|err| CoreError::Persistence(err.to_string()))?;
 

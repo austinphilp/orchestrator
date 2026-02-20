@@ -277,6 +277,15 @@ impl<S: Supervisor, G: GithubClient> App<S, G> {
         Ok(())
     }
 
+    pub fn set_session_working_state(
+        &self,
+        session_id: &WorkerSessionId,
+        is_working: bool,
+    ) -> Result<(), CoreError> {
+        let store = open_event_store(&self.config.event_store_path)?;
+        store.set_session_working_state(session_id, is_working)
+    }
+
     pub async fn complete_session_after_merge(
         &self,
         session_id: &WorkerSessionId,
@@ -290,15 +299,14 @@ impl<S: Supervisor, G: GithubClient> App<S, G> {
             )
             .await?;
 
-        if cleanup_warnings.is_empty() {
-            Ok(())
-        } else {
-            Err(CoreError::DependencyUnavailable(format!(
-                "merged session '{}' finalized with cleanup warnings: {}",
-                session_id.as_str(),
-                cleanup_warnings.join("; ")
-            )))
+        if !cleanup_warnings.is_empty() {
+            tracing::warn!(
+                session_id = session_id.as_str(),
+                warnings = %cleanup_warnings.join("; "),
+                "merged session finalized with cleanup warnings"
+            );
         }
+        Ok(())
     }
 
     pub async fn archive_session(

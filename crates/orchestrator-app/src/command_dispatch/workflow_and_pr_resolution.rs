@@ -34,14 +34,11 @@ fn resolve_runtime_mapping_for_context_with_command(
     context: &SupervisorCommandContext,
     command_id: &str,
 ) -> Result<RuntimeMappingRecord, CoreError> {
-    let mappings = store.list_runtime_mappings()?;
-
     if let Some(session_id) = context.selected_session_id.as_deref() {
-        if let Some(mapping) = mappings
-            .iter()
-            .find(|mapping| mapping.session.session_id.as_str() == session_id)
-        {
-            return Ok(mapping.clone());
+        if let Some(mapping) = store.find_runtime_mapping_by_session_id(&WorkerSessionId::new(
+            session_id.to_owned(),
+        ))? {
+            return Ok(mapping);
         }
 
         return Err(CoreError::Configuration(format!(
@@ -50,11 +47,10 @@ fn resolve_runtime_mapping_for_context_with_command(
     }
 
     if let Some(work_item_id) = context.selected_work_item_id.as_deref() {
-        if let Some(mapping) = mappings
-            .iter()
-            .find(|mapping| mapping.work_item_id.as_str() == work_item_id)
-        {
-            return Ok(mapping.clone());
+        if let Some(mapping) = store.find_runtime_mapping_by_work_item_id(&WorkItemId::new(
+            work_item_id.to_owned(),
+        ))? {
+            return Ok(mapping);
         }
 
         return Err(CoreError::Configuration(format!(

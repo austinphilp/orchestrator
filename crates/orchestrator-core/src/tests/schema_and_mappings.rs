@@ -7,7 +7,7 @@ fn initialization_creates_required_schema_and_version() {
     let db = unique_db("init");
 
     let store = SqliteEventStore::open(db.path()).expect("open store");
-    assert_eq!(store.schema_version().expect("schema version"), 7);
+    assert_eq!(store.schema_version().expect("schema version"), 8);
 
     let conn = rusqlite::Connection::open(db.path()).expect("open sqlite for inspection");
     let tables = [
@@ -16,6 +16,7 @@ fn initialization_creates_required_schema_and_version() {
         "work_items",
         "worktrees",
         "sessions",
+        "session_runtime_flags",
         "artifacts",
         "events",
         "event_artifact_refs",
@@ -62,7 +63,7 @@ fn initialization_creates_required_schema_and_version() {
             row.get(0)
         })
         .expect("count migrations");
-    assert_eq!(applied_migrations, 7);
+    assert_eq!(applied_migrations, 8);
 
     drop(store);
 }
@@ -72,11 +73,11 @@ fn startup_is_idempotent_and_does_not_duplicate_migrations() {
     let db = unique_db("idempotent");
 
     let first = SqliteEventStore::open(db.path()).expect("first open");
-    assert_eq!(first.schema_version().expect("schema version"), 7);
+    assert_eq!(first.schema_version().expect("schema version"), 8);
     drop(first);
 
     let second = SqliteEventStore::open(db.path()).expect("second open");
-    assert_eq!(second.schema_version().expect("schema version"), 7);
+    assert_eq!(second.schema_version().expect("schema version"), 8);
     drop(second);
 
     let conn = rusqlite::Connection::open(db.path()).expect("open sqlite for inspection");
@@ -85,7 +86,7 @@ fn startup_is_idempotent_and_does_not_duplicate_migrations() {
             row.get(0)
         })
         .expect("count migrations");
-    assert_eq!(migration_count, 7);
+    assert_eq!(migration_count, 8);
 }
 
 #[test]
@@ -126,7 +127,7 @@ fn startup_adopts_legacy_events_schema_without_recreating_events_table() {
     drop(conn);
 
     let store = SqliteEventStore::open(db.path()).expect("open store");
-    assert_eq!(store.schema_version().expect("schema version"), 7);
+    assert_eq!(store.schema_version().expect("schema version"), 8);
 
     let events = store.read_ordered().expect("read ordered");
     assert_eq!(events.len(), 1);
@@ -140,6 +141,7 @@ fn startup_adopts_legacy_events_schema_without_recreating_events_table() {
         "work_items",
         "worktrees",
         "sessions",
+        "session_runtime_flags",
         "artifacts",
         "event_artifact_refs",
         "project_repositories",
@@ -733,4 +735,74 @@ fn runtime_mapping_round_trip_survives_restart_and_prevents_duplicate_resume_ent
         .expect("lookup session")
         .expect("session exists");
     assert_eq!(session.status, WorkerSessionStatus::Running);
+}
+
+#[test]
+fn session_working_state_round_trips_and_defaults_to_false() {
+    let db = unique_db("session-working-state");
+
+    let mapping = RuntimeMappingRecord {
+        ticket: TicketRecord {
+            ticket_id: TicketId::from_provider_uuid(TicketProvider::Linear, "990"),
+            provider: TicketProvider::Linear,
+            provider_ticket_id: "990".to_owned(),
+            identifier: "AP-990".to_owned(),
+            title: "Persist working-state".to_owned(),
+            state: "in_progress".to_owned(),
+            updated_at: "2026-02-20T08:00:00Z".to_owned(),
+        },
+        work_item_id: WorkItemId::new("wi-working-1"),
+        worktree: WorktreeRecord {
+            worktree_id: WorktreeId::new("wt-working-1"),
+            work_item_id: WorkItemId::new("wi-working-1"),
+            path: "/tmp/orchestrator/wt-working-1".to_owned(),
+            branch: "ap/AP-990-working-state".to_owned(),
+            base_branch: "main".to_owned(),
+            created_at: "2026-02-20T08:00:10Z".to_owned(),
+        },
+        session: SessionRecord {
+            session_id: WorkerSessionId::new("sess-working-1"),
+            work_item_id: WorkItemId::new("wi-working-1"),
+            backend_kind: BackendKind::OpenCode,
+            workdir: "/tmp/orchestrator/wt-working-1".to_owned(),
+            model: None,
+            status: WorkerSessionStatus::Running,
+            created_at: "2026-02-20T08:00:20Z".to_owned(),
+            updated_at: "2026-02-20T08:00:30Z".to_owned(),
+        },
+    };
+
+    let mut writer = SqliteEventStore::open(db.path()).expect("open store");
+    writer
+        .upsert_runtime_mapping(&mapping)
+        .expect("insert runtime mapping");
+    assert!(
+        !writer
+            .is_session_working(&mapping.session.session_id)
+            .expect("default working state")
+    );
+    writer
+        .set_session_working_state(&mapping.session.session_id, true)
+        .expect("set working state true");
+    assert!(
+        writer
+            .is_session_working(&mapping.session.session_id)
+            .expect("working state after set")
+    );
+    writer
+        .set_session_working_state(&WorkerSessionId::new("sess-not-in-db"), true)
+        .expect("setting unknown session should be a no-op");
+    drop(writer);
+
+    let reopened = SqliteEventStore::open(db.path()).expect("reopen store");
+    assert!(
+        reopened
+            .is_session_working(&mapping.session.session_id)
+            .expect("working state persisted")
+    );
+    assert!(
+        !reopened
+            .is_session_working(&WorkerSessionId::new("sess-not-in-db"))
+            .expect("unknown session defaults to false")
+    );
 }

@@ -657,21 +657,22 @@ impl UiShellState {
         self.ensure_terminal_stream(session_id);
     }
 
-    fn ensure_startup_session_feed_opened(&mut self) {
+    fn ensure_startup_session_feed_opened_and_report(&mut self) -> bool {
         if self.startup_session_feed_opened {
-            return;
+            return false;
         }
         if self.active_terminal_session_id().is_some() {
             self.startup_session_feed_opened = true;
-            return;
+            return true;
         }
         let session_ids = self.session_ids_for_navigation();
         if session_ids.is_empty() {
-            return;
+            return false;
         }
         self.sync_selected_session_panel_state();
         self.show_selected_session_output();
         self.startup_session_feed_opened = true;
+        true
     }
 
     fn focus_and_stream_session(&mut self, session_id: WorkerSessionId) {
@@ -773,6 +774,30 @@ impl UiShellState {
             Err(_) => {
                 self.status_warning = Some(
                     "inbox resolution unavailable: tokio runtime is not active".to_owned(),
+                );
+            }
+        }
+    }
+
+    fn spawn_set_session_working_state(
+        &mut self,
+        session_id: WorkerSessionId,
+        is_working: bool,
+    ) {
+        let Some(provider) = self.ticket_picker_provider.clone() else {
+            return;
+        };
+
+        match TokioHandle::try_current() {
+            Ok(handle) => {
+                handle.spawn(async move {
+                    run_set_session_working_state_task(provider, session_id, is_working).await;
+                });
+            }
+            Err(_) => {
+                self.status_warning = Some(
+                    "session working-state persistence unavailable: tokio runtime is not active"
+                        .to_owned(),
                 );
             }
         }
@@ -1340,26 +1365,28 @@ impl UiShellState {
         }
     }
 
-    fn tick_ticket_picker(&mut self) {
-        self.poll_ticket_picker_events();
+    fn tick_ticket_picker_and_report(&mut self) -> bool {
+        self.poll_ticket_picker_events()
     }
 
-    fn tick_terminal_view(&mut self) {
-        self.poll_terminal_session_events();
-        self.poll_merge_queue_events();
-        self.enqueue_merge_reconcile_polls();
-        self.dispatch_merge_queue_requests();
+    fn tick_terminal_view_and_report(&mut self) -> bool {
+        let mut changed = false;
+        changed |= self.poll_terminal_session_events();
+        changed |= self.poll_merge_queue_events();
+        changed |= self.enqueue_merge_reconcile_polls();
+        changed |= self.dispatch_merge_queue_requests();
         if let Some(session_id) = self.active_terminal_session_id().cloned() {
-            self.ensure_terminal_stream(session_id);
+            changed |= self.ensure_terminal_stream_and_report(session_id);
         }
+        changed
     }
 
-    fn poll_terminal_session_events(&mut self) {
+    fn poll_terminal_session_events(&mut self) -> bool {
         let mut events = Vec::new();
 
         {
             let Some(receiver) = self.terminal_session_receiver.as_mut() else {
-                return;
+                return false;
             };
 
             loop {
@@ -1375,6 +1402,7 @@ impl UiShellState {
             }
         }
 
+        let had_events = !events.is_empty();
         for event in events {
             match event {
                 TerminalSessionEvent::Output { session_id, output } => {
@@ -1386,8 +1414,16 @@ impl UiShellState {
                     session_id,
                     turn_state,
                 } => {
+                    let persisted_session_id = session_id.clone();
                     let view = self.terminal_session_states.entry(session_id).or_default();
+                    let previous_turn_active = view.turn_active;
                     view.turn_active = turn_state.active;
+                    if previous_turn_active != turn_state.active {
+                        self.spawn_set_session_working_state(
+                            persisted_session_id,
+                            turn_state.active,
+                        );
+                    }
                 }
                 TerminalSessionEvent::NeedsInput {
                     session_id,
@@ -1426,6 +1462,7 @@ impl UiShellState {
                     view.output_scroll_line = 0;
                     view.output_follow_tail = true;
                     view.turn_active = false;
+                    self.spawn_set_session_working_state(session_id.clone(), false);
                     self.publish_error_for_session(
                         &session_id,
                         "terminal-stream",
@@ -1437,19 +1474,22 @@ impl UiShellState {
                 }
                 TerminalSessionEvent::StreamEnded { session_id } => {
                     self.terminal_session_streamed.remove(&session_id);
+                    let persisted_session_id = session_id.clone();
                     let view = self.terminal_session_states.entry(session_id).or_default();
                     flush_terminal_output_fragment(view);
                     view.turn_active = false;
+                    self.spawn_set_session_working_state(persisted_session_id, false);
                 }
             }
         }
+        had_events
     }
 
-    fn poll_merge_queue_events(&mut self) {
+    fn poll_merge_queue_events(&mut self) -> bool {
         let mut events = Vec::new();
         {
             let Some(receiver) = self.merge_event_receiver.as_mut() else {
-                return;
+                return false;
             };
             loop {
                 match receiver.try_recv() {
@@ -1464,6 +1504,7 @@ impl UiShellState {
             }
         }
 
+        let had_events = !events.is_empty();
         for event in events {
             match event {
                 MergeQueueEvent::Completed {
@@ -1579,11 +1620,12 @@ impl UiShellState {
                 }
             }
         }
+        had_events
     }
 
-    fn enqueue_merge_reconcile_polls(&mut self) {
+    fn enqueue_merge_reconcile_polls(&mut self) -> bool {
         if self.supervisor_command_dispatcher.is_none() {
-            return;
+            return false;
         }
         let now = Instant::now();
         if self
@@ -1591,8 +1633,9 @@ impl UiShellState {
             .map(|previous| now.duration_since(previous) < MERGE_POLL_INTERVAL)
             .unwrap_or(false)
         {
-            return;
+            return false;
         }
+        let mut changed = false;
         self.merge_last_poll_at = Some(now);
 
         let session_ids = self
@@ -1612,22 +1655,29 @@ impl UiShellState {
             .collect::<Vec<_>>();
 
         let active_review_sessions = session_ids.iter().cloned().collect::<HashSet<_>>();
+        let review_len_before = self.review_sync_instructions_sent.len();
         self.review_sync_instructions_sent
             .retain(|session_id| active_review_sessions.contains(session_id));
+        changed |= self.review_sync_instructions_sent.len() != review_len_before;
+        let pending_len_before = self.merge_pending_sessions.len();
         self.merge_pending_sessions
             .retain(|session_id| active_review_sessions.contains(session_id));
+        changed |= self.merge_pending_sessions.len() != pending_len_before;
+        let finalizing_len_before = self.merge_finalizing_sessions.len();
         self.merge_finalizing_sessions
             .retain(|session_id| active_review_sessions.contains(session_id));
+        changed |= self.merge_finalizing_sessions.len() != finalizing_len_before;
 
         for session_id in session_ids {
-            self.ensure_review_sync_instruction(&session_id);
-            self.enqueue_merge_queue_request(session_id, MergeQueueCommandKind::Reconcile);
+            changed |= self.ensure_review_sync_instruction(&session_id);
+            changed |= self.enqueue_merge_queue_request(session_id, MergeQueueCommandKind::Reconcile);
         }
+        changed
     }
 
-    fn ensure_review_sync_instruction(&mut self, session_id: &WorkerSessionId) {
+    fn ensure_review_sync_instruction(&mut self, session_id: &WorkerSessionId) -> bool {
         if self.review_sync_instructions_sent.contains(session_id) {
-            return;
+            return false;
         }
         self.send_terminal_instruction_to_session(
             session_id,
@@ -1635,14 +1685,15 @@ impl UiShellState {
         );
         self.review_sync_instructions_sent
             .insert(session_id.clone());
+        true
     }
 
-    fn dispatch_merge_queue_requests(&mut self) {
+    fn dispatch_merge_queue_requests(&mut self) -> bool {
         if self.supervisor_command_dispatcher.is_none() {
-            return;
+            return false;
         }
         if self.merge_queue.is_empty() {
-            return;
+            return false;
         }
         let now = Instant::now();
         if self
@@ -1650,16 +1701,16 @@ impl UiShellState {
             .map(|previous| now.duration_since(previous) < MERGE_REQUEST_RATE_LIMIT)
             .unwrap_or(false)
         {
-            return;
+            return false;
         }
         let Some(dispatcher) = self.supervisor_command_dispatcher.clone() else {
-            return;
+            return false;
         };
         let Some(sender) = self.merge_event_sender.clone() else {
-            return;
+            return false;
         };
         let Some(request) = self.merge_queue.pop_front() else {
-            return;
+            return false;
         };
 
         match TokioHandle::try_current() {
@@ -1668,10 +1719,12 @@ impl UiShellState {
                 runtime.spawn(async move {
                     run_merge_queue_command_task(dispatcher, request, sender).await;
                 });
+                true
             }
             Err(_) => {
                 self.status_warning =
                     Some("workflow merge queue unavailable: tokio runtime unavailable".to_owned());
+                true
             }
         }
     }
@@ -1758,16 +1811,16 @@ impl UiShellState {
         &mut self,
         session_id: WorkerSessionId,
         kind: MergeQueueCommandKind,
-    ) {
+    ) -> bool {
         let Some(context) = self.supervisor_context_for_session(&session_id) else {
-            return;
+            return false;
         };
         if self
             .merge_queue
             .iter()
             .any(|queued| queued.session_id == session_id && queued.kind == kind)
         {
-            return;
+            return false;
         }
         let request = MergeQueueRequest {
             session_id,
@@ -1779,6 +1832,7 @@ impl UiShellState {
         } else {
             self.merge_queue.push_back(request);
         }
+        true
     }
 
     fn supervisor_context_for_session(
@@ -1798,23 +1852,27 @@ impl UiShellState {
     }
 
     fn ensure_terminal_stream(&mut self, session_id: WorkerSessionId) {
+        let _ = self.ensure_terminal_stream_and_report(session_id);
+    }
+
+    fn ensure_terminal_stream_and_report(&mut self, session_id: WorkerSessionId) -> bool {
         if self.terminal_session_streamed.contains(&session_id) {
-            return;
+            return false;
         }
         let Some(backend) = self.worker_backend.clone() else {
             self.terminal_session_streamed.remove(&session_id);
-            return;
+            return false;
         };
         let Some(sender) = self.terminal_session_sender.clone() else {
             self.terminal_session_streamed.remove(&session_id);
             self.status_warning = Some("terminal stream channel unavailable".to_owned());
-            return;
+            return true;
         };
         let Some(handle) = self.terminal_session_handle(&session_id) else {
             self.terminal_session_streamed.remove(&session_id);
             self.status_warning =
                 Some("terminal stream unavailable: cannot build session handle".to_owned());
-            return;
+            return true;
         };
         self.terminal_session_streamed.insert(session_id.clone());
 
@@ -1882,11 +1940,13 @@ impl UiShellState {
                         }
                     }
                 });
+                true
             }
             Err(_) => {
                 self.terminal_session_streamed.remove(&session_id);
                 self.status_warning =
                     Some("terminal stream unavailable: tokio runtime unavailable".to_owned());
+                true
             }
         }
     }
@@ -1944,12 +2004,12 @@ impl UiShellState {
         }
     }
 
-    fn poll_ticket_picker_events(&mut self) {
+    fn poll_ticket_picker_events(&mut self) -> bool {
         let mut events = Vec::new();
 
         {
             let Some(receiver) = self.ticket_picker_receiver.as_mut() else {
-                return;
+                return false;
             };
 
             loop {
@@ -1965,9 +2025,11 @@ impl UiShellState {
             }
         }
 
+        let had_events = !events.is_empty();
         for event in events {
             self.apply_ticket_picker_event(event);
         }
+        had_events
     }
 
 fn apply_ticket_picker_event(&mut self, event: TicketPickerEvent) {
@@ -2675,25 +2737,33 @@ fn apply_ticket_picker_event(&mut self, event: TicketPickerEvent) {
         }
     }
 
+    #[cfg(test)]
     fn tick_supervisor_stream(&mut self) {
-        self.poll_supervisor_stream_events();
-        if let Some(stream) = self.supervisor_chat_stream.as_mut() {
-            stream.flush_pending_delta();
-        }
+        let _ = self.tick_supervisor_stream_and_report();
     }
 
-    fn poll_supervisor_stream_events(&mut self) {
+    fn tick_supervisor_stream_and_report(&mut self) -> bool {
+        let mut changed = self.poll_supervisor_stream_events();
+        if let Some(stream) = self.supervisor_chat_stream.as_mut() {
+            changed |= stream.flush_pending_delta();
+        }
+        changed
+    }
+
+    fn poll_supervisor_stream_events(&mut self) -> bool {
         let mut cancel_stream_id: Option<String> = None;
         let mut warning_message: Option<String> = None;
+        let mut changed = false;
 
         {
             let Some(stream) = self.supervisor_chat_stream.as_mut() else {
-                return;
+                return false;
             };
 
             loop {
                 match stream.receiver.try_recv() {
                     Ok(SupervisorStreamEvent::Started { stream_id }) => {
+                        changed = true;
                         stream.stream_id = Some(stream_id.clone());
                         if stream.lifecycle != SupervisorStreamLifecycle::Cancelling {
                             stream.lifecycle = SupervisorStreamLifecycle::Streaming;
@@ -2708,11 +2778,13 @@ fn apply_ticket_picker_event(&mut self, event: TicketPickerEvent) {
                     }
                     Ok(SupervisorStreamEvent::Delta { text }) => {
                         if !text.is_empty() {
+                            changed = true;
                             stream.pending_delta.push_str(text.as_str());
                             stream.pending_chunk_count += 1;
                         }
                     }
                     Ok(SupervisorStreamEvent::RateLimit { state }) => {
+                        changed = true;
                         let exhausted = state.requests_remaining.is_some_and(|value| value == 0)
                             || state.tokens_remaining.is_some_and(|value| value == 0);
                         let low_headroom = state
@@ -2752,6 +2824,7 @@ fn apply_ticket_picker_event(&mut self, event: TicketPickerEvent) {
                         }
                     }
                     Ok(SupervisorStreamEvent::Usage { usage }) => {
+                        changed = true;
                         if usage_trips_high_cost_state(&usage)
                             && stream.response_state != SupervisorResponseState::RateLimited
                         {
@@ -2767,6 +2840,7 @@ fn apply_ticket_picker_event(&mut self, event: TicketPickerEvent) {
                         stream.usage = Some(usage);
                     }
                     Ok(SupervisorStreamEvent::Finished { reason, usage }) => {
+                        changed = true;
                         if let Some(usage) = usage {
                             if usage_trips_high_cost_state(&usage)
                                 && stream.response_state != SupervisorResponseState::RateLimited
@@ -2801,6 +2875,7 @@ fn apply_ticket_picker_event(&mut self, event: TicketPickerEvent) {
                         }
                     }
                     Ok(SupervisorStreamEvent::Failed { message }) => {
+                        changed = true;
                         let response_state = classify_supervisor_stream_error(&message);
                         let cooldown_hint =
                             if response_state == SupervisorResponseState::RateLimited {
@@ -2823,6 +2898,7 @@ fn apply_ticket_picker_event(&mut self, event: TicketPickerEvent) {
                             || stream.lifecycle == SupervisorStreamLifecycle::Streaming
                             || stream.lifecycle == SupervisorStreamLifecycle::Cancelling
                         {
+                            changed = true;
                             stream.lifecycle = SupervisorStreamLifecycle::Error;
                             stream.set_response_state(
                                 SupervisorResponseState::BackendUnavailable,
@@ -2866,7 +2942,24 @@ fn apply_ticket_picker_event(&mut self, event: TicketPickerEvent) {
                 response_state_warning_label(state),
                 compact_focus_card_text(message.as_str())
             ));
+            changed = true;
         }
+        changed
+    }
+
+    fn has_active_animated_indicator(&self) -> bool {
+        self.terminal_session_states
+            .iter()
+            .any(|(session_id, state)| {
+                state.turn_active
+                    && matches!(
+                        self.domain
+                            .sessions
+                            .get(session_id)
+                            .and_then(|session| session.status.as_ref()),
+                        Some(WorkerSessionStatus::Running)
+                    )
+            })
     }
 
     fn append_live_supervisor_chat(&self, ui_state: &mut UiState) {
@@ -3588,7 +3681,7 @@ fn apply_ticket_picker_event(&mut self, event: TicketPickerEvent) {
             return;
         };
         self.merge_pending_sessions.insert(session_id.clone());
-        self.enqueue_merge_queue_request(session_id.clone(), MergeQueueCommandKind::Merge);
+        let _ = self.enqueue_merge_queue_request(session_id.clone(), MergeQueueCommandKind::Merge);
         self.status_warning = Some(format!(
             "merge queued for review session {}",
             session_id.as_str()

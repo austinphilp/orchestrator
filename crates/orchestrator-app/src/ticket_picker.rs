@@ -203,6 +203,23 @@ where
             })?
     }
 
+    async fn set_session_working_state(
+        &self,
+        session_id: WorkerSessionId,
+        is_working: bool,
+    ) -> Result<(), CoreError> {
+        let app = self.app.clone();
+        tokio::task::spawn_blocking(move || {
+            app.set_session_working_state(&session_id, is_working)
+        })
+        .await
+        .map_err(|error| {
+            CoreError::Configuration(format!(
+                "ticket picker task failed while persisting session working state: {error}"
+            ))
+        })?
+    }
+
     async fn session_worktree_diff(
         &self,
         session_id: WorkerSessionId,

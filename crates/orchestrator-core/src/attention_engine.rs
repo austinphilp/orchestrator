@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
 
-use crate::events::OrchestrationEventPayload;
+use crate::events::{OrchestrationEventPayload, StoredEventEnvelope};
 use crate::identifiers::{InboxItemId, WorkItemId, WorkerSessionId};
 use crate::projection::ProjectionState;
 use crate::status::{InboxItemKind, WorkerSessionStatus, WorkflowState};
@@ -198,7 +198,7 @@ pub fn attention_inbox_snapshot(
     let mut items = state
         .inbox_items
         .values()
-        .map(|item| {
+        .filter_map(|item| {
             let work_item = state.work_items.get(&item.work_item_id);
             let session_id = work_item.and_then(|entry| entry.session_id.clone());
             let session_status = session_id
@@ -206,6 +206,10 @@ pub fn attention_inbox_snapshot(
                 .and_then(|id| state.sessions.get(id))
                 .and_then(|session| session.status.clone());
             let workflow_state = work_item.and_then(|entry| entry.workflow_state.clone());
+
+            if session_has_ended(session_status.as_ref()) {
+                return None;
+            }
 
             let base = config.base_score(&item.kind);
             let minutes_since_created = created_minutes
@@ -244,7 +248,7 @@ pub fn attention_inbox_snapshot(
             score = score.saturating_sub(resolved_penalty);
 
             let priority_band = priority_band(score, item.resolved, config);
-            AttentionInboxItem {
+            Some(AttentionInboxItem {
                 inbox_item_id: item.id.clone(),
                 work_item_id: item.work_item_id.clone(),
                 kind: item.kind.clone(),
@@ -266,7 +270,7 @@ pub fn attention_inbox_snapshot(
                     resolved_penalty,
                     minutes_since_created,
                 },
-            }
+            })
         })
         .collect::<Vec<_>>();
 
@@ -283,6 +287,13 @@ pub fn attention_inbox_snapshot(
         batch_surfaces: build_batch_surfaces(&items),
         items,
     }
+}
+
+fn session_has_ended(status: Option<&WorkerSessionStatus>) -> bool {
+    matches!(
+        status,
+        Some(WorkerSessionStatus::Done) | Some(WorkerSessionStatus::Crashed)
+    )
 }
 
 fn priority_band(
@@ -315,21 +326,40 @@ fn batch_kind(kind: &InboxItemKind) -> AttentionBatchKind {
 }
 
 fn build_batch_surfaces(rows: &[AttentionInboxItem]) -> Vec<AttentionBatchSurface> {
-    AttentionBatchKind::ORDERED
+    let mut surfaces = AttentionBatchKind::ORDERED
         .iter()
         .map(|kind| AttentionBatchSurface {
             kind: *kind,
-            unresolved_count: rows
-                .iter()
-                .filter(|row| row.batch_kind == *kind && !row.resolved)
-                .count(),
-            total_count: rows.iter().filter(|row| row.batch_kind == *kind).count(),
-            first_unresolved_index: rows
-                .iter()
-                .position(|row| row.batch_kind == *kind && !row.resolved),
-            first_any_index: rows.iter().position(|row| row.batch_kind == *kind),
+            unresolved_count: 0,
+            total_count: 0,
+            first_unresolved_index: None,
+            first_any_index: None,
         })
-        .collect()
+        .collect::<Vec<_>>();
+
+    let mut kind_to_index = HashMap::new();
+    for (index, kind) in AttentionBatchKind::ORDERED.iter().enumerate() {
+        kind_to_index.insert(*kind, index);
+    }
+
+    for (row_index, row) in rows.iter().enumerate() {
+        let Some(surface_index) = kind_to_index.get(&row.batch_kind).copied() else {
+            continue;
+        };
+        let surface = &mut surfaces[surface_index];
+        surface.total_count = surface.total_count.saturating_add(1);
+        if surface.first_any_index.is_none() {
+            surface.first_any_index = Some(row_index);
+        }
+        if !row.resolved {
+            surface.unresolved_count = surface.unresolved_count.saturating_add(1);
+            if surface.first_unresolved_index.is_none() {
+                surface.first_unresolved_index = Some(row_index);
+            }
+        }
+    }
+
+    surfaces
 }
 
 fn workflow_gate_bonus(
@@ -431,12 +461,14 @@ fn collect_timeline(
     Option<HashMap<WorkerSessionId, WorkerIdleTimeline>>,
     u64,
 ) {
-    let mut events = state.events.iter().collect::<Vec<_>>();
-    events.sort_by(|a, b| {
-        a.sequence
-            .cmp(&b.sequence)
-            .then_with(|| a.event_id.cmp(&b.event_id))
-    });
+    let mut events_ordered = state.events.iter().collect::<Vec<_>>();
+    if !events_are_sequence_sorted(state.events.as_slice()) {
+        events_ordered.sort_by(|a, b| {
+            a.sequence
+                .cmp(&b.sequence)
+                .then_with(|| a.event_id.cmp(&b.event_id))
+        });
+    }
 
     let mut work_item_sessions = state
         .work_items
@@ -454,7 +486,7 @@ fn collect_timeline(
     let mut as_of_minute = 0;
     let mut saw_timestamp = false;
 
-    for event in events {
+    for event in events_ordered {
         let Some(minute) = parse_rfc3339_minute(event.occurred_at.as_str()) else {
             continue;
         };
@@ -549,6 +581,18 @@ fn collect_timeline(
 
     let timeline = saw_timestamp.then_some(timelines);
     (created_minutes, timeline, as_of_minute)
+}
+
+fn events_are_sequence_sorted(events: &[StoredEventEnvelope]) -> bool {
+    events
+        .windows(2)
+        .all(|pair| match (pair.first(), pair.get(1)) {
+            (Some(left), Some(right)) => {
+                left.sequence < right.sequence
+                    || (left.sequence == right.sequence && left.event_id <= right.event_id)
+            }
+            _ => true,
+        })
 }
 
 fn mark_progress(timeline: &mut WorkerIdleTimeline, minute: u64) {
@@ -1159,5 +1203,24 @@ mod tests {
         assert!(snapshot.batch_surfaces[1].first_any_index.is_some());
         assert_eq!(snapshot.batch_surfaces[2].unresolved_count, 1);
         assert_eq!(snapshot.batch_surfaces[3].unresolved_count, 1);
+    }
+
+    #[test]
+    fn ended_sessions_are_filtered_from_attention_snapshot() {
+        let mut projection = base_projection();
+        let session_id = WorkerSessionId::new("sess-1");
+        projection
+            .sessions
+            .get_mut(&session_id)
+            .expect("session")
+            .status = Some(WorkerSessionStatus::Done);
+
+        let snapshot =
+            attention_inbox_snapshot(&projection, &AttentionEngineConfig::default(), &[]);
+        assert!(snapshot.items.is_empty());
+        assert!(snapshot
+            .batch_surfaces
+            .iter()
+            .all(|surface| surface.total_count == 0 && surface.unresolved_count == 0));
     }
 }

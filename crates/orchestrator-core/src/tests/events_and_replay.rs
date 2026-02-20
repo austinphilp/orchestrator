@@ -326,6 +326,7 @@ fn retrieval_orders_newest_first_with_limit() {
 
 #[test]
 fn projection_updates_session_status_for_completed_and_crashed_signals() {
+    let inbox_item_id = InboxItemId::new("inbox-1");
     let events = vec![
         StoredEventEnvelope::from((
             1,
@@ -341,6 +342,18 @@ fn projection_updates_session_status_for_completed_and_crashed_signals() {
         StoredEventEnvelope::from((
             2,
             sample_event(
+                "evt-inbox-created",
+                OrchestrationEventPayload::InboxItemCreated(InboxItemCreatedPayload {
+                    inbox_item_id: inbox_item_id.clone(),
+                    work_item_id: WorkItemId::new("wi-1"),
+                    kind: InboxItemKind::NeedsDecision,
+                    title: "Need input".to_owned(),
+                }),
+            ),
+        )),
+        StoredEventEnvelope::from((
+            3,
+            sample_event(
                 "evt-session-completed",
                 OrchestrationEventPayload::SessionCompleted(SessionCompletedPayload {
                     session_id: WorkerSessionId::new("sess-1"),
@@ -349,7 +362,7 @@ fn projection_updates_session_status_for_completed_and_crashed_signals() {
             ),
         )),
         StoredEventEnvelope::from((
-            3,
+            4,
             sample_event(
                 "evt-session-crashed",
                 OrchestrationEventPayload::SessionCrashed(SessionCrashedPayload {
@@ -366,6 +379,11 @@ fn projection_updates_session_status_for_completed_and_crashed_signals() {
         .get(&WorkerSessionId::new("sess-1"))
         .expect("session exists");
     assert_eq!(session.status, Some(WorkerSessionStatus::Crashed));
+    let inbox_item = projection
+        .inbox_items
+        .get(&inbox_item_id)
+        .expect("inbox item exists");
+    assert!(inbox_item.resolved);
 }
 
 #[test]
@@ -382,4 +400,3 @@ fn artifact_payload_uses_reference_metadata_not_embedded_blob() {
     assert!(serialized.contains("artifact://logs/worker-1"));
     assert!(!serialized.contains("BEGIN RAW LOG CONTENT"));
 }
-

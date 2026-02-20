@@ -48,7 +48,7 @@ pub use keymap::{
 };
 
 const TICKET_PICKER_EVENT_CHANNEL_CAPACITY: usize = 32;
-const TERMINAL_STREAM_EVENT_CHANNEL_CAPACITY: usize = 32;
+const TERMINAL_STREAM_EVENT_CHANNEL_CAPACITY: usize = 128;
 const TICKET_PICKER_PRIORITY_STATES_DEFAULT: &[&str] =
     &["In Progress", "Final Approval", "Todo", "Backlog"];
 const DEFAULT_UI_THEME: &str = "nord";
@@ -189,6 +189,13 @@ pub trait TicketPickerProvider: Send + Sync {
         &self,
         _session_id: WorkerSessionId,
         _reason: String,
+    ) -> Result<(), CoreError> {
+        Ok(())
+    }
+    async fn set_session_working_state(
+        &self,
+        _session_id: WorkerSessionId,
+        _is_working: bool,
     ) -> Result<(), CoreError> {
         Ok(())
     }
@@ -1097,10 +1104,10 @@ impl ActiveSupervisorChatStream {
         self.cooldown_hint = cooldown_hint;
     }
 
-    fn flush_pending_delta(&mut self) {
+    fn flush_pending_delta(&mut self) -> bool {
         if self.pending_delta.is_empty() {
             self.last_flush_coalesced_chunks = 0;
-            return;
+            return false;
         }
 
         self.last_flush_coalesced_chunks = self.pending_chunk_count.max(1);
@@ -1108,6 +1115,7 @@ impl ActiveSupervisorChatStream {
         self.pending_delta.clear();
         self.pending_chunk_count = 0;
         trim_to_trailing_chars(&mut self.transcript, SUPERVISOR_STREAM_MAX_TRANSCRIPT_CHARS);
+        true
     }
 
     fn render_lines(&self) -> Vec<String> {

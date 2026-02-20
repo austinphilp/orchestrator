@@ -176,6 +176,16 @@ async fn run_session_archive_task(
     }
 }
 
+async fn run_set_session_working_state_task(
+    provider: Arc<dyn TicketPickerProvider>,
+    session_id: WorkerSessionId,
+    is_working: bool,
+) {
+    let _ = provider
+        .set_session_working_state(session_id, is_working)
+        .await;
+}
+
 async fn run_publish_inbox_item_task(
     provider: Arc<dyn TicketPickerProvider>,
     request: InboxPublishRequest,

@@ -124,11 +124,13 @@ pub fn apply_event(state: &mut ProjectionState, event: StoredEventEnvelope) {
             if let Some(session) = state.sessions.get_mut(&payload.session_id) {
                 session.status = Some(WorkerSessionStatus::Done);
             }
+            resolve_inbox_items_for_session(state, &payload.session_id);
         }
         OrchestrationEventPayload::SessionCrashed(payload) => {
             if let Some(session) = state.sessions.get_mut(&payload.session_id) {
                 session.status = Some(WorkerSessionStatus::Crashed);
             }
+            resolve_inbox_items_for_session(state, &payload.session_id);
         }
         OrchestrationEventPayload::ArtifactCreated(payload) => {
             state.artifacts.insert(
@@ -188,6 +190,27 @@ pub fn apply_event(state: &mut ProjectionState, event: StoredEventEnvelope) {
     }
 
     state.events.push(event);
+}
+
+fn resolve_inbox_items_for_session(state: &mut ProjectionState, session_id: &WorkerSessionId) {
+    let work_item_id = state
+        .sessions
+        .get(session_id)
+        .and_then(|session| session.work_item_id.as_ref())
+        .cloned();
+    let Some(work_item_id) = work_item_id else {
+        return;
+    };
+    let inbox_items = state
+        .work_items
+        .get(&work_item_id)
+        .map(|work_item| work_item.inbox_items.clone())
+        .unwrap_or_default();
+    for inbox_item_id in inbox_items {
+        if let Some(item) = state.inbox_items.get_mut(&inbox_item_id) {
+            item.resolved = true;
+        }
+    }
 }
 
 pub fn rebuild_projection(events: &[StoredEventEnvelope]) -> ProjectionState {
