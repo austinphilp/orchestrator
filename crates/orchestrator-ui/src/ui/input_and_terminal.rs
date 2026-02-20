@@ -310,7 +310,7 @@ fn bottom_bar_hint_groups(mode: UiMode) -> &'static [BottomBarHintGroup] {
         UiMode::Terminal => &[
             BottomBarHintGroup {
                 label: "Terminal:",
-                hints: &["Vim i/Esc", "Enter send (Normal)", "Ctrl+Enter send"],
+                hints: &["Type by default", "Esc+Enter send", "Ctrl+Enter send"],
             },
             BottomBarHintGroup {
                 label: "Back:",

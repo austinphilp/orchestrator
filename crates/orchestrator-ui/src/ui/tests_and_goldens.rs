@@ -1920,7 +1920,7 @@ mod tests {
             .get(&WorkerSessionId::new("sess-1"))
             .and_then(|view| view.active_needs_input.as_ref())
             .expect("planning prompt should stay active");
-        assert_eq!(prompt.note_input_state.text.as_str(), "n");
+        assert_eq!(editor_state_text(&prompt.note_editor_state), "n");
     }
 
     #[test]
@@ -4361,8 +4361,11 @@ mod tests {
         let mut shell_state = UiShellState::new("ready".to_owned(), triage_projection());
         shell_state.ticket_picker_overlay.open();
         shell_state.ticket_picker_overlay.begin_new_ticket_mode();
+        assert_eq!(
+            shell_state.ticket_picker_overlay.new_ticket_brief_editor.mode,
+            EditorMode::Insert
+        );
 
-        route_ticket_picker_key(&mut shell_state, key(KeyCode::Char('i')));
         route_ticket_picker_key(&mut shell_state, key(KeyCode::Char('b')));
         route_ticket_picker_key(&mut shell_state, key(KeyCode::Char('r')));
         route_ticket_picker_key(&mut shell_state, key(KeyCode::Backspace));
@@ -4372,6 +4375,8 @@ mod tests {
         );
 
         clear_editor_state(&mut shell_state.ticket_picker_overlay.new_ticket_brief_editor);
+        route_ticket_picker_key(&mut shell_state, key(KeyCode::Enter));
+        route_ticket_picker_key(&mut shell_state, key(KeyCode::Esc));
         route_ticket_picker_key(&mut shell_state, key(KeyCode::Enter));
         assert!(shell_state
             .ticket_picker_overlay
@@ -4386,8 +4391,11 @@ mod tests {
         let mut shell_state = UiShellState::new("ready".to_owned(), triage_projection());
         shell_state.ticket_picker_overlay.open();
         shell_state.ticket_picker_overlay.begin_new_ticket_mode();
+        assert_eq!(
+            shell_state.ticket_picker_overlay.new_ticket_brief_editor.mode,
+            EditorMode::Insert
+        );
 
-        route_ticket_picker_key(&mut shell_state, key(KeyCode::Char('i')));
         route_ticket_picker_key(&mut shell_state, key(KeyCode::Char('a')));
         route_ticket_picker_key(&mut shell_state, key(KeyCode::Esc));
         route_ticket_picker_key(&mut shell_state, shift_key(KeyCode::Enter));
@@ -5164,6 +5172,9 @@ mod tests {
         assert!(shell_state.is_terminal_view_active());
 
         handle_key_press(&mut shell_state, key(KeyCode::Esc));
+        assert_eq!(shell_state.mode, UiMode::Terminal);
+        assert_eq!(shell_state.terminal_compose_editor.mode, EditorMode::Normal);
+        handle_key_press(&mut shell_state, key(KeyCode::Esc));
         assert_eq!(shell_state.mode, UiMode::Normal);
         assert!(shell_state.is_terminal_view_active());
 
@@ -5188,8 +5199,8 @@ mod tests {
         handle_key_press(&mut shell_state, key(KeyCode::Char('I')));
         assert_eq!(shell_state.mode, UiMode::Terminal);
         assert!(shell_state.is_terminal_view_active());
+        assert_eq!(shell_state.terminal_compose_editor.mode, EditorMode::Insert);
 
-        let _ = route_key_press(&mut shell_state, key(KeyCode::Char('i')));
         let routed = route_key_press(&mut shell_state, key(KeyCode::Char('j')));
         assert!(matches!(routed, RoutedInput::Ignore));
         assert_eq!(editor_state_text(&shell_state.terminal_compose_editor), "j");
@@ -5203,6 +5214,31 @@ mod tests {
         assert!(!finish_chord);
         assert_eq!(shell_state.mode, UiMode::Normal);
         assert!(!shell_state.terminal_escape_pending);
+    }
+
+    #[test]
+    fn terminal_compose_restores_insert_mode_after_focus_returns() {
+        let mut shell_state = UiShellState::new("ready".to_owned(), sample_projection(true));
+        handle_key_press(&mut shell_state, key(KeyCode::Char('I')));
+        assert_eq!(shell_state.mode, UiMode::Terminal);
+        assert_eq!(shell_state.terminal_compose_editor.mode, EditorMode::Insert);
+
+        handle_key_press(&mut shell_state, key(KeyCode::Char('a')));
+        handle_key_press(&mut shell_state, key(KeyCode::Esc));
+        assert_eq!(shell_state.terminal_compose_editor.mode, EditorMode::Normal);
+
+        handle_key_press(&mut shell_state, key(KeyCode::Tab));
+        assert!(shell_state.is_left_pane_focused());
+        assert_eq!(shell_state.mode, UiMode::Normal);
+        handle_key_press(&mut shell_state, key(KeyCode::Tab));
+        assert!(shell_state.is_right_pane_focused());
+        assert_eq!(shell_state.mode, UiMode::Normal);
+
+        handle_key_press(&mut shell_state, key(KeyCode::Char('i')));
+        assert_eq!(shell_state.mode, UiMode::Terminal);
+        assert_eq!(shell_state.terminal_compose_editor.mode, EditorMode::Insert);
+        handle_key_press(&mut shell_state, key(KeyCode::Char('b')));
+        assert_eq!(editor_state_text(&shell_state.terminal_compose_editor), "ab");
     }
 
     #[test]
@@ -5314,8 +5350,8 @@ mod tests {
         let mut shell_state = UiShellState::new("ready".to_owned(), sample_projection(true));
         handle_key_press(&mut shell_state, key(KeyCode::Char('I')));
         assert_eq!(shell_state.mode, UiMode::Terminal);
+        assert_eq!(shell_state.terminal_compose_editor.mode, EditorMode::Insert);
 
-        handle_key_press(&mut shell_state, key(KeyCode::Char('i')));
         handle_key_press(&mut shell_state, key(KeyCode::Char('h')));
         handle_key_press(&mut shell_state, key(KeyCode::Char('i')));
         handle_key_press(&mut shell_state, key(KeyCode::Enter));
@@ -5337,8 +5373,8 @@ mod tests {
         );
         shell_state.open_terminal_and_enter_mode();
         assert_eq!(shell_state.mode, UiMode::Terminal);
+        assert_eq!(shell_state.terminal_compose_editor.mode, EditorMode::Insert);
 
-        handle_key_press(&mut shell_state, key(KeyCode::Char('i')));
         handle_key_press(&mut shell_state, key(KeyCode::Char('h')));
         handle_key_press(&mut shell_state, key(KeyCode::Char('i')));
         assert_eq!(editor_state_text(&shell_state.terminal_compose_editor), "hi");
@@ -5363,8 +5399,8 @@ mod tests {
         );
         shell_state.open_terminal_and_enter_mode();
         assert_eq!(shell_state.mode, UiMode::Terminal);
+        assert_eq!(shell_state.terminal_compose_editor.mode, EditorMode::Insert);
 
-        handle_key_press(&mut shell_state, key(KeyCode::Char('i')));
         handle_key_press(&mut shell_state, key(KeyCode::Char('o')));
         handle_key_press(&mut shell_state, key(KeyCode::Char('k')));
         assert_eq!(editor_state_text(&shell_state.terminal_compose_editor), "ok");
@@ -5389,6 +5425,8 @@ mod tests {
         shell_state.open_terminal_and_enter_mode();
         assert_eq!(shell_state.mode, UiMode::Terminal);
 
+        handle_key_press(&mut shell_state, key(KeyCode::Enter));
+        handle_key_press(&mut shell_state, key(KeyCode::Esc));
         handle_key_press(&mut shell_state, key(KeyCode::Enter));
 
         assert_eq!(shell_state.mode, UiMode::Terminal);
@@ -5429,6 +5467,7 @@ mod tests {
         }
 
         handle_key_press(&mut shell_state, key(KeyCode::Esc));
+        handle_key_press(&mut shell_state, key(KeyCode::Esc));
         assert_eq!(shell_state.mode, UiMode::Normal);
 
         handle_key_press(&mut shell_state, key(KeyCode::Char('I')));
@@ -5459,6 +5498,7 @@ mod tests {
             .terminal_session_states
             .entry(session_id.clone())
             .or_default();
+        handle_key_press(&mut shell_state, key(KeyCode::Esc));
         handle_key_press(&mut shell_state, key(KeyCode::Esc));
         assert_eq!(shell_state.mode, UiMode::Normal);
 
@@ -5519,6 +5559,7 @@ mod tests {
             .terminal_session_states
             .entry(session_id.clone())
             .or_default();
+        handle_key_press(&mut shell_state, key(KeyCode::Esc));
         handle_key_press(&mut shell_state, key(KeyCode::Esc));
         assert_eq!(shell_state.mode, UiMode::Normal);
 
