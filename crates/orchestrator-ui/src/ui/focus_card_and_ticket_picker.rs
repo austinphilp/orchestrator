@@ -39,8 +39,9 @@ fn project_focus_card_pane(
             .map(|state| format!("{state:?}"))
             .unwrap_or_else(|| "Unknown".to_owned());
         let session = match (&item.session_id, &item.session_status) {
-            (Some(session_id), Some(status)) => format!("{} ({status:?})", session_id.as_str()),
-            (Some(session_id), None) => format!("{} (Unknown)", session_id.as_str()),
+            (Some(session_id), status) => {
+                session_display_with_status(domain, session_id, status.as_ref())
+            }
             (None, _) => "None".to_owned(),
         };
         let focus_details = build_focus_card_details(item, domain);

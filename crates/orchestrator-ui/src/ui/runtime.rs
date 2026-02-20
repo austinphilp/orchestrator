@@ -199,6 +199,7 @@ impl Ui {
                             render_terminal_needs_input_panel(
                                 frame,
                                 terminal_input_area,
+                                &shell_state.domain,
                                 &session_id,
                                 prompt,
                                 shell_state.mode == UiMode::Terminal,
@@ -283,13 +284,23 @@ impl Ui {
                         render_ticket_archive_confirm_overlay(frame, main, ticket);
                     }
                     if let Some(session_id) = shell_state.archive_session_confirm_session.as_ref() {
-                        render_archive_session_confirm_overlay(frame, main, session_id);
+                        render_archive_session_confirm_overlay(
+                            frame,
+                            main,
+                            &shell_state.domain,
+                            session_id,
+                        );
                     }
                     if let Some(modal) = shell_state.worktree_diff_modal.as_ref() {
-                        render_worktree_diff_modal(frame, main, modal);
+                        render_worktree_diff_modal(frame, main, &shell_state.domain, modal);
                     }
                     if let Some(session_id) = shell_state.review_merge_confirm_session.as_ref() {
-                        render_review_merge_confirm_overlay(frame, main, session_id);
+                        render_review_merge_confirm_overlay(
+                            frame,
+                            main,
+                            &shell_state.domain,
+                            session_id,
+                        );
                     }
                 })?;
 

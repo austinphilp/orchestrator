@@ -18,7 +18,7 @@ Title: Confirm golden snapshot update workflow
 Kind: NeedsDecision
 Work item: wi-focus
 Workflow: Implementing
-Session: sess-focus (Blocked)
+Session: session sess-focus (Blocked)
 
 Why attention is required:
 - The worker needs a decision before it can continue implementation. Session status is Blocked.
