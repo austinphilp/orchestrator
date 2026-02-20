@@ -378,11 +378,12 @@ async fn run_ticket_picker_start_task(
 ) {
     let started_ticket = ticket.clone();
 
-    if let Err(error) = provider
+    let result = match provider
         .start_or_resume_ticket(ticket, repository_override)
         .await
     {
-        match &error {
+        Ok(result) => result,
+        Err(error) => match &error {
             CoreError::MissingProjectRepositoryMapping { project, .. } => {
                 let _ = sender
                     .send(TicketPickerEvent::TicketStartRequiresRepository {
@@ -417,8 +418,8 @@ async fn run_ticket_picker_start_task(
                     .await;
                 return;
             }
-        }
-    }
+        },
+    };
 
     let mut warning = Vec::new();
     let projection = match provider.reload_projection().await {
@@ -438,6 +439,7 @@ async fn run_ticket_picker_start_task(
 
     let _ = sender
         .send(TicketPickerEvent::TicketStarted {
+            started_session_id: result.mapping.session.session_id,
             projection,
             tickets,
             warning: (!warning.is_empty()).then(|| warning.join("; ")),

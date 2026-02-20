@@ -238,6 +238,7 @@ mod tests {
     #[derive(Default, Debug)]
     struct ManualTerminalBackend {
         spawned_session_ids: Arc<Mutex<Vec<RuntimeSessionId>>>,
+        subscribed_session_ids: Arc<Mutex<Vec<RuntimeSessionId>>>,
     }
 
     impl ManualTerminalBackend {
@@ -245,6 +246,13 @@ mod tests {
             self.spawned_session_ids
                 .lock()
                 .expect("spawned session IDs lock")
+                .clone()
+        }
+
+        fn subscribed_session_ids(&self) -> Vec<RuntimeSessionId> {
+            self.subscribed_session_ids
+                .lock()
+                .expect("subscribed session IDs lock")
                 .clone()
         }
     }
@@ -303,7 +311,11 @@ mod tests {
             Ok(())
         }
 
-        async fn subscribe(&self, _session: &SessionHandle) -> RuntimeResult<WorkerEventStream> {
+        async fn subscribe(&self, session: &SessionHandle) -> RuntimeResult<WorkerEventStream> {
+            self.subscribed_session_ids
+                .lock()
+                .expect("subscribed session IDs lock")
+                .push(session.session_id.clone());
             Ok(Box::new(EmptyEventStream))
         }
     }
@@ -1218,6 +1230,44 @@ mod tests {
                 .first(),
             Some(CenterView::FocusCardView { inbox_item_id }) if inbox_item_id.as_str() == "inbox-1"
         ));
+    }
+
+    #[tokio::test]
+    async fn ticket_started_auto_focuses_and_streams_started_session() {
+        let backend = Arc::new(ManualTerminalBackend::default());
+        let mut shell_state = UiShellState::new_with_integrations(
+            "ready".to_owned(),
+            ProjectionState::default(),
+            None,
+            None,
+            None,
+            Some(backend.clone()),
+        );
+
+        shell_state.apply_ticket_picker_event(TicketPickerEvent::TicketStarted {
+            started_session_id: WorkerSessionId::new("sess-1"),
+            projection: Some(sample_projection(true)),
+            tickets: None,
+            warning: None,
+        });
+
+        assert!(matches!(
+            shell_state.view_stack.active_center(),
+            Some(CenterView::TerminalView { session_id }) if session_id.as_str() == "sess-1"
+        ));
+        assert_eq!(
+            shell_state.selected_session_id_for_panel().as_ref().map(|id| id.as_str()),
+            Some("sess-1")
+        );
+        tokio::task::yield_now().await;
+        assert_eq!(
+            backend
+                .subscribed_session_ids()
+                .iter()
+                .map(|id| id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["sess-1"]
+        );
     }
 
     #[test]

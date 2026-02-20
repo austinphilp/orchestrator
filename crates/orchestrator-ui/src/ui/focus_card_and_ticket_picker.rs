@@ -598,6 +598,7 @@ enum TicketPickerEvent {
         message: String,
     },
     TicketStarted {
+        started_session_id: WorkerSessionId,
         projection: Option<ProjectionState>,
         tickets: Option<Vec<TicketSummary>>,
         warning: Option<String>,

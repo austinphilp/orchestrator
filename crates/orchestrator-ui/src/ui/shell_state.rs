@@ -533,6 +533,28 @@ impl UiShellState {
         self.startup_session_feed_opened = true;
     }
 
+    fn focus_and_stream_session(&mut self, session_id: WorkerSessionId) {
+        let session_ids = self.session_ids_for_navigation();
+        if let Some(index) = session_ids.iter().position(|candidate| candidate == &session_id) {
+            self.selected_session_index = Some(index);
+        }
+
+        if let Some(inbox_item_id) = self.inbox_item_id_for_session(&session_id) {
+            self.open_focus_and_push_center(
+                inbox_item_id,
+                CenterView::TerminalView {
+                    session_id: session_id.clone(),
+                },
+            );
+        } else {
+            self.view_stack.replace_center(CenterView::TerminalView {
+                session_id: session_id.clone(),
+            });
+        }
+
+        self.ensure_terminal_stream(session_id);
+    }
+
     fn inbox_item_id_for_session(&self, session_id: &WorkerSessionId) -> Option<InboxItemId> {
         self.domain
             .work_items
@@ -1694,6 +1716,7 @@ fn apply_ticket_picker_event(&mut self, event: TicketPickerEvent) {
                 ));
             }
             TicketPickerEvent::TicketStarted {
+                started_session_id,
                 projection,
                 tickets,
                 warning,
@@ -1709,6 +1732,7 @@ fn apply_ticket_picker_event(&mut self, event: TicketPickerEvent) {
                     self.ticket_picker_overlay
                         .apply_tickets(tickets, projects, &self.ticket_picker_priority_states);
                 }
+                self.focus_and_stream_session(started_session_id);
                 if let Some(message) = warning {
                     self.status_warning = Some(format!(
                         "ticket picker start warning: {}",
