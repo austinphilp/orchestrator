@@ -185,7 +185,7 @@ mod tests {
 
         async fn create_ticket_from_brief(
             &self,
-            _brief: String,
+            _request: CreateTicketFromPickerRequest,
         ) -> Result<TicketSummary, CoreError> {
             self.created.clone().ok_or_else(|| {
                 CoreError::DependencyUnavailable("create unavailable in test provider".to_owned())
@@ -452,6 +452,37 @@ mod tests {
         }
 
         projection
+    }
+
+    fn sample_worktree_diff_content(additions: usize) -> String {
+        let mut lines = vec![
+            "diff --git a/src/demo.rs b/src/demo.rs".to_owned(),
+            "index 1111111..2222222 100644".to_owned(),
+            "--- a/src/demo.rs".to_owned(),
+            "+++ b/src/demo.rs".to_owned(),
+            format!("@@ -1,1 +1,{} @@", additions.saturating_add(1)),
+            " fn demo() {".to_owned(),
+        ];
+        for index in 0..additions {
+            lines.push(format!("+    let _line_{index} = {index};"));
+        }
+        lines.push(" }".to_owned());
+        lines.join("\n")
+    }
+
+    fn sample_diff_modal_with_content(content: String) -> WorktreeDiffModalState {
+        WorktreeDiffModalState {
+            session_id: WorkerSessionId::new("sess-diff-test"),
+            base_branch: "main".to_owned(),
+            content,
+            loading: false,
+            error: None,
+            scroll: 0,
+            cursor_line: 0,
+            selected_file_index: 0,
+            selected_hunk_index: 0,
+            focus: DiffPaneFocus::Diff,
+        }
     }
 
     fn inspector_projection() -> ProjectionState {
@@ -1066,6 +1097,81 @@ mod tests {
     }
 
     #[test]
+    fn session_panel_selection_tracks_session_id_when_rows_reorder() {
+        let mut projection = ProjectionState::default();
+        let work_item_a = WorkItemId::new("wi-a");
+        let work_item_b = WorkItemId::new("wi-b");
+        let session_a = WorkerSessionId::new("sess-a");
+        let session_b = WorkerSessionId::new("sess-b");
+
+        projection.work_items.insert(
+            work_item_a.clone(),
+            WorkItemProjection {
+                id: work_item_a.clone(),
+                ticket_id: None,
+                project_id: Some(ProjectId::new("Orchestrator")),
+                workflow_state: Some(WorkflowState::Implementing),
+                session_id: Some(session_a.clone()),
+                worktree_id: None,
+                inbox_items: vec![],
+                artifacts: vec![],
+            },
+        );
+        projection.work_items.insert(
+            work_item_b.clone(),
+            WorkItemProjection {
+                id: work_item_b.clone(),
+                ticket_id: None,
+                project_id: Some(ProjectId::new("Orchestrator")),
+                workflow_state: Some(WorkflowState::Planning),
+                session_id: Some(session_b.clone()),
+                worktree_id: None,
+                inbox_items: vec![],
+                artifacts: vec![],
+            },
+        );
+
+        projection.sessions.insert(
+            session_a.clone(),
+            SessionProjection {
+                id: session_a.clone(),
+                work_item_id: Some(work_item_a.clone()),
+                status: Some(WorkerSessionStatus::Running),
+                latest_checkpoint: None,
+            },
+        );
+        projection.sessions.insert(
+            session_b.clone(),
+            SessionProjection {
+                id: session_b.clone(),
+                work_item_id: Some(work_item_b.clone()),
+                status: Some(WorkerSessionStatus::Running),
+                latest_checkpoint: None,
+            },
+        );
+
+        let mut shell_state = UiShellState::new("ready".to_owned(), projection);
+        assert!(shell_state.move_to_first_session());
+        assert_eq!(shell_state.selected_session_id_for_panel(), Some(session_a.clone()));
+        assert_eq!(
+            shell_state.session_ids_for_navigation(),
+            vec![session_a.clone(), session_b.clone()]
+        );
+
+        shell_state
+            .domain
+            .work_items
+            .get_mut(&work_item_a)
+            .expect("work item a")
+            .workflow_state = Some(WorkflowState::InReview);
+        assert_eq!(
+            shell_state.session_ids_for_navigation(),
+            vec![session_b, session_a.clone()]
+        );
+        assert_eq!(shell_state.selected_session_id_for_panel(), Some(session_a));
+    }
+
+    #[test]
     fn center_stack_replace_push_and_pop_behavior() {
         let mut stack = ViewStack::default();
         assert_eq!(stack.active_center(), Some(&CenterView::InboxView));
@@ -1313,7 +1419,87 @@ mod tests {
             .and_then(|view| view.active_needs_input.as_ref())
             .expect("needs-input prompt should activate for active terminal session");
         assert_eq!(prompt.prompt_id.as_str(), "prompt-plan-gate");
+        assert!(prompt.interaction_active);
+        assert!(shell_state.terminal_session_has_active_needs_input());
         assert!(shell_state.mode == UiMode::Terminal);
+    }
+
+    #[test]
+    fn planning_needs_input_option_navigation_activates_from_normal_mode() {
+        let backend = Arc::new(ManualTerminalBackend::default());
+        let mut projection = sample_projection(true);
+        projection
+            .work_items
+            .get_mut(&WorkItemId::new("wi-1"))
+            .expect("work item")
+            .workflow_state = Some(WorkflowState::Planning);
+        let mut shell_state = UiShellState::new_with_integrations(
+            "ready".to_owned(),
+            projection,
+            None,
+            None,
+            None,
+            Some(backend),
+        );
+        shell_state.open_terminal_and_enter_mode();
+
+        let sender = shell_state
+            .terminal_session_sender
+            .clone()
+            .expect("terminal sender");
+        sender
+            .try_send(TerminalSessionEvent::NeedsInput {
+                session_id: WorkerSessionId::new("sess-1"),
+                needs_input: BackendNeedsInputEvent {
+                    prompt_id: "prompt-planning".to_owned(),
+                    question: "Add planning note".to_owned(),
+                    options: vec!["Continue".to_owned(), "Revise".to_owned()],
+                    default_option: Some("Continue".to_owned()),
+                    questions: Vec::new(),
+                },
+            })
+            .expect("queue needs-input event");
+
+        shell_state.poll_terminal_session_events();
+        assert!(!shell_state.terminal_session_has_active_needs_input());
+        shell_state.enter_normal_mode();
+        assert_eq!(shell_state.mode, UiMode::Normal);
+
+        let prompt = shell_state
+            .terminal_session_states
+            .get(&WorkerSessionId::new("sess-1"))
+            .and_then(|view| view.active_needs_input.as_ref())
+            .expect("planning prompt should exist");
+        assert_eq!(prompt.prompt_id.as_str(), "prompt-planning");
+        assert!(!prompt.interaction_active);
+
+        handle_key_press(&mut shell_state, key(KeyCode::Char('j')));
+        let prompt = shell_state
+            .terminal_session_states
+            .get(&WorkerSessionId::new("sess-1"))
+            .and_then(|view| view.active_needs_input.as_ref())
+            .expect("planning prompt should become active for option navigation");
+        assert!(prompt.interaction_active);
+        assert!(!prompt.note_insert_mode);
+        assert_eq!(prompt.select_state.highlighted_index, 1);
+
+        handle_key_press(&mut shell_state, key(KeyCode::Char('i')));
+        let prompt = shell_state
+            .terminal_session_states
+            .get(&WorkerSessionId::new("sess-1"))
+            .and_then(|view| view.active_needs_input.as_ref())
+            .expect("planning prompt should become active");
+        assert!(prompt.interaction_active);
+        assert!(prompt.note_insert_mode);
+        assert!(shell_state.terminal_session_has_active_needs_input());
+
+        handle_key_press(&mut shell_state, key(KeyCode::Char('n')));
+        let prompt = shell_state
+            .terminal_session_states
+            .get(&WorkerSessionId::new("sess-1"))
+            .and_then(|view| view.active_needs_input.as_ref())
+            .expect("planning prompt should stay active");
+        assert_eq!(prompt.note_input_state.text.as_str(), "n");
     }
 
     #[test]
@@ -2052,6 +2238,7 @@ mod tests {
             handle_key_press(&mut shell_state, key(KeyCode::Char(ch)));
         }
         handle_key_press(&mut shell_state, key(KeyCode::Enter));
+        assert_eq!(shell_state.mode, UiMode::Insert);
 
         tokio::time::timeout(Duration::from_secs(1), async {
             loop {
@@ -2686,12 +2873,106 @@ mod tests {
             .clone();
         assert_eq!(selected_kind, InboxItemKind::FYI);
 
-        handle_key_press(&mut shell_state, key(KeyCode::BackTab));
+        handle_key_press(&mut shell_state, key(KeyCode::Char('[')));
         let selected = shell_state.ui_state();
         let selected_kind = selected.inbox_rows[selected.selected_inbox_index.expect("selected")]
             .kind
             .clone();
         assert_eq!(selected_kind, InboxItemKind::ReadyForReview);
+    }
+
+    #[test]
+    fn tab_cycles_sidebar_focus_and_moves_selection_in_focused_panel() {
+        let mut projection = sample_projection(true);
+        let extra_work_item_id = WorkItemId::new("wi-extra");
+        let extra_session_id = WorkerSessionId::new("sess-extra");
+        projection.work_items.insert(
+            extra_work_item_id.clone(),
+            WorkItemProjection {
+                id: extra_work_item_id.clone(),
+                ticket_id: None,
+                project_id: None,
+                workflow_state: Some(WorkflowState::Implementing),
+                session_id: Some(extra_session_id.clone()),
+                worktree_id: None,
+                inbox_items: vec![],
+                artifacts: vec![],
+            },
+        );
+        projection.sessions.insert(
+            extra_session_id.clone(),
+            SessionProjection {
+                id: extra_session_id,
+                work_item_id: Some(extra_work_item_id),
+                status: Some(WorkerSessionStatus::WaitingForUser),
+                latest_checkpoint: None,
+            },
+        );
+        let mut shell_state = UiShellState::new("ready".to_owned(), projection);
+        let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
+
+        let initial_inbox_index = shell_state.ui_state().selected_inbox_index;
+        assert!(shell_state.is_inbox_sidebar_focused());
+
+        handle_key_press(&mut shell_state, key(KeyCode::Tab));
+        assert!(shell_state.is_sessions_sidebar_focused());
+
+        let before_session = shell_state
+            .selected_session_id_for_panel()
+            .expect("selected session before move");
+        handle_key_press(&mut shell_state, key(KeyCode::Char('j')));
+        let after_session = shell_state
+            .selected_session_id_for_panel()
+            .expect("selected session after move");
+        assert_ne!(before_session, after_session);
+        assert_eq!(shell_state.ui_state().selected_inbox_index, initial_inbox_index);
+
+        handle_key_press(&mut shell_state, key(KeyCode::BackTab));
+        assert!(shell_state.is_right_pane_focused());
+
+        handle_key_press(&mut shell_state, key(KeyCode::BackTab));
+        assert!(shell_state.is_left_pane_focused());
+        assert!(shell_state.is_sessions_sidebar_focused());
+    }
+
+    #[test]
+    fn open_session_output_for_selected_inbox_shortcut_opens_terminal_view() {
+        let mut shell_state = UiShellState::new("ready".to_owned(), sample_projection(true));
+        let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
+
+        handle_key_press(&mut shell_state, key(KeyCode::Char('o')));
+        assert!(matches!(
+            shell_state.view_stack.active_center(),
+            Some(CenterView::TerminalView { session_id }) if session_id.as_str() == "sess-1"
+        ));
+        assert_eq!(shell_state.mode, UiMode::Normal);
+        assert!(
+            shell_state
+                .domain
+                .inbox_items
+                .get(&InboxItemId::new("inbox-1"))
+                .map(|item| item.resolved)
+                .unwrap_or(false)
+        );
+    }
+
+    #[test]
+    fn open_session_output_shortcut_warns_when_selected_inbox_has_no_session() {
+        let mut shell_state = UiShellState::new("ready".to_owned(), sample_projection(false));
+        let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
+
+        handle_key_press(&mut shell_state, key(KeyCode::Char('o')));
+        assert!(!shell_state.is_terminal_view_active());
+        let status = shell_state.ui_state().status;
+        assert!(status.contains("selected inbox item has no active session"));
+        assert!(
+            !shell_state
+                .domain
+                .inbox_items
+                .get(&InboxItemId::new("inbox-1"))
+                .map(|item| item.resolved)
+                .unwrap_or(false)
+        );
     }
 
     #[test]
@@ -2850,12 +3131,20 @@ mod tests {
     #[test]
     fn ticket_picker_new_ticket_mode_overlay_text_does_not_duplicate_brief_label() {
         let mut overlay = TicketPickerOverlayState::default();
+        overlay.apply_tickets(
+            vec![sample_ticket_summary("issue-310", "AP-310", "Todo")],
+            Vec::new(),
+            &["Todo".to_owned()],
+        );
+        overlay.move_selection(1);
         overlay.begin_new_ticket_mode();
         overlay.new_ticket_brief_input.set_text("draft");
 
         let rendered = render_ticket_picker_overlay_text(&overlay);
         assert!(!rendered.contains("Brief:"));
         assert!(rendered.contains("Enter: create"));
+        assert!(rendered.contains("Shift+Enter: newline"));
+        assert!(rendered.contains("Assigned project: Core"));
     }
 
     #[test]
@@ -2880,6 +3169,20 @@ mod tests {
     }
 
     #[test]
+    fn ticket_picker_new_ticket_mode_shift_enter_inserts_newline() {
+        let mut shell_state = UiShellState::new("ready".to_owned(), triage_projection());
+        shell_state.ticket_picker_overlay.open();
+        shell_state.ticket_picker_overlay.begin_new_ticket_mode();
+
+        route_ticket_picker_key(&mut shell_state, shift_key(KeyCode::Char('a')));
+        route_ticket_picker_key(&mut shell_state, shift_key(KeyCode::Enter));
+        route_ticket_picker_key(&mut shell_state, key(KeyCode::Char('b')));
+
+        assert_eq!(shell_state.ticket_picker_overlay.new_ticket_brief_input.text(), "a\nb");
+        assert!(!shell_state.ticket_picker_overlay.creating);
+    }
+
+    #[test]
     fn ticket_picker_esc_cancels_new_ticket_mode_without_closing_overlay() {
         let mut shell_state = UiShellState::new("ready".to_owned(), triage_projection());
         shell_state.ticket_picker_overlay.open();
@@ -2892,7 +3195,11 @@ mod tests {
         route_ticket_picker_key(&mut shell_state, key(KeyCode::Esc));
         assert!(shell_state.ticket_picker_overlay.visible);
         assert!(!shell_state.ticket_picker_overlay.new_ticket_mode);
-        assert!(shell_state.ticket_picker_overlay.new_ticket_brief_input.is_empty());
+        assert!(shell_state
+            .ticket_picker_overlay
+            .new_ticket_brief_input
+            .text()
+            .is_empty());
     }
 
     #[test]
@@ -2934,7 +3241,15 @@ mod tests {
         });
         let (sender, mut receiver) = mpsc::channel(1);
 
-        run_ticket_picker_create_task(provider, "brief".to_owned(), sender).await;
+        run_ticket_picker_create_task(
+            provider,
+            CreateTicketFromPickerRequest {
+                brief: "brief".to_owned(),
+                selected_project: Some("Core".to_owned()),
+            },
+            sender,
+        )
+        .await;
 
         let event = receiver.recv().await.expect("ticket picker event");
         match event {
@@ -3083,7 +3398,7 @@ mod tests {
 
             async fn create_ticket_from_brief(
                 &self,
-                _brief: String,
+                _request: CreateTicketFromPickerRequest,
             ) -> Result<TicketSummary, CoreError> {
                 Err(CoreError::DependencyUnavailable("not used".to_owned()))
             }
@@ -3165,7 +3480,7 @@ mod tests {
 
             async fn create_ticket_from_brief(
                 &self,
-                _brief: String,
+                _request: CreateTicketFromPickerRequest,
             ) -> Result<TicketSummary, CoreError> {
                 Err(CoreError::DependencyUnavailable("not used".to_owned()))
             }
@@ -3330,12 +3645,24 @@ mod tests {
             command_ids::UI_FOCUS_NEXT_INBOX
         );
         assert_eq!(
+            command_id(UiCommand::CycleSidebarFocusNext),
+            "ui.sidebar.focus_next"
+        );
+        assert_eq!(
+            command_id(UiCommand::CycleSidebarFocusPrevious),
+            "ui.sidebar.focus_previous"
+        );
+        assert_eq!(
             command_id(UiCommand::AdvanceTerminalWorkflowStage),
             "ui.terminal.workflow.advance"
         );
         assert_eq!(
             command_id(UiCommand::ArchiveSelectedSession),
             "ui.terminal.archive_selected_session"
+        );
+        assert_eq!(
+            command_id(UiCommand::OpenSessionOutputForSelectedInbox),
+            "ui.open_session_output_for_selected_inbox"
         );
     }
 
@@ -3354,6 +3681,8 @@ mod tests {
             UiCommand::QuitShell,
             UiCommand::FocusNextInbox,
             UiCommand::FocusPreviousInbox,
+            UiCommand::CycleSidebarFocusNext,
+            UiCommand::CycleSidebarFocusPrevious,
             UiCommand::CycleBatchNext,
             UiCommand::CycleBatchPrevious,
             UiCommand::JumpFirstInbox,
@@ -3366,6 +3695,7 @@ mod tests {
             UiCommand::AdvanceTerminalWorkflowStage,
             UiCommand::ArchiveSelectedSession,
             UiCommand::MinimizeCenterView,
+            UiCommand::OpenSessionOutputForSelectedInbox,
         ];
 
         for command in all_commands {
@@ -3407,7 +3737,7 @@ mod tests {
     #[test]
     fn insert_mode_is_not_entered_while_terminal_view_is_active() {
         let mut shell_state = UiShellState::new("ready".to_owned(), sample_projection(true));
-        handle_key_press(&mut shell_state, key(KeyCode::Char('i')));
+        handle_key_press(&mut shell_state, key(KeyCode::Char('I')));
         assert_eq!(shell_state.mode, UiMode::Terminal);
         assert!(shell_state.is_terminal_view_active());
 
@@ -3433,7 +3763,7 @@ mod tests {
     #[test]
     fn terminal_mode_supports_escape_chord_with_compose_buffer() {
         let mut shell_state = UiShellState::new("ready".to_owned(), sample_projection(true));
-        handle_key_press(&mut shell_state, key(KeyCode::Char('i')));
+        handle_key_press(&mut shell_state, key(KeyCode::Char('I')));
         assert_eq!(shell_state.mode, UiMode::Terminal);
         assert!(shell_state.is_terminal_view_active());
 
@@ -3473,7 +3803,7 @@ mod tests {
     #[test]
     fn terminal_escape_prefix_replays_when_chord_not_completed() {
         let mut shell_state = UiShellState::new("ready".to_owned(), sample_projection(true));
-        handle_key_press(&mut shell_state, key(KeyCode::Char('i')));
+        handle_key_press(&mut shell_state, key(KeyCode::Char('I')));
         assert_eq!(shell_state.mode, UiMode::Terminal);
 
         handle_key_press(&mut shell_state, ctrl_key(KeyCode::Char('\\')));
@@ -3508,7 +3838,7 @@ mod tests {
     #[test]
     fn terminal_compose_supports_multiline_input() {
         let mut shell_state = UiShellState::new("ready".to_owned(), sample_projection(true));
-        handle_key_press(&mut shell_state, key(KeyCode::Char('i')));
+        handle_key_press(&mut shell_state, key(KeyCode::Char('I')));
         assert_eq!(shell_state.mode, UiMode::Terminal);
 
         handle_key_press(&mut shell_state, key(KeyCode::Char('h')));
@@ -3519,10 +3849,81 @@ mod tests {
         assert_eq!(shell_state.terminal_compose_input.text(), "hi\n!");
     }
 
+    #[tokio::test]
+    async fn terminal_submit_success_returns_to_normal_mode() {
+        let backend = Arc::new(ManualTerminalBackend::default());
+        let mut shell_state = UiShellState::new_with_integrations(
+            "ready".to_owned(),
+            sample_projection(true),
+            None,
+            None,
+            None,
+            Some(backend),
+        );
+        shell_state.open_terminal_and_enter_mode();
+        assert_eq!(shell_state.mode, UiMode::Terminal);
+
+        handle_key_press(&mut shell_state, key(KeyCode::Char('h')));
+        handle_key_press(&mut shell_state, key(KeyCode::Char('i')));
+        assert_eq!(shell_state.terminal_compose_input.text(), "hi");
+
+        handle_key_press(&mut shell_state, key(KeyCode::Enter));
+
+        assert_eq!(shell_state.terminal_compose_input.text(), "");
+        assert_eq!(shell_state.mode, UiMode::Normal);
+    }
+
+    #[tokio::test]
+    async fn terminal_submit_ctrl_enter_success_returns_to_normal_mode() {
+        let backend = Arc::new(ManualTerminalBackend::default());
+        let mut shell_state = UiShellState::new_with_integrations(
+            "ready".to_owned(),
+            sample_projection(true),
+            None,
+            None,
+            None,
+            Some(backend),
+        );
+        shell_state.open_terminal_and_enter_mode();
+        assert_eq!(shell_state.mode, UiMode::Terminal);
+
+        handle_key_press(&mut shell_state, key(KeyCode::Char('o')));
+        handle_key_press(&mut shell_state, key(KeyCode::Char('k')));
+        assert_eq!(shell_state.terminal_compose_input.text(), "ok");
+
+        handle_key_press(&mut shell_state, ctrl_key(KeyCode::Enter));
+
+        assert_eq!(shell_state.terminal_compose_input.text(), "");
+        assert_eq!(shell_state.mode, UiMode::Normal);
+    }
+
+    #[test]
+    fn terminal_submit_failure_keeps_terminal_mode() {
+        let backend = Arc::new(ManualTerminalBackend::default());
+        let mut shell_state = UiShellState::new_with_integrations(
+            "ready".to_owned(),
+            sample_projection(true),
+            None,
+            None,
+            None,
+            Some(backend),
+        );
+        shell_state.open_terminal_and_enter_mode();
+        assert_eq!(shell_state.mode, UiMode::Terminal);
+
+        handle_key_press(&mut shell_state, key(KeyCode::Enter));
+
+        assert_eq!(shell_state.mode, UiMode::Terminal);
+        assert!(shell_state
+            .status_warning
+            .as_deref()
+            .is_some_and(|warning| warning.contains("compose a non-empty message")));
+    }
+
     #[test]
     fn entering_terminal_mode_snaps_stream_view_to_bottom() {
         let mut shell_state = UiShellState::new("ready".to_owned(), sample_projection(true));
-        handle_key_press(&mut shell_state, key(KeyCode::Char('i')));
+        handle_key_press(&mut shell_state, key(KeyCode::Char('I')));
         assert_eq!(shell_state.mode, UiMode::Terminal);
         let session_id = shell_state
             .active_terminal_session_id()
@@ -3552,7 +3953,7 @@ mod tests {
         handle_key_press(&mut shell_state, key(KeyCode::Esc));
         assert_eq!(shell_state.mode, UiMode::Normal);
 
-        handle_key_press(&mut shell_state, key(KeyCode::Char('i')));
+        handle_key_press(&mut shell_state, key(KeyCode::Char('I')));
         assert_eq!(shell_state.mode, UiMode::Terminal);
 
         let view = shell_state
@@ -3568,9 +3969,9 @@ mod tests {
     }
 
     #[test]
-    fn terminal_stream_normal_mode_scrolls_with_shift_jk_and_g() {
+    fn terminal_stream_normal_mode_scrolls_with_jk_and_g() {
         let mut shell_state = UiShellState::new("ready".to_owned(), sample_projection(true));
-        handle_key_press(&mut shell_state, key(KeyCode::Char('i')));
+        handle_key_press(&mut shell_state, key(KeyCode::Char('I')));
         assert_eq!(shell_state.mode, UiMode::Terminal);
         let session_id = shell_state
             .active_terminal_session_id()
@@ -3600,14 +4001,14 @@ mod tests {
             view.output_follow_tail = false;
         }
 
-        handle_key_press(&mut shell_state, shift_key(KeyCode::Char('J')));
+        handle_key_press(&mut shell_state, key(KeyCode::Char('j')));
         let view = shell_state
             .terminal_session_states
             .get_mut(&session_id)
             .expect("terminal view state");
         assert_eq!(view.output_scroll_line, 1);
 
-        handle_key_press(&mut shell_state, shift_key(KeyCode::Char('K')));
+        handle_key_press(&mut shell_state, key(KeyCode::Char('k')));
         let view = shell_state
             .terminal_session_states
             .get_mut(&session_id)
@@ -3630,7 +4031,7 @@ mod tests {
     #[test]
     fn terminal_stream_scroll_uses_rendered_line_count_without_initial_jump() {
         let mut shell_state = UiShellState::new("ready".to_owned(), sample_projection(true));
-        handle_key_press(&mut shell_state, key(KeyCode::Char('i')));
+        handle_key_press(&mut shell_state, key(KeyCode::Char('I')));
         assert_eq!(shell_state.mode, UiMode::Terminal);
         let session_id = shell_state
             .active_terminal_session_id()
@@ -3664,13 +4065,63 @@ mod tests {
             .expect("terminal view state");
         assert_eq!(view.output_scroll_line, 100);
 
-        handle_key_press(&mut shell_state, shift_key(KeyCode::Char('K')));
+        handle_key_press(&mut shell_state, key(KeyCode::Char('k')));
         let view = shell_state
             .terminal_session_states
             .get(&session_id)
             .expect("terminal view state");
         assert_eq!(view.output_scroll_line, 99);
         assert!(!view.output_follow_tail);
+    }
+
+    #[test]
+    fn worktree_diff_modal_scroll_is_zero_when_selected_file_fits_viewport() {
+        let modal = sample_diff_modal_with_content(sample_worktree_diff_content(2));
+        let files = parse_diff_file_summaries(modal.content.as_str());
+
+        let scroll = worktree_diff_modal_scroll(&modal, files.as_slice(), 16);
+        assert_eq!(scroll, 0);
+    }
+
+    #[test]
+    fn worktree_diff_modal_scroll_clamps_to_max_scroll() {
+        let modal = sample_diff_modal_with_content(sample_worktree_diff_content(2));
+        let files = parse_diff_file_summaries(modal.content.as_str());
+        let (start, end, _) =
+            selected_file_and_hunk_range(&modal, files.as_slice()).expect("selected file range");
+        let line_count = end.saturating_sub(start).saturating_add(1);
+        let viewport_rows = line_count.saturating_sub(1);
+        let max_scroll = line_count.saturating_sub(viewport_rows);
+
+        let scroll = usize::from(worktree_diff_modal_scroll(
+            &modal,
+            files.as_slice(),
+            viewport_rows,
+        ));
+        assert_eq!(scroll, max_scroll);
+    }
+
+    #[test]
+    fn worktree_diff_modal_scroll_keeps_focus_padding_when_overflow_exists() {
+        let modal = sample_diff_modal_with_content(sample_worktree_diff_content(20));
+        let files = parse_diff_file_summaries(modal.content.as_str());
+        let (file_start, _, selected_hunk) =
+            selected_file_and_hunk_range(&modal, files.as_slice()).expect("selected file range");
+        let (hunk_start, hunk_end) = selected_hunk.expect("selected hunk");
+        let center = hunk_start + (hunk_end.saturating_sub(hunk_start) / 2);
+        let expected = center.saturating_sub(file_start).saturating_sub(3);
+
+        let scroll = usize::from(worktree_diff_modal_scroll(&modal, files.as_slice(), 5));
+        assert_eq!(scroll, expected);
+    }
+
+    #[test]
+    fn worktree_diff_modal_scroll_returns_zero_without_selected_file() {
+        let modal = sample_diff_modal_with_content(String::new());
+        let files = parse_diff_file_summaries(modal.content.as_str());
+
+        let scroll = worktree_diff_modal_scroll(&modal, files.as_slice(), 5);
+        assert_eq!(scroll, 0);
     }
 
     #[test]
@@ -3711,6 +4162,10 @@ mod tests {
         );
         assert_eq!(
             routed_command(route_key_press(&mut shell_state, key(KeyCode::Char('i')))),
+            Some(UiCommand::EnterInsertMode)
+        );
+        assert_eq!(
+            routed_command(route_key_press(&mut shell_state, key(KeyCode::Char('I')))),
             Some(UiCommand::OpenTerminalForSelected)
         );
         assert_eq!(

@@ -1,13 +1,15 @@
 use anyhow::Result;
-use backend_codex::CodexBackend;
+use backend_codex::{CodexBackend, CodexBackendConfig};
 use backend_opencode::{OpenCodeBackend, OpenCodeBackendConfig};
 use integration_git::{GitCliVcsProvider, ProcessCommandRunner as GitProcessCommandRunner};
-use integration_linear::LinearTicketingProvider;
-use integration_shortcut::ShortcutTicketingProvider;
+use integration_linear::{
+    LinearConfig, LinearRuntimeSettings, LinearTicketingProvider, WorkflowStateMapSetting,
+};
+use integration_shortcut::{ShortcutConfig, ShortcutTicketingProvider};
 use orchestrator_app::{App, AppConfig, AppTicketPickerProvider};
 use orchestrator_core::{
-    BackendKind, CoreError, SpawnSpec, SqliteEventStore, TicketProvider, TicketRecord,
-    TicketingProvider, WorkerBackend,
+    BackendKind, CoreError, OrchestrationEventPayload, SpawnSpec, SqliteEventStore, TicketProvider,
+    TicketRecord, TicketingProvider, WorkItemId, WorkerBackend, WorkflowState,
 };
 use orchestrator_github::{GhCliClient, ProcessCommandRunner as GhProcessCommandRunner};
 use orchestrator_supervisor::OpenRouterSupervisor;
@@ -15,9 +17,12 @@ use orchestrator_ui::Ui;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-const ENV_TICKETING_PROVIDER: &str = "ORCHESTRATOR_TICKETING_PROVIDER";
-const ENV_HARNESS_PROVIDER: &str = "ORCHESTRATOR_HARNESS_PROVIDER";
 const ENV_HARNESS_SESSION_ID: &str = "ORCHESTRATOR_HARNESS_SESSION_ID";
+const ENV_OPENROUTER_API_KEY: &str = "OPENROUTER_API_KEY";
+const ENV_LINEAR_API_KEY: &str = "LINEAR_API_KEY";
+const ENV_SHORTCUT_API_KEY: &str = "ORCHESTRATOR_SHORTCUT_API_KEY";
+const STARTUP_RESUME_NUDGE: &str =
+    "Sorry, we got interrupted, please continue from where we last left off.";
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -32,20 +37,40 @@ async fn main() -> Result<()> {
 
     config.ticketing_provider = resolve_provider_name(
         cli.ticketing_provider.as_deref(),
-        ENV_TICKETING_PROVIDER,
         &config.ticketing_provider,
     )?;
-    config.harness_provider = resolve_provider_name(
-        cli.harness_provider.as_deref(),
-        ENV_HARNESS_PROVIDER,
-        &config.harness_provider,
-    )?;
+    config.harness_provider =
+        resolve_provider_name(cli.harness_provider.as_deref(), &config.harness_provider)?;
 
-    let supervisor = OpenRouterSupervisor::from_env()?;
-    let github = GhCliClient::new(GhProcessCommandRunner)?;
-    let (ticketing, linear_ticketing) = build_ticketing_provider(&config.ticketing_provider)?;
-    let worker_backend = build_harness_provider(&config.harness_provider)?;
-    let vcs = Arc::new(GitCliVcsProvider::new(GitProcessCommandRunner)?);
+    orchestrator_app::set_supervisor_model_config(config.supervisor.model.clone());
+    orchestrator_app::set_git_binary_config(config.git.binary.clone());
+    orchestrator_ui::set_ui_runtime_config(
+        config.ui.theme.clone(),
+        config.ui.ticket_picker_priority_states.clone(),
+        config.supervisor.model.clone(),
+    );
+
+    let openrouter_api_key = required_env(ENV_OPENROUTER_API_KEY)?;
+    let supervisor = OpenRouterSupervisor::with_base_url(
+        openrouter_api_key,
+        config.supervisor.openrouter_base_url.clone(),
+    )?;
+    let github = GhCliClient::new(
+        GhProcessCommandRunner,
+        PathBuf::from(config.github.binary.as_str()),
+        config.runtime.allow_unsafe_command_paths,
+    )?;
+    let (ticketing, linear_ticketing) =
+        build_ticketing_provider(&config, &config.ticketing_provider)?;
+    let worker_backend = build_harness_provider(&config, &config.harness_provider)?;
+    let vcs = Arc::new(GitCliVcsProvider::new(
+        GitProcessCommandRunner,
+        PathBuf::from(config.git.binary.as_str()),
+        config.git.allow_destructive_automation,
+        config.git.allow_force_push,
+        config.git.allow_delete_unmerged_branches,
+        config.runtime.allow_unsafe_command_paths,
+    )?);
 
     ticketing.health_check().await?;
     worker_backend.health_check().await?;
@@ -164,14 +189,9 @@ fn read_cli_value(flag: &str, value: String) -> Result<String, CoreError> {
     Ok(value)
 }
 
-fn resolve_provider_name(
-    cli: Option<&str>,
-    env_var: &str,
-    config_value: &str,
-) -> Result<String, CoreError> {
+fn resolve_provider_name(cli: Option<&str>, config_value: &str) -> Result<String, CoreError> {
     let raw = cli
         .map(|value| value.to_owned())
-        .or_else(|| std::env::var(env_var).ok())
         .unwrap_or_else(|| config_value.to_owned());
 
     let normalized = raw.trim().to_ascii_lowercase();
@@ -183,6 +203,7 @@ fn resolve_provider_name(
 }
 
 fn build_ticketing_provider(
+    config: &AppConfig,
     provider: &str,
 ) -> Result<
     (
@@ -193,12 +214,43 @@ fn build_ticketing_provider(
 > {
     match provider {
         "linear" => {
-            let provider = Arc::new(LinearTicketingProvider::from_env()?);
+            let api_key = required_env(ENV_LINEAR_API_KEY)?;
+            let settings = LinearRuntimeSettings {
+                api_url: config.linear.api_url.clone(),
+                sync_interval_secs: config.linear.sync_interval_secs,
+                fetch_limit: config.linear.fetch_limit,
+                sync_assigned_to_me: config.linear.sync_assigned_to_me,
+                sync_states: config.linear.sync_states.clone(),
+                workflow_state_map: config
+                    .linear
+                    .workflow_state_map
+                    .iter()
+                    .map(|entry| WorkflowStateMapSetting {
+                        workflow_state: entry.workflow_state.clone(),
+                        linear_state: entry.linear_state.clone(),
+                    })
+                    .collect(),
+                workflow_comment_summaries: config.linear.workflow_comment_summaries,
+                workflow_attach_pr_links: config.linear.workflow_attach_pr_links,
+            };
+            let linear_config = LinearConfig::from_settings(api_key, settings)?;
+            let provider = Arc::new(LinearTicketingProvider::new(linear_config)?);
             let linear_ticketing = Arc::clone(&provider);
             let ticketing: Arc<dyn TicketingProvider + Send + Sync> = provider;
             Ok((ticketing, Some(linear_ticketing)))
         }
-        "shortcut" => Ok((Arc::new(ShortcutTicketingProvider::from_env()?), None)),
+        "shortcut" => {
+            let api_key = required_env(ENV_SHORTCUT_API_KEY)?;
+            let shortcut_config = ShortcutConfig::from_settings(
+                api_key,
+                config.shortcut.api_url.clone(),
+                config.shortcut.fetch_limit,
+            )?;
+            Ok((
+                Arc::new(ShortcutTicketingProvider::new(shortcut_config)?),
+                None,
+            ))
+        }
         other => Err(CoreError::Configuration(format!(
             "Unknown ticketing provider '{other}'. Expected 'linear' or 'shortcut'."
         ))),
@@ -206,17 +258,51 @@ fn build_ticketing_provider(
 }
 
 fn build_harness_provider(
+    config: &AppConfig,
     provider: &str,
 ) -> Result<Arc<dyn WorkerBackend + Send + Sync>, CoreError> {
     match provider {
-        "opencode" => Ok(Arc::new(OpenCodeBackend::new(
-            OpenCodeBackendConfig::default(),
-        ))),
-        "codex" => Ok(Arc::new(CodexBackend::from_env())),
+        "opencode" => Ok(Arc::new(OpenCodeBackend::new(OpenCodeBackendConfig {
+            binary: PathBuf::from(config.runtime.opencode_binary.as_str()),
+            base_args: Vec::new(),
+            output_buffer: 256,
+            server_base_url: Some(config.runtime.opencode_server_base_url.clone()),
+            server_startup_timeout: std::time::Duration::from_secs(
+                config.runtime.harness_server_startup_timeout_secs,
+            ),
+            allow_unsafe_command_paths: config.runtime.allow_unsafe_command_paths,
+            harness_log_raw_events: config.runtime.harness_log_raw_events,
+            harness_log_normalized_events: config.runtime.harness_log_normalized_events,
+        }))),
+        "codex" => Ok(Arc::new(CodexBackend::new(CodexBackendConfig {
+            binary: PathBuf::from(config.runtime.codex_binary.as_str()),
+            base_args: Vec::new(),
+            server_startup_timeout: std::time::Duration::from_secs(
+                config.runtime.harness_server_startup_timeout_secs,
+            ),
+            legacy_server_base_url: None,
+            harness_log_raw_events: config.runtime.harness_log_raw_events,
+            harness_log_normalized_events: config.runtime.harness_log_normalized_events,
+        }))),
         other => Err(CoreError::Configuration(format!(
             "Unknown harness provider '{other}'. Expected 'opencode' or 'codex'."
         ))),
     }
+}
+
+fn required_env(name: &str) -> Result<String, CoreError> {
+    let value = std::env::var(name).map_err(|_| {
+        CoreError::Configuration(format!(
+            "{name} is not set. Export a valid value before starting orchestrator-app."
+        ))
+    })?;
+    let value = value.trim().to_owned();
+    if value.is_empty() {
+        return Err(CoreError::Configuration(format!(
+            "{name} is empty. Provide a non-empty value."
+        )));
+    }
+    Ok(value)
 }
 
 async fn rehydrate_inflight_sessions(
@@ -231,6 +317,7 @@ async fn rehydrate_inflight_sessions(
         if mapping.session.backend_kind != active_backend_kind {
             continue;
         }
+        let workflow_state = latest_workflow_state_for_work_item(&store, &mapping.work_item_id)?;
 
         let mut environment = Vec::new();
         if mapping.session.backend_kind == BackendKind::Codex {
@@ -242,7 +329,7 @@ async fn rehydrate_inflight_sessions(
             }
         }
 
-        let instruction = resume_instruction_from_ticket(&mapping.ticket);
+        let instruction = resume_instruction_from_ticket(&mapping.ticket, &workflow_state);
         let spawn_result = worker_backend
             .spawn(SpawnSpec {
                 session_id: mapping.session.session_id.clone().into(),
@@ -270,6 +357,21 @@ async fn rehydrate_inflight_sessions(
                         );
                     }
                 }
+
+                let nudge = startup_rehydrate_nudge(&workflow_state);
+                let mut nudge_bytes = nudge.as_bytes().to_vec();
+                if !nudge_bytes.ends_with(b"\n") {
+                    nudge_bytes.push(b'\n');
+                }
+                if let Err(error) = worker_backend.send_input(&handle, &nudge_bytes).await {
+                    tracing::warn!(
+                        session_id = mapping.session.session_id.as_str(),
+                        backend = ?mapping.session.backend_kind,
+                        state = ?workflow_state,
+                        error = %error,
+                        "failed to send startup resume nudge to rehydrated session"
+                    );
+                }
             }
             Err(error) => {
                 tracing::warn!(
@@ -285,13 +387,99 @@ async fn rehydrate_inflight_sessions(
     Ok(())
 }
 
-fn resume_instruction_from_ticket(ticket: &TicketRecord) -> String {
+fn latest_workflow_state_for_work_item(
+    store: &SqliteEventStore,
+    work_item_id: &WorkItemId,
+) -> Result<WorkflowState, CoreError> {
+    let mut current = WorkflowState::New;
+    let events = store.read_events_for_work_item(work_item_id)?;
+    for event in events {
+        if let OrchestrationEventPayload::WorkflowTransition(payload) = event.payload {
+            current = payload.to;
+        }
+    }
+    Ok(current)
+}
+
+fn is_past_planning_state(state: &WorkflowState) -> bool {
+    !matches!(state, WorkflowState::New | WorkflowState::Planning)
+}
+
+fn resume_instruction_from_ticket(ticket: &TicketRecord, workflow_state: &WorkflowState) -> String {
     let provider_name = match ticket.provider {
         TicketProvider::Linear => "linear",
         TicketProvider::Shortcut => "shortcut",
     };
+    if is_past_planning_state(workflow_state) {
+        return format!(
+            "Ticket provider: {provider_name}. Resume work on {}: {}. Current workflow state is {:?}. Planning is already complete for this ticket, so continue from the current workflow state. For ticket operations, use the {provider_name} ticketing integration/skill.",
+            ticket.identifier, ticket.title, workflow_state
+        );
+    }
     format!(
         "Ticket provider: {provider_name}. Resume work on {}: {} in Planning mode. Reconcile the current state, refresh the plan, and wait for an explicit workflow transition command before implementation. For ticket operations, use the {provider_name} ticketing integration/skill.",
         ticket.identifier, ticket.title
     )
+}
+
+fn startup_rehydrate_nudge(workflow_state: &WorkflowState) -> String {
+    if is_past_planning_state(workflow_state) {
+        return format!(
+            "Planning is already complete for this ticket. End planning mode now. Current workflow state: {:?}. {STARTUP_RESUME_NUDGE}",
+            workflow_state
+        );
+    }
+
+    format!(
+        "Current workflow state: {:?}. {STARTUP_RESUME_NUDGE}",
+        workflow_state
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample_ticket() -> TicketRecord {
+        TicketRecord {
+            ticket_id: "linear-1".into(),
+            provider: TicketProvider::Linear,
+            provider_ticket_id: "1".to_owned(),
+            identifier: "AP-1".to_owned(),
+            title: "Implement startup rehydrate resume logic".to_owned(),
+            state: "In Progress".to_owned(),
+            updated_at: "2026-02-20T00:00:00Z".to_owned(),
+        }
+    }
+
+    #[test]
+    fn past_planning_state_detection_is_correct() {
+        assert!(!is_past_planning_state(&WorkflowState::New));
+        assert!(!is_past_planning_state(&WorkflowState::Planning));
+        assert!(is_past_planning_state(&WorkflowState::Implementing));
+        assert!(is_past_planning_state(&WorkflowState::Testing));
+        assert!(is_past_planning_state(&WorkflowState::PRDrafted));
+    }
+
+    #[test]
+    fn post_planning_resume_instruction_does_not_force_planning_mode() {
+        let instruction =
+            resume_instruction_from_ticket(&sample_ticket(), &WorkflowState::Implementing);
+        assert!(instruction.contains("Planning is already complete"));
+        assert!(!instruction.contains("in Planning mode"));
+    }
+
+    #[test]
+    fn post_planning_nudge_requests_exit_from_planning_mode() {
+        let nudge = startup_rehydrate_nudge(&WorkflowState::Testing);
+        assert!(nudge.contains("End planning mode now."));
+        assert!(nudge.contains(STARTUP_RESUME_NUDGE));
+    }
+
+    #[test]
+    fn planning_nudge_keeps_planning_mode_active() {
+        let nudge = startup_rehydrate_nudge(&WorkflowState::Planning);
+        assert!(!nudge.contains("End planning mode now."));
+        assert!(nudge.contains(STARTUP_RESUME_NUDGE));
+    }
 }

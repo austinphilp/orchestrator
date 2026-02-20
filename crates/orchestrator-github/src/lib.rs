@@ -196,17 +196,16 @@ impl GhMergeStrategy {
 }
 
 impl<R: CommandRunner> GhCliClient<R> {
-    pub fn new(runner: R) -> Result<Self, CoreError> {
-        let binary = std::env::var_os(ENV_GH_BIN)
-            .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from("gh"));
+    pub fn new(
+        runner: R,
+        binary: PathBuf,
+        allow_unsafe_command_paths: bool,
+    ) -> Result<Self, CoreError> {
         if binary.as_os_str().is_empty() {
             return Err(CoreError::Configuration(format!(
                 "{ENV_GH_BIN} is set but empty. Provide a valid gh binary path or unset it."
             )));
         }
-
-        let allow_unsafe_command_paths = read_bool_env(ENV_ALLOW_UNSAFE_COMMAND_PATHS)?;
         Ok(Self {
             runner,
             binary,
@@ -557,26 +556,6 @@ impl<R: CommandRunner> GhCliClient<R> {
             GhMergeStrategy::Squash => detail.contains("squash"),
             GhMergeStrategy::Rebase => detail.contains("rebase"),
         }
-    }
-}
-
-fn parse_bool_env(name: &str, value: &str) -> Result<bool, CoreError> {
-    match value.trim().to_ascii_lowercase().as_str() {
-        "1" | "true" | "yes" | "on" => Ok(true),
-        "0" | "false" | "no" | "off" => Ok(false),
-        _ => Err(CoreError::Configuration(format!(
-            "{name} must be a boolean (true/false)."
-        ))),
-    }
-}
-
-fn read_bool_env(name: &str) -> Result<bool, CoreError> {
-    match std::env::var(name) {
-        Ok(value) => parse_bool_env(name, &value),
-        Err(std::env::VarError::NotPresent) => Ok(false),
-        Err(std::env::VarError::NotUnicode(_)) => Err(CoreError::Configuration(format!(
-            "{name} contained invalid UTF-8"
-        ))),
     }
 }
 
@@ -1168,7 +1147,7 @@ mod tests {
     #[tokio::test]
     async fn command_construction_uses_argument_vector() {
         let runner = StubRunner::with_results(vec![Ok(success_output())]);
-        let client = GhCliClient::new(runner).expect("init");
+        let client = GhCliClient::new(runner, PathBuf::from("gh"), false).expect("init");
         GithubClient::health_check(&client)
             .await
             .expect("health check");
@@ -1188,7 +1167,7 @@ mod tests {
             io::ErrorKind::NotFound,
             "missing",
         ))]);
-        let client = GhCliClient::new(runner).expect("init");
+        let client = GhCliClient::new(runner, PathBuf::from("gh"), false).expect("init");
         let err = GithubClient::health_check(&client)
             .await
             .expect_err("expected error");
@@ -1202,7 +1181,7 @@ mod tests {
             "https://github.com/octocat/orchestrator/pull/42\n",
             "",
         ))]);
-        let client = GhCliClient::new(runner).expect("init");
+        let client = GhCliClient::new(runner, PathBuf::from("gh"), false).expect("init");
         let repository = sample_repository();
 
         let summary = CodeHostProvider::create_draft_pull_request(
@@ -1251,7 +1230,7 @@ mod tests {
     #[tokio::test]
     async fn create_draft_pull_request_rejects_missing_repository_root() {
         let runner = StubRunner::with_results(Vec::new());
-        let client = GhCliClient::new(runner).expect("init");
+        let client = GhCliClient::new(runner, PathBuf::from("gh"), false).expect("init");
         let timestamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .expect("system time before unix epoch")
@@ -1285,7 +1264,7 @@ mod tests {
     #[tokio::test]
     async fn mark_ready_for_review_uses_pr_number() {
         let runner = StubRunner::with_results(vec![Ok(success_output())]);
-        let client = GhCliClient::new(runner).expect("init");
+        let client = GhCliClient::new(runner, PathBuf::from("gh"), false).expect("init");
         let pr = PullRequestRef {
             repository: sample_repository(),
             number: 7,
@@ -1316,7 +1295,7 @@ mod tests {
             "",
             "pull request is already marked ready for review",
         ))]);
-        let client = GhCliClient::new(runner).expect("init");
+        let client = GhCliClient::new(runner, PathBuf::from("gh"), false).expect("init");
         let pr = PullRequestRef {
             repository: sample_repository(),
             number: 9,
@@ -1338,7 +1317,7 @@ mod tests {
             )),
             Ok(success_output()),
         ]);
-        let client = GhCliClient::new(runner).expect("init");
+        let client = GhCliClient::new(runner, PathBuf::from("gh"), false).expect("init");
         let pr = PullRequestRef {
             repository: sample_repository(),
             number: 7,
@@ -1387,7 +1366,7 @@ mod tests {
             )),
             Ok(success_output()),
         ]);
-        let client = GhCliClient::new(runner).expect("init");
+        let client = GhCliClient::new(runner, PathBuf::from("gh"), false).expect("init");
         let pr = PullRequestRef {
             repository: sample_repository(),
             number: 11,
@@ -1442,7 +1421,7 @@ mod tests {
             )),
             Ok(success_output()),
         ]);
-        let client = GhCliClient::new(runner).expect("init");
+        let client = GhCliClient::new(runner, PathBuf::from("gh"), false).expect("init");
         let pr = PullRequestRef {
             repository: sample_repository(),
             number: 13,
@@ -1480,7 +1459,7 @@ mod tests {
     #[tokio::test]
     async fn request_reviewers_short_circuits_when_empty() {
         let runner = StubRunner::with_results(Vec::new());
-        let client = GhCliClient::new(runner).expect("init");
+        let client = GhCliClient::new(runner, PathBuf::from("gh"), false).expect("init");
         let pr = PullRequestRef {
             repository: sample_repository(),
             number: 12,
@@ -1498,7 +1477,7 @@ mod tests {
     #[tokio::test]
     async fn request_reviewers_includes_users_and_teams() {
         let runner = StubRunner::with_results(vec![Ok(success_output())]);
-        let client = GhCliClient::new(runner).expect("init");
+        let client = GhCliClient::new(runner, PathBuf::from("gh"), false).expect("init");
         let pr = PullRequestRef {
             repository: sample_repository(),
             number: 12,
@@ -1535,7 +1514,7 @@ mod tests {
     #[tokio::test]
     async fn request_reviewers_deduplicates_and_trims() {
         let runner = StubRunner::with_results(vec![Ok(success_output())]);
-        let client = GhCliClient::new(runner).expect("init");
+        let client = GhCliClient::new(runner, PathBuf::from("gh"), false).expect("init");
         let pr = PullRequestRef {
             repository: sample_repository(),
             number: 12,
@@ -1576,7 +1555,7 @@ mod tests {
             "",
             "review request already exists for alice",
         ))]);
-        let client = GhCliClient::new(runner).expect("init");
+        let client = GhCliClient::new(runner, PathBuf::from("gh"), false).expect("init");
         let pr = PullRequestRef {
             repository: sample_repository(),
             number: 12,
@@ -1602,7 +1581,7 @@ mod tests {
             r#"[{"number":3,"title":"Fix race condition","url":"https://github.com/octo/repo/pull/3","isDraft":false,"repository":{"nameWithOwner":"octo/repo"}}]"#,
             "",
         ))]);
-        let client = GhCliClient::new(runner).expect("init");
+        let client = GhCliClient::new(runner, PathBuf::from("gh"), false).expect("init");
 
         let queue = CodeHostProvider::list_waiting_for_my_review(&client)
             .await
@@ -1621,7 +1600,7 @@ mod tests {
             r#"[{"number":5,"title":"Docs update","url":"https://github.com/octo/docs/pull/5","isDraft":true}]"#,
             "",
         ))]);
-        let client = GhCliClient::new(runner).expect("init");
+        let client = GhCliClient::new(runner, PathBuf::from("gh"), false).expect("init");
 
         let queue = CodeHostProvider::list_waiting_for_my_review(&client)
             .await
@@ -1638,7 +1617,7 @@ mod tests {
             r#"[{"number":52,"url":"https://github.com/octocat/orchestrator/pull/52"}]"#,
             "",
         ))]);
-        let client = GhCliClient::new(runner).expect("init");
+        let client = GhCliClient::new(runner, PathBuf::from("gh"), false).expect("init");
         let repository = sample_repository();
 
         let pr = CodeHostProvider::find_open_pull_request_for_branch(
@@ -1678,7 +1657,7 @@ mod tests {
     #[tokio::test]
     async fn find_open_pull_request_for_branch_returns_none_when_not_found() {
         let runner = StubRunner::with_results(vec![Ok(output(0, "[]", ""))]);
-        let client = GhCliClient::new(runner).expect("init");
+        let client = GhCliClient::new(runner, PathBuf::from("gh"), false).expect("init");
         let repository = sample_repository();
 
         let pr = CodeHostProvider::find_open_pull_request_for_branch(

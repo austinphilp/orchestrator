@@ -550,18 +550,12 @@ enum UiTheme {
 }
 
 fn ui_theme_from_env() -> UiTheme {
-    static THEME: OnceLock<UiTheme> = OnceLock::new();
-    *THEME.get_or_init(|| {
-        let value = std::env::var(UI_THEME_ENV)
-            .ok()
-            .map(|entry| entry.trim().to_ascii_lowercase())
-            .unwrap_or_else(|| "nord".to_owned());
-        match value.as_str() {
-            "default" => UiTheme::Default,
-            "nord" => UiTheme::Nord,
-            _ => UiTheme::Nord,
-        }
-    })
+    let value = ui_theme_config_value().trim().to_ascii_lowercase();
+    match value.as_str() {
+        "default" => UiTheme::Default,
+        "nord" => UiTheme::Nord,
+        _ => UiTheme::Nord,
+    }
 }
 
 fn apply_nord_markdown_theme(skin: &mut RatSkin) {
@@ -795,19 +789,39 @@ fn render_ticket_picker_overlay(
         popup,
     );
     if popup.width > 4 && popup.height > 4 {
+        let input_height: u16 = if overlay.new_ticket_mode { 5 } else { 3 };
+        if popup.height <= input_height.saturating_add(1) {
+            return;
+        }
         let input_area = Rect {
             x: popup.x.saturating_add(1),
-            y: popup.y.saturating_add(popup.height.saturating_sub(4)),
+            y: popup
+                .y
+                .saturating_add(popup.height.saturating_sub(input_height.saturating_add(1))),
             width: popup.width.saturating_sub(2),
-            height: 3,
+            height: input_height,
         };
         if overlay.new_ticket_mode {
+            let project_area = Rect {
+                x: popup.x.saturating_add(1),
+                y: popup.y.saturating_add(popup.height.saturating_sub(5)),
+                width: popup.width.saturating_sub(2),
+                height: 1,
+            };
+            let selected_project = overlay
+                .selected_project_name()
+                .unwrap_or_else(|| "No Project".to_owned());
+            frame.render_widget(
+                Paragraph::new(format!("Assigned project: {selected_project}")),
+                project_area,
+            );
             let mut state = overlay.new_ticket_brief_input.clone();
             state.focused = true;
-            Input::new(&state)
-                .label("brief")
+            TextArea::new()
+                .label("describe ticket")
                 .placeholder("ticket summary")
-                .render_stateful(frame, input_area);
+                .wrap_mode(WrapMode::Soft)
+                .render_stateful(frame, input_area, &mut state);
         } else if overlay.has_repository_prompt() {
             let mut state = overlay.repository_prompt_input.clone();
             state.focused = true;
@@ -819,30 +833,132 @@ fn render_ticket_picker_overlay(
     }
 }
 
-fn terminal_input_pane_height(center_height: u16, prompt: Option<&NeedsInputComposerState>) -> u16 {
-    const DEFAULT_INPUT_HEIGHT: u16 = 6;
+const DEFAULT_TERMINAL_INPUT_HEIGHT: u16 = 6;
+const INPUT_PANEL_OUTER_BORDER_HEIGHT: u16 = 2;
+const NEEDS_INPUT_NOTE_HEIGHT: u16 = 3;
+const NEEDS_INPUT_HELP_HEIGHT: u16 = 1;
+const NEEDS_INPUT_ERROR_HEIGHT: u16 = 1;
+const NEEDS_INPUT_QUESTION_MIN_HEIGHT: u16 = 3;
+const NEEDS_INPUT_QUESTION_MAX_EXPANDED_HEIGHT: u16 = 7;
+const NEEDS_INPUT_QUESTION_MAX_DEFAULT_HEIGHT: u16 = 4;
+const NEEDS_INPUT_CHOICE_MIN_ROWS_DEFAULT: usize = 1;
+const NEEDS_INPUT_CHOICE_MAX_ROWS_DEFAULT: usize = 4;
+const NEEDS_INPUT_CHOICE_MAX_ROWS_EXPANDED: usize = 12;
+
+fn terminal_input_pane_height(
+    center_height: u16,
+    center_width: u16,
+    prompt: Option<&NeedsInputComposerState>,
+) -> u16 {
     let Some(prompt) = prompt else {
-        return DEFAULT_INPUT_HEIGHT;
+        return DEFAULT_TERMINAL_INPUT_HEIGHT;
     };
     let Some(question) = prompt.current_question() else {
-        return DEFAULT_INPUT_HEIGHT;
+        return DEFAULT_TERMINAL_INPUT_HEIGHT;
     };
-    let options_len = question
-        .options
-        .as_ref()
-        .map(|options| options.len())
-        .unwrap_or(0);
-    let choice_rows = options_len.clamp(1, 4);
-    let choice_height = u16::try_from(choice_rows).unwrap_or(4).saturating_add(2);
-    let mut target_height = 3u16
+    let is_plan_prompt = expanded_needs_input_layout_active(prompt);
+    let question_height = needs_input_question_height(question, center_width, is_plan_prompt);
+    let choice_height = needs_input_choice_height(question, center_width, is_plan_prompt);
+    let mut inner_required = question_height
         .saturating_add(choice_height)
-        .saturating_add(3)
-        .saturating_add(2);
+        .saturating_add(NEEDS_INPUT_NOTE_HEIGHT)
+        .saturating_add(NEEDS_INPUT_HELP_HEIGHT);
     if prompt.error.is_some() {
-        target_height = target_height.saturating_add(1);
+        inner_required = inner_required.saturating_add(NEEDS_INPUT_ERROR_HEIGHT);
+    }
+    let mut target_height = inner_required.saturating_add(INPUT_PANEL_OUTER_BORDER_HEIGHT);
+    if is_plan_prompt {
+        target_height = target_height.max(DEFAULT_TERMINAL_INPUT_HEIGHT.saturating_mul(2));
     }
     let max_height = center_height.saturating_sub(4).max(3);
     target_height.clamp(3, max_height)
+}
+
+fn expanded_needs_input_layout_active(prompt: &NeedsInputComposerState) -> bool {
+    if prompt.questions.len() > 1 {
+        return true;
+    }
+
+    if prompt
+        .prompt_id
+        .to_ascii_lowercase()
+        .contains("plan")
+    {
+        return true;
+    }
+
+    prompt.questions.iter().any(|question| {
+        let id_has_plan = question.id.to_ascii_lowercase().contains("plan");
+        let header_has_plan = question.header.to_ascii_lowercase().contains("plan");
+        let question_has_plan = question.question.to_ascii_lowercase().contains("plan");
+        id_has_plan || header_has_plan || question_has_plan
+    })
+}
+
+fn needs_input_question_height(
+    question: &BackendNeedsInputQuestion,
+    panel_width: u16,
+    expanded_layout: bool,
+) -> u16 {
+    let question_text = format!("{} | {}", question.header, question.question);
+    let content_width = panel_width.saturating_sub(6);
+    let wrapped_rows = wrapped_row_count(question_text.as_str(), content_width);
+    let max_height = if expanded_layout {
+        NEEDS_INPUT_QUESTION_MAX_EXPANDED_HEIGHT
+    } else {
+        NEEDS_INPUT_QUESTION_MAX_DEFAULT_HEIGHT
+    };
+    wrapped_rows
+        .saturating_add(2)
+        .clamp(NEEDS_INPUT_QUESTION_MIN_HEIGHT, max_height)
+}
+
+fn needs_input_choice_height(
+    question: &BackendNeedsInputQuestion,
+    panel_width: u16,
+    expanded_layout: bool,
+) -> u16 {
+    let content_width = panel_width.saturating_sub(10);
+    let Some(options) = question.options.as_ref().filter(|options| !options.is_empty()) else {
+        return 3;
+    };
+
+    let mut rows = 0usize;
+    for option in options {
+        let label = compact_focus_card_text(option.label.as_str());
+        let line = if option.description.trim().is_empty() {
+            format!("> [ ] {label}")
+        } else {
+            let description = compact_focus_card_text(option.description.as_str());
+            format!("> [ ] {label} - {description}")
+        };
+        rows = rows.saturating_add(usize::from(wrapped_row_count(line.as_str(), content_width)));
+    }
+    let max_rows = if expanded_layout {
+        NEEDS_INPUT_CHOICE_MAX_ROWS_EXPANDED
+    } else {
+        NEEDS_INPUT_CHOICE_MAX_ROWS_DEFAULT
+    };
+    let clamped_rows = rows.clamp(NEEDS_INPUT_CHOICE_MIN_ROWS_DEFAULT, max_rows);
+    u16::try_from(clamped_rows).unwrap_or(NEEDS_INPUT_CHOICE_MAX_EXPANDED_HEIGHT_U16)
+        .saturating_add(2)
+}
+
+const NEEDS_INPUT_CHOICE_MAX_EXPANDED_HEIGHT_U16: u16 = 12;
+
+fn wrapped_row_count(text: &str, width: u16) -> u16 {
+    let width = width.max(1) as usize;
+    let mut rows = 0usize;
+    for segment in text.split('\n') {
+        let chars = segment.chars().count();
+        let wrapped = if chars == 0 {
+            1
+        } else {
+            chars.div_ceil(width)
+        };
+        rows = rows.saturating_add(wrapped.max(1));
+    }
+    u16::try_from(rows).unwrap_or(u16::MAX)
 }
 
 fn render_terminal_needs_input_panel(
@@ -874,18 +990,19 @@ fn render_terminal_needs_input_panel(
         .as_ref()
         .map(|options| options.len())
         .unwrap_or(0);
-    let choice_rows = options_len.clamp(1, 4);
-    let choice_height = u16::try_from(choice_rows).unwrap_or(4).saturating_add(2);
+    let is_plan_prompt = expanded_needs_input_layout_active(prompt);
+    let question_height = needs_input_question_height(question, input_area.width, is_plan_prompt);
+    let choice_height = needs_input_choice_height(question, input_area.width, is_plan_prompt);
 
     let mut constraints = vec![
-        Constraint::Length(3),
-        Constraint::Length(choice_height),
-        Constraint::Length(3),
+        Constraint::Length(question_height),
+        Constraint::Min(choice_height),
+        Constraint::Length(NEEDS_INPUT_NOTE_HEIGHT),
     ];
     if prompt.error.is_some() {
-        constraints.push(Constraint::Length(1));
+        constraints.push(Constraint::Length(NEEDS_INPUT_ERROR_HEIGHT));
     }
-    constraints.push(Constraint::Min(2));
+    constraints.push(Constraint::Length(NEEDS_INPUT_HELP_HEIGHT));
     let sections = Layout::vertical(constraints).split(inner);
     let question_area = sections[0];
     let choice_area = sections[1];
@@ -957,13 +1074,13 @@ fn render_terminal_needs_input_panel(
     }
 
     let mut note_input_state = prompt.note_input_state.clone();
-    note_input_state.focused = prompt.note_insert_mode && focused;
+    note_input_state.focused = prompt.interaction_active && prompt.note_insert_mode && focused;
     let note_input = Input::new(&note_input_state)
         .label("note")
         .placeholder("Optional with selection; required when no options")
         .with_border(true);
     let _ = note_input.render_stateful(frame, note_area);
-    if prompt.note_insert_mode && focused {
+    if prompt.interaction_active && prompt.note_insert_mode && focused {
         if let Some((x, y)) = needs_input_note_cursor(note_area, prompt) {
             frame.set_cursor_position((x, y));
         }
@@ -980,25 +1097,29 @@ fn render_terminal_needs_input_panel(
         );
         index += 1;
     }
-    let help = format!(
-        "{}Enter: {} | Tab/S-Tab: question | i: note insert | Esc: normal mode",
-        if options_len > 0 {
-            "j/k: option | "
-        } else {
-            ""
-        },
-        if options_len > 0 {
-            if prompt.has_next_question() {
-                "select option + next question"
+    let help = if prompt.interaction_active {
+        format!(
+            "{}Enter: {} | Tab/S-Tab: question | i: note insert | Esc: normal mode",
+            if options_len > 0 {
+                "j/k: option | "
             } else {
-                "select option + submit"
-            }
-        } else if prompt.has_next_question() {
-            "next question"
-        } else {
-            "submit"
-        },
-    );
+                ""
+            },
+            if options_len > 0 {
+                if prompt.has_next_question() {
+                    "select option + next question"
+                } else {
+                    "select option + submit"
+                }
+            } else if prompt.has_next_question() {
+                "next question"
+            } else {
+                "submit"
+            },
+        )
+    } else {
+        "Press i or use j/k + Enter to activate input | Esc: normal mode".to_owned()
+    };
     frame.render_widget(
         Paragraph::new(help).wrap(Wrap { trim: false }),
         sections[index],
@@ -1118,9 +1239,13 @@ fn render_worktree_diff_modal(
         .map(|entry| entry.path.as_str())
         .unwrap_or("(no file)");
     let right_title = format!("diff | {selected_path}");
+    let diff_viewport_rows = usize::from(panes[1].height.saturating_sub(2)).max(1);
     frame.render_widget(
         Paragraph::new(right)
-            .scroll((worktree_diff_modal_scroll(modal, files.as_slice()), 0))
+            .scroll((
+                worktree_diff_modal_scroll(modal, files.as_slice(), diff_viewport_rows),
+                0,
+            ))
             .block(Block::default().title(right_title).borders(Borders::ALL)),
         panes[1],
     );
@@ -1421,15 +1546,22 @@ fn render_selected_file_diff(modal: &WorktreeDiffModalState, files: &[DiffFileSu
     Text::from(rendered)
 }
 
-fn worktree_diff_modal_scroll(modal: &WorktreeDiffModalState, files: &[DiffFileSummary]) -> u16 {
-    let Some((file_start, _file_end, selected_hunk)) = selected_file_and_hunk_range(modal, files) else {
+fn worktree_diff_modal_scroll(
+    modal: &WorktreeDiffModalState,
+    files: &[DiffFileSummary],
+    viewport_rows: usize,
+) -> u16 {
+    let Some((file_start, file_end, selected_hunk)) = selected_file_and_hunk_range(modal, files) else {
         return 0;
     };
     let center = selected_hunk
         .map(|(start, end)| start + (end.saturating_sub(start) / 2))
         .unwrap_or(file_start);
     let local_line = center.saturating_sub(file_start);
-    local_line.saturating_sub(3).min(u16::MAX as usize) as u16
+    let preferred_scroll = local_line.saturating_sub(3);
+    let line_count = file_end.saturating_sub(file_start).saturating_add(1);
+    let max_scroll = line_count.saturating_sub(viewport_rows.max(1));
+    preferred_scroll.min(max_scroll).min(u16::MAX as usize) as u16
 }
 
 fn diff_rendered_line_style(kind: DiffRenderedLineKind) -> Style {
@@ -1734,28 +1866,7 @@ fn render_which_key_overlay_text(overlay: &WhichKeyOverlayState) -> String {
 }
 
 fn ticket_picker_priority_states_from_env() -> Vec<String> {
-    match std::env::var(TICKET_PICKER_PRIORITY_STATES_ENV) {
-        Ok(raw) => {
-            let parsed = raw
-                .split(',')
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .map(ToOwned::to_owned)
-                .collect::<Vec<_>>();
-            if parsed.is_empty() {
-                TICKET_PICKER_PRIORITY_STATES_DEFAULT
-                    .iter()
-                    .map(|value| (*value).to_owned())
-                    .collect()
-            } else {
-                parsed
-            }
-        }
-        Err(_) => TICKET_PICKER_PRIORITY_STATES_DEFAULT
-            .iter()
-            .map(|value| (*value).to_owned())
-            .collect(),
-    }
+    ticket_picker_priority_states_config_value()
 }
 
 fn normalize_ticket_state(value: &str) -> String {

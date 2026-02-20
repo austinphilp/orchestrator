@@ -986,6 +986,7 @@ mod tests {
                 event_store_path: temp_db.path().to_string_lossy().to_string(),
                 ticketing_provider: "linear".to_owned(),
                 harness_provider: "codex".to_owned(),
+            ..AppConfig::default()
             },
             ticketing: MockTicketingProvider::service(),
             supervisor: Healthy,
@@ -1123,6 +1124,7 @@ mod tests {
                 event_store_path: temp_db.path().to_string_lossy().to_string(),
                 ticketing_provider: "linear".to_owned(),
                 harness_provider: "codex".to_owned(),
+            ..AppConfig::default()
             },
             ticketing: MockTicketingProvider::service(),
             supervisor: Healthy,
@@ -1179,6 +1181,7 @@ mod tests {
                 event_store_path: temp_db.path().to_string_lossy().to_string(),
                 ticketing_provider: "linear".to_owned(),
                 harness_provider: "codex".to_owned(),
+            ..AppConfig::default()
             },
             ticketing: MockTicketingProvider::service(),
             supervisor: Healthy,
@@ -1268,6 +1271,7 @@ mod tests {
                 event_store_path: temp_db.path().to_string_lossy().to_string(),
                 ticketing_provider: "linear".to_owned(),
                 harness_provider: "codex".to_owned(),
+            ..AppConfig::default()
             },
             ticketing: MockTicketingProvider::service(),
             supervisor: Healthy,
@@ -1292,6 +1296,7 @@ mod tests {
                 event_store_path: temp_db.path().to_string_lossy().to_string(),
                 ticketing_provider: "shortcut".to_owned(),
                 harness_provider: "codex".to_owned(),
+            ..AppConfig::default()
             },
             ticketing: MockTicketingProvider::service(),
             supervisor: Healthy,
@@ -1332,6 +1337,7 @@ mod tests {
                 event_store_path: temp_db.path().to_string_lossy().to_string(),
                 ticketing_provider: "linear".to_owned(),
                 harness_provider: "codex".to_owned(),
+            ..AppConfig::default()
             },
             ticketing: MockTicketingProvider::service(),
             supervisor: supervisor.clone(),
@@ -1430,6 +1436,7 @@ mod tests {
                 event_store_path: temp_db.path().to_string_lossy().to_string(),
                 ticketing_provider: "linear".to_owned(),
                 harness_provider: "codex".to_owned(),
+            ..AppConfig::default()
             },
             ticketing: ticketing.clone(),
             supervisor: supervisor.clone(),
@@ -1531,6 +1538,7 @@ mod tests {
                 event_store_path: temp_db.path().to_string_lossy().to_string(),
                 ticketing_provider: "linear".to_owned(),
                 harness_provider: "codex".to_owned(),
+            ..AppConfig::default()
             },
             ticketing: ticketing.clone(),
             supervisor: supervisor.clone(),
@@ -1611,6 +1619,7 @@ mod tests {
                 event_store_path: temp_db.path().to_string_lossy().to_string(),
                 ticketing_provider: "linear".to_owned(),
                 harness_provider: "codex".to_owned(),
+            ..AppConfig::default()
             },
             ticketing: MockTicketingProvider::service(),
             supervisor: supervisor.clone(),
@@ -1696,6 +1705,7 @@ mod tests {
                 event_store_path: temp_db.path().to_string_lossy().to_string(),
                 ticketing_provider: "linear".to_owned(),
                 harness_provider: "codex".to_owned(),
+            ..AppConfig::default()
             },
             ticketing: MockTicketingProvider::service(),
             supervisor: supervisor.clone(),
@@ -1783,6 +1793,7 @@ mod tests {
                 event_store_path: temp_db.path().to_string_lossy().to_string(),
                 ticketing_provider: "linear".to_owned(),
                 harness_provider: "codex".to_owned(),
+            ..AppConfig::default()
             },
             ticketing: MockTicketingProvider::service(),
             supervisor: supervisor.clone(),
@@ -1833,6 +1844,7 @@ mod tests {
                 event_store_path: temp_db.path().to_string_lossy().to_string(),
                 ticketing_provider: "linear".to_owned(),
                 harness_provider: "codex".to_owned(),
+            ..AppConfig::default()
             },
             ticketing: MockTicketingProvider::service(),
             supervisor: supervisor.clone(),
@@ -1888,6 +1900,7 @@ mod tests {
                 event_store_path: temp_db.path().to_string_lossy().to_string(),
                 ticketing_provider: "linear".to_owned(),
                 harness_provider: "codex".to_owned(),
+            ..AppConfig::default()
             },
             ticketing: MockTicketingProvider::service(),
             supervisor: supervisor.clone(),
@@ -1945,6 +1958,7 @@ mod tests {
                     event_store_path: temp_db.path().to_string_lossy().to_string(),
                     ticketing_provider: "linear".to_owned(),
                     harness_provider: "codex".to_owned(),
+                ..AppConfig::default()
                 },
                 ticketing: MockTicketingProvider::service(),
                 supervisor: supervisor.clone(),
@@ -1990,6 +2004,7 @@ mod tests {
                 event_store_path: temp_db.path().to_string_lossy().to_string(),
                 ticketing_provider: "linear".to_owned(),
                 harness_provider: "codex".to_owned(),
+            ..AppConfig::default()
             },
             ticketing: MockTicketingProvider::service(),
             supervisor: supervisor.clone(),
@@ -2028,6 +2043,7 @@ mod tests {
                 event_store_path: temp_db.path().to_string_lossy().to_string(),
                 ticketing_provider: "linear".to_owned(),
                 harness_provider: "codex".to_owned(),
+            ..AppConfig::default()
             },
             ticketing: MockTicketingProvider::service(),
             supervisor: QueryingSupervisor::default(),
@@ -2064,6 +2080,7 @@ mod tests {
                 event_store_path: temp_db.path().to_string_lossy().to_string(),
                 ticketing_provider: "linear".to_owned(),
                 harness_provider: "codex".to_owned(),
+            ..AppConfig::default()
             },
             ticketing: MockTicketingProvider::service(),
             supervisor: QueryingSupervisor::default(),
@@ -2105,6 +2122,7 @@ mod tests {
                 event_store_path: temp_db.path().to_string_lossy().to_string(),
                 ticketing_provider: "linear".to_owned(),
                 harness_provider: "codex".to_owned(),
+            ..AppConfig::default()
             },
             ticketing: MockTicketingProvider::service(),
             supervisor: supervisor.clone(),
@@ -2158,6 +2176,7 @@ mod tests {
                 event_store_path: temp_db.path().to_string_lossy().to_string(),
                 ticketing_provider: "linear".to_owned(),
                 harness_provider: "codex".to_owned(),
+            ..AppConfig::default()
             },
             ticketing: MockTicketingProvider::service(),
             supervisor: QueryingSupervisor::default(),
@@ -2201,6 +2220,7 @@ mod tests {
                 event_store_path: temp_db.path().to_string_lossy().to_string(),
                 ticketing_provider: "linear".to_owned(),
                 harness_provider: "codex".to_owned(),
+            ..AppConfig::default()
             },
             ticketing: MockTicketingProvider::service(),
             supervisor: QueryingSupervisor::default(),
@@ -2257,6 +2277,7 @@ mod tests {
                 event_store_path: temp_db.path().to_string_lossy().to_string(),
                 ticketing_provider: "linear".to_owned(),
                 harness_provider: "codex".to_owned(),
+            ..AppConfig::default()
             },
             ticketing: MockTicketingProvider::service(),
             supervisor: QueryingSupervisor::default(),
@@ -2301,6 +2322,7 @@ mod tests {
                 event_store_path: temp_db.path().to_string_lossy().to_string(),
                 ticketing_provider: "linear".to_owned(),
                 harness_provider: "codex".to_owned(),
+            ..AppConfig::default()
             },
             ticketing: MockTicketingProvider::service(),
             supervisor: QueryingSupervisor::default(),
@@ -2364,6 +2386,7 @@ mod tests {
                 event_store_path: temp_db.path().to_string_lossy().to_string(),
                 ticketing_provider: "linear".to_owned(),
                 harness_provider: "codex".to_owned(),
+            ..AppConfig::default()
             },
             ticketing: MockTicketingProvider::service(),
             supervisor: QueryingSupervisor::default(),
@@ -2413,6 +2436,7 @@ mod tests {
                 event_store_path: temp_db.path().to_string_lossy().to_string(),
                 ticketing_provider: "linear".to_owned(),
                 harness_provider: "codex".to_owned(),
+            ..AppConfig::default()
             },
             ticketing: MockTicketingProvider::service(),
             supervisor: QueryingSupervisor::default(),
@@ -2446,6 +2470,7 @@ mod tests {
                 event_store_path: temp_db.path().to_string_lossy().to_string(),
                 ticketing_provider: "linear".to_owned(),
                 harness_provider: "codex".to_owned(),
+            ..AppConfig::default()
             },
             ticketing: MockTicketingProvider::service(),
             supervisor: QueryingSupervisor::default(),
@@ -2494,6 +2519,7 @@ mod tests {
                 event_store_path: temp_db.path().to_string_lossy().to_string(),
                 ticketing_provider: "linear".to_owned(),
                 harness_provider: "codex".to_owned(),
+            ..AppConfig::default()
             },
             ticketing: MockTicketingProvider::service(),
             supervisor: supervisor.clone(),
@@ -2526,6 +2552,7 @@ mod tests {
                 event_store_path: temp_db.path().to_string_lossy().to_string(),
                 ticketing_provider: "linear".to_owned(),
                 harness_provider: "codex".to_owned(),
+            ..AppConfig::default()
             },
             ticketing: MockTicketingProvider::service(),
             supervisor: supervisor.clone(),
@@ -2593,6 +2620,7 @@ mod tests {
                 event_store_path: temp_db.path().to_string_lossy().to_string(),
                 ticketing_provider: "linear".to_owned(),
                 harness_provider: "codex".to_owned(),
+            ..AppConfig::default()
             },
             ticketing: MockTicketingProvider::service(),
             supervisor: supervisor.clone(),
@@ -2656,6 +2684,7 @@ mod tests {
                 event_store_path: temp_db.path().to_string_lossy().to_string(),
                 ticketing_provider: "linear".to_owned(),
                 harness_provider: "codex".to_owned(),
+            ..AppConfig::default()
             },
             ticketing: MockTicketingProvider::service(),
             supervisor: supervisor.clone(),

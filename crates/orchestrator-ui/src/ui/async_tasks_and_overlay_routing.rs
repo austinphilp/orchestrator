@@ -197,6 +197,26 @@ async fn run_publish_inbox_item_task(
     }
 }
 
+async fn run_resolve_inbox_item_task(
+    provider: Arc<dyn TicketPickerProvider>,
+    request: InboxResolveRequest,
+    sender: mpsc::Sender<TicketPickerEvent>,
+) {
+    match provider.resolve_inbox_item(request).await {
+        Ok(projection) => {
+            let _ = sender
+                .send(TicketPickerEvent::InboxItemResolved { projection })
+                .await;
+        }
+        Err(error) => {
+            let _ = sender
+                .send(TicketPickerEvent::InboxItemResolveFailed {
+                    message: sanitize_terminal_display_text(error.to_string().as_str()),
+                })
+                .await;
+        }
+    }
+}
 #[derive(Debug, Default)]
 struct MergeQueueResponse {
     completed: bool,
@@ -470,10 +490,10 @@ async fn run_ticket_picker_start_task(
 
 async fn run_ticket_picker_create_task(
     provider: Arc<dyn TicketPickerProvider>,
-    brief: String,
+    request: CreateTicketFromPickerRequest,
     sender: mpsc::Sender<TicketPickerEvent>,
 ) {
-    let created_ticket = match provider.create_ticket_from_brief(brief).await {
+    let created_ticket = match provider.create_ticket_from_brief(request).await {
         Ok(ticket) => ticket,
         Err(error) => {
             let tickets = match provider.list_unfinished_tickets().await {
@@ -588,7 +608,8 @@ fn resolve_shell_home() -> Option<String> {
 fn render_ticket_picker_overlay_text(overlay: &TicketPickerOverlayState) -> String {
     let mut lines = if overlay.new_ticket_mode {
         vec![
-            "Type brief | Enter: create | Backspace: edit | Esc: cancel".to_owned(),
+            "Describe ticket | Enter: create | Shift+Enter: newline | Backspace: edit | Esc: cancel"
+                .to_owned(),
         ]
     } else {
         vec![
@@ -633,6 +654,14 @@ fn render_ticket_picker_overlay_text(overlay: &TicketPickerOverlayState) -> Stri
         }
         lines.push("Enter local repository path, then press Enter. Esc to cancel.".to_owned());
         lines.push(format!("Path: {}", overlay.repository_prompt_input.text()));
+        lines.push(String::new());
+    }
+
+    if overlay.new_ticket_mode {
+        let selected_project = overlay
+            .selected_project_name()
+            .unwrap_or_else(|| "No Project".to_owned());
+        lines.push(format!("Assigned project: {selected_project}"));
         lines.push(String::new());
     }
 
@@ -735,14 +764,15 @@ fn route_needs_input_modal_key(shell_state: &mut UiShellState, key: KeyEvent) ->
         return RoutedInput::Ignore;
     }
 
+    if matches!(key.code, KeyCode::BackTab) {
+        shell_state.cycle_pane_focus();
+        return RoutedInput::Ignore;
+    }
+
     if is_escape_to_normal(key) || !shell_state.is_terminal_view_active() {
         return RoutedInput::Ignore;
     }
     if !key.modifiers.is_empty() {
-        if key.modifiers == KeyModifiers::SHIFT && matches!(key.code, KeyCode::BackTab) {
-            shell_state.move_terminal_needs_input_question(-1);
-            return RoutedInput::Ignore;
-        }
         return RoutedInput::Ignore;
     }
 
@@ -753,7 +783,7 @@ fn route_needs_input_modal_key(shell_state: &mut UiShellState, key: KeyEvent) ->
         KeyCode::Tab | KeyCode::Right | KeyCode::Char('l') => {
             shell_state.move_terminal_needs_input_question(1);
         }
-        KeyCode::BackTab | KeyCode::Left | KeyCode::Char('h') => {
+        KeyCode::Left | KeyCode::Char('h') => {
             shell_state.move_terminal_needs_input_question(-1);
         }
         KeyCode::Enter => {
@@ -883,6 +913,9 @@ fn route_ticket_picker_key(shell_state: &mut UiShellState, key: KeyEvent) -> Rou
         match key.code {
             KeyCode::Enter if key.modifiers.is_empty() => {
                 shell_state.submit_created_ticket_from_picker();
+            }
+            KeyCode::Enter if key.modifiers == KeyModifiers::SHIFT => {
+                shell_state.append_create_ticket_brief_newline();
             }
             KeyCode::Backspace if key.modifiers.is_empty() => {
                 shell_state.pop_create_ticket_brief_char();

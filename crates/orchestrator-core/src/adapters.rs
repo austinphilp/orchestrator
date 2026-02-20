@@ -50,6 +50,8 @@ pub struct TicketSummary {
 pub struct CreateTicketRequest {
     pub title: String,
     pub description: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project: Option<String>,
     pub state: Option<String>,
     pub priority: Option<i32>,
     pub labels: Vec<String>,

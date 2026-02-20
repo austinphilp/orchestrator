@@ -12,6 +12,8 @@ enum UiCommand {
     QuitShell,
     FocusNextInbox,
     FocusPreviousInbox,
+    CycleSidebarFocusNext,
+    CycleSidebarFocusPrevious,
     CycleBatchNext,
     CycleBatchPrevious,
     JumpFirstInbox,
@@ -32,10 +34,11 @@ enum UiCommand {
     AdvanceTerminalWorkflowStage,
     ArchiveSelectedSession,
     MinimizeCenterView,
+    OpenSessionOutputForSelectedInbox,
 }
 
 impl UiCommand {
-    const ALL: [Self; 32] = [
+    const ALL: [Self; 35] = [
         Self::EnterNormalMode,
         Self::EnterInsertMode,
         Self::ToggleGlobalSupervisorChat,
@@ -48,6 +51,8 @@ impl UiCommand {
         Self::QuitShell,
         Self::FocusNextInbox,
         Self::FocusPreviousInbox,
+        Self::CycleSidebarFocusNext,
+        Self::CycleSidebarFocusPrevious,
         Self::CycleBatchNext,
         Self::CycleBatchPrevious,
         Self::JumpFirstInbox,
@@ -68,6 +73,7 @@ impl UiCommand {
         Self::AdvanceTerminalWorkflowStage,
         Self::ArchiveSelectedSession,
         Self::MinimizeCenterView,
+        Self::OpenSessionOutputForSelectedInbox,
     ];
 
     const fn id(self) -> &'static str {
@@ -84,6 +90,8 @@ impl UiCommand {
             Self::QuitShell => "ui.shell.quit",
             Self::FocusNextInbox => command_ids::UI_FOCUS_NEXT_INBOX,
             Self::FocusPreviousInbox => "ui.focus_previous_inbox",
+            Self::CycleSidebarFocusNext => "ui.sidebar.focus_next",
+            Self::CycleSidebarFocusPrevious => "ui.sidebar.focus_previous",
             Self::CycleBatchNext => "ui.cycle_batch_next",
             Self::CycleBatchPrevious => "ui.cycle_batch_previous",
             Self::JumpFirstInbox => "ui.jump_first_inbox",
@@ -104,6 +112,9 @@ impl UiCommand {
             Self::AdvanceTerminalWorkflowStage => "ui.terminal.workflow.advance",
             Self::ArchiveSelectedSession => "ui.terminal.archive_selected_session",
             Self::MinimizeCenterView => "ui.center.pop",
+            Self::OpenSessionOutputForSelectedInbox => {
+                "ui.open_session_output_for_selected_inbox"
+            }
         }
     }
 
@@ -121,6 +132,8 @@ impl UiCommand {
             Self::QuitShell => "Quit shell",
             Self::FocusNextInbox => "Focus next inbox item",
             Self::FocusPreviousInbox => "Focus previous inbox item",
+            Self::CycleSidebarFocusNext => "Focus next sidebar panel",
+            Self::CycleSidebarFocusPrevious => "Focus previous sidebar panel",
             Self::CycleBatchNext => "Cycle to next inbox lane",
             Self::CycleBatchPrevious => "Cycle to previous inbox lane",
             Self::JumpFirstInbox => "Jump to first inbox item",
@@ -141,6 +154,9 @@ impl UiCommand {
             Self::AdvanceTerminalWorkflowStage => "Advance terminal workflow stage",
             Self::ArchiveSelectedSession => "Archive selected terminal session",
             Self::MinimizeCenterView => "Minimize active center view",
+            Self::OpenSessionOutputForSelectedInbox => {
+                "Open session output for selected inbox item"
+            }
         }
     }
 
@@ -182,8 +198,10 @@ fn default_keymap_config() -> KeymapConfig {
                     binding(&["j"], UiCommand::FocusNextInbox),
                     binding(&["up"], UiCommand::FocusPreviousInbox),
                     binding(&["k"], UiCommand::FocusPreviousInbox),
-                    binding(&["tab"], UiCommand::CycleBatchNext),
-                    binding(&["backtab"], UiCommand::CycleBatchPrevious),
+                    binding(&["tab"], UiCommand::CycleSidebarFocusNext),
+                    binding(&["backtab"], UiCommand::CycleSidebarFocusPrevious),
+                    binding(&["]"], UiCommand::CycleBatchNext),
+                    binding(&["["], UiCommand::CycleBatchPrevious),
                     binding(&["g"], UiCommand::JumpFirstInbox),
                     binding(&["G"], UiCommand::JumpLastInbox),
                     binding(&["1"], UiCommand::JumpBatchDecideOrUnblock),
@@ -193,7 +211,9 @@ fn default_keymap_config() -> KeymapConfig {
                     binding(&["s"], UiCommand::OpenTicketPicker),
                     binding(&["c"], UiCommand::ToggleGlobalSupervisorChat),
                     binding(&["enter"], UiCommand::OpenFocusCard),
-                    binding(&["i"], UiCommand::OpenTerminalForSelected),
+                    binding(&["i"], UiCommand::EnterInsertMode),
+                    binding(&["I"], UiCommand::OpenTerminalForSelected),
+                    binding(&["o"], UiCommand::OpenSessionOutputForSelectedInbox),
                     binding(&["D"], UiCommand::ToggleWorktreeDiffModal),
                     binding(&["n"], UiCommand::AdvanceTerminalWorkflowStage),
                     binding(&["x"], UiCommand::ArchiveSelectedSession),
@@ -250,7 +270,7 @@ enum RoutedInput {
 fn mode_help(mode: UiMode) -> &'static str {
     match mode {
         UiMode::Normal => {
-            "j/k: select | Tab/S-Tab: batch cycle | 1-4 or z{1-4}: batch jump | g/G: first/last | s: start ticket | c: supervisor chat | Enter: focus | i: terminal | Shift+J/K: scroll terminal stream | G (terminal): bottom | D: worktree diff modal | n: advance session workflow | x: archive selected session | v{d/t/p/c}: inspectors | q: quit"
+            "j/k: move in focused panel (right pane scrolls session output) | Tab: cycle left-panel focus | Shift+Tab: toggle left/right pane focus | [ ]: batch cycle | 1-4 or z{1-4}: batch jump | g/G: first/last in focused panel (G in right pane: bottom) | s: start ticket | c: supervisor chat | Enter: focus | i: insert/notes mode | I: open terminal | o: open associated session output + acknowledge inbox item | D: worktree diff modal | n: advance session workflow | x: archive selected session | v{d/t/p/c}: inspectors | q: quit"
         }
         UiMode::Insert => "Insert input active | Esc/Ctrl-[: Normal",
         UiMode::Terminal => "Terminal compose active | Enter send | Shift+Enter newline | Esc or Ctrl-\\ Ctrl-n: Normal | then n: advance workflow",
@@ -470,7 +490,17 @@ fn handle_key_press(shell_state: &mut UiShellState, key: KeyEvent) -> bool {
 }
 
 fn route_key_press(shell_state: &mut UiShellState, key: KeyEvent) -> RoutedInput {
-    if shell_state.terminal_session_has_active_needs_input() {
+    if shell_state.terminal_session_has_active_needs_input() && shell_state.is_right_pane_focused() {
+        return route_needs_input_modal_key(shell_state, key);
+    }
+    if shell_state.terminal_session_has_any_needs_input()
+        && !shell_state.terminal_session_has_active_needs_input()
+        && shell_state.is_right_pane_focused()
+        && shell_state.is_terminal_view_active()
+        && key.modifiers.is_empty()
+        && is_needs_input_interaction_key(key.code)
+    {
+        let _ = shell_state.activate_terminal_needs_input(false);
         return route_needs_input_modal_key(shell_state, key);
     }
     if shell_state.worktree_diff_modal.is_some() {
@@ -486,13 +516,21 @@ fn route_key_press(shell_state: &mut UiShellState, key: KeyEvent) -> RoutedInput
         return route_review_merge_confirm_key(shell_state, key);
     }
 
-    if shell_state.mode == UiMode::Normal && shell_state.is_terminal_view_active() {
+    if matches!(key.code, KeyCode::BackTab) {
+        shell_state.cycle_pane_focus();
+        return RoutedInput::Ignore;
+    }
+
+    if shell_state.mode == UiMode::Normal
+        && shell_state.is_right_pane_focused()
+        && shell_state.is_terminal_view_active()
+    {
         match key.code {
-            KeyCode::Char('J') => {
+            KeyCode::Char('j') | KeyCode::Char('J') => {
                 shell_state.scroll_terminal_output_view(1);
                 return RoutedInput::Ignore;
             }
-            KeyCode::Char('K') => {
+            KeyCode::Char('k') | KeyCode::Char('K') => {
                 shell_state.scroll_terminal_output_view(-1);
                 return RoutedInput::Ignore;
             }
@@ -536,6 +574,29 @@ fn route_key_press(shell_state: &mut UiShellState, key: KeyEvent) -> RoutedInput
             }
         }
     }
+}
+
+fn is_needs_input_interaction_key(code: KeyCode) -> bool {
+    matches!(
+        code,
+        KeyCode::Char('i')
+            | KeyCode::Tab
+            | KeyCode::BackTab
+            | KeyCode::Right
+            | KeyCode::Char('l')
+            | KeyCode::Left
+            | KeyCode::Char('h')
+            | KeyCode::Enter
+            | KeyCode::Up
+            | KeyCode::Down
+            | KeyCode::Home
+            | KeyCode::End
+            | KeyCode::PageUp
+            | KeyCode::PageDown
+            | KeyCode::Char(' ')
+            | KeyCode::Char('j')
+            | KeyCode::Char('k')
+    )
 }
 
 fn route_worktree_diff_modal_key(shell_state: &mut UiShellState, key: KeyEvent) -> RoutedInput {
@@ -645,7 +706,7 @@ fn dispatch_command(shell_state: &mut UiShellState, command: UiCommand) -> bool 
             false
         }
         UiCommand::EnterInsertMode => {
-            shell_state.enter_insert_mode();
+            shell_state.enter_insert_mode_for_current_focus();
             false
         }
         UiCommand::ToggleGlobalSupervisorChat => {
@@ -683,6 +744,14 @@ fn dispatch_command(shell_state: &mut UiShellState, command: UiCommand) -> bool 
         }
         UiCommand::FocusPreviousInbox => {
             shell_state.move_selection(-1);
+            false
+        }
+        UiCommand::CycleSidebarFocusNext => {
+            shell_state.cycle_sidebar_focus(1);
+            false
+        }
+        UiCommand::CycleSidebarFocusPrevious => {
+            shell_state.cycle_sidebar_focus(-1);
             false
         }
         UiCommand::CycleBatchNext => {
@@ -767,6 +836,10 @@ fn dispatch_command(shell_state: &mut UiShellState, command: UiCommand) -> bool 
             } else {
                 shell_state.minimize_center_view();
             }
+            false
+        }
+        UiCommand::OpenSessionOutputForSelectedInbox => {
+            shell_state.open_session_output_for_selected_inbox();
             false
         }
     }
