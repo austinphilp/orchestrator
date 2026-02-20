@@ -529,35 +529,87 @@ where
     transitions.push("InReview->Merging".to_owned());
     current = next;
 
+    match code_host.get_pull_request_merge_state(&pr).await {
+        Ok(merge_state) => {
+            if merge_state.is_draft {
+                if let Err(error) = code_host.mark_ready_for_review(&pr).await {
+                    return rollback_merge_to_review_state(
+                        &mut store,
+                        &runtime,
+                        &current,
+                        &prior_review_state,
+                        &mut transitions,
+                        command_id,
+                        format!(
+                            "{command_id} failed to mark draft PR #{} ready for review: {}",
+                            pr.number,
+                            sanitize_error_display_text(error.to_string().as_str())
+                        ),
+                    );
+                }
+            }
+        }
+        Err(error) => {
+            warn!(
+                "workflow.merge_pr could not read merge state for PR #{}; continuing merge attempt: {}",
+                pr.number,
+                sanitize_error_display_text(error.to_string().as_str())
+            );
+        }
+    }
+
     if let Err(error) = code_host.merge_pull_request(&pr).await {
-        let _ = append_workflow_transition_event_for_runtime(
+        return rollback_merge_to_review_state(
             &mut store,
             &runtime,
             &current,
             &prior_review_state,
-            WorkflowTransitionReason::MergeFailed,
-            &WorkflowGuardContext {
-                has_draft_pr: true,
-                ..WorkflowGuardContext::default()
-            },
+            &mut transitions,
             command_id,
+            format!(
+                "{command_id} failed for PR #{}: {}",
+                pr.number,
+                sanitize_error_display_text(error.to_string().as_str())
+            ),
         );
-        transitions.push("Merging->InReview".to_owned());
-
-        let detail = sanitize_error_display_text(error.to_string().as_str());
-        let message = json!({
-            "command": command_id,
-            "work_item_id": runtime.work_item_id.as_str(),
-            "merged": false,
-            "completed": false,
-            "transitions": transitions,
-            "error": format!("{command_id} failed for PR #{}: {detail}", pr.number),
-        })
-        .to_string();
-        return runtime_command_response(message.as_str());
     }
 
     execute_workflow_reconcile_pr_merge(code_host, event_store_path, context).await
+}
+
+fn rollback_merge_to_review_state(
+    store: &mut SqliteEventStore,
+    runtime: &RuntimeMappingRecord,
+    current: &WorkflowState,
+    prior_review_state: &WorkflowState,
+    transitions: &mut Vec<String>,
+    command_id: &str,
+    error: String,
+) -> Result<(String, LlmResponseStream), CoreError> {
+    let _ = append_workflow_transition_event_for_runtime(
+        store,
+        runtime,
+        current,
+        prior_review_state,
+        WorkflowTransitionReason::MergeFailed,
+        &WorkflowGuardContext {
+            has_draft_pr: true,
+            ..WorkflowGuardContext::default()
+        },
+        command_id,
+    );
+    transitions.push("Merging->InReview".to_owned());
+
+    let message = json!({
+        "command": command_id,
+        "work_item_id": runtime.work_item_id.as_str(),
+        "merged": false,
+        "completed": false,
+        "transitions": transitions,
+        "error": error,
+    })
+    .to_string();
+    runtime_command_response(message.as_str())
 }
 
 fn append_supervisor_event(

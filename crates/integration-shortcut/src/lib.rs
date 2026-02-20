@@ -14,9 +14,6 @@ use tracing::warn;
 const DEFAULT_SHORTCUT_API_URL: &str = "https://api.app.shortcut.com/api/v3";
 const DEFAULT_SHORTCUT_FETCH_LIMIT: u32 = 100;
 const DEFAULT_SHORTCUT_REQUEST_TIMEOUT_SECS: u64 = 20;
-const ENV_SHORTCUT_API_KEY: &str = "ORCHESTRATOR_SHORTCUT_API_KEY";
-const ENV_SHORTCUT_API_URL: &str = "ORCHESTRATOR_SHORTCUT_API_URL";
-const ENV_SHORTCUT_FETCH_LIMIT: &str = "ORCHESTRATOR_SHORTCUT_FETCH_LIMIT";
 
 #[derive(Debug, Clone)]
 pub struct ShortcutConfig {
@@ -36,50 +33,29 @@ impl Default for ShortcutConfig {
 }
 
 impl ShortcutConfig {
-    pub fn from_env() -> Result<Self, CoreError> {
-        let api_key = std::env::var(ENV_SHORTCUT_API_KEY).map_err(|_| {
-            CoreError::Configuration(
-                "ORCHESTRATOR_SHORTCUT_API_KEY is not set. Export a valid API key before using integration-shortcut."
-                    .to_owned(),
-            )
-        })?;
-        let api_key = api_key.trim().to_owned();
+    pub fn from_settings(
+        api_key: impl Into<String>,
+        api_url: impl Into<String>,
+        fetch_limit: u32,
+    ) -> Result<Self, CoreError> {
+        let api_key = api_key.into().trim().to_owned();
         if api_key.is_empty() {
             return Err(CoreError::Configuration(
                 "ORCHESTRATOR_SHORTCUT_API_KEY is empty. Provide a non-empty API key.".to_owned(),
             ));
         }
 
-        let api_url = std::env::var(ENV_SHORTCUT_API_URL)
-            .ok()
-            .map(|value| value.trim().to_owned())
-            .filter(|value| !value.is_empty())
-            .unwrap_or_else(|| DEFAULT_SHORTCUT_API_URL.to_owned());
-
-        let fetch_limit = std::env::var(ENV_SHORTCUT_FETCH_LIMIT)
-            .ok()
-            .and_then(|raw| {
-                let value = raw.trim();
-                if value.is_empty() {
-                    return None;
-                }
-                Some(value.to_owned())
-            })
-            .map(|raw| {
-                let value = raw.parse::<u32>().map_err(|_| {
-                    CoreError::Configuration(
-                        "ORCHESTRATOR_SHORTCUT_FETCH_LIMIT must be a non-zero integer.".to_owned(),
-                    )
-                })?;
-                if value == 0 {
-                    return Err(CoreError::Configuration(
-                        "ORCHESTRATOR_SHORTCUT_FETCH_LIMIT must be greater than zero.".to_owned(),
-                    ));
-                }
-                Ok(value)
-            })
-            .transpose()?
-            .unwrap_or(DEFAULT_SHORTCUT_FETCH_LIMIT);
+        let api_url = api_url.into().trim().to_owned();
+        let api_url = if api_url.is_empty() {
+            DEFAULT_SHORTCUT_API_URL.to_owned()
+        } else {
+            api_url
+        };
+        if fetch_limit == 0 {
+            return Err(CoreError::Configuration(
+                "ORCHESTRATOR_SHORTCUT_FETCH_LIMIT must be greater than zero.".to_owned(),
+            ));
+        }
 
         Ok(Self {
             api_url,
@@ -96,9 +72,7 @@ pub struct ShortcutTicketingProvider {
 }
 
 impl ShortcutTicketingProvider {
-    pub fn from_env() -> Result<Self, CoreError> {
-        let config = ShortcutConfig::from_env()?;
-
+    pub fn new(config: ShortcutConfig) -> Result<Self, CoreError> {
         let mut headers = header::HeaderMap::new();
         let token = header::HeaderValue::from_str(&config.api_key).map_err(|error| {
             CoreError::Configuration(format!("ORCHESTRATOR_SHORTCUT_API_KEY is invalid: {error}"))
@@ -188,6 +162,43 @@ impl ShortcutTicketingProvider {
         let request = self.client.get(self.endpoint("workflow-states"));
         let payload = self.request_json::<Value>(request).await?;
         extract_list(payload, "workflowStates")
+    }
+
+    async fn fetch_projects(&self) -> Result<Vec<ShortcutProjectRecord>, CoreError> {
+        let request = self
+            .client
+            .get(self.endpoint("projects"))
+            .query(&[("page_size", self.config.fetch_limit.to_string())]);
+        let payload = self.request_json::<Value>(request).await?;
+        extract_list(payload, "projects")
+    }
+
+    async fn resolve_project_id(&self, project_name: &str) -> Result<String, CoreError> {
+        let target = project_name.trim();
+        if target.is_empty() {
+            return Err(CoreError::Configuration(
+                "Shortcut project name cannot be empty.".to_owned(),
+            ));
+        }
+
+        let mut matches = self
+            .fetch_projects()
+            .await?
+            .into_iter()
+            .filter(|project| project.name.eq_ignore_ascii_case(target))
+            .collect::<Vec<_>>();
+
+        if matches.is_empty() {
+            return Err(CoreError::Configuration(format!(
+                "Shortcut project `{target}` was not found."
+            )));
+        }
+        if matches.len() > 1 {
+            return Err(CoreError::Configuration(format!(
+                "Shortcut project `{target}` is ambiguous; multiple projects share that name."
+            )));
+        }
+        Ok(matches.pop().expect("single project match").id)
     }
 
     async fn resolve_workflow_state_id(&self, state_name: &str) -> Result<String, CoreError> {
@@ -303,12 +314,9 @@ impl TicketingProvider for ShortcutTicketingProvider {
     }
 
     async fn list_projects(&self) -> Result<Vec<String>, CoreError> {
-        let request = self
-            .client
-            .get(self.endpoint("projects"))
-            .query(&[("page_size", self.config.fetch_limit.to_string())]);
-        let payload = self.request_json::<Value>(request).await?;
-        let projects = extract_list::<ShortcutProjectRecord>(payload, "projects")?
+        let projects = self
+            .fetch_projects()
+            .await?
             .into_iter()
             .map(|project| project.name)
             .filter(|name| !name.trim().is_empty())
@@ -363,6 +371,13 @@ impl TicketingProvider for ShortcutTicketingProvider {
         });
         if let Some(state_id) = workflow_state_id {
             payload["workflowStateId"] = json!(state_id);
+        }
+        if let Some(project) = request.project.as_deref() {
+            let project = project.trim();
+            if !project.is_empty() && !project.eq_ignore_ascii_case("No Project") {
+                let project_id = self.resolve_project_id(project).await?;
+                payload["project_id"] = json!(project_id);
+            }
         }
 
         let response = self.client.post(self.endpoint("stories")).json(&payload);
@@ -643,6 +658,7 @@ struct ShortcutProject {
 #[derive(Debug, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 struct ShortcutProjectRecord {
+    pub id: String,
     pub name: String,
 }
 

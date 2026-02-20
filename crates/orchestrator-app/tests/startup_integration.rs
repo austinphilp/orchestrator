@@ -108,6 +108,7 @@ async fn startup_path_cleanly_initializes() {
             event_store_path: temp_db.path().to_string_lossy().to_string(),
             ticketing_provider: "linear".to_owned(),
             harness_provider: "codex".to_owned(),
+            ..AppConfig::default()
         },
         ticketing: MockTicketingProvider::service(),
         supervisor: MockAdapter { pass: true },

@@ -1,3 +1,15 @@
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SidebarFocus {
+    Sessions,
+    Inbox,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PaneFocus {
+    Left,
+    Right,
+}
+
 struct UiShellState {
     base_status: String,
     status_warning: Option<String>,
@@ -24,6 +36,9 @@ struct UiShellState {
     startup_session_feed_opened: bool,
     worker_backend: Option<Arc<dyn WorkerBackend>>,
     selected_session_index: Option<usize>,
+    selected_session_id: Option<WorkerSessionId>,
+    sidebar_focus: SidebarFocus,
+    pane_focus: PaneFocus,
     terminal_session_sender: Option<mpsc::Sender<TerminalSessionEvent>>,
     terminal_session_receiver: Option<mpsc::Receiver<TerminalSessionEvent>>,
     terminal_session_states: HashMap<WorkerSessionId, TerminalViewState>,
@@ -111,6 +126,9 @@ impl UiShellState {
             startup_session_feed_opened: false,
             worker_backend,
             selected_session_index: None,
+            selected_session_id: None,
+            sidebar_focus: SidebarFocus::Inbox,
+            pane_focus: PaneFocus::Left,
             terminal_session_sender,
             terminal_session_receiver,
             terminal_session_states: HashMap::new(),
@@ -162,10 +180,14 @@ impl UiShellState {
     }
 
     fn move_selection(&mut self, delta: isize) {
-        let ui_state = self.ui_state();
-        if ui_state.selected_inbox_item_id.is_none() && self.move_session_selection(delta) {
+        if !self.is_left_pane_focused() {
             return;
         }
+        if matches!(self.sidebar_focus, SidebarFocus::Sessions) {
+            let _ = self.move_session_selection(delta);
+            return;
+        }
+        let ui_state = self.ui_state();
         if ui_state.inbox_rows.is_empty() {
             self.selected_inbox_index = None;
             self.selected_inbox_item_id = None;
@@ -179,11 +201,15 @@ impl UiShellState {
     }
 
     fn jump_to_first_item(&mut self) {
+        if !self.is_left_pane_focused() {
+            return;
+        }
+        if matches!(self.sidebar_focus, SidebarFocus::Sessions) {
+            let _ = self.move_to_first_session();
+            return;
+        }
         let ui_state = self.ui_state();
         if ui_state.inbox_rows.is_empty() {
-            if self.move_to_first_session() {
-                return;
-            }
             self.set_selection(None, &ui_state.inbox_rows);
             return;
         }
@@ -191,15 +217,40 @@ impl UiShellState {
     }
 
     fn jump_to_last_item(&mut self) {
+        if !self.is_left_pane_focused() {
+            return;
+        }
+        if matches!(self.sidebar_focus, SidebarFocus::Sessions) {
+            let _ = self.move_to_last_session();
+            return;
+        }
         let ui_state = self.ui_state();
         if ui_state.inbox_rows.is_empty() {
-            if self.move_to_last_session() {
-                return;
-            }
             self.set_selection(None, &ui_state.inbox_rows);
             return;
         }
         self.set_selection(Some(ui_state.inbox_rows.len() - 1), &ui_state.inbox_rows);
+    }
+
+    fn cycle_sidebar_focus(&mut self, delta: isize) {
+        if !self.is_left_pane_focused() {
+            return;
+        }
+        if delta.rem_euclid(2) == 0 {
+            return;
+        }
+        self.sidebar_focus = match self.sidebar_focus {
+            SidebarFocus::Sessions => SidebarFocus::Inbox,
+            SidebarFocus::Inbox => SidebarFocus::Sessions,
+        };
+    }
+
+    fn cycle_pane_focus(&mut self) {
+        self.pane_focus = match self.pane_focus {
+            PaneFocus::Left => PaneFocus::Right,
+            PaneFocus::Right => PaneFocus::Left,
+        };
+        self.enter_normal_mode();
     }
 
     fn jump_to_batch(&mut self, target: InboxBatchKind) {
@@ -318,6 +369,42 @@ impl UiShellState {
         if let Some(session_id) = terminal_session_id {
             self.ensure_terminal_stream(session_id);
         }
+    }
+
+    fn open_session_output_for_selected_inbox(&mut self) {
+        if !matches!(self.sidebar_focus, SidebarFocus::Inbox) {
+            return;
+        }
+        let ui_state = self.ui_state();
+        let Some(selected_index) = ui_state.selected_inbox_index else {
+            self.status_warning =
+                Some("session output unavailable: select an inbox item first".to_owned());
+            return;
+        };
+        let Some(selected_row) = ui_state.inbox_rows.get(selected_index).cloned() else {
+            self.status_warning =
+                Some("session output unavailable: select an inbox item first".to_owned());
+            return;
+        };
+        let Some(session_id) = selected_row.session_id.clone()
+        else {
+            self.status_warning =
+                Some("session output unavailable: selected inbox item has no active session".to_owned());
+            return;
+        };
+        if let Some(index) = self
+            .session_ids_for_navigation()
+            .iter()
+            .position(|candidate| candidate == &session_id)
+        {
+            self.selected_session_index = Some(index);
+        }
+        self.selected_session_id = Some(session_id.clone());
+        self.view_stack.replace_center(CenterView::TerminalView {
+            session_id: session_id.clone(),
+        });
+        self.ensure_terminal_stream(session_id);
+        self.acknowledge_inbox_item(selected_row.inbox_item_id, selected_row.work_item_id);
     }
 
     fn spawn_manual_terminal_session(&mut self) -> Result<Option<WorkerSessionId>, String> {
@@ -444,6 +531,14 @@ impl UiShellState {
         if session_ids.is_empty() {
             return None;
         }
+        if let Some(selected_session_id) = self.selected_session_id.as_ref() {
+            if session_ids
+                .iter()
+                .any(|candidate| candidate == selected_session_id)
+            {
+                return Some(selected_session_id.clone());
+            }
+        }
         let index = self
             .selected_session_index
             .unwrap_or(0)
@@ -451,11 +546,55 @@ impl UiShellState {
         session_ids.get(index).cloned()
     }
 
+    fn sync_selected_session_panel_state(&mut self) {
+        let session_ids = self.session_ids_for_navigation();
+        if session_ids.is_empty() {
+            self.selected_session_index = None;
+            self.selected_session_id = None;
+            return;
+        }
+
+        if let Some(selected_session_id) = self.selected_session_id.as_ref() {
+            if let Some(index) = session_ids
+                .iter()
+                .position(|candidate| candidate == selected_session_id)
+            {
+                self.selected_session_index = Some(index);
+                return;
+            }
+        }
+
+        let index = self
+            .selected_session_index
+            .unwrap_or(0)
+            .min(session_ids.len() - 1);
+        self.selected_session_index = Some(index);
+        self.selected_session_id = session_ids.get(index).cloned();
+    }
+
+    fn is_sessions_sidebar_focused(&self) -> bool {
+        self.is_left_pane_focused() && matches!(self.sidebar_focus, SidebarFocus::Sessions)
+    }
+
+    fn is_inbox_sidebar_focused(&self) -> bool {
+        self.is_left_pane_focused() && matches!(self.sidebar_focus, SidebarFocus::Inbox)
+    }
+
+    fn is_left_pane_focused(&self) -> bool {
+        matches!(self.pane_focus, PaneFocus::Left)
+    }
+
+    fn is_right_pane_focused(&self) -> bool {
+        matches!(self.pane_focus, PaneFocus::Right)
+    }
+
     fn move_session_selection(&mut self, delta: isize) -> bool {
+        self.sync_selected_session_panel_state();
         let session_ids = self.session_ids_for_navigation();
         let len = session_ids.len();
         if len == 0 {
             self.selected_session_index = None;
+            self.selected_session_id = None;
             return false;
         }
 
@@ -465,34 +604,42 @@ impl UiShellState {
         }
         let next = (index as isize + delta).rem_euclid(len as isize) as usize;
         self.selected_session_index = Some(next);
+        self.selected_session_id = session_ids.get(next).cloned();
         self.show_selected_session_output();
         true
     }
 
     fn move_to_first_session(&mut self) -> bool {
-        if self.session_ids_for_navigation().is_empty() {
+        let session_ids = self.session_ids_for_navigation();
+        if session_ids.is_empty() {
             self.selected_session_index = None;
+            self.selected_session_id = None;
             false
         } else {
             self.selected_session_index = Some(0);
+            self.selected_session_id = session_ids.first().cloned();
             self.show_selected_session_output();
             true
         }
     }
 
     fn move_to_last_session(&mut self) -> bool {
-        let len = self.session_ids_for_navigation().len();
+        let session_ids = self.session_ids_for_navigation();
+        let len = session_ids.len();
         if len == 0 {
             self.selected_session_index = None;
+            self.selected_session_id = None;
             false
         } else {
             self.selected_session_index = Some(len - 1);
+            self.selected_session_id = session_ids.last().cloned();
             self.show_selected_session_output();
             true
         }
     }
 
     fn show_selected_session_output(&mut self) {
+        self.sync_selected_session_panel_state();
         let Some(session_id) = self.selected_session_id_for_panel() else {
             return;
         };
@@ -522,14 +669,13 @@ impl UiShellState {
         if session_ids.is_empty() {
             return;
         }
-        if self.selected_session_index.is_none() {
-            self.selected_session_index = Some(0);
-        }
+        self.sync_selected_session_panel_state();
         self.show_selected_session_output();
         self.startup_session_feed_opened = true;
     }
 
     fn focus_and_stream_session(&mut self, session_id: WorkerSessionId) {
+        self.selected_session_id = Some(session_id.clone());
         let session_ids = self.session_ids_for_navigation();
         if let Some(index) = session_ids.iter().position(|candidate| candidate == &session_id) {
             self.selected_session_index = Some(index);
@@ -610,6 +756,37 @@ impl UiShellState {
         }
     }
 
+    fn spawn_resolve_inbox_item(&mut self, request: InboxResolveRequest) {
+        let Some(provider) = self.ticket_picker_provider.clone() else {
+            return;
+        };
+        let Some(sender) = self.ticket_picker_sender.clone() else {
+            return;
+        };
+
+        match TokioHandle::try_current() {
+            Ok(handle) => {
+                handle.spawn(async move {
+                    run_resolve_inbox_item_task(provider, request, sender).await;
+                });
+            }
+            Err(_) => {
+                self.status_warning = Some(
+                    "inbox resolution unavailable: tokio runtime is not active".to_owned(),
+                );
+            }
+        }
+    }
+
+    fn acknowledge_inbox_item(&mut self, inbox_item_id: InboxItemId, work_item_id: WorkItemId) {
+        if let Some(item) = self.domain.inbox_items.get_mut(&inbox_item_id) {
+            item.resolved = true;
+        }
+        self.spawn_resolve_inbox_item(InboxResolveRequest {
+            inbox_item_id,
+            work_item_id,
+        });
+    }
     fn publish_inbox_for_session(
         &mut self,
         session_id: &WorkerSessionId,
@@ -881,6 +1058,13 @@ impl UiShellState {
         self.ticket_picker_overlay.append_new_ticket_brief_char(ch);
     }
 
+    fn append_create_ticket_brief_newline(&mut self) {
+        if !self.ticket_picker_overlay.visible || !self.ticket_picker_overlay.new_ticket_mode {
+            return;
+        }
+        self.ticket_picker_overlay.append_new_ticket_brief_newline();
+    }
+
     fn pop_create_ticket_brief_char(&mut self) {
         if !self.ticket_picker_overlay.visible || !self.ticket_picker_overlay.new_ticket_mode {
             return;
@@ -1028,9 +1212,13 @@ impl UiShellState {
             .text()
             .trim()
             .to_owned();
+        let selected_project = self.ticket_picker_overlay.selected_project_name();
         self.ticket_picker_overlay.error = None;
         self.ticket_picker_overlay.creating = true;
-        self.spawn_ticket_picker_create(brief);
+        self.spawn_ticket_picker_create(CreateTicketFromPickerRequest {
+            brief,
+            selected_project,
+        });
     }
 
     fn spawn_ticket_picker_load(&mut self) {
@@ -1096,7 +1284,7 @@ impl UiShellState {
         }
     }
 
-    fn spawn_ticket_picker_create(&mut self, brief: String) {
+    fn spawn_ticket_picker_create(&mut self, request: CreateTicketFromPickerRequest) {
         let Some(provider) = self.ticket_picker_provider.clone() else {
             self.ticket_picker_overlay.creating = false;
             self.ticket_picker_overlay.error =
@@ -1113,7 +1301,7 @@ impl UiShellState {
         match TokioHandle::try_current() {
             Ok(handle) => {
                 handle.spawn(async move {
-                    run_ticket_picker_create_task(provider, brief, sender).await;
+                    run_ticket_picker_create_task(provider, request, sender).await;
                 });
             }
             Err(_) => {
@@ -1222,7 +1410,7 @@ impl UiShellState {
                             "plan-input-request",
                         );
                     }
-                    let prompt = self.needs_input_prompt_from_event(needs_input);
+                    let prompt = self.needs_input_prompt_from_event(&session_id, needs_input);
                     let view = self.terminal_session_states.entry(session_id).or_default();
                     view.enqueue_needs_input_prompt(prompt);
                 }
@@ -1504,6 +1692,17 @@ impl UiShellState {
                         | WorkflowState::Merging
                 )
             })
+            .unwrap_or(false)
+    }
+
+    fn session_requires_manual_needs_input_activation(&self, session_id: &WorkerSessionId) -> bool {
+        self.domain
+            .sessions
+            .get(session_id)
+            .and_then(|session| session.work_item_id.as_ref())
+            .and_then(|work_item_id| self.domain.work_items.get(work_item_id))
+            .and_then(|work_item| work_item.workflow_state.as_ref())
+            .map(|state| matches!(state, WorkflowState::New | WorkflowState::Planning))
             .unwrap_or(false)
     }
 
@@ -2043,6 +2242,15 @@ fn apply_ticket_picker_event(&mut self, event: TicketPickerEvent) {
                     compact_focus_card_text(message.as_str())
                 ));
             }
+            TicketPickerEvent::InboxItemResolved { projection } => {
+                self.domain = projection;
+            }
+            TicketPickerEvent::InboxItemResolveFailed { message } => {
+                self.status_warning = Some(format!(
+                    "inbox resolve warning: {}",
+                    compact_focus_card_text(message.as_str())
+                ));
+            }
         }
     }
 
@@ -2119,7 +2327,7 @@ fn apply_ticket_picker_event(&mut self, event: TicketPickerEvent) {
         if self.mode != UiMode::Terminal || !self.is_terminal_view_active() {
             return false;
         }
-        if self.terminal_session_has_active_needs_input() {
+        if self.terminal_session_has_any_needs_input() {
             return false;
         }
 
@@ -2736,8 +2944,22 @@ fn apply_ticket_picker_event(&mut self, event: TicketPickerEvent) {
         }
     }
 
+    fn enter_insert_mode_for_current_focus(&mut self) {
+        if self.is_right_pane_focused() && self.is_terminal_view_active() {
+            if self.terminal_session_has_any_needs_input() && !self.terminal_session_has_active_needs_input()
+            {
+                let _ = self.activate_terminal_needs_input(true);
+            } else {
+                self.enter_terminal_mode();
+            }
+            return;
+        }
+        self.enter_insert_mode();
+    }
+
     fn enter_terminal_mode(&mut self) {
         if self.is_terminal_view_active() {
+            self.pane_focus = PaneFocus::Right;
             self.snap_active_terminal_output_to_bottom();
             self.mode = UiMode::Terminal;
             self.mode_key_buffer.clear();
@@ -2753,6 +2975,7 @@ fn apply_ticket_picker_event(&mut self, event: TicketPickerEvent) {
 
     fn needs_input_prompt_from_event(
         &self,
+        session_id: &WorkerSessionId,
         event: BackendNeedsInputEvent,
     ) -> NeedsInputPromptState {
         let questions = if event.questions.is_empty() {
@@ -2779,6 +3002,8 @@ fn apply_ticket_picker_event(&mut self, event: TicketPickerEvent) {
         NeedsInputPromptState {
             prompt_id: event.prompt_id,
             questions,
+            requires_manual_activation: self
+                .session_requires_manual_needs_input_activation(session_id),
         }
     }
 
@@ -2797,7 +3022,33 @@ fn apply_ticket_picker_event(&mut self, event: TicketPickerEvent) {
     }
 
     fn terminal_session_has_active_needs_input(&self) -> bool {
+        self.active_terminal_needs_input()
+            .map(|prompt| prompt.interaction_active)
+            .unwrap_or(false)
+    }
+
+    fn terminal_session_has_any_needs_input(&self) -> bool {
         self.active_terminal_needs_input().is_some()
+    }
+
+    fn activate_terminal_needs_input(&mut self, enable_note_insert_mode: bool) -> bool {
+        let Some(prompt) = self.active_terminal_needs_input_mut() else {
+            return false;
+        };
+        if prompt.interaction_active {
+            return false;
+        }
+        prompt.set_interaction_active(true);
+        if enable_note_insert_mode {
+            prompt.note_insert_mode = true;
+            prompt.note_input_state.focused = true;
+            prompt.select_state.focused = false;
+        } else {
+            prompt.note_insert_mode = false;
+            prompt.note_input_state.focused = false;
+            prompt.select_state.focused = prompt.current_question_requires_option_selection();
+        }
+        true
     }
 
     fn terminal_needs_input_is_note_insert_mode(&self) -> bool {
@@ -2820,6 +3071,9 @@ fn apply_ticket_picker_event(&mut self, event: TicketPickerEvent) {
         let Some(prompt) = self.active_terminal_needs_input_mut() else {
             return;
         };
+        if !prompt.interaction_active {
+            return;
+        }
         prompt.note_insert_mode = enabled;
         prompt.note_input_state.focused = enabled;
         prompt.select_state.focused = !enabled && prompt.current_question_requires_option_selection();
@@ -2829,7 +3083,7 @@ fn apply_ticket_picker_event(&mut self, event: TicketPickerEvent) {
         let Some(prompt) = self.active_terminal_needs_input_mut() else {
             return false;
         };
-        if !prompt.note_insert_mode {
+        if !prompt.interaction_active || !prompt.note_insert_mode {
             return false;
         }
 
@@ -3255,6 +3509,7 @@ fn apply_ticket_picker_event(&mut self, event: TicketPickerEvent) {
                     let _ = backend.send_input(&handle, bytes.as_slice()).await;
                 });
                 self.terminal_compose_input.clear();
+                self.enter_normal_mode();
             }
             Err(_) => {
                 self.status_warning =

@@ -98,7 +98,10 @@ mod tests {
     struct MockCodeHost {
         fallback_pr: Option<PullRequestRef>,
         fallback_calls: Mutex<Vec<(String, String)>>,
+        ready_calls: Mutex<Vec<PullRequestRef>>,
         merge_state: PullRequestMergeState,
+        merge_state_error: Option<String>,
+        ready_error: Option<String>,
         merge_error: Option<String>,
     }
 
@@ -107,6 +110,7 @@ mod tests {
             Self {
                 fallback_pr,
                 fallback_calls: Mutex::new(Vec::new()),
+                ready_calls: Mutex::new(Vec::new()),
                 merge_state: PullRequestMergeState {
                     merged: false,
                     is_draft: true,
@@ -114,6 +118,8 @@ mod tests {
                     base_branch: None,
                     head_branch: None,
                 },
+                merge_state_error: None,
+                ready_error: None,
                 merge_error: None,
             }
         }
@@ -122,7 +128,10 @@ mod tests {
             Self {
                 fallback_pr,
                 fallback_calls: Mutex::new(Vec::new()),
+                ready_calls: Mutex::new(Vec::new()),
                 merge_state,
+                merge_state_error: None,
+                ready_error: None,
                 merge_error: None,
             }
         }
@@ -135,7 +144,48 @@ mod tests {
             Self {
                 fallback_pr,
                 fallback_calls: Mutex::new(Vec::new()),
+                ready_calls: Mutex::new(Vec::new()),
                 merge_state,
+                merge_state_error: None,
+                ready_error: None,
+                merge_error: Some(merge_error.into()),
+            }
+        }
+
+        fn with_ready_error(
+            fallback_pr: Option<PullRequestRef>,
+            merge_state: PullRequestMergeState,
+            ready_error: impl Into<String>,
+        ) -> Self {
+            Self {
+                fallback_pr,
+                fallback_calls: Mutex::new(Vec::new()),
+                ready_calls: Mutex::new(Vec::new()),
+                merge_state,
+                merge_state_error: None,
+                ready_error: Some(ready_error.into()),
+                merge_error: None,
+            }
+        }
+
+        fn with_merge_state_and_merge_error(
+            fallback_pr: Option<PullRequestRef>,
+            merge_state_error: impl Into<String>,
+            merge_error: impl Into<String>,
+        ) -> Self {
+            Self {
+                fallback_pr,
+                fallback_calls: Mutex::new(Vec::new()),
+                ready_calls: Mutex::new(Vec::new()),
+                merge_state: PullRequestMergeState {
+                    merged: false,
+                    is_draft: false,
+                    merge_conflict: false,
+                    base_branch: None,
+                    head_branch: None,
+                },
+                merge_state_error: Some(merge_state_error.into()),
+                ready_error: None,
                 merge_error: Some(merge_error.into()),
             }
         }
@@ -145,6 +195,10 @@ mod tests {
                 .lock()
                 .expect("fallback calls lock")
                 .clone()
+        }
+
+        fn ready_calls(&self) -> Vec<PullRequestRef> {
+            self.ready_calls.lock().expect("ready calls lock").clone()
         }
     }
 
@@ -167,7 +221,14 @@ mod tests {
             ))
         }
 
-        async fn mark_ready_for_review(&self, _pr: &PullRequestRef) -> Result<(), CoreError> {
+        async fn mark_ready_for_review(&self, pr: &PullRequestRef) -> Result<(), CoreError> {
+            self.ready_calls
+                .lock()
+                .expect("ready calls lock")
+                .push(pr.clone());
+            if let Some(message) = &self.ready_error {
+                return Err(CoreError::DependencyUnavailable(message.clone()));
+            }
             Ok(())
         }
 
@@ -187,6 +248,9 @@ mod tests {
             &self,
             _pr: &PullRequestRef,
         ) -> Result<PullRequestMergeState, CoreError> {
+            if let Some(message) = &self.merge_state_error {
+                return Err(CoreError::DependencyUnavailable(message.clone()));
+            }
             Ok(self.merge_state.clone())
         }
 
@@ -845,6 +909,287 @@ mod tests {
             .last()
             .expect("workflow transitions recorded");
         assert_eq!(latest_state, WorkflowState::Done);
+    }
+
+    #[tokio::test]
+    async fn workflow_merge_pr_marks_draft_ready_before_merge_attempt() {
+        let temp_db = TestDbPath::new("app-runtime-command-merge-pr-draft-auto-ready");
+        let work_item_id = WorkItemId::new("wi-merge-pr-draft-auto-ready");
+        let session_id = WorkerSessionId::new("sess-merge-pr-draft-auto-ready");
+        let mut store = SqliteEventStore::open(temp_db.path()).expect("open store");
+        seed_runtime_mapping(&mut store, &work_item_id, session_id.as_str()).expect("seed mapping");
+        store
+            .append(NewEventEnvelope {
+                event_id: "evt-awaiting-review-seed".to_owned(),
+                occurred_at: "2026-02-19T00:00:00Z".to_owned(),
+                work_item_id: Some(work_item_id.clone()),
+                session_id: Some(session_id.clone()),
+                payload: OrchestrationEventPayload::WorkflowTransition(WorkflowTransitionPayload {
+                    work_item_id: work_item_id.clone(),
+                    from: WorkflowState::PRDrafted,
+                    to: WorkflowState::AwaitingYourReview,
+                    reason: None,
+                }),
+                schema_version: DOMAIN_EVENT_SCHEMA_VERSION,
+            })
+            .expect("seed awaiting-review workflow transition");
+
+        let code_host = MockCodeHost::with_merge_state(
+            Some(PullRequestRef {
+                repository: RepositoryRef {
+                    id: "acme/repo".to_owned(),
+                    name: "acme/repo".to_owned(),
+                    root: std::path::PathBuf::from("/workspace/wi-merge-pr-draft-auto-ready"),
+                },
+                number: 611,
+                url: "https://github.com/acme/repo/pull/611".to_owned(),
+            }),
+            PullRequestMergeState {
+                merged: false,
+                is_draft: true,
+                merge_conflict: false,
+                base_branch: Some("main".to_owned()),
+                head_branch: Some("ap/AP-611-fix".to_owned()),
+            },
+        );
+
+        let (_stream_id, mut stream) = super::execute_workflow_merge_pr(
+            &code_host,
+            temp_db.path().to_str().expect("path"),
+            SupervisorCommandContext {
+                selected_work_item_id: Some(work_item_id.as_str().to_owned()),
+                selected_session_id: Some(session_id.as_str().to_owned()),
+                scope: Some(format!("session:{}", session_id.as_str())),
+            },
+        )
+        .await
+        .expect("merge command should return runtime output payload");
+
+        let first_chunk = stream
+            .next_chunk()
+            .await
+            .expect("read runtime chunk")
+            .expect("expected runtime message");
+        let parsed: serde_json::Value =
+            serde_json::from_str(first_chunk.delta.as_str()).expect("parse merge response");
+        assert_eq!(parsed["completed"], false);
+        assert_eq!(code_host.ready_calls().len(), 1);
+        assert_eq!(code_host.ready_calls()[0].number, 611);
+    }
+
+    #[tokio::test]
+    async fn workflow_merge_pr_skips_ready_conversion_when_pr_is_not_draft() {
+        let temp_db = TestDbPath::new("app-runtime-command-merge-pr-ready-skip");
+        let work_item_id = WorkItemId::new("wi-merge-pr-ready-skip");
+        let session_id = WorkerSessionId::new("sess-merge-pr-ready-skip");
+        let mut store = SqliteEventStore::open(temp_db.path()).expect("open store");
+        seed_runtime_mapping(&mut store, &work_item_id, session_id.as_str()).expect("seed mapping");
+        store
+            .append(NewEventEnvelope {
+                event_id: "evt-awaiting-review-seed".to_owned(),
+                occurred_at: "2026-02-19T00:00:00Z".to_owned(),
+                work_item_id: Some(work_item_id.clone()),
+                session_id: Some(session_id.clone()),
+                payload: OrchestrationEventPayload::WorkflowTransition(WorkflowTransitionPayload {
+                    work_item_id: work_item_id.clone(),
+                    from: WorkflowState::PRDrafted,
+                    to: WorkflowState::AwaitingYourReview,
+                    reason: None,
+                }),
+                schema_version: DOMAIN_EVENT_SCHEMA_VERSION,
+            })
+            .expect("seed awaiting-review workflow transition");
+
+        let code_host = MockCodeHost::with_merge_state(
+            Some(PullRequestRef {
+                repository: RepositoryRef {
+                    id: "acme/repo".to_owned(),
+                    name: "acme/repo".to_owned(),
+                    root: std::path::PathBuf::from("/workspace/wi-merge-pr-ready-skip"),
+                },
+                number: 612,
+                url: "https://github.com/acme/repo/pull/612".to_owned(),
+            }),
+            PullRequestMergeState {
+                merged: false,
+                is_draft: false,
+                merge_conflict: false,
+                base_branch: Some("main".to_owned()),
+                head_branch: Some("ap/AP-612-fix".to_owned()),
+            },
+        );
+
+        let (_stream_id, mut stream) = super::execute_workflow_merge_pr(
+            &code_host,
+            temp_db.path().to_str().expect("path"),
+            SupervisorCommandContext {
+                selected_work_item_id: Some(work_item_id.as_str().to_owned()),
+                selected_session_id: Some(session_id.as_str().to_owned()),
+                scope: Some(format!("session:{}", session_id.as_str())),
+            },
+        )
+        .await
+        .expect("merge command should return runtime output payload");
+
+        let first_chunk = stream
+            .next_chunk()
+            .await
+            .expect("read runtime chunk")
+            .expect("expected runtime message");
+        let parsed: serde_json::Value =
+            serde_json::from_str(first_chunk.delta.as_str()).expect("parse merge response");
+        assert_eq!(parsed["completed"], false);
+        assert!(code_host.ready_calls().is_empty());
+    }
+
+    #[tokio::test]
+    async fn workflow_merge_pr_rolls_back_to_in_review_when_mark_ready_fails() {
+        let temp_db = TestDbPath::new("app-runtime-command-merge-pr-ready-failure");
+        let work_item_id = WorkItemId::new("wi-merge-pr-ready-failure");
+        let session_id = WorkerSessionId::new("sess-merge-pr-ready-failure");
+        let mut store = SqliteEventStore::open(temp_db.path()).expect("open store");
+        seed_runtime_mapping(&mut store, &work_item_id, session_id.as_str()).expect("seed mapping");
+        store
+            .append(NewEventEnvelope {
+                event_id: "evt-awaiting-review-seed".to_owned(),
+                occurred_at: "2026-02-19T00:00:00Z".to_owned(),
+                work_item_id: Some(work_item_id.clone()),
+                session_id: Some(session_id.clone()),
+                payload: OrchestrationEventPayload::WorkflowTransition(WorkflowTransitionPayload {
+                    work_item_id: work_item_id.clone(),
+                    from: WorkflowState::PRDrafted,
+                    to: WorkflowState::AwaitingYourReview,
+                    reason: None,
+                }),
+                schema_version: DOMAIN_EVENT_SCHEMA_VERSION,
+            })
+            .expect("seed awaiting-review workflow transition");
+
+        let code_host = MockCodeHost::with_ready_error(
+            Some(PullRequestRef {
+                repository: RepositoryRef {
+                    id: "acme/repo".to_owned(),
+                    name: "acme/repo".to_owned(),
+                    root: std::path::PathBuf::from("/workspace/wi-merge-pr-ready-failure"),
+                },
+                number: 613,
+                url: "https://github.com/acme/repo/pull/613".to_owned(),
+            }),
+            PullRequestMergeState {
+                merged: false,
+                is_draft: true,
+                merge_conflict: false,
+                base_branch: Some("main".to_owned()),
+                head_branch: Some("ap/AP-613-fix".to_owned()),
+            },
+            "ready conversion blocked by policy",
+        );
+
+        let (_stream_id, mut stream) = super::execute_workflow_merge_pr(
+            &code_host,
+            temp_db.path().to_str().expect("path"),
+            SupervisorCommandContext {
+                selected_work_item_id: Some(work_item_id.as_str().to_owned()),
+                selected_session_id: Some(session_id.as_str().to_owned()),
+                scope: Some(format!("session:{}", session_id.as_str())),
+            },
+        )
+        .await
+        .expect("merge command should return runtime output payload");
+
+        let first_chunk = stream
+            .next_chunk()
+            .await
+            .expect("read runtime chunk")
+            .expect("expected runtime message");
+        let parsed: serde_json::Value =
+            serde_json::from_str(first_chunk.delta.as_str()).expect("parse merge response");
+        assert_eq!(parsed["completed"], false);
+        assert!(parsed["error"]
+            .as_str()
+            .expect("error message")
+            .contains("failed to mark draft PR #613 ready for review"));
+
+        let persisted_store = SqliteEventStore::open(temp_db.path()).expect("reopen store");
+        let events = persisted_store.read_ordered().expect("read events");
+        let transition_targets = events
+            .iter()
+            .filter_map(|event| match &event.payload {
+                OrchestrationEventPayload::WorkflowTransition(payload)
+                    if event.work_item_id.as_ref() == Some(&work_item_id) =>
+                {
+                    Some(payload.to.clone())
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert!(transition_targets.contains(&WorkflowState::Merging));
+        assert_eq!(transition_targets.last(), Some(&WorkflowState::InReview));
+    }
+
+    #[tokio::test]
+    async fn workflow_merge_pr_attempts_merge_when_merge_state_probe_fails() {
+        let temp_db = TestDbPath::new("app-runtime-command-merge-pr-merge-state-probe-failure");
+        let work_item_id = WorkItemId::new("wi-merge-pr-merge-state-probe-failure");
+        let session_id = WorkerSessionId::new("sess-merge-pr-merge-state-probe-failure");
+        let mut store = SqliteEventStore::open(temp_db.path()).expect("open store");
+        seed_runtime_mapping(&mut store, &work_item_id, session_id.as_str()).expect("seed mapping");
+        store
+            .append(NewEventEnvelope {
+                event_id: "evt-awaiting-review-seed".to_owned(),
+                occurred_at: "2026-02-19T00:00:00Z".to_owned(),
+                work_item_id: Some(work_item_id.clone()),
+                session_id: Some(session_id.clone()),
+                payload: OrchestrationEventPayload::WorkflowTransition(WorkflowTransitionPayload {
+                    work_item_id: work_item_id.clone(),
+                    from: WorkflowState::PRDrafted,
+                    to: WorkflowState::AwaitingYourReview,
+                    reason: None,
+                }),
+                schema_version: DOMAIN_EVENT_SCHEMA_VERSION,
+            })
+            .expect("seed awaiting-review workflow transition");
+
+        let code_host = MockCodeHost::with_merge_state_and_merge_error(
+            Some(PullRequestRef {
+                repository: RepositoryRef {
+                    id: "acme/repo".to_owned(),
+                    name: "acme/repo".to_owned(),
+                    root: std::path::PathBuf::from(
+                        "/workspace/wi-merge-pr-merge-state-probe-failure",
+                    ),
+                },
+                number: 614,
+                url: "https://github.com/acme/repo/pull/614".to_owned(),
+            }),
+            "pre-merge state probe unavailable",
+            "merge blocked by required checks",
+        );
+
+        let (_stream_id, mut stream) = super::execute_workflow_merge_pr(
+            &code_host,
+            temp_db.path().to_str().expect("path"),
+            SupervisorCommandContext {
+                selected_work_item_id: Some(work_item_id.as_str().to_owned()),
+                selected_session_id: Some(session_id.as_str().to_owned()),
+                scope: Some(format!("session:{}", session_id.as_str())),
+            },
+        )
+        .await
+        .expect("merge command should return runtime output payload");
+
+        let first_chunk = stream
+            .next_chunk()
+            .await
+            .expect("read runtime chunk")
+            .expect("expected runtime message");
+        let parsed: serde_json::Value =
+            serde_json::from_str(first_chunk.delta.as_str()).expect("parse merge response");
+        assert_eq!(parsed["completed"], false);
+        assert!(parsed["error"]
+            .as_str()
+            .expect("error message")
+            .contains("merge blocked by required checks"));
     }
 
     #[tokio::test]

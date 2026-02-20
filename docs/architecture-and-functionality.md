@@ -114,6 +114,7 @@ The repository is a Rust workspace with a layered design:
   - `orchestrator-app/src/command_dispatch.rs`
 - PR completion flow includes:
   - Manual merge path: `AwaitingYourReview -> ReadyForReview -> InReview -> Merging -> Done`
+    - During `workflow.merge_pr`, draft PRs are automatically converted to ready-for-review before merge is attempted.
   - External/direct GitHub merge path: `AwaitingYourReview -> ReadyForReview -> InReview -> Done`
 
 ## UI and interaction model
@@ -129,14 +130,14 @@ The repository is a Rust workspace with a layered design:
 
 ## Configuration model
 
-- Runtime behavior is environment-driven, with canonical variable documentation in:
+- Runtime behavior is TOML-first via `ORCHESTRATOR_CONFIG` (`config.toml`), with missing entries defaulted during boot.
+- Environment variables are reserved for:
+  - secrets/API keys (`OPENROUTER_API_KEY`, `LINEAR_API_KEY`, `ORCHESTRATOR_SHORTCUT_API_KEY`)
+  - config path override (`ORCHESTRATOR_CONFIG`)
+  - test/internal helpers (`ORCHESTRATOR_UPDATE_GOLDENS`, `ORCHESTRATOR_HARNESS_SESSION_ID`)
+- Canonical env documentation remains in:
   - `AGENTS.md`
   - `.env-template`
-- Important configuration groups:
-  - provider selection (`ORCHESTRATOR_TICKETING_PROVIDER`, `ORCHESTRATOR_HARNESS_PROVIDER`)
-  - backend binaries (`ORCHESTRATOR_CODEX_BIN`, `ORCHESTRATOR_OPENCODE_BIN`, `ORCHESTRATOR_GIT_BIN`, `ORCHESTRATOR_GH_BIN`)
-  - integration credentials/endpoints (`OPENROUTER_*`, `LINEAR_*`, `ORCHESTRATOR_SHORTCUT_*`)
-  - safety toggles for command execution/destructive git behavior.
 
 ## Architectural boundaries that matter for future work
 

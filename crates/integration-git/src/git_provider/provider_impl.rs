@@ -1,19 +1,18 @@
 impl<R: CommandRunner> GitCliVcsProvider<R> {
-    pub fn new(runner: R) -> Result<Self, CoreError> {
-        let binary = std::env::var_os(ENV_GIT_BIN)
-            .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from("git"));
+    pub fn new(
+        runner: R,
+        binary: PathBuf,
+        allow_destructive_automation: bool,
+        allow_force_push: bool,
+        allow_force_delete_unmerged_branches: bool,
+        allow_unsafe_command_paths: bool,
+    ) -> Result<Self, CoreError> {
         if binary.as_os_str().is_empty() {
             return Err(CoreError::Configuration(format!(
                 "{ENV_GIT_BIN} is set but empty. Provide a valid git binary path or unset it."
             )));
         }
 
-        let allow_destructive_automation = read_bool_env(ENV_ALLOW_DESTRUCTIVE_AUTOMATION)?;
-        let allow_force_push = read_bool_env(ENV_ALLOW_FORCE_PUSH)?;
-        let allow_force_delete_unmerged_branches =
-            read_bool_env(ENV_ALLOW_DELETE_UNMERGED_BRANCHES)?;
-        let allow_unsafe_command_paths = read_bool_env(ENV_ALLOW_UNSAFE_COMMAND_PATHS)?;
         if allow_force_push && !allow_destructive_automation {
             return Err(CoreError::Configuration(format!(
                 "{ENV_ALLOW_FORCE_PUSH}=true requires {ENV_ALLOW_DESTRUCTIVE_AUTOMATION}=true."
@@ -716,4 +715,3 @@ impl<R: CommandRunner> GitCliVcsProvider<R> {
         Err(self.command_failed(&args, &output))
     }
 }
-

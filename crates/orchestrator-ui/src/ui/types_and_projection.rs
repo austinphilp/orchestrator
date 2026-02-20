@@ -49,12 +49,112 @@ pub use keymap::{
 
 const TICKET_PICKER_EVENT_CHANNEL_CAPACITY: usize = 32;
 const TERMINAL_STREAM_EVENT_CHANNEL_CAPACITY: usize = 32;
-const TICKET_PICKER_PRIORITY_STATES_ENV: &str = "ORCHESTRATOR_TICKET_PICKER_PRIORITY_STATES";
-const UI_THEME_ENV: &str = "ORCHESTRATOR_UI_THEME";
 const TICKET_PICKER_PRIORITY_STATES_DEFAULT: &[&str] =
     &["In Progress", "Final Approval", "Todo", "Backlog"];
+const DEFAULT_UI_THEME: &str = "nord";
+const DEFAULT_SUPERVISOR_MODEL: &str = "openai/gpt-4o-mini";
 const MERGE_POLL_INTERVAL: Duration = Duration::from_secs(60);
 const MERGE_REQUEST_RATE_LIMIT: Duration = Duration::from_secs(1);
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct UiRuntimeConfig {
+    theme: String,
+    ticket_picker_priority_states: Vec<String>,
+    supervisor_model: String,
+}
+
+impl Default for UiRuntimeConfig {
+    fn default() -> Self {
+        Self {
+            theme: DEFAULT_UI_THEME.to_owned(),
+            ticket_picker_priority_states: TICKET_PICKER_PRIORITY_STATES_DEFAULT
+                .iter()
+                .map(|value| (*value).to_owned())
+                .collect(),
+            supervisor_model: DEFAULT_SUPERVISOR_MODEL.to_owned(),
+        }
+    }
+}
+
+static UI_RUNTIME_CONFIG: OnceLock<std::sync::RwLock<UiRuntimeConfig>> = OnceLock::new();
+
+fn ui_runtime_config_store() -> &'static std::sync::RwLock<UiRuntimeConfig> {
+    UI_RUNTIME_CONFIG.get_or_init(|| std::sync::RwLock::new(UiRuntimeConfig::default()))
+}
+
+pub fn set_ui_runtime_config(
+    theme: String,
+    ticket_picker_priority_states: Vec<String>,
+    supervisor_model: String,
+) {
+    let mut parsed_states = ticket_picker_priority_states
+        .into_iter()
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+        .collect::<Vec<_>>();
+    if parsed_states.is_empty() {
+        parsed_states = TICKET_PICKER_PRIORITY_STATES_DEFAULT
+            .iter()
+            .map(|value| (*value).to_owned())
+            .collect();
+    }
+
+    let config = UiRuntimeConfig {
+        theme: {
+            let trimmed = theme.trim();
+            if trimmed.is_empty() {
+                DEFAULT_UI_THEME.to_owned()
+            } else {
+                trimmed.to_owned()
+            }
+        },
+        ticket_picker_priority_states: parsed_states,
+        supervisor_model: {
+            let trimmed = supervisor_model.trim();
+            if trimmed.is_empty() {
+                DEFAULT_SUPERVISOR_MODEL.to_owned()
+            } else {
+                trimmed.to_owned()
+            }
+        },
+    };
+
+    if let Ok(mut guard) = ui_runtime_config_store().write() {
+        *guard = config;
+    }
+}
+
+fn ui_theme_config_value() -> String {
+    ui_runtime_config_store()
+        .read()
+        .map(|guard| guard.theme.clone())
+        .unwrap_or_else(|_| DEFAULT_UI_THEME.to_owned())
+}
+
+fn ticket_picker_priority_states_config_value() -> Vec<String> {
+    ui_runtime_config_store()
+        .read()
+        .map(|guard| guard.ticket_picker_priority_states.clone())
+        .unwrap_or_else(|_| {
+            TICKET_PICKER_PRIORITY_STATES_DEFAULT
+                .iter()
+                .map(|value| (*value).to_owned())
+                .collect()
+        })
+}
+
+fn supervisor_model_config_value() -> String {
+    ui_runtime_config_store()
+        .read()
+        .map(|guard| guard.supervisor_model.clone())
+        .unwrap_or_else(|_| DEFAULT_SUPERVISOR_MODEL.to_owned())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreateTicketFromPickerRequest {
+    pub brief: String,
+    pub selected_project: Option<String>,
+}
 
 #[async_trait]
 pub trait TicketPickerProvider: Send + Sync {
@@ -67,7 +167,10 @@ pub trait TicketPickerProvider: Send + Sync {
         ticket: TicketSummary,
         repository_override: Option<PathBuf>,
     ) -> Result<SelectedTicketFlowResult, CoreError>;
-    async fn create_ticket_from_brief(&self, brief: String) -> Result<TicketSummary, CoreError>;
+    async fn create_ticket_from_brief(
+        &self,
+        request: CreateTicketFromPickerRequest,
+    ) -> Result<TicketSummary, CoreError>;
     async fn archive_ticket(&self, _ticket: TicketSummary) -> Result<(), CoreError> {
         Err(CoreError::DependencyUnavailable(
             "ticket archiving is not supported by this ticket provider".to_owned(),
@@ -119,6 +222,14 @@ pub trait TicketPickerProvider: Send + Sync {
             "inbox publishing is not supported by this ticket provider".to_owned(),
         ))
     }
+    async fn resolve_inbox_item(
+        &self,
+        _request: InboxResolveRequest,
+    ) -> Result<ProjectionState, CoreError> {
+        Err(CoreError::DependencyUnavailable(
+            "inbox resolution is not supported by this ticket provider".to_owned(),
+        ))
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -128,6 +239,12 @@ pub struct InboxPublishRequest {
     pub kind: InboxItemKind,
     pub title: String,
     pub coalesce_key: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InboxResolveRequest {
+    pub inbox_item_id: InboxItemId,
+    pub work_item_id: WorkItemId,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -470,11 +587,15 @@ fn project_center_pane(
                     }),
             );
             lines.push("j/k or arrows: move selection".to_owned());
-            lines.push("Tab/Shift+Tab: cycle batch lanes".to_owned());
+            lines.push("Tab: cycle inbox/sessions focus in left pane".to_owned());
+            lines.push("Shift+Tab: toggle left/right pane focus".to_owned());
+            lines.push("[ / ]: cycle batch lanes".to_owned());
             lines.push("g/G: jump first/last item".to_owned());
             lines.push("Enter: open focus card".to_owned());
             lines.push("c: toggle global supervisor chat".to_owned());
-            lines.push("i: open terminal for selected item".to_owned());
+            lines.push("i: enter insert mode (or notes/compose on right pane)".to_owned());
+            lines.push("I: open terminal for selected item".to_owned());
+            lines.push("o: open session output and acknowledge selected inbox item".to_owned());
             lines.push("v d/t/p/c: open diff/test/PR/chat inspector".to_owned());
             lines.push("Backspace: minimize top view".to_owned());
             CenterPaneState {
@@ -537,8 +658,6 @@ const SUPERVISOR_STREAM_MAX_TRANSCRIPT_CHARS: usize = 24_000;
 const SUPERVISOR_STREAM_RENDER_LINE_LIMIT: usize = 80;
 const SUPERVISOR_STREAM_HIGH_COST_TOTAL_TOKENS: u32 = 900;
 const SUPERVISOR_STREAM_LOW_TOKEN_HEADROOM: u32 = 120;
-const DEFAULT_SUPERVISOR_MODEL: &str = "openai/gpt-4o-mini";
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SupervisorStreamLifecycle {
     Connecting,
@@ -652,6 +771,7 @@ impl TerminalViewState {
             self.active_needs_input = Some(NeedsInputComposerState::new(
                 prompt.prompt_id,
                 prompt.questions,
+                !prompt.requires_manual_activation,
             ));
             return;
         }
@@ -712,6 +832,7 @@ struct NeedsInputAnswerDraft {
 struct NeedsInputPromptState {
     prompt_id: String,
     questions: Vec<BackendNeedsInputQuestion>,
+    requires_manual_activation: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -722,12 +843,17 @@ struct NeedsInputComposerState {
     current_question_index: usize,
     select_state: SelectState,
     note_input_state: InputState,
+    interaction_active: bool,
     note_insert_mode: bool,
     error: Option<String>,
 }
 
 impl NeedsInputComposerState {
-    fn new(prompt_id: String, questions: Vec<BackendNeedsInputQuestion>) -> Self {
+    fn new(
+        prompt_id: String,
+        questions: Vec<BackendNeedsInputQuestion>,
+        interaction_active: bool,
+    ) -> Self {
         let answer_drafts = vec![NeedsInputAnswerDraft::default(); questions.len()];
         let mut state = Self {
             prompt_id,
@@ -736,6 +862,7 @@ impl NeedsInputComposerState {
             current_question_index: 0,
             select_state: SelectState::new(0),
             note_input_state: InputState::empty(),
+            interaction_active,
             note_insert_mode: false,
             error: None,
         };
@@ -770,13 +897,13 @@ impl NeedsInputComposerState {
             .cloned()
             .unwrap_or_default();
         self.select_state = SelectState::new(options_len);
-        self.select_state.focused = options_len > 0;
+        self.select_state.focused = self.interaction_active && options_len > 0;
         if let Some(index) = draft.selected_option_index.filter(|index| *index < options_len) {
             self.select_state.selected_index = Some(index);
             self.select_state.highlighted_index = index;
         }
         self.note_input_state.set_text(draft.note);
-        self.note_input_state.focused = self.note_insert_mode;
+        self.note_input_state.focused = self.interaction_active && self.note_insert_mode;
     }
 
     fn move_to_question(&mut self, next_index: usize) {
@@ -798,6 +925,14 @@ impl NeedsInputComposerState {
             .and_then(|question| question.options.as_ref())
             .map(|options| !options.is_empty())
             .unwrap_or(false)
+    }
+
+    fn set_interaction_active(&mut self, active: bool) {
+        self.interaction_active = active;
+        if !active {
+            self.note_insert_mode = false;
+        }
+        self.refresh_controls_from_current_question();
     }
 
     fn build_runtime_answers(&mut self) -> RuntimeResult<Vec<BackendNeedsInputAnswer>> {

@@ -152,9 +152,7 @@ impl OpenRouterSupervisor {
             )
         })?;
 
-        let base_url =
-            std::env::var("OPENROUTER_BASE_URL").unwrap_or_else(|_| OPENROUTER_API_BASE.to_owned());
-        Self::with_base_url(api_key, base_url)
+        Self::with_base_url(api_key, OPENROUTER_API_BASE)
     }
 
     pub fn new(api_key: impl Into<String>) -> Result<Self, CoreError> {

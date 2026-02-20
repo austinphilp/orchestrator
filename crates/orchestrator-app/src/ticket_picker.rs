@@ -7,7 +7,8 @@ use orchestrator_core::{
     TicketQuery, TicketSummary, TicketingProvider, VcsProvider, WorkerBackend, WorkerSessionId,
 };
 use orchestrator_ui::{
-    InboxPublishRequest, SessionWorktreeDiff, SessionWorkflowAdvanceOutcome, TicketPickerProvider,
+    CreateTicketFromPickerRequest, InboxPublishRequest, InboxResolveRequest, SessionWorktreeDiff,
+    SessionWorkflowAdvanceOutcome, TicketPickerProvider,
 };
 use std::path::PathBuf;
 
@@ -44,7 +45,6 @@ where
             worker_backend,
         }
     }
-
 }
 
 #[async_trait]
@@ -119,8 +119,11 @@ where
             })?
     }
 
-    async fn create_ticket_from_brief(&self, brief: String) -> Result<TicketSummary, CoreError> {
-        let brief = brief.trim();
+    async fn create_ticket_from_brief(
+        &self,
+        request: CreateTicketFromPickerRequest,
+    ) -> Result<TicketSummary, CoreError> {
+        let brief = request.brief.trim();
         if brief.is_empty() {
             return Err(CoreError::InvalidCommandArgs {
                 command_id: "ui.ticket_picker.create".to_owned(),
@@ -129,11 +132,16 @@ where
         }
 
         let (title, description) = draft_ticket_from_brief(&self.app.supervisor, brief).await?;
+        let project = request
+            .selected_project
+            .map(|value| value.trim().to_owned())
+            .filter(|value| !value.is_empty() && !value.eq_ignore_ascii_case("No Project"));
         let ticket = self
             .ticketing
             .create_ticket(CreateTicketRequest {
                 title,
                 description: Some(description),
+                project,
                 state: None,
                 priority: None,
                 labels: Vec::new(),
@@ -265,9 +273,22 @@ where
                 ))
             })?
     }
+
+    async fn resolve_inbox_item(
+        &self,
+        request: InboxResolveRequest,
+    ) -> Result<ProjectionState, CoreError> {
+        let app = self.app.clone();
+        tokio::task::spawn_blocking(move || app.resolve_inbox_item(&request))
+            .await
+            .map_err(|error| {
+                CoreError::Configuration(format!(
+                    "ticket picker task failed while resolving inbox item: {error}"
+                ))
+            })?
+    }
 }
 
-const DEFAULT_SUPERVISOR_MODEL: &str = "openai/gpt-4o-mini";
 const MAX_GENERATED_TITLE_LEN: usize = 180;
 
 async fn draft_ticket_from_brief(
@@ -389,11 +410,7 @@ fn truncate_to_char_boundary(value: &str, max_chars: usize) -> &str {
 }
 
 fn supervisor_model_from_env() -> String {
-    std::env::var("ORCHESTRATOR_SUPERVISOR_MODEL")
-        .ok()
-        .map(|value| value.trim().to_owned())
-        .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| DEFAULT_SUPERVISOR_MODEL.to_owned())
+    crate::supervisor_model_from_env()
 }
 
 #[cfg(test)]

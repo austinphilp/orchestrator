@@ -1,23 +1,3 @@
-fn parse_bool_env(name: &str, value: &str) -> Result<bool, CoreError> {
-    match value.trim().to_ascii_lowercase().as_str() {
-        "1" | "true" | "yes" | "on" => Ok(true),
-        "0" | "false" | "no" | "off" => Ok(false),
-        _ => Err(CoreError::Configuration(format!(
-            "{name} must be a boolean (true/false)."
-        ))),
-    }
-}
-
-fn read_bool_env(name: &str) -> Result<bool, CoreError> {
-    match std::env::var(name) {
-        Ok(value) => parse_bool_env(name, &value),
-        Err(std::env::VarError::NotPresent) => Ok(false),
-        Err(std::env::VarError::NotUnicode(_)) => Err(CoreError::Configuration(format!(
-            "{name} contained invalid UTF-8"
-        ))),
-    }
-}
-
 fn is_bare_command_name(path: &Path) -> bool {
     let mut components = path.components();
     matches!(components.next(), Some(Component::Normal(_))) && components.next().is_none()
@@ -147,4 +127,3 @@ impl<R: CommandRunner> VcsProvider for GitCliVcsProvider<R> {
         })
     }
 }
-

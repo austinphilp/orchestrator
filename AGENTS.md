@@ -9,39 +9,16 @@
 
 - `ORCHESTRATOR_CONFIG` (orchestrator-app): optional path to TOML config.
 - `OPENROUTER_API_KEY` (orchestrator-supervisor): required API key for supervisor.
-- `OPENROUTER_BASE_URL` (orchestrator-supervisor): optional base URL override (defaults to `https://openrouter.ai/api/v1`).
-- `ORCHESTRATOR_SUPERVISOR_MODEL` (orchestrator-ui): optional chat model override.
 - `LINEAR_API_KEY` (integration-linear, scripts/ralph_loop.py, scripts/linear_graphql.py): required Linear API key.
-- `ORCHESTRATOR_LINEAR_API_URL` (integration-linear, scripts/linear_graphql.py): optional Linear GraphQL endpoint override.
-- `ORCHESTRATOR_LINEAR_SYNC_INTERVAL_SECS` (integration-linear): optional poll interval in seconds.
-- `ORCHESTRATOR_LINEAR_FETCH_LIMIT` (integration-linear): optional fetch limit for synced issues.
-- `ORCHESTRATOR_LINEAR_SYNC_ASSIGNED_TO_ME` (integration-linear): optional boolean.
-- `ORCHESTRATOR_LINEAR_SYNC_STATES` (integration-linear): optional comma-separated Linear state filter.
-- `ORCHESTRATOR_LINEAR_WORKFLOW_STATE_MAP` (integration-linear): optional workflow→Linear map using `WorkflowState=LinearState` pairs.
-- `ORCHESTRATOR_LINEAR_WORKFLOW_COMMENT_SUMMARIES` (integration-linear): optional boolean.
-- `ORCHESTRATOR_LINEAR_WORKFLOW_ATTACH_PR_LINKS` (integration-linear): optional boolean.
-- `ORCHESTRATOR_GH_BIN` (orchestrator-github): optional path to `gh` binary.
-- `ORCHESTRATOR_GIT_BIN` (integration-git): optional path to `git` binary.
-- `ORCHESTRATOR_GIT_ALLOW_DELETE_UNMERGED_BRANCHES` (integration-git): optional boolean.
-- `ORCHESTRATOR_GIT_ALLOW_DESTRUCTIVE_AUTOMATION` (integration-git): optional boolean.
-- `ORCHESTRATOR_GIT_ALLOW_FORCE_PUSH` (integration-git): optional boolean.
-- `ORCHESTRATOR_ALLOW_UNSAFE_COMMAND_PATHS` (orchestrator-github, integration-git, backend-opencode): optional safety override boolean.
-- `ORCHESTRATOR_TICKETING_PROVIDER` (orchestrator-app): optional ticketing provider override (`linear` or `shortcut`; default `linear`).
-- `ORCHESTRATOR_HARNESS_PROVIDER` (orchestrator-app): optional harness/backend provider override (`opencode` or `codex`; default `codex`).
+- `ORCHESTRATOR_LINEAR_API_URL` (scripts/linear_graphql.py): optional Linear GraphQL endpoint override for script usage.
 - `ORCHESTRATOR_HARNESS_SESSION_ID` (orchestrator-core, backend-codex): optional harness thread/session identifier used to resume Codex sessions; automatically set from persisted runtime mappings and not typically configured manually.
 - `ORCHESTRATOR_SHORTCUT_API_KEY` (integration-shortcut): required for Shortcut ticketing.
-- `ORCHESTRATOR_SHORTCUT_API_URL` (integration-shortcut): optional API endpoint override (defaults to `https://api.app.shortcut.com/api/v3`).
-- `ORCHESTRATOR_SHORTCUT_FETCH_LIMIT` (integration-shortcut): optional fetch cap for Shortcut ticket sync.
-- `ORCHESTRATOR_CODEX_BIN` (backend-codex): optional path to `codex` binary.
-- `ORCHESTRATOR_OPENCODE_BIN` (backend-opencode): optional path to opencode binary.
-- `ORCHESTRATOR_OPENCODE_SERVER_BASE_URL` (backend-opencode): optional base URL override for OpenCode harness server (defaults to managed local server at `http://127.0.0.1:8787`).
-- `ORCHESTRATOR_CODEX_SERVER_BASE_URL` (backend-codex): deprecated/unsupported. Codex uses JSON-RPC app-server over stdio; setting this now causes a configuration error.
-- `ORCHESTRATOR_HARNESS_SERVER_STARTUP_TIMEOUT_SECS` (backend-opencode, backend-codex): optional startup health-check timeout in seconds for managed harness server processes.
-- `ORCHESTRATOR_HARNESS_LOG_RAW_EVENTS` (backend-opencode, backend-codex): optional boolean toggle to append raw harness event payload lines to `${XDG_DATA_HOME:-$HOME/.local/share}/orchestrator/logs/harness-raw.log` on Linux (platform-equivalent app data dir on macOS/Windows).
-- `ORCHESTRATOR_HARNESS_LOG_NORMALIZED_EVENTS` (backend-opencode, backend-codex): optional boolean toggle to append normalized `BackendEvent` payloads to `${XDG_DATA_HOME:-$HOME/.local/share}/orchestrator/logs/harness-normalized.log` on Linux (platform-equivalent app data dir on macOS/Windows).
-- `ORCHESTRATOR_TICKET_PICKER_PRIORITY_STATES` (orchestrator-ui): optional comma-separated ticket state ordering.
-- `ORCHESTRATOR_UI_THEME` (orchestrator-ui): optional UI markdown theme override for terminal chat rendering (`nord` or `default`; defaults to `nord`).
 - `ORCHESTRATOR_UPDATE_GOLDENS` (orchestrator-ui): optional test helper toggle for golden snapshot updates.
+
+### Config TOML ownership
+
+- Runtime settings previously controlled by `ORCHESTRATOR_*` non-secret env vars now live in `config.toml` under `ORCHESTRATOR_CONFIG`.
+- This includes provider selection, supervisor model/base URL, Linear/Shortcut runtime options, git/github binary+safety controls, harness backend settings, and UI theme/ticket-priority ordering.
 
 ## Development Policy
 

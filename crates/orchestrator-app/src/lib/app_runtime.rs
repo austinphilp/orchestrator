@@ -144,6 +144,55 @@ impl<S: Supervisor, G: GithubClient> App<S, G> {
         Ok(rebuild_projection(&events))
     }
 
+    pub fn resolve_inbox_item(
+        &self,
+        request: &InboxResolveRequest,
+    ) -> Result<ProjectionState, CoreError> {
+        let mut store = open_event_store(&self.config.event_store_path)?;
+        let projection = rebuild_projection(&store.read_ordered()?);
+        let Some(inbox_item) = projection.inbox_items.get(&request.inbox_item_id) else {
+            return Err(CoreError::InvalidCommandArgs {
+                command_id: "ui.resolve_inbox_item".to_owned(),
+                reason: format!(
+                    "inbox item '{}' was not found",
+                    request.inbox_item_id.as_str()
+                ),
+            });
+        };
+        if inbox_item.work_item_id != request.work_item_id {
+            return Err(CoreError::InvalidCommandArgs {
+                command_id: "ui.resolve_inbox_item".to_owned(),
+                reason: format!(
+                    "inbox item '{}' does not belong to work item '{}'",
+                    request.inbox_item_id.as_str(),
+                    request.work_item_id.as_str()
+                ),
+            });
+        }
+        if inbox_item.resolved {
+            return Ok(projection);
+        }
+
+        let session_id = projection
+            .work_items
+            .get(&request.work_item_id)
+            .and_then(|work_item| work_item.session_id.clone());
+        store.append(NewEventEnvelope {
+            event_id: format!("evt-inbox-resolved-{}", now_nanos()),
+            occurred_at: now_timestamp(),
+            work_item_id: Some(request.work_item_id.clone()),
+            session_id,
+            payload: OrchestrationEventPayload::InboxItemResolved(InboxItemResolvedPayload {
+                inbox_item_id: request.inbox_item_id.clone(),
+                work_item_id: request.work_item_id.clone(),
+            }),
+            schema_version: DOMAIN_EVENT_SCHEMA_VERSION,
+        })?;
+
+        let events = store.read_ordered()?;
+        Ok(rebuild_projection(&events))
+    }
+
     pub async fn start_linear_polling(
         &self,
         linear_ticketing_provider: Option<&LinearTicketingProvider>,
@@ -294,9 +343,7 @@ impl<S: Supervisor, G: GithubClient> App<S, G> {
             )));
         }
 
-        let git_bin = std::env::var_os("ORCHESTRATOR_GIT_BIN")
-            .filter(|value| !value.is_empty())
-            .unwrap_or_else(|| "git".into());
+        let git_bin = std::ffi::OsString::from(git_binary_from_config());
 
         let run_git = |args: &[&str]| -> Result<std::process::Output, CoreError> {
             Command::new(&git_bin)
@@ -658,13 +705,8 @@ fn resolve_repository_root_from_worktree(worktree_path: &PathBuf) -> Result<Path
     Ok(PathBuf::from(root))
 }
 
-fn run_git_command(
-    cwd: &std::path::Path,
-    args: &[&str],
-) -> Result<std::process::Output, CoreError> {
-    let git_bin = std::env::var_os("ORCHESTRATOR_GIT_BIN")
-        .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| "git".into());
+fn run_git_command(cwd: &std::path::Path, args: &[&str]) -> Result<std::process::Output, CoreError> {
+    let git_bin = std::ffi::OsString::from(git_binary_from_config());
 
     Command::new(&git_bin)
         .arg("-C")
@@ -718,12 +760,37 @@ fn sanitize_terminal_display_text(input: &str) -> String {
     output
 }
 
+static SUPERVISOR_MODEL_CONFIG: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+static GIT_BINARY_CONFIG: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+pub fn set_supervisor_model_config(model: String) {
+    let trimmed = model.trim();
+    if trimmed.is_empty() {
+        return;
+    }
+    let _ = SUPERVISOR_MODEL_CONFIG.set(trimmed.to_owned());
+}
+
+pub fn set_git_binary_config(binary: String) {
+    let trimmed = binary.trim();
+    if trimmed.is_empty() {
+        return;
+    }
+    let _ = GIT_BINARY_CONFIG.set(trimmed.to_owned());
+}
+
 fn supervisor_model_from_env() -> String {
-    std::env::var("ORCHESTRATOR_SUPERVISOR_MODEL")
-        .ok()
-        .map(|value| value.trim().to_owned())
-        .filter(|value| !value.is_empty())
+    SUPERVISOR_MODEL_CONFIG
+        .get()
+        .cloned()
         .unwrap_or_else(|| DEFAULT_SUPERVISOR_MODEL.to_owned())
+}
+
+fn git_binary_from_config() -> String {
+    GIT_BINARY_CONFIG
+        .get()
+        .cloned()
+        .unwrap_or_else(|| "git".to_owned())
 }
 
 #[async_trait::async_trait]
