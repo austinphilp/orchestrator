@@ -2154,6 +2154,7 @@ mod tests {
             handle_key_press(&mut shell_state, key(KeyCode::Char(ch)));
         }
         handle_key_press(&mut shell_state, key(KeyCode::Enter));
+        assert_eq!(shell_state.mode, UiMode::Insert);
 
         tokio::time::timeout(Duration::from_secs(1), async {
             loop {
@@ -3653,6 +3654,77 @@ mod tests {
         handle_key_press(&mut shell_state, key(KeyCode::Char('!')));
 
         assert_eq!(shell_state.terminal_compose_input.text(), "hi\n!");
+    }
+
+    #[tokio::test]
+    async fn terminal_submit_success_returns_to_normal_mode() {
+        let backend = Arc::new(ManualTerminalBackend::default());
+        let mut shell_state = UiShellState::new_with_integrations(
+            "ready".to_owned(),
+            sample_projection(true),
+            None,
+            None,
+            None,
+            Some(backend),
+        );
+        shell_state.open_terminal_and_enter_mode();
+        assert_eq!(shell_state.mode, UiMode::Terminal);
+
+        handle_key_press(&mut shell_state, key(KeyCode::Char('h')));
+        handle_key_press(&mut shell_state, key(KeyCode::Char('i')));
+        assert_eq!(shell_state.terminal_compose_input.text(), "hi");
+
+        handle_key_press(&mut shell_state, key(KeyCode::Enter));
+
+        assert_eq!(shell_state.terminal_compose_input.text(), "");
+        assert_eq!(shell_state.mode, UiMode::Normal);
+    }
+
+    #[tokio::test]
+    async fn terminal_submit_ctrl_enter_success_returns_to_normal_mode() {
+        let backend = Arc::new(ManualTerminalBackend::default());
+        let mut shell_state = UiShellState::new_with_integrations(
+            "ready".to_owned(),
+            sample_projection(true),
+            None,
+            None,
+            None,
+            Some(backend),
+        );
+        shell_state.open_terminal_and_enter_mode();
+        assert_eq!(shell_state.mode, UiMode::Terminal);
+
+        handle_key_press(&mut shell_state, key(KeyCode::Char('o')));
+        handle_key_press(&mut shell_state, key(KeyCode::Char('k')));
+        assert_eq!(shell_state.terminal_compose_input.text(), "ok");
+
+        handle_key_press(&mut shell_state, ctrl_key(KeyCode::Enter));
+
+        assert_eq!(shell_state.terminal_compose_input.text(), "");
+        assert_eq!(shell_state.mode, UiMode::Normal);
+    }
+
+    #[test]
+    fn terminal_submit_failure_keeps_terminal_mode() {
+        let backend = Arc::new(ManualTerminalBackend::default());
+        let mut shell_state = UiShellState::new_with_integrations(
+            "ready".to_owned(),
+            sample_projection(true),
+            None,
+            None,
+            None,
+            Some(backend),
+        );
+        shell_state.open_terminal_and_enter_mode();
+        assert_eq!(shell_state.mode, UiMode::Terminal);
+
+        handle_key_press(&mut shell_state, key(KeyCode::Enter));
+
+        assert_eq!(shell_state.mode, UiMode::Terminal);
+        assert!(shell_state
+            .status_warning
+            .as_deref()
+            .is_some_and(|warning| warning.contains("compose a non-empty message")));
     }
 
     #[test]

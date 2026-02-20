@@ -3151,6 +3151,7 @@ fn apply_ticket_picker_event(&mut self, event: TicketPickerEvent) {
                     let _ = backend.send_input(&handle, bytes.as_slice()).await;
                 });
                 self.terminal_compose_input.clear();
+                self.enter_normal_mode();
             }
             Err(_) => {
                 self.status_warning =
