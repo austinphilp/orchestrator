@@ -543,6 +543,11 @@ async fn run_ticket_picker_create_task(
             None
         }
     };
+    if created_ticket.assignee.is_none() {
+        warning.push(
+            "ticket may be unassigned: could not confirm assignment to API-key user".to_owned(),
+        );
+    }
 
     let _ = sender
         .send(TicketPickerEvent::TicketCreated {

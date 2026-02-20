@@ -8,6 +8,7 @@ use reqwest::{header, Client};
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use serde_json::{json, Value};
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 use tracing::warn;
 
@@ -69,6 +70,7 @@ impl ShortcutConfig {
 pub struct ShortcutTicketingProvider {
     config: ShortcutConfig,
     client: Client,
+    member_id_cache: Arc<RwLock<Option<String>>>,
 }
 
 impl ShortcutTicketingProvider {
@@ -91,7 +93,11 @@ impl ShortcutTicketingProvider {
                 CoreError::Configuration(format!("failed to build Shortcut HTTP client: {error}"))
             })?;
 
-        Ok(Self { config, client })
+        Ok(Self {
+            config,
+            client,
+            member_id_cache: Arc::new(RwLock::new(None)),
+        })
     }
 
     fn endpoint(&self, path: &str) -> String {
@@ -237,6 +243,40 @@ impl ShortcutTicketingProvider {
             }));
         self.request_status_only(response).await
     }
+
+    async fn resolve_api_key_member_id(&self) -> Result<Option<String>, CoreError> {
+        {
+            let cache = self
+                .member_id_cache
+                .read()
+                .expect("shortcut member cache read lock");
+            if let Some(member_id) = cache
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            {
+                return Ok(Some(member_id.to_owned()));
+            }
+        }
+
+        let request = self.client.get(self.endpoint("member"));
+        let payload = self.request_json::<Value>(request).await?;
+        let member_id = parse_shortcut_member_id(&payload).ok_or_else(|| {
+            CoreError::DependencyUnavailable(
+                "Shortcut member lookup returned no member id.".to_owned(),
+            )
+        })?;
+
+        {
+            let mut cache = self
+                .member_id_cache
+                .write()
+                .expect("shortcut member cache write lock");
+            *cache = Some(member_id.clone());
+        }
+
+        Ok(Some(member_id))
+    }
 }
 
 #[async_trait]
@@ -379,6 +419,19 @@ impl TicketingProvider for ShortcutTicketingProvider {
                 payload["project_id"] = json!(project_id);
             }
         }
+        if request.assign_to_api_key_user {
+            match self.resolve_api_key_member_id().await {
+                Ok(Some(member_id)) => {
+                    payload["owner_ids"] = json!([member_id]);
+                }
+                Ok(None) => {
+                    warn!("Shortcut member lookup returned empty id; creating ticket unassigned");
+                }
+                Err(error) => {
+                    warn!(error = %error, "Shortcut member lookup failed; creating ticket unassigned");
+                }
+            }
+        }
 
         let response = self.client.post(self.endpoint("stories")).json(&payload);
         let created: ShortcutStory = self.request_json(response).await?;
@@ -510,6 +563,27 @@ fn parse_shortcut_story(payload: Value) -> Result<ShortcutStory, CoreError> {
             "Shortcut response does not contain a story payload.".to_owned(),
         ))
     }
+}
+
+fn parse_shortcut_member_id(payload: &Value) -> Option<String> {
+    payload
+        .get("id")
+        .and_then(Value::as_str)
+        .or_else(|| {
+            payload
+                .get("member")
+                .and_then(|value| value.get("id"))
+                .and_then(Value::as_str)
+        })
+        .or_else(|| {
+            payload
+                .get("data")
+                .and_then(|value| value.get("id"))
+                .and_then(Value::as_str)
+        })
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
 }
 
 fn compose_shortcut_comment_body(
@@ -682,4 +756,33 @@ struct ShortcutWorkflowState {
     pub id: String,
     #[serde(default)]
     pub name: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_shortcut_member_id_reads_top_level_id() {
+        let payload = json!({ "id": "member-1" });
+        assert_eq!(
+            parse_shortcut_member_id(&payload),
+            Some("member-1".to_owned())
+        );
+    }
+
+    #[test]
+    fn parse_shortcut_member_id_reads_nested_member_id() {
+        let payload = json!({ "member": { "id": "member-2" } });
+        assert_eq!(
+            parse_shortcut_member_id(&payload),
+            Some("member-2".to_owned())
+        );
+    }
+
+    #[test]
+    fn parse_shortcut_member_id_returns_none_for_missing_id() {
+        let payload = json!({ "member": { "name": "Austin" } });
+        assert_eq!(parse_shortcut_member_id(&payload), None);
+    }
 }

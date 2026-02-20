@@ -672,6 +672,44 @@ async fn resolve_linear_create_context(
     })
 }
 
+async fn resolve_linear_viewer_id(
+    transport: &Arc<dyn GraphqlTransport>,
+    cache: &Arc<RwLock<TicketCache>>,
+) -> Result<Option<String>, CoreError> {
+    {
+        let cache = cache.read().expect("linear ticket cache read lock");
+        if let Some(viewer_id) = cache
+            .viewer_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            return Ok(Some(viewer_id.to_owned()));
+        }
+    }
+
+    let response = transport
+        .execute(GraphqlRequest::new(VIEWER_HEALTH_QUERY, json!({})))
+        .await
+        .map_err(|error| normalize_linear_api_error(error, "could not resolve Linear viewer id"))?;
+    let payload: ViewerHealthData = serde_json::from_value(response).map_err(|error| {
+        CoreError::DependencyUnavailable(format!(
+            "failed to decode Linear viewer lookup payload: {error}"
+        ))
+    })?;
+    let viewer_id = payload.viewer.id.trim().to_owned();
+    if viewer_id.is_empty() {
+        return Ok(None);
+    }
+
+    {
+        let mut cache = cache.write().expect("linear ticket cache write lock");
+        cache.viewer_id = Some(viewer_id.clone());
+    }
+
+    Ok(Some(viewer_id))
+}
+
 async fn resolve_linear_state_id(
     transport: &Arc<dyn GraphqlTransport>,
     issue_id: &str,

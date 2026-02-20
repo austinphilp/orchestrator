@@ -145,6 +145,7 @@ where
                 state: None,
                 priority: None,
                 labels: Vec::new(),
+                assign_to_api_key_user: true,
             })
             .await?;
 
