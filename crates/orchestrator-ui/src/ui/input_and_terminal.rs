@@ -215,7 +215,7 @@ fn default_keymap_config() -> KeymapConfig {
                     binding(&["I"], UiCommand::OpenTerminalForSelected),
                     binding(&["o"], UiCommand::OpenSessionOutputForSelectedInbox),
                     binding(&["D"], UiCommand::ToggleWorktreeDiffModal),
-                    binding(&["n"], UiCommand::AdvanceTerminalWorkflowStage),
+                    binding(&["w", "n"], UiCommand::AdvanceTerminalWorkflowStage),
                     binding(&["x"], UiCommand::ArchiveSelectedSession),
                     binding(&["backspace"], UiCommand::MinimizeCenterView),
                     binding(&["z", "1"], UiCommand::JumpBatchDecideOrUnblock),
@@ -235,6 +235,10 @@ fn default_keymap_config() -> KeymapConfig {
                     KeyPrefixConfig {
                         keys: vec!["v".to_owned()],
                         label: "Artifact inspectors".to_owned(),
+                    },
+                    KeyPrefixConfig {
+                        keys: vec!["w".to_owned()],
+                        label: "Workflow Actions".to_owned(),
                     },
                 ],
             },
@@ -270,10 +274,10 @@ enum RoutedInput {
 fn mode_help(mode: UiMode) -> &'static str {
     match mode {
         UiMode::Normal => {
-            "j/k: move in focused panel (right pane scrolls session output) | Tab: cycle left-panel focus | Shift+Tab: toggle left/right pane focus | [ ]: batch cycle | 1-4 or z{1-4}: batch jump | g/G: first/last in focused panel (G in right pane: bottom) | s: start ticket | c: supervisor chat | Enter: focus | i: insert/notes mode | I: open terminal | o: open associated session output + acknowledge inbox item | D: worktree diff modal | n: advance session workflow | x: archive selected session | v{d/t/p/c}: inspectors | q: quit"
+            "j/k: move in focused panel (right pane scrolls session output) | Tab: cycle left-panel focus | Shift+Tab: toggle left/right pane focus | [ ]: batch cycle | 1-4 or z{1-4}: batch jump | g/G: first/last in focused panel (G in right pane: bottom) | s: start ticket | c: supervisor chat | Enter: focus | i: insert/notes mode | I: open terminal | o: open associated session output + acknowledge inbox item | D: worktree diff modal | w n: advance session workflow | x: archive selected session | v{d/t/p/c}: inspectors | q: quit"
         }
         UiMode::Insert => "Insert input active | Esc/Ctrl-[: Normal",
-        UiMode::Terminal => "Terminal compose active | Enter send | Shift+Enter newline | Esc or Ctrl-\\ Ctrl-n: Normal | then n: advance workflow",
+        UiMode::Terminal => "Terminal compose active | Enter send | Shift+Enter newline | Esc or Ctrl-\\ Ctrl-n: Normal | then w n: advance workflow",
     }
 }
 
