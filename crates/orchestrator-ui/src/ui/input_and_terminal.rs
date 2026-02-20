@@ -310,7 +310,7 @@ fn bottom_bar_hint_groups(mode: UiMode) -> &'static [BottomBarHintGroup] {
         UiMode::Terminal => &[
             BottomBarHintGroup {
                 label: "Terminal:",
-                hints: &["Enter send", "Shift+Enter newline"],
+                hints: &["Vim i/Esc", "Enter send (Normal)", "Ctrl+Enter send"],
             },
             BottomBarHintGroup {
                 label: "Back:",
@@ -596,6 +596,15 @@ fn route_key_press(shell_state: &mut UiShellState, key: KeyEvent) -> RoutedInput
             }
             _ => {}
         }
+    }
+
+    if shell_state.mode == UiMode::Terminal
+        && shell_state.is_terminal_view_active()
+        && key.code == KeyCode::Esc
+        && key.modifiers.is_empty()
+        && shell_state.apply_terminal_compose_key(key)
+    {
+        return RoutedInput::Ignore;
     }
 
     if is_escape_to_normal(key) {
