@@ -1790,6 +1790,60 @@ mod tests {
         assert!(shell_state.mode == UiMode::Terminal);
     }
 
+    #[tokio::test]
+    async fn submit_needs_input_auto_acknowledges_needs_decision_inbox_items() {
+        let backend = Arc::new(ManualTerminalBackend::default());
+        let mut projection = sample_projection(true);
+        projection.inbox_items.insert(
+            InboxItemId::new("inbox-1"),
+            InboxItemProjection {
+                id: InboxItemId::new("inbox-1"),
+                work_item_id: WorkItemId::new("wi-1"),
+                kind: InboxItemKind::NeedsDecision,
+                title: "Need implementation decision".to_owned(),
+                resolved: false,
+            },
+        );
+        let mut shell_state = UiShellState::new_with_integrations(
+            "ready".to_owned(),
+            projection,
+            None,
+            None,
+            None,
+            Some(backend),
+        );
+        shell_state.open_terminal_and_enter_mode();
+
+        let sender = shell_state
+            .terminal_session_sender
+            .clone()
+            .expect("terminal sender");
+        sender
+            .try_send(TerminalSessionEvent::NeedsInput {
+                session_id: WorkerSessionId::new("sess-1"),
+                needs_input: BackendNeedsInputEvent {
+                    prompt_id: "prompt-needs-decision".to_owned(),
+                    question: "Pick implementation path".to_owned(),
+                    options: vec!["A".to_owned(), "B".to_owned()],
+                    default_option: Some("A".to_owned()),
+                    questions: Vec::new(),
+                },
+            })
+            .expect("queue needs-input event");
+        shell_state.poll_terminal_session_events();
+
+        let _ = route_needs_input_modal_key(&mut shell_state, key(KeyCode::Enter));
+
+        assert!(
+            shell_state
+                .domain
+                .inbox_items
+                .get(&InboxItemId::new("inbox-1"))
+                .map(|item| item.resolved)
+                .unwrap_or(false)
+        );
+    }
+
     #[test]
     fn planning_needs_input_option_navigation_activates_from_normal_mode() {
         let backend = Arc::new(ManualTerminalBackend::default());
@@ -4169,7 +4223,11 @@ mod tests {
         match event {
             MergeQueueEvent::SessionFinalized {
                 session_id: event_session_id,
-            } => assert_eq!(event_session_id, session_id),
+                projection,
+            } => {
+                assert_eq!(event_session_id, session_id);
+                assert!(projection.is_some());
+            }
             _ => panic!("expected merge finalize success event"),
         }
     }
@@ -4248,9 +4306,11 @@ mod tests {
             TicketPickerEvent::SessionArchived {
                 session_id: event_session_id,
                 warning,
+                projection,
             } => {
                 assert_eq!(event_session_id, session_id);
                 assert!(warning.is_none());
+                assert!(projection.is_some());
             }
             _ => panic!("expected session archived event"),
         }

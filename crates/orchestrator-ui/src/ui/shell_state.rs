@@ -814,6 +814,34 @@ impl UiShellState {
             work_item_id,
         });
     }
+
+    fn acknowledge_needs_decision_for_work_item(&mut self, work_item_id: &WorkItemId) {
+        let Some(work_item) = self.domain.work_items.get(work_item_id) else {
+            return;
+        };
+        let to_resolve = work_item
+            .inbox_items
+            .iter()
+            .filter_map(|inbox_item_id| {
+                self.domain
+                    .inbox_items
+                    .get(inbox_item_id)
+                    .filter(|item| !item.resolved && item.kind == InboxItemKind::NeedsDecision)
+                    .map(|_| inbox_item_id.clone())
+            })
+            .collect::<Vec<_>>();
+
+        for inbox_item_id in to_resolve {
+            if let Some(item) = self.domain.inbox_items.get_mut(&inbox_item_id) {
+                item.resolved = true;
+            }
+            self.spawn_resolve_inbox_item(InboxResolveRequest {
+                inbox_item_id,
+                work_item_id: work_item_id.clone(),
+            });
+        }
+    }
+
     fn publish_inbox_for_session(
         &mut self,
         session_id: &WorkerSessionId,
@@ -1664,7 +1692,13 @@ impl UiShellState {
                         ));
                     }
                 }
-                MergeQueueEvent::SessionFinalized { session_id } => {
+                MergeQueueEvent::SessionFinalized {
+                    session_id,
+                    projection,
+                } => {
+                    if let Some(projection) = projection {
+                        self.domain = projection;
+                    }
                     self.merge_finalizing_sessions.remove(&session_id);
                 }
                 MergeQueueEvent::SessionFinalizeFailed {
@@ -2332,10 +2366,13 @@ fn apply_ticket_picker_event(&mut self, event: TicketPickerEvent) {
             TicketPickerEvent::SessionArchived {
                 session_id,
                 warning,
+                projection,
             } => {
                 self.archiving_session_id = None;
                 self.archive_session_confirm_session = None;
-                if let Some(session) = self.domain.sessions.get_mut(&session_id) {
+                if let Some(projection) = projection {
+                    self.domain = projection;
+                } else if let Some(session) = self.domain.sessions.get_mut(&session_id) {
                     session.status = Some(WorkerSessionStatus::Done);
                 }
                 self.terminal_session_states.remove(&session_id);
@@ -3351,6 +3388,9 @@ fn apply_ticket_picker_event(&mut self, event: TicketPickerEvent) {
                 });
                 if let Some(view) = self.terminal_session_states.get_mut(&session_id) {
                     view.complete_active_needs_input_prompt();
+                }
+                if let Some(work_item_id) = self.work_item_id_for_session(&session_id) {
+                    self.acknowledge_needs_decision_for_work_item(&work_item_id);
                 }
             }
             Err(_) => {
