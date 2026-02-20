@@ -4,6 +4,7 @@ pub struct Ui {
     supervisor_command_dispatcher: Option<Arc<dyn SupervisorCommandDispatcher>>,
     ticket_picker_provider: Option<Arc<dyn TicketPickerProvider>>,
     worker_backend: Option<Arc<dyn WorkerBackend>>,
+    keyboard_enhancement_enabled: bool,
 }
 
 impl Ui {
@@ -11,6 +12,16 @@ impl Ui {
         enable_raw_mode()?;
         let mut stdout = io::stdout();
         stdout.execute(EnterAlternateScreen)?;
+        let keyboard_enhancement_enabled = match crossterm::terminal::supports_keyboard_enhancement()
+        {
+            Ok(true) => stdout
+                .execute(crossterm::event::PushKeyboardEnhancementFlags(
+                    crossterm::event::KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
+                        | crossterm::event::KeyboardEnhancementFlags::REPORT_EVENT_TYPES,
+                ))
+                .is_ok(),
+            _ => false,
+        };
         let backend = CrosstermBackend::new(stdout);
         let terminal = Terminal::new(backend)?;
         Ok(Self {
@@ -19,6 +30,7 @@ impl Ui {
             supervisor_command_dispatcher: None,
             ticket_picker_provider: None,
             worker_backend: None,
+            keyboard_enhancement_enabled,
         })
     }
 
@@ -339,6 +351,9 @@ impl Ui {
 
 impl Drop for Ui {
     fn drop(&mut self) {
+        if self.keyboard_enhancement_enabled {
+            let _ = io::stdout().execute(crossterm::event::PopKeyboardEnhancementFlags);
+        }
         let _ = disable_raw_mode();
         let _ = io::stdout().execute(SetCursorStyle::DefaultUserShape);
         let _ = io::stdout().execute(LeaveAlternateScreen);

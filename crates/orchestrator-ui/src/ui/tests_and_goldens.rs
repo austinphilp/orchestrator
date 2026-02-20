@@ -3886,6 +3886,28 @@ mod tests {
     }
 
     #[test]
+    fn ticket_picker_new_ticket_mode_ignores_shift_enter_with_extra_modifiers() {
+        let mut shell_state = UiShellState::new("ready".to_owned(), triage_projection());
+        shell_state.ticket_picker_overlay.open();
+        shell_state.ticket_picker_overlay.begin_new_ticket_mode();
+        shell_state
+            .ticket_picker_overlay
+            .new_ticket_brief_input
+            .set_text("draft");
+
+        route_ticket_picker_key(
+            &mut shell_state,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT | KeyModifiers::ALT),
+        );
+
+        assert_eq!(
+            shell_state.ticket_picker_overlay.new_ticket_brief_input.text(),
+            "draft"
+        );
+        assert!(shell_state.ticket_picker_overlay.new_ticket_mode);
+    }
+
+    #[test]
     fn ticket_picker_esc_cancels_new_ticket_mode_without_closing_overlay() {
         let mut shell_state = UiShellState::new("ready".to_owned(), triage_projection());
         shell_state.ticket_picker_overlay.open();
@@ -4014,6 +4036,29 @@ mod tests {
             shell_state.status_warning.as_deref(),
             Some("created AP-499")
         );
+    }
+
+    #[test]
+    fn ticket_created_event_create_and_start_attempts_session_start() {
+        let mut shell_state = UiShellState::new("ready".to_owned(), triage_projection());
+        shell_state.ticket_picker_overlay.open();
+        shell_state.ticket_picker_overlay.loading = false;
+
+        let created = sample_ticket_summary("issue-498", "AP-498", "Todo");
+        shell_state.apply_ticket_picker_event(TicketPickerEvent::TicketCreated {
+            created_ticket: created,
+            submit_mode: TicketCreateSubmitMode::CreateAndStart,
+            projection: None,
+            tickets: Some(vec![sample_ticket_summary("issue-401", "AP-401", "Todo")]),
+            warning: None,
+        });
+
+        assert!(shell_state
+            .ticket_picker_overlay
+            .error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("ticket provider unavailable while starting ticket"));
     }
 
     #[test]
