@@ -46,7 +46,6 @@ enum FixtureUiMode {
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum FixtureCenterView {
-    Inbox,
     FocusCard {
         inbox_item_id: InboxItemId,
     },
@@ -62,7 +61,6 @@ enum FixtureCenterView {
 impl FixtureCenterView {
     fn into_center_view(self) -> CenterView {
         match self {
-            Self::Inbox => CenterView::InboxView,
             Self::FocusCard { inbox_item_id } => CenterView::FocusCardView { inbox_item_id },
             Self::Terminal { session_id } => CenterView::TerminalView { session_id },
             Self::Inspector {

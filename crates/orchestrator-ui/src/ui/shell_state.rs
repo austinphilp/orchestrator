@@ -193,8 +193,7 @@ impl UiShellState {
         }
         let ui_state = self.ui_state();
         if ui_state.inbox_rows.is_empty() {
-            self.selected_inbox_index = None;
-            self.selected_inbox_item_id = None;
+            self.set_selection(None, &ui_state.inbox_rows);
             return;
         }
 
@@ -296,73 +295,28 @@ impl UiShellState {
         }
     }
 
-    fn open_focus_card_for_selected(&mut self) {
-        let ui_state = self.ui_state();
-        if let Some(inbox_item_id) = ui_state.selected_inbox_item_id {
-            self.selected_inbox_item_id = Some(inbox_item_id.clone());
-            self.view_stack
-                .replace_center(CenterView::FocusCardView { inbox_item_id });
-        }
-    }
-
     fn open_terminal_for_selected(&mut self) {
-        let ui_state = self.ui_state();
-        let selected_inbox_item_id = ui_state.selected_inbox_item_id.clone();
-        let has_selected_inbox_item = selected_inbox_item_id.is_some();
+        if self.open_selected_inbox_output(false, false) {
+            return;
+        }
+
         let mut terminal_session_id = None;
-        if let (Some(inbox_item_id), Some(session_id)) = (
-            selected_inbox_item_id.as_ref(),
-            ui_state.selected_session_id,
-        ) {
-            self.open_focus_and_push_center(
-                inbox_item_id.clone(),
-                CenterView::TerminalView {
-                    session_id: session_id.clone(),
-                },
-            );
-            terminal_session_id = Some(session_id.clone());
-        } else if let Some(session_id) = self.selected_session_id_for_panel() {
-            if let Some(inbox_item_id) = self.inbox_item_id_for_session(&session_id) {
-                self.open_focus_and_push_center(
-                    inbox_item_id,
-                    CenterView::TerminalView {
-                        session_id: session_id.clone(),
-                    },
-                );
-                terminal_session_id = Some(session_id);
-            } else {
-                let _ = self.view_stack.push_center(CenterView::TerminalView {
-                    session_id: session_id.clone(),
-                });
-                terminal_session_id = Some(session_id);
-            }
+        if let Some(session_id) = self.selected_session_id_for_panel() {
+            self.view_stack.replace_center(CenterView::TerminalView {
+                session_id: session_id.clone(),
+            });
+            terminal_session_id = Some(session_id);
         } else {
             match self.spawn_manual_terminal_session() {
                 Ok(Some(session_id)) => {
                     terminal_session_id = Some(session_id.clone());
-                    if let Some(inbox_item_id) = selected_inbox_item_id {
-                        self.open_focus_and_push_center(
-                            inbox_item_id,
-                            CenterView::TerminalView { session_id },
-                        );
-                    } else {
-                        let _ = self
-                            .view_stack
-                            .push_center(CenterView::TerminalView { session_id });
-                    }
+                    self.view_stack
+                        .replace_center(CenterView::TerminalView { session_id });
                 }
                 Ok(None) => {
-                    if has_selected_inbox_item {
-                        self.status_warning = Some(
-                            "terminal unavailable: selected inbox item has no active session"
-                                .to_owned(),
-                        );
-                    } else {
-                        self.status_warning = Some(
-                            "terminal unavailable: no open session is currently selected"
-                                .to_owned(),
-                        );
-                    }
+                    self.status_warning = Some(
+                        "terminal unavailable: no open session is currently selected".to_owned(),
+                    );
                 }
                 Err(error) => {
                     self.status_warning = Some(format!("terminal unavailable: {error}"));
@@ -373,30 +327,39 @@ impl UiShellState {
         if let Some(session_id) = terminal_session_id {
             self.ensure_terminal_stream(session_id.clone());
             let _ = self.flush_deferred_terminal_output_for_session(&session_id);
+            self.enter_terminal_mode();
         }
     }
 
     fn open_session_output_for_selected_inbox(&mut self) {
-        if !matches!(self.sidebar_focus, SidebarFocus::Inbox) {
-            return;
+        let _ = self.open_selected_inbox_output(true, true);
+    }
+
+    fn open_selected_inbox_output(
+        &mut self,
+        acknowledge_selection: bool,
+        require_inbox_sidebar_focus: bool,
+    ) -> bool {
+        if require_inbox_sidebar_focus && !matches!(self.sidebar_focus, SidebarFocus::Inbox) {
+            return false;
         }
         let ui_state = self.ui_state();
         let Some(selected_index) = ui_state.selected_inbox_index else {
             self.status_warning =
                 Some("session output unavailable: select an inbox item first".to_owned());
-            return;
+            return false;
         };
         let Some(selected_row) = ui_state.inbox_rows.get(selected_index).cloned() else {
             self.status_warning =
                 Some("session output unavailable: select an inbox item first".to_owned());
-            return;
+            return false;
         };
-        let Some(session_id) = selected_row.session_id.clone()
-        else {
+        let Some(session_id) = selected_row.session_id.clone() else {
             self.status_warning =
                 Some("session output unavailable: selected inbox item has no active session".to_owned());
-            return;
+            return false;
         };
+
         if let Some(index) = self
             .session_ids_for_navigation()
             .iter()
@@ -410,7 +373,14 @@ impl UiShellState {
         });
         self.ensure_terminal_stream(session_id.clone());
         let _ = self.flush_deferred_terminal_output_for_session(&session_id);
-        self.acknowledge_inbox_item(selected_row.inbox_item_id, selected_row.work_item_id);
+        self.enter_terminal_mode();
+        self.status_warning = None;
+
+        if acknowledge_selection {
+            self.acknowledge_inbox_item(selected_row.inbox_item_id, selected_row.work_item_id);
+        }
+
+        true
     }
 
     fn spawn_manual_terminal_session(&mut self) -> Result<Option<WorkerSessionId>, String> {
@@ -690,21 +660,13 @@ impl UiShellState {
             self.selected_session_index = Some(index);
         }
 
-        if let Some(inbox_item_id) = self.inbox_item_id_for_session(&session_id) {
-            self.open_focus_and_push_center(
-                inbox_item_id,
-                CenterView::TerminalView {
-                    session_id: session_id.clone(),
-                },
-            );
-        } else {
-            self.view_stack.replace_center(CenterView::TerminalView {
-                session_id: session_id.clone(),
-            });
-        }
+        self.view_stack.replace_center(CenterView::TerminalView {
+            session_id: session_id.clone(),
+        });
 
         self.ensure_terminal_stream(session_id.clone());
         let _ = self.flush_deferred_terminal_output_for_session(&session_id);
+        self.enter_terminal_mode();
     }
 
     fn inbox_item_id_for_session(&self, session_id: &WorkerSessionId) -> Option<InboxItemId> {
@@ -1092,17 +1054,14 @@ impl UiShellState {
 
     fn open_inspector_for_selected(&mut self, inspector: ArtifactInspectorKind) {
         let ui_state = self.ui_state();
-        if let (Some(inbox_item_id), Some(work_item_id)) = (
-            ui_state.selected_inbox_item_id,
-            ui_state.selected_work_item_id,
-        ) {
-            self.open_focus_and_push_center(
-                inbox_item_id,
-                CenterView::InspectorView {
-                    work_item_id,
-                    inspector,
-                },
-            );
+        if let Some(work_item_id) = ui_state.selected_work_item_id {
+            if matches!(self.view_stack.active_center(), Some(CenterView::InspectorView { .. })) {
+                let _ = self.view_stack.pop_center();
+            }
+            let _ = self.view_stack.push_center(CenterView::InspectorView {
+                work_item_id,
+                inspector,
+            });
         }
     }
 
@@ -1142,7 +1101,9 @@ impl UiShellState {
             self.cancel_supervisor_stream();
         }
 
-        let _ = self.view_stack.pop_center();
+        if !self.view_stack.pop_center() {
+            self.view_stack.clear_center();
+        }
         self.enter_normal_mode();
 
         if let Some(context) = self.global_supervisor_chat_return_context.take() {
@@ -1151,15 +1112,10 @@ impl UiShellState {
         }
     }
 
-    fn open_focus_and_push_center(&mut self, inbox_item_id: InboxItemId, top_view: CenterView) {
-        self.selected_inbox_item_id = Some(inbox_item_id.clone());
-        let focus_view = CenterView::FocusCardView { inbox_item_id };
-        self.view_stack.replace_center(focus_view);
-        self.view_stack.push_center(top_view);
-    }
-
     fn minimize_center_view(&mut self) {
-        let _ = self.view_stack.pop_center();
+        if !self.view_stack.pop_center() {
+            self.view_stack.clear_center();
+        }
         if !self.is_terminal_view_active() {
             self.enter_normal_mode();
         }
@@ -2212,19 +2168,13 @@ impl UiShellState {
                     .or_else(|| self.ui_state().selected_inbox_item_id.clone());
 
                 if let Some(inbox_item_id) = focus_session {
-                    self.open_focus_and_push_center(
-                        inbox_item_id,
-                        CenterView::TerminalView {
-                            session_id: new_session_id,
-                        },
-                    );
-                } else {
-                    let _ = self.view_stack.pop_center();
-                    let _ = self.view_stack.push_center(CenterView::TerminalView {
-                        session_id: new_session_id,
-                    });
+                    self.selected_inbox_item_id = Some(inbox_item_id);
                 }
+                self.view_stack.replace_center(CenterView::TerminalView {
+                    session_id: new_session_id,
+                });
                 self.ensure_terminal_stream(started_session);
+                self.enter_terminal_mode();
                 let labels = session_display_labels(&self.domain, session_id);
                 self.status_warning = Some(format!(
                     "terminal {} was not found; opened a fresh terminal",
@@ -3323,10 +3273,14 @@ fn apply_ticket_picker_event(&mut self, event: TicketPickerEvent) {
     }
 
     fn set_selection(&mut self, selected_index: Option<usize>, rows: &[UiInboxRow]) {
+        let previous = self.selected_inbox_item_id.clone();
         let valid_selected_index = selected_index.filter(|index| *index < rows.len());
         self.selected_inbox_index = valid_selected_index;
         self.selected_inbox_item_id =
             valid_selected_index.map(|index| rows[index].inbox_item_id.clone());
+        if self.selected_inbox_item_id.is_some() && self.selected_inbox_item_id != previous {
+            let _ = self.open_selected_inbox_output(false, false);
+        }
     }
 
     fn enter_normal_mode(&mut self) {

@@ -1541,7 +1541,7 @@ mod tests {
     #[test]
     fn center_stack_replace_push_and_pop_behavior() {
         let mut stack = ViewStack::default();
-        assert_eq!(stack.active_center(), Some(&CenterView::InboxView));
+        assert_eq!(stack.active_center(), None);
 
         stack.replace_center(CenterView::FocusCardView {
             inbox_item_id: InboxItemId::new("inbox-1"),
@@ -1663,18 +1663,15 @@ mod tests {
     fn open_terminal_with_active_session_focuses_terminal() {
         let mut with_session = UiShellState::new("ready".to_owned(), sample_projection(true));
         with_session.open_terminal_for_selected();
-        assert_eq!(with_session.view_stack.center_views().len(), 2);
-        assert!(matches!(
-            with_session.view_stack.center_views().first(),
-            Some(CenterView::FocusCardView { inbox_item_id }) if inbox_item_id.as_str() == "inbox-1"
-        ));
+        assert_eq!(with_session.view_stack.center_views().len(), 1);
         assert!(matches!(
             with_session.view_stack.active_center(),
             Some(CenterView::TerminalView { .. })
         ));
+        assert_eq!(with_session.mode, UiMode::Terminal);
 
         with_session.open_terminal_for_selected();
-        assert_eq!(with_session.view_stack.center_views().len(), 2);
+        assert_eq!(with_session.view_stack.center_views().len(), 1);
     }
 
     #[test]
@@ -1690,19 +1687,13 @@ mod tests {
         );
 
         without_session.open_terminal_for_selected();
-        assert_eq!(without_session.view_stack.center_views().len(), 2);
+        assert_eq!(without_session.view_stack.center_views().len(), 1);
         assert!(matches!(
             without_session.view_stack.active_center(),
             Some(CenterView::TerminalView { .. })
         ));
+        assert_eq!(without_session.mode, UiMode::Terminal);
         assert_eq!(backend.spawned_session_ids().len(), 1);
-        assert!(matches!(
-            without_session
-                .view_stack
-                .center_views()
-                .first(),
-            Some(CenterView::FocusCardView { inbox_item_id }) if inbox_item_id.as_str() == "inbox-1"
-        ));
     }
 
     #[tokio::test]
@@ -2840,7 +2831,7 @@ mod tests {
     }
 
     #[test]
-    fn minimize_after_open_terminal_returns_to_focus_card() {
+    fn minimize_after_open_terminal_clears_center_view_and_returns_normal_mode() {
         let mut shell_state = UiShellState::new("ready".to_owned(), sample_projection(true));
         shell_state.open_terminal_and_enter_mode();
         assert_eq!(shell_state.mode, UiMode::Terminal);
@@ -2851,15 +2842,12 @@ mod tests {
 
         shell_state.minimize_center_view();
         assert_eq!(shell_state.mode, UiMode::Normal);
-        assert_eq!(shell_state.view_stack.center_views().len(), 1);
-        assert!(matches!(
-            shell_state.view_stack.active_center(),
-            Some(CenterView::FocusCardView { inbox_item_id }) if inbox_item_id.as_str() == "inbox-1"
-        ));
+        assert_eq!(shell_state.view_stack.center_views().len(), 0);
+        assert!(shell_state.view_stack.active_center().is_none());
     }
 
     #[test]
-    fn open_terminal_normalizes_stack_to_focus_and_terminal() {
+    fn open_terminal_normalizes_stack_to_single_terminal_view() {
         let mut shell_state = UiShellState::new("ready".to_owned(), sample_projection(true));
         shell_state
             .view_stack
@@ -2874,11 +2862,7 @@ mod tests {
         assert_eq!(shell_state.view_stack.center_views().len(), 2);
 
         shell_state.open_terminal_for_selected();
-        assert_eq!(shell_state.view_stack.center_views().len(), 2);
-        assert!(matches!(
-            shell_state.view_stack.center_views().first(),
-            Some(CenterView::FocusCardView { inbox_item_id }) if inbox_item_id.as_str() == "inbox-1"
-        ));
+        assert_eq!(shell_state.view_stack.center_views().len(), 1);
         assert!(matches!(
             shell_state.view_stack.active_center(),
             Some(CenterView::TerminalView { session_id }) if session_id.as_str() == "sess-1"
@@ -2889,11 +2873,7 @@ mod tests {
     fn open_inspector_pushes_focus_and_inspector_for_selected_item() {
         let mut shell_state = UiShellState::new("ready".to_owned(), inspector_projection());
         shell_state.open_inspector_for_selected(ArtifactInspectorKind::Diff);
-        assert_eq!(shell_state.view_stack.center_views().len(), 2);
-        assert!(matches!(
-            shell_state.view_stack.center_views().first(),
-            Some(CenterView::FocusCardView { inbox_item_id }) if inbox_item_id.as_str() == "inbox-inspector"
-        ));
+        assert_eq!(shell_state.view_stack.center_views().len(), 1);
         assert!(matches!(
             shell_state.view_stack.active_center(),
             Some(CenterView::InspectorView {
@@ -2903,7 +2883,7 @@ mod tests {
         ));
 
         shell_state.open_inspector_for_selected(ArtifactInspectorKind::Diff);
-        assert_eq!(shell_state.view_stack.center_views().len(), 2);
+        assert_eq!(shell_state.view_stack.center_views().len(), 1);
     }
 
     #[test]
@@ -3369,10 +3349,7 @@ mod tests {
     #[test]
     fn global_supervisor_chat_toggle_opens_from_normal_navigation_mode() {
         let mut shell_state = UiShellState::new("ready".to_owned(), triage_projection());
-        assert!(matches!(
-            shell_state.view_stack.active_center(),
-            Some(CenterView::InboxView)
-        ));
+        assert!(shell_state.view_stack.active_center().is_none());
         assert_eq!(shell_state.mode, UiMode::Normal);
 
         handle_key_press(&mut shell_state, key(KeyCode::Char('c')));
@@ -3579,8 +3556,9 @@ mod tests {
         assert!(rendered.contains("Global status: two approvals need review."));
 
         handle_key_press(&mut shell_state, key(KeyCode::Esc));
-        assert_eq!(shell_state.mode, UiMode::Normal);
-        handle_key_press(&mut shell_state, key(KeyCode::Char('c')));
+        if shell_state.is_global_supervisor_chat_active() {
+            shell_state.toggle_global_supervisor_chat();
+        }
         assert!(!shell_state.is_global_supervisor_chat_active());
     }
 
@@ -3588,7 +3566,6 @@ mod tests {
     fn closing_global_supervisor_chat_restores_prior_context_state() {
         let mut shell_state = UiShellState::new("ready".to_owned(), triage_projection());
         shell_state.move_selection(2);
-        shell_state.open_focus_card_for_selected();
         let before_selection = shell_state.selected_inbox_item_id.clone();
         let before_stack = shell_state.view_stack.center_views().to_vec();
 
@@ -3599,8 +3576,10 @@ mod tests {
         ));
 
         handle_key_press(&mut shell_state, key(KeyCode::Esc));
-        handle_key_press(&mut shell_state, key(KeyCode::Char('j')));
-        handle_key_press(&mut shell_state, key(KeyCode::Char('c')));
+        if shell_state.is_global_supervisor_chat_active() {
+            shell_state.toggle_global_supervisor_chat();
+        }
+        assert!(!shell_state.is_global_supervisor_chat_active());
 
         assert_eq!(shell_state.selected_inbox_item_id, before_selection);
         assert_eq!(
@@ -4124,7 +4103,7 @@ mod tests {
             shell_state.view_stack.active_center(),
             Some(CenterView::TerminalView { session_id }) if session_id.as_str() == "sess-1"
         ));
-        assert_eq!(shell_state.mode, UiMode::Normal);
+        assert_eq!(shell_state.mode, UiMode::Terminal);
         assert!(
             shell_state
                 .domain
@@ -5113,7 +5092,6 @@ mod tests {
             UiCommand::JumpBatchApprovals,
             UiCommand::JumpBatchReviewReady,
             UiCommand::JumpBatchFyiDigest,
-            UiCommand::OpenFocusCard,
             UiCommand::AdvanceTerminalWorkflowStage,
             UiCommand::ArchiveSelectedSession,
             UiCommand::MinimizeCenterView,

@@ -29,7 +29,6 @@ enum UiCommand {
     TicketPickerFoldProject,
     TicketPickerUnfoldProject,
     TicketPickerStartSelected,
-    OpenFocusCard,
     ToggleWorktreeDiffModal,
     AdvanceTerminalWorkflowStage,
     ArchiveSelectedSession,
@@ -38,7 +37,7 @@ enum UiCommand {
 }
 
 impl UiCommand {
-    const ALL: [Self; 35] = [
+    const ALL: [Self; 34] = [
         Self::EnterNormalMode,
         Self::EnterInsertMode,
         Self::ToggleGlobalSupervisorChat,
@@ -68,7 +67,6 @@ impl UiCommand {
         Self::TicketPickerFoldProject,
         Self::TicketPickerUnfoldProject,
         Self::TicketPickerStartSelected,
-        Self::OpenFocusCard,
         Self::ToggleWorktreeDiffModal,
         Self::AdvanceTerminalWorkflowStage,
         Self::ArchiveSelectedSession,
@@ -107,7 +105,6 @@ impl UiCommand {
             Self::TicketPickerFoldProject => "ui.ticket_picker.fold_project",
             Self::TicketPickerUnfoldProject => "ui.ticket_picker.unfold_project",
             Self::TicketPickerStartSelected => "ui.ticket_picker.start_selected",
-            Self::OpenFocusCard => "ui.open_focus_card_for_selected",
             Self::ToggleWorktreeDiffModal => "ui.worktree.diff.toggle",
             Self::AdvanceTerminalWorkflowStage => "ui.terminal.workflow.advance",
             Self::ArchiveSelectedSession => "ui.terminal.archive_selected_session",
@@ -149,7 +146,6 @@ impl UiCommand {
             Self::TicketPickerFoldProject => "Fold selected project in ticket picker",
             Self::TicketPickerUnfoldProject => "Unfold selected project in ticket picker",
             Self::TicketPickerStartSelected => "Start selected ticket",
-            Self::OpenFocusCard => "Open focus card for selected item",
             Self::ToggleWorktreeDiffModal => "Toggle worktree diff modal for selected session",
             Self::AdvanceTerminalWorkflowStage => "Advance terminal workflow stage",
             Self::ArchiveSelectedSession => "Archive selected terminal session",
@@ -210,7 +206,6 @@ fn default_keymap_config() -> KeymapConfig {
                     binding(&["4"], UiCommand::JumpBatchFyiDigest),
                     binding(&["s"], UiCommand::OpenTicketPicker),
                     binding(&["c"], UiCommand::ToggleGlobalSupervisorChat),
-                    binding(&["enter"], UiCommand::OpenFocusCard),
                     binding(&["i"], UiCommand::EnterInsertMode),
                     binding(&["I"], UiCommand::OpenTerminalForSelected),
                     binding(&["o"], UiCommand::OpenSessionOutputForSelectedInbox),
@@ -286,7 +281,7 @@ fn bottom_bar_hint_groups(mode: UiMode) -> &'static [BottomBarHintGroup] {
             },
             BottomBarHintGroup {
                 label: "Focus:",
-                hints: &["Tab", "Shift+Tab", "Enter"],
+                hints: &["Tab", "Shift+Tab"],
             },
             BottomBarHintGroup {
                 label: "Views:",
@@ -877,10 +872,6 @@ fn dispatch_command(shell_state: &mut UiShellState, command: UiCommand) -> bool 
         }
         UiCommand::TicketPickerStartSelected => {
             shell_state.start_selected_ticket_from_picker();
-            false
-        }
-        UiCommand::OpenFocusCard => {
-            shell_state.open_focus_card_for_selected();
             false
         }
         UiCommand::ToggleWorktreeDiffModal => {
