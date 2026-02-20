@@ -454,6 +454,37 @@ mod tests {
         projection
     }
 
+    fn sample_worktree_diff_content(additions: usize) -> String {
+        let mut lines = vec![
+            "diff --git a/src/demo.rs b/src/demo.rs".to_owned(),
+            "index 1111111..2222222 100644".to_owned(),
+            "--- a/src/demo.rs".to_owned(),
+            "+++ b/src/demo.rs".to_owned(),
+            format!("@@ -1,1 +1,{} @@", additions.saturating_add(1)),
+            " fn demo() {".to_owned(),
+        ];
+        for index in 0..additions {
+            lines.push(format!("+    let _line_{index} = {index};"));
+        }
+        lines.push(" }".to_owned());
+        lines.join("\n")
+    }
+
+    fn sample_diff_modal_with_content(content: String) -> WorktreeDiffModalState {
+        WorktreeDiffModalState {
+            session_id: WorkerSessionId::new("sess-diff-test"),
+            base_branch: "main".to_owned(),
+            content,
+            loading: false,
+            error: None,
+            scroll: 0,
+            cursor_line: 0,
+            selected_file_index: 0,
+            selected_hunk_index: 0,
+            focus: DiffPaneFocus::Diff,
+        }
+    }
+
     fn inspector_projection() -> ProjectionState {
         let work_item_id = WorkItemId::new("wi-inspector");
         let session_id = WorkerSessionId::new("sess-inspector");
@@ -3705,6 +3736,56 @@ mod tests {
             .expect("terminal view state");
         assert_eq!(view.output_scroll_line, 99);
         assert!(!view.output_follow_tail);
+    }
+
+    #[test]
+    fn worktree_diff_modal_scroll_is_zero_when_selected_file_fits_viewport() {
+        let modal = sample_diff_modal_with_content(sample_worktree_diff_content(2));
+        let files = parse_diff_file_summaries(modal.content.as_str());
+
+        let scroll = worktree_diff_modal_scroll(&modal, files.as_slice(), 16);
+        assert_eq!(scroll, 0);
+    }
+
+    #[test]
+    fn worktree_diff_modal_scroll_clamps_to_max_scroll() {
+        let modal = sample_diff_modal_with_content(sample_worktree_diff_content(2));
+        let files = parse_diff_file_summaries(modal.content.as_str());
+        let (start, end, _) =
+            selected_file_and_hunk_range(&modal, files.as_slice()).expect("selected file range");
+        let line_count = end.saturating_sub(start).saturating_add(1);
+        let viewport_rows = line_count.saturating_sub(1);
+        let max_scroll = line_count.saturating_sub(viewport_rows);
+
+        let scroll = usize::from(worktree_diff_modal_scroll(
+            &modal,
+            files.as_slice(),
+            viewport_rows,
+        ));
+        assert_eq!(scroll, max_scroll);
+    }
+
+    #[test]
+    fn worktree_diff_modal_scroll_keeps_focus_padding_when_overflow_exists() {
+        let modal = sample_diff_modal_with_content(sample_worktree_diff_content(20));
+        let files = parse_diff_file_summaries(modal.content.as_str());
+        let (file_start, _, selected_hunk) =
+            selected_file_and_hunk_range(&modal, files.as_slice()).expect("selected file range");
+        let (hunk_start, hunk_end) = selected_hunk.expect("selected hunk");
+        let center = hunk_start + (hunk_end.saturating_sub(hunk_start) / 2);
+        let expected = center.saturating_sub(file_start).saturating_sub(3);
+
+        let scroll = usize::from(worktree_diff_modal_scroll(&modal, files.as_slice(), 5));
+        assert_eq!(scroll, expected);
+    }
+
+    #[test]
+    fn worktree_diff_modal_scroll_returns_zero_without_selected_file() {
+        let modal = sample_diff_modal_with_content(String::new());
+        let files = parse_diff_file_summaries(modal.content.as_str());
+
+        let scroll = worktree_diff_modal_scroll(&modal, files.as_slice(), 5);
+        assert_eq!(scroll, 0);
     }
 
     #[test]
