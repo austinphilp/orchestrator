@@ -32,6 +32,7 @@ struct UiShellState {
     ticket_picker_sender: Option<mpsc::Sender<TicketPickerEvent>>,
     ticket_picker_receiver: Option<mpsc::Receiver<TicketPickerEvent>>,
     ticket_picker_overlay: TicketPickerOverlayState,
+    ticket_picker_create_refresh_deadline: Option<Instant>,
     ticket_picker_priority_states: Vec<String>,
     startup_session_feed_opened: bool,
     worker_backend: Option<Arc<dyn WorkerBackend>>,
@@ -122,6 +123,7 @@ impl UiShellState {
             ticket_picker_sender,
             ticket_picker_receiver,
             ticket_picker_overlay: TicketPickerOverlayState::default(),
+            ticket_picker_create_refresh_deadline: None,
             ticket_picker_priority_states: ticket_picker_priority_states_from_env(),
             startup_session_feed_opened: false,
             worker_backend,
@@ -1060,6 +1062,7 @@ impl UiShellState {
 
     fn close_ticket_picker(&mut self) {
         self.ticket_picker_overlay.close();
+        self.ticket_picker_create_refresh_deadline = None;
     }
 
     fn begin_create_ticket_from_picker(&mut self) {
@@ -1081,13 +1084,6 @@ impl UiShellState {
             return;
         }
         self.ticket_picker_overlay.append_new_ticket_brief_char(ch);
-    }
-
-    fn append_create_ticket_brief_newline(&mut self) {
-        if !self.ticket_picker_overlay.visible || !self.ticket_picker_overlay.new_ticket_mode {
-            return;
-        }
-        self.ticket_picker_overlay.append_new_ticket_brief_newline();
     }
 
     fn pop_create_ticket_brief_char(&mut self) {
@@ -1122,7 +1118,7 @@ impl UiShellState {
         if !self.ticket_picker_overlay.visible {
             return;
         }
-        if self.ticket_picker_overlay.creating || self.ticket_picker_overlay.new_ticket_mode {
+        if self.ticket_picker_overlay.new_ticket_mode {
             return;
         }
         let Some(ticket) = self.ticket_picker_overlay.selected_ticket().cloned() else {
@@ -1152,7 +1148,6 @@ impl UiShellState {
             return;
         }
         if self.ticket_picker_overlay.loading
-            || self.ticket_picker_overlay.creating
             || self.ticket_picker_overlay.new_ticket_mode
             || self.ticket_picker_overlay.starting_ticket_id.is_some()
             || self.ticket_picker_overlay.archiving_ticket_id.is_some()
@@ -1221,7 +1216,7 @@ impl UiShellState {
             .delete_char_backward();
     }
 
-    fn submit_created_ticket_from_picker(&mut self) {
+    fn submit_created_ticket_from_picker(&mut self, submit_mode: TicketCreateSubmitMode) {
         if !self.ticket_picker_overlay.visible || !self.ticket_picker_overlay.new_ticket_mode {
             return;
         }
@@ -1239,10 +1234,18 @@ impl UiShellState {
             .to_owned();
         let selected_project = self.ticket_picker_overlay.selected_project_name();
         self.ticket_picker_overlay.error = None;
+        self.ticket_picker_overlay.new_ticket_mode = false;
+        self.ticket_picker_overlay.new_ticket_brief_input.clear();
         self.ticket_picker_overlay.creating = true;
+        if !self.ticket_picker_overlay.loading {
+            self.spawn_ticket_picker_load();
+        }
+        self.ticket_picker_create_refresh_deadline =
+            Some(Instant::now() + TICKET_PICKER_CREATE_REFRESH_INTERVAL);
         self.spawn_ticket_picker_create(CreateTicketFromPickerRequest {
             brief,
             selected_project,
+            submit_mode,
         });
     }
 
@@ -1366,7 +1369,56 @@ impl UiShellState {
     }
 
     fn tick_ticket_picker_and_report(&mut self) -> bool {
-        self.poll_ticket_picker_events()
+        let mut changed = self.poll_ticket_picker_events();
+        changed |= self.tick_ticket_picker_create_refresh();
+        changed
+    }
+
+    fn tick_ticket_picker_create_refresh(&mut self) -> bool {
+        if !self.ticket_picker_overlay.visible || !self.ticket_picker_overlay.creating {
+            self.ticket_picker_create_refresh_deadline = None;
+            return false;
+        }
+        if self.ticket_picker_overlay.loading {
+            return false;
+        }
+        let now = Instant::now();
+        let deadline = self.ticket_picker_create_refresh_deadline.unwrap_or(now);
+        if now < deadline {
+            return false;
+        }
+        self.spawn_ticket_picker_load();
+        self.ticket_picker_create_refresh_deadline =
+            Some(now + TICKET_PICKER_CREATE_REFRESH_INTERVAL);
+        true
+    }
+
+    fn filtered_ticket_picker_tickets(&self, tickets: Vec<TicketSummary>) -> Vec<TicketSummary> {
+        let active_ticket_ids = self.active_ticket_ids_for_picker();
+        tickets
+            .into_iter()
+            .filter(|ticket| !active_ticket_ids.iter().any(|id| id == &ticket.ticket_id))
+            .collect()
+    }
+
+    fn active_ticket_ids_for_picker(&self) -> Vec<TicketId> {
+        self.domain
+            .work_items
+            .values()
+            .filter_map(|work_item| {
+                let ticket_id = work_item.ticket_id.clone()?;
+                let session_id = work_item.session_id.as_ref()?;
+                let session = self.domain.sessions.get(session_id)?;
+                match session.status {
+                    Some(
+                        WorkerSessionStatus::Running
+                        | WorkerSessionStatus::WaitingForUser
+                        | WorkerSessionStatus::Blocked,
+                    ) => Some(ticket_id),
+                    _ => None,
+                }
+            })
+            .collect::<Vec<_>>()
     }
 
     fn tick_terminal_view_and_report(&mut self) -> bool {
@@ -2037,6 +2089,7 @@ fn apply_ticket_picker_event(&mut self, event: TicketPickerEvent) {
             TicketPickerEvent::TicketsLoaded { tickets, projects } => {
                 self.ticket_picker_overlay.loading = false;
                 self.ticket_picker_overlay.error = None;
+                let tickets = self.filtered_ticket_picker_tickets(tickets);
                 self.ticket_picker_overlay
                     .apply_tickets(tickets, projects, &self.ticket_picker_priority_states);
             }
@@ -2094,6 +2147,7 @@ fn apply_ticket_picker_event(&mut self, event: TicketPickerEvent) {
                     self.domain = projection;
                 }
                 if let Some(tickets) = tickets {
+                    let tickets = self.filtered_ticket_picker_tickets(tickets);
                     let projects = self.ticket_picker_overlay.project_names();
                     self.ticket_picker_overlay
                         .apply_tickets(tickets, projects, &self.ticket_picker_priority_states);
@@ -2138,6 +2192,7 @@ fn apply_ticket_picker_event(&mut self, event: TicketPickerEvent) {
                 self.ticket_picker_overlay.archive_confirm_ticket = None;
                 self.ticket_picker_overlay.error = None;
                 if let Some(tickets) = tickets {
+                    let tickets = self.filtered_ticket_picker_tickets(tickets);
                     let projects = self.ticket_picker_overlay.project_names();
                     self.ticket_picker_overlay
                         .apply_tickets(tickets, projects, &self.ticket_picker_priority_states);
@@ -2158,6 +2213,7 @@ fn apply_ticket_picker_event(&mut self, event: TicketPickerEvent) {
                 self.ticket_picker_overlay.archive_confirm_ticket = None;
                 self.ticket_picker_overlay.error = Some(message.clone());
                 if let Some(tickets) = tickets {
+                    let tickets = self.filtered_ticket_picker_tickets(tickets);
                     let projects = self.ticket_picker_overlay.project_names();
                     self.ticket_picker_overlay
                         .apply_tickets(tickets, projects, &self.ticket_picker_priority_states);
@@ -2170,19 +2226,20 @@ fn apply_ticket_picker_event(&mut self, event: TicketPickerEvent) {
             }
             TicketPickerEvent::TicketCreated {
                 created_ticket,
+                submit_mode,
                 projection,
                 tickets,
                 warning,
             } => {
                 self.ticket_picker_overlay.creating = false;
-                self.ticket_picker_overlay.new_ticket_mode = false;
-                self.ticket_picker_overlay.new_ticket_brief_input.clear();
+                self.ticket_picker_create_refresh_deadline = None;
                 self.ticket_picker_overlay.error = None;
                 if let Some(projection) = projection {
                     self.domain = projection;
                 }
                 let mut display_tickets = tickets
                     .unwrap_or_else(|| self.ticket_picker_overlay.tickets_snapshot());
+                display_tickets = self.filtered_ticket_picker_tickets(display_tickets);
                 if !display_tickets
                     .iter()
                     .any(|ticket| ticket.ticket_id == created_ticket.ticket_id)
@@ -2203,6 +2260,9 @@ fn apply_ticket_picker_event(&mut self, event: TicketPickerEvent) {
                     status.push_str(compact_focus_card_text(message.as_str()).as_str());
                 }
                 self.status_warning = Some(status);
+                if submit_mode == TicketCreateSubmitMode::CreateAndStart {
+                    self.start_selected_ticket_from_picker_with_override(created_ticket, None);
+                }
             }
             TicketPickerEvent::TicketCreateFailed {
                 message,
@@ -2210,8 +2270,10 @@ fn apply_ticket_picker_event(&mut self, event: TicketPickerEvent) {
                 warning,
             } => {
                 self.ticket_picker_overlay.creating = false;
+                self.ticket_picker_create_refresh_deadline = None;
                 self.ticket_picker_overlay.error = Some(message.clone());
                 if let Some(tickets) = tickets {
+                    let tickets = self.filtered_ticket_picker_tickets(tickets);
                     let projects = self.ticket_picker_overlay.project_names();
                     self.ticket_picker_overlay
                         .apply_tickets(tickets, projects, &self.ticket_picker_priority_states);

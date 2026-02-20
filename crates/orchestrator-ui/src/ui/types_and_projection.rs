@@ -55,6 +55,7 @@ const DEFAULT_UI_THEME: &str = "nord";
 const DEFAULT_SUPERVISOR_MODEL: &str = "openai/gpt-4o-mini";
 const MERGE_POLL_INTERVAL: Duration = Duration::from_secs(60);
 const MERGE_REQUEST_RATE_LIMIT: Duration = Duration::from_secs(1);
+const TICKET_PICKER_CREATE_REFRESH_INTERVAL: Duration = Duration::from_secs(1);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct UiRuntimeConfig {
@@ -151,9 +152,16 @@ fn supervisor_model_config_value() -> String {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TicketCreateSubmitMode {
+    CreateOnly,
+    CreateAndStart,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CreateTicketFromPickerRequest {
     pub brief: String,
     pub selected_project: Option<String>,
+    pub submit_mode: TicketCreateSubmitMode,
 }
 
 #[async_trait]

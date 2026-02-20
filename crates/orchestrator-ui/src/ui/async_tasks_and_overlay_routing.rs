@@ -503,6 +503,7 @@ async fn run_ticket_picker_create_task(
     request: CreateTicketFromPickerRequest,
     sender: mpsc::Sender<TicketPickerEvent>,
 ) {
+    let submit_mode = request.submit_mode.clone();
     let created_ticket = match provider.create_ticket_from_brief(request).await {
         Ok(ticket) => ticket,
         Err(error) => {
@@ -540,6 +541,7 @@ async fn run_ticket_picker_create_task(
     let _ = sender
         .send(TicketPickerEvent::TicketCreated {
             created_ticket,
+            submit_mode,
             projection,
             tickets,
             warning: (!warning.is_empty()).then(|| warning.join("; ")),
@@ -618,7 +620,7 @@ fn resolve_shell_home() -> Option<String> {
 fn render_ticket_picker_overlay_text(overlay: &TicketPickerOverlayState) -> String {
     let mut lines = if overlay.new_ticket_mode {
         vec![
-            "Describe ticket | Enter: create | Shift+Enter: newline | Backspace: edit | Esc: cancel"
+            "Describe ticket | Enter: create | Shift+Enter: create + start | Backspace: edit | Esc: cancel"
                 .to_owned(),
         ]
     } else {
@@ -664,14 +666,6 @@ fn render_ticket_picker_overlay_text(overlay: &TicketPickerOverlayState) -> Stri
         }
         lines.push("Enter local repository path, then press Enter. Esc to cancel.".to_owned());
         lines.push(format!("Path: {}", overlay.repository_prompt_input.text()));
-        lines.push(String::new());
-    }
-
-    if overlay.new_ticket_mode {
-        let selected_project = overlay
-            .selected_project_name()
-            .unwrap_or_else(|| "No Project".to_owned());
-        lines.push(format!("Assigned project: {selected_project}"));
         lines.push(String::new());
     }
 
@@ -922,10 +916,11 @@ fn route_ticket_picker_key(shell_state: &mut UiShellState, key: KeyEvent) -> Rou
 
         match key.code {
             KeyCode::Enter if key.modifiers.is_empty() => {
-                shell_state.submit_created_ticket_from_picker();
+                shell_state.submit_created_ticket_from_picker(TicketCreateSubmitMode::CreateOnly);
             }
             KeyCode::Enter if key.modifiers == KeyModifiers::SHIFT => {
-                shell_state.append_create_ticket_brief_newline();
+                shell_state
+                    .submit_created_ticket_from_picker(TicketCreateSubmitMode::CreateAndStart);
             }
             KeyCode::Backspace if key.modifiers.is_empty() => {
                 shell_state.pop_create_ticket_brief_char();

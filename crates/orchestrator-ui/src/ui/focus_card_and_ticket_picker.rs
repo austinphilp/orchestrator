@@ -483,10 +483,6 @@ impl TicketPickerOverlayState {
         self.new_ticket_brief_input.insert_char(ch);
     }
 
-    fn append_new_ticket_brief_newline(&mut self) {
-        self.new_ticket_brief_input.insert_newline();
-    }
-
     fn pop_new_ticket_brief_char(&mut self) {
         self.new_ticket_brief_input.delete_char_backward();
     }
@@ -674,6 +670,7 @@ enum TicketPickerEvent {
     },
     TicketCreated {
         created_ticket: TicketSummary,
+        submit_mode: TicketCreateSubmitMode,
         projection: Option<ProjectionState>,
         tickets: Option<Vec<TicketSummary>>,
         warning: Option<String>,
