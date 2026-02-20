@@ -339,7 +339,7 @@ impl Default for TicketPickerOverlayState {
             archiving_ticket_id: None,
             creating: false,
             new_ticket_mode: false,
-            new_ticket_brief_editor: EditorState::default(),
+            new_ticket_brief_editor: insert_mode_editor_state(),
             new_ticket_brief_event_handler: EditorEventHandler::default(),
             error: None,
             project_groups: Vec::new(),

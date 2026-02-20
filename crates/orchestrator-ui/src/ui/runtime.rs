@@ -218,16 +218,12 @@ impl Ui {
                             );
                         } else {
                             frame.render_widget(
-                                EditorView::new(&mut shell_state.terminal_compose_editor)
-                                    .theme(
-                                        EditorTheme::default()
-                                            .block(
+                                        EditorView::new(&mut shell_state.terminal_compose_editor)
+                                            .theme(nord_editor_theme(
                                                 Block::default()
-                                                    .title("input (Normal+Enter send)")
+                                                    .title("input (Esc+Enter send | Ctrl+Enter send)")
                                                     .borders(Borders::ALL),
-                                            )
-                                            .hide_status_line(),
-                                    )
+                                            ))
                                     .wrap(true),
                                 terminal_input_area,
                             );

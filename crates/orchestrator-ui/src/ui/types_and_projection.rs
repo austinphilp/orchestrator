@@ -948,18 +948,36 @@ struct NeedsInputPromptState {
     is_structured_plan_request: bool,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 struct NeedsInputComposerState {
     prompt_id: String,
     questions: Vec<BackendNeedsInputQuestion>,
     answer_drafts: Vec<NeedsInputAnswerDraft>,
     current_question_index: usize,
     select_state: SelectState,
-    note_input_state: InputState,
+    note_editor_state: EditorState,
     interaction_active: bool,
     note_insert_mode: bool,
     error: Option<String>,
     is_structured_plan_request: bool,
+}
+
+impl std::fmt::Debug for NeedsInputComposerState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NeedsInputComposerState")
+            .field("prompt_id", &self.prompt_id)
+            .field("questions", &self.questions)
+            .field("answer_drafts", &self.answer_drafts)
+            .field("current_question_index", &self.current_question_index)
+            .field("select_state", &self.select_state)
+            .field("note_editor_mode", &self.note_editor_state.mode)
+            .field("note_editor_text", &editor_state_text(&self.note_editor_state))
+            .field("interaction_active", &self.interaction_active)
+            .field("note_insert_mode", &self.note_insert_mode)
+            .field("error", &self.error)
+            .field("is_structured_plan_request", &self.is_structured_plan_request)
+            .finish()
+    }
 }
 
 impl NeedsInputComposerState {
@@ -976,7 +994,7 @@ impl NeedsInputComposerState {
             answer_drafts,
             current_question_index: 0,
             select_state: SelectState::new(0),
-            note_input_state: InputState::empty(),
+            note_editor_state: insert_mode_editor_state(),
             interaction_active,
             note_insert_mode: false,
             error: None,
@@ -995,13 +1013,13 @@ impl NeedsInputComposerState {
             return;
         };
         draft.selected_option_index = self.select_state.selected_index;
-        draft.note = self.note_input_state.text.clone();
+        draft.note = editor_state_text(&self.note_editor_state);
     }
 
     fn refresh_controls_from_current_question(&mut self) {
         let Some(question) = self.current_question() else {
             self.select_state = SelectState::new(0);
-            self.note_input_state.clear();
+            clear_editor_state(&mut self.note_editor_state);
             self.note_insert_mode = false;
             return;
         };
@@ -1018,8 +1036,13 @@ impl NeedsInputComposerState {
             self.select_state.selected_index = Some(index);
             self.select_state.highlighted_index = index;
         }
-        self.note_input_state.set_text(draft.note);
-        self.note_input_state.focused = self.interaction_active && self.note_insert_mode;
+        set_editor_state_text(&mut self.note_editor_state, draft.note.as_str());
+        self.note_editor_state.mode =
+            if self.interaction_active && self.note_insert_mode {
+                EditorMode::Insert
+            } else {
+                EditorMode::Normal
+            };
     }
 
     fn move_to_question(&mut self, next_index: usize) {

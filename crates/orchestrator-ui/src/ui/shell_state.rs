@@ -136,7 +136,7 @@ impl UiShellState {
             terminal_session_receiver,
             terminal_session_states: HashMap::new(),
             terminal_session_streamed: HashSet::new(),
-            terminal_compose_editor: EditorState::default(),
+            terminal_compose_editor: insert_mode_editor_state(),
             terminal_compose_event_handler: EditorEventHandler::default(),
             archive_session_confirm_session: None,
             archiving_session_id: None,
@@ -3276,6 +3276,7 @@ fn apply_ticket_picker_event(&mut self, event: TicketPickerEvent) {
         if self.is_terminal_view_active() {
             self.pane_focus = PaneFocus::Right;
             self.snap_active_terminal_output_to_bottom();
+            self.terminal_compose_editor.mode = EditorMode::Insert;
             self.mode = UiMode::Terminal;
             self.mode_key_buffer.clear();
             self.which_key_overlay = None;
@@ -3358,11 +3359,11 @@ fn apply_ticket_picker_event(&mut self, event: TicketPickerEvent) {
         prompt.set_interaction_active(true);
         if enable_note_insert_mode {
             prompt.note_insert_mode = true;
-            prompt.note_input_state.focused = true;
+            prompt.note_editor_state.mode = EditorMode::Insert;
             prompt.select_state.focused = false;
         } else {
             prompt.note_insert_mode = false;
-            prompt.note_input_state.focused = false;
+            prompt.note_editor_state.mode = EditorMode::Normal;
             prompt.select_state.focused = prompt.current_question_requires_option_selection();
         }
         true
@@ -3392,7 +3393,11 @@ fn apply_ticket_picker_event(&mut self, event: TicketPickerEvent) {
             return;
         }
         prompt.note_insert_mode = enabled;
-        prompt.note_input_state.focused = enabled;
+        prompt.note_editor_state.mode = if enabled {
+            EditorMode::Insert
+        } else {
+            EditorMode::Normal
+        };
         prompt.select_state.focused = !enabled && prompt.current_question_requires_option_selection();
     }
 
@@ -3405,50 +3410,28 @@ fn apply_ticket_picker_event(&mut self, event: TicketPickerEvent) {
         }
 
         match key.code {
-            KeyCode::Esc => {
+            KeyCode::Esc if key.modifiers.is_empty() => {
                 prompt.note_insert_mode = false;
-                prompt.note_input_state.focused = false;
+                prompt.note_editor_state.mode = EditorMode::Normal;
                 prompt.select_state.focused = prompt.current_question_requires_option_selection();
                 true
             }
             KeyCode::Enter if key.modifiers == KeyModifiers::SHIFT => {
-                prompt.note_input_state.insert_char('\n');
+                let enter = edtui_key_input(KeyCode::Enter, KeyModifiers::NONE)
+                    .expect("enter key conversion");
+                EditorEventHandler::default().on_key_event(enter, &mut prompt.note_editor_state);
                 true
             }
             KeyCode::Enter if key.modifiers.is_empty() || key.modifiers == KeyModifiers::CONTROL => {
                 false
             }
-            KeyCode::Backspace if key.modifiers.is_empty() => {
-                prompt.note_input_state.delete_char_backward();
+            _ => {
+                if let Some(key_input) = map_edtui_key_input(key) {
+                    EditorEventHandler::default()
+                        .on_key_event(key_input, &mut prompt.note_editor_state);
+                }
                 true
             }
-            KeyCode::Delete if key.modifiers.is_empty() => {
-                prompt.note_input_state.delete_char_forward();
-                true
-            }
-            KeyCode::Left if key.modifiers.is_empty() => {
-                prompt.note_input_state.move_left();
-                true
-            }
-            KeyCode::Right if key.modifiers.is_empty() => {
-                prompt.note_input_state.move_right();
-                true
-            }
-            KeyCode::Home if key.modifiers.is_empty() => {
-                prompt.note_input_state.move_home();
-                true
-            }
-            KeyCode::End if key.modifiers.is_empty() => {
-                prompt.note_input_state.move_end();
-                true
-            }
-            KeyCode::Char(ch)
-                if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT =>
-            {
-                prompt.note_input_state.insert_char(ch);
-                true
-            }
-            _ => true,
         }
     }
 
@@ -3961,13 +3944,21 @@ fn editor_state_text(state: &EditorState) -> String {
 }
 
 fn set_editor_state_text(state: &mut EditorState, text: &str) {
-    let mode = state.mode;
-    *state = EditorState::new(Lines::from(text));
-    state.mode = mode;
+    *state = insert_mode_editor_state_with_text(text);
 }
 
 fn clear_editor_state(state: &mut EditorState) {
-    *state = EditorState::default();
+    *state = insert_mode_editor_state();
+}
+
+fn insert_mode_editor_state() -> EditorState {
+    insert_mode_editor_state_with_text("")
+}
+
+fn insert_mode_editor_state_with_text(text: &str) -> EditorState {
+    let mut state = EditorState::new(Lines::from(text));
+    state.mode = EditorMode::Insert;
+    state
 }
 
 fn map_edtui_key_input(key: KeyEvent) -> Option<edtui::events::KeyInput> {
