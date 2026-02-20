@@ -670,6 +670,12 @@ enum TicketPickerEvent {
         session_id: WorkerSessionId,
         message: String,
     },
+    InboxItemPublished {
+        projection: ProjectionState,
+    },
+    InboxItemPublishFailed {
+        message: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
