@@ -23,12 +23,18 @@ impl TicketingProvider for LinearTicketingProvider {
     }
 
     async fn list_tickets(&self, query: TicketQuery) -> Result<Vec<TicketSummary>, CoreError> {
-        let cache_empty = {
-            let cache = self.cache.read().expect("linear ticket cache read lock");
-            cache.tickets.is_empty()
-        };
-        if cache_empty {
-            self.sync_with_query(query.clone()).await?;
+        if let Err(sync_error) = self.sync_with_query(query.clone()).await {
+            let cache_empty = {
+                let cache = self.cache.read().expect("linear ticket cache read lock");
+                cache.tickets.is_empty()
+            };
+            if cache_empty {
+                return Err(sync_error);
+            }
+            warn!(
+                error = %sync_error,
+                "linear ticket list sync failed; returning filtered results from cached tickets"
+            );
         }
 
         let cache = self.cache.read().expect("linear ticket cache read lock");

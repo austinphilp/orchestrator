@@ -189,7 +189,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn list_tickets_filters_from_cache_for_search_and_state() {
+    async fn list_tickets_syncs_latest_payload_and_applies_search_and_state_filters() {
         let sync_query = TicketQuery {
             assigned_to_me: true,
             states: Vec::new(),
@@ -221,6 +221,29 @@ mod tests {
                 ],
             ))
             .await;
+        transport
+            .push_response(list_payload(
+                "viewer-1",
+                vec![
+                    issue_json(
+                        "issue-11",
+                        "AP-111",
+                        "Parser fails for escaped slash",
+                        "In Progress",
+                        "2026-02-16T12:20:00.000Z",
+                        Some("viewer-1"),
+                    ),
+                    issue_json(
+                        "issue-13",
+                        "AP-113",
+                        "Escaped slash follow-up",
+                        "Todo",
+                        "2026-02-16T12:15:00.000Z",
+                        Some("viewer-1"),
+                    ),
+                ],
+            ))
+            .await;
 
         let provider = LinearTicketingProvider::with_transport(config, transport.clone());
         provider.sync_once().await.expect("seed cache");
@@ -233,10 +256,53 @@ mod tests {
                 limit: Some(5),
             })
             .await
-            .expect("list from cache");
+            .expect("list after sync");
 
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].identifier, "AP-111");
+        assert_eq!(result[0].updated_at, "2026-02-16T12:20:00.000Z");
+    }
+
+    #[tokio::test]
+    async fn list_tickets_returns_cached_results_when_refresh_fails() {
+        let sync_query = TicketQuery {
+            assigned_to_me: true,
+            states: Vec::new(),
+            search: None,
+            limit: Some(20),
+        };
+        let config = config_with(Duration::from_secs(60), sync_query);
+        let transport = Arc::new(StubTransport::default());
+        transport
+            .push_response(list_payload(
+                "viewer-1",
+                vec![issue_json(
+                    "issue-14",
+                    "AP-114",
+                    "Fallback cache issue",
+                    "In Progress",
+                    "2026-02-16T12:30:00.000Z",
+                    Some("viewer-1"),
+                )],
+            ))
+            .await;
+
+        let provider = LinearTicketingProvider::with_transport(config, transport.clone());
+        provider.sync_once().await.expect("seed cache");
+
+        let result = provider
+            .list_tickets(TicketQuery {
+                assigned_to_me: true,
+                states: vec!["In Progress".to_owned()],
+                search: Some("fallback".to_owned()),
+                limit: Some(5),
+            })
+            .await
+            .expect("list should fall back to cache");
+
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].identifier, "AP-114");
+        assert_eq!(transport.request_count().await, 2);
     }
 
     #[tokio::test]

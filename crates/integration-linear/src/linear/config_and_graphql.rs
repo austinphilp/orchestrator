@@ -14,7 +14,7 @@ use serde::Deserialize;
 use serde_json::json;
 use tokio::sync::{oneshot, Mutex};
 use tokio::task::JoinHandle;
-use tracing::warn;
+use tracing::{debug, warn};
 
 const DEFAULT_LINEAR_API_URL: &str = "https://api.linear.app/graphql";
 const DEFAULT_SYNC_INTERVAL_SECS: u64 = 60;

@@ -104,7 +104,10 @@ impl LinearTicketingProvider {
                             config.fetch_limit,
                             config.sync_query.clone(),
                         ).await {
-                            warn!(error = %error, "linear polling sync failed");
+                            debug!(
+                                error = %error,
+                                "linear polling sync failed; retrying in background"
+                            );
                         }
                     }
                 }
