@@ -1805,6 +1805,189 @@ mod tests {
     }
 
     #[test]
+    fn ticket_picker_modal_prevents_pending_planning_prompt_activation() {
+        let backend = Arc::new(ManualTerminalBackend::default());
+        let mut projection = sample_projection(true);
+        projection
+            .work_items
+            .get_mut(&WorkItemId::new("wi-1"))
+            .expect("work item")
+            .workflow_state = Some(WorkflowState::Planning);
+        let mut shell_state = UiShellState::new_with_integrations(
+            "ready".to_owned(),
+            projection,
+            None,
+            None,
+            None,
+            Some(backend),
+        );
+        shell_state.open_terminal_and_enter_mode();
+        assert!(shell_state.is_right_pane_focused());
+
+        let sender = shell_state
+            .terminal_session_sender
+            .clone()
+            .expect("terminal sender");
+        sender
+            .try_send(TerminalSessionEvent::NeedsInput {
+                session_id: WorkerSessionId::new("sess-1"),
+                needs_input: BackendNeedsInputEvent {
+                    prompt_id: "prompt-planning-modal".to_owned(),
+                    question: "Add planning note".to_owned(),
+                    options: vec!["Continue".to_owned(), "Revise".to_owned()],
+                    default_option: Some("Continue".to_owned()),
+                    questions: Vec::new(),
+                },
+            })
+            .expect("queue needs-input event");
+        shell_state.poll_terminal_session_events();
+
+        shell_state.ticket_picker_overlay.open();
+        shell_state.ticket_picker_overlay.loading = false;
+        shell_state.ticket_picker_overlay.apply_tickets(
+            vec![
+                sample_ticket_summary("issue-226", "AP-226", "Todo"),
+                sample_ticket_summary("issue-227", "AP-227", "Todo"),
+            ],
+            Vec::new(),
+            &["Todo".to_owned()],
+        );
+
+        assert_eq!(
+            routed_command(route_key_press(&mut shell_state, key(KeyCode::Char('j')))),
+            Some(UiCommand::TicketPickerMoveNext)
+        );
+
+        let prompt = shell_state
+            .terminal_session_states
+            .get(&WorkerSessionId::new("sess-1"))
+            .and_then(|view| view.active_needs_input.as_ref())
+            .expect("planning prompt should exist");
+        assert!(!prompt.interaction_active);
+    }
+
+    #[test]
+    fn ticket_picker_modal_blocks_navigation_when_needs_input_is_active() {
+        let backend = Arc::new(ManualTerminalBackend::default());
+        let mut shell_state = UiShellState::new_with_integrations(
+            "ready".to_owned(),
+            sample_projection(true),
+            None,
+            None,
+            None,
+            Some(backend),
+        );
+        shell_state.open_terminal_and_enter_mode();
+
+        let sender = shell_state
+            .terminal_session_sender
+            .clone()
+            .expect("terminal sender");
+        sender
+            .try_send(TerminalSessionEvent::NeedsInput {
+                session_id: WorkerSessionId::new("sess-1"),
+                needs_input: BackendNeedsInputEvent {
+                    prompt_id: "prompt-active-modal".to_owned(),
+                    question: "Confirm plan".to_owned(),
+                    options: vec!["A".to_owned(), "B".to_owned()],
+                    default_option: Some("A".to_owned()),
+                    questions: Vec::new(),
+                },
+            })
+            .expect("queue needs-input event");
+        shell_state.poll_terminal_session_events();
+
+        let before = shell_state
+            .terminal_session_states
+            .get(&WorkerSessionId::new("sess-1"))
+            .and_then(|view| view.active_needs_input.as_ref())
+            .expect("active prompt")
+            .select_state
+            .highlighted_index;
+
+        shell_state.ticket_picker_overlay.open();
+        shell_state.ticket_picker_overlay.loading = false;
+        shell_state.ticket_picker_overlay.apply_tickets(
+            vec![
+                sample_ticket_summary("issue-228", "AP-228", "Todo"),
+                sample_ticket_summary("issue-229", "AP-229", "Todo"),
+            ],
+            Vec::new(),
+            &["Todo".to_owned()],
+        );
+
+        let should_quit = handle_key_press(&mut shell_state, key(KeyCode::Char('j')));
+        assert!(!should_quit);
+
+        let after = shell_state
+            .terminal_session_states
+            .get(&WorkerSessionId::new("sess-1"))
+            .and_then(|view| view.active_needs_input.as_ref())
+            .expect("active prompt")
+            .select_state
+            .highlighted_index;
+        assert_eq!(before, after);
+    }
+
+    #[test]
+    fn planning_prompt_activates_after_ticket_picker_closes() {
+        let backend = Arc::new(ManualTerminalBackend::default());
+        let mut projection = sample_projection(true);
+        projection
+            .work_items
+            .get_mut(&WorkItemId::new("wi-1"))
+            .expect("work item")
+            .workflow_state = Some(WorkflowState::Planning);
+        let mut shell_state = UiShellState::new_with_integrations(
+            "ready".to_owned(),
+            projection,
+            None,
+            None,
+            None,
+            Some(backend),
+        );
+        shell_state.open_terminal_and_enter_mode();
+
+        let sender = shell_state
+            .terminal_session_sender
+            .clone()
+            .expect("terminal sender");
+        sender
+            .try_send(TerminalSessionEvent::NeedsInput {
+                session_id: WorkerSessionId::new("sess-1"),
+                needs_input: BackendNeedsInputEvent {
+                    prompt_id: "prompt-planning-resume".to_owned(),
+                    question: "Add planning note".to_owned(),
+                    options: vec!["Continue".to_owned(), "Revise".to_owned()],
+                    default_option: Some("Continue".to_owned()),
+                    questions: Vec::new(),
+                },
+            })
+            .expect("queue needs-input event");
+        shell_state.poll_terminal_session_events();
+        shell_state.ticket_picker_overlay.open();
+        shell_state.ticket_picker_overlay.loading = false;
+        shell_state.ticket_picker_overlay.apply_tickets(
+            vec![sample_ticket_summary("issue-230", "AP-230", "Todo")],
+            Vec::new(),
+            &["Todo".to_owned()],
+        );
+
+        let should_quit = handle_key_press(&mut shell_state, key(KeyCode::Esc));
+        assert!(!should_quit);
+        assert!(!shell_state.ticket_picker_overlay.visible);
+
+        handle_key_press(&mut shell_state, key(KeyCode::Char('j')));
+        let prompt = shell_state
+            .terminal_session_states
+            .get(&WorkerSessionId::new("sess-1"))
+            .and_then(|view| view.active_needs_input.as_ref())
+            .expect("planning prompt should exist");
+        assert!(prompt.interaction_active);
+        assert_eq!(prompt.select_state.highlighted_index, 1);
+    }
+
+    #[test]
     fn inline_needs_input_uses_jk_navigation_and_enter_selection() {
         let backend = Arc::new(ManualTerminalBackend::default());
         let mut shell_state = UiShellState::new_with_integrations(
@@ -4135,6 +4318,57 @@ mod tests {
         let routed = route_key_press(&mut shell_state, key(KeyCode::Esc));
         assert!(matches!(routed, RoutedInput::Ignore));
         assert!(shell_state.archive_session_confirm_session.is_none());
+    }
+
+    #[test]
+    fn archive_confirm_modal_blocks_pending_planning_prompt_activation() {
+        let backend = Arc::new(ManualTerminalBackend::default());
+        let mut projection = sample_projection(true);
+        projection
+            .work_items
+            .get_mut(&WorkItemId::new("wi-1"))
+            .expect("work item")
+            .workflow_state = Some(WorkflowState::Planning);
+        let mut shell_state = UiShellState::new_with_integrations(
+            "ready".to_owned(),
+            projection,
+            None,
+            None,
+            None,
+            Some(backend),
+        );
+        shell_state.open_terminal_and_enter_mode();
+        let session_id = shell_state
+            .selected_session_id_for_terminal_action()
+            .expect("selected session");
+
+        let sender = shell_state
+            .terminal_session_sender
+            .clone()
+            .expect("terminal sender");
+        sender
+            .try_send(TerminalSessionEvent::NeedsInput {
+                session_id: WorkerSessionId::new("sess-1"),
+                needs_input: BackendNeedsInputEvent {
+                    prompt_id: "prompt-planning-archive-modal".to_owned(),
+                    question: "Pick plan option".to_owned(),
+                    options: vec!["A".to_owned(), "B".to_owned()],
+                    default_option: Some("A".to_owned()),
+                    questions: Vec::new(),
+                },
+            })
+            .expect("queue needs-input event");
+        shell_state.poll_terminal_session_events();
+        shell_state.archive_session_confirm_session = Some(session_id);
+
+        let routed = route_key_press(&mut shell_state, key(KeyCode::Char('j')));
+        assert!(matches!(routed, RoutedInput::Ignore));
+        let prompt = shell_state
+            .terminal_session_states
+            .get(&WorkerSessionId::new("sess-1"))
+            .and_then(|view| view.active_needs_input.as_ref())
+            .expect("planning prompt should exist");
+        assert!(!prompt.interaction_active);
     }
 
     #[test]
