@@ -114,6 +114,7 @@ The repository is a Rust workspace with a layered design:
   - `orchestrator-app/src/command_dispatch.rs`
 - PR completion flow includes:
   - Manual merge path: `AwaitingYourReview -> ReadyForReview -> InReview -> Merging -> Done`
+    - During `workflow.merge_pr`, draft PRs are automatically converted to ready-for-review before merge is attempted.
   - External/direct GitHub merge path: `AwaitingYourReview -> ReadyForReview -> InReview -> Done`
 
 ## UI and interaction model
