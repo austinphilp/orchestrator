@@ -32,6 +32,8 @@ struct UiShellState {
     pending_needs_input_prompts: HashMap<WorkerSessionId, VecDeque<NeedsInputPromptState>>,
     needs_input_modal: Option<NeedsInputModalState>,
     terminal_compose_input: TextAreaState,
+    archive_session_confirm_session: Option<WorkerSessionId>,
+    archiving_session_id: Option<WorkerSessionId>,
     review_merge_confirm_session: Option<WorkerSessionId>,
     merge_queue: VecDeque<MergeQueueRequest>,
     merge_last_dispatched_at: Option<Instant>,
@@ -120,6 +122,8 @@ impl UiShellState {
             pending_needs_input_prompts: HashMap::new(),
             needs_input_modal: None,
             terminal_compose_input: TextAreaState::empty().with_tab_config(TabConfig::Literal),
+            archive_session_confirm_session: None,
+            archiving_session_id: None,
             review_merge_confirm_session: None,
             merge_queue: VecDeque::new(),
             merge_last_dispatched_at: None,
@@ -375,89 +379,57 @@ impl UiShellState {
             .or_else(|| self.selected_session_id_for_panel())
     }
 
-    fn kill_selected_session(&mut self) {
+    fn begin_archive_selected_session_confirmation(&mut self) {
+        if self.archive_session_confirm_session.is_some() || self.archiving_session_id.is_some() {
+            return;
+        }
         let Some(session_id) = self.selected_session_id_for_terminal_action() else {
-            self.status_warning = Some(
-                "terminal kill unavailable: no terminal session is currently selected".to_owned(),
-            );
+            self.status_warning = Some("session archive unavailable: no session selected".to_owned());
             return;
         };
+        self.archive_session_confirm_session = Some(session_id);
+        self.status_warning = None;
+    }
 
-        let Some(backend) = self.worker_backend.clone() else {
+    fn cancel_archive_selected_session_confirmation(&mut self) {
+        self.archive_session_confirm_session = None;
+    }
+
+    fn confirm_archive_selected_session(&mut self) {
+        let Some(session_id) = self.archive_session_confirm_session.take() else {
+            return;
+        };
+        if self.archiving_session_id.is_some() {
+            return;
+        }
+        self.archiving_session_id = Some(session_id.clone());
+        self.status_warning = Some(format!("archiving session {}", session_id.as_str()));
+        self.spawn_session_archive(session_id);
+    }
+
+    fn spawn_session_archive(&mut self, session_id: WorkerSessionId) {
+        let Some(provider) = self.ticket_picker_provider.clone() else {
+            self.archiving_session_id = None;
+            self.status_warning = Some("session archive unavailable: ticket provider not configured".to_owned());
+            return;
+        };
+        let Some(sender) = self.ticket_picker_sender.clone() else {
+            self.archiving_session_id = None;
             self.status_warning =
-                Some("terminal kill unavailable: no worker backend configured".to_owned());
+                Some("session archive unavailable: ticket event channel unavailable".to_owned());
             return;
         };
-        let Some(handle) = self.terminal_session_handle(&session_id) else {
-            self.status_warning =
-                Some("terminal kill unavailable: cannot resolve backend session handle".to_owned());
-            return;
-        };
-
-        if let Some(session) = self.domain.sessions.get_mut(&session_id) {
-            session.status = Some(WorkerSessionStatus::Crashed);
-        }
-        if let Some(ticket_provider) = self.ticket_picker_provider.clone() {
-            let session_id_for_store = session_id.clone();
-            let reason = "killed from terminal session panel".to_owned();
-            match TokioHandle::try_current() {
-                Ok(runtime) => {
-                    runtime.spawn(async move {
-                        let _ = ticket_provider
-                            .mark_session_crashed(session_id_for_store, reason)
-                            .await;
-                    });
-                }
-                Err(_) => {}
-            }
-        }
-        self.terminal_session_states.remove(&session_id);
-        self.terminal_session_streamed.remove(&session_id);
-        if self.active_terminal_session_id() == Some(&session_id) {
-            let _ = self.view_stack.pop_center();
-        }
-
-        let kill_target = session_id;
-        let kill_backend = backend;
-        let kill_handle = handle;
         match TokioHandle::try_current() {
             Ok(runtime) => {
-                let session_id = kill_target.as_str().to_owned();
                 runtime.spawn(async move {
-                    let _ = kill_backend.kill(&kill_handle).await;
+                    run_session_archive_task(provider, session_id, sender).await;
                 });
-                self.status_warning =
-                    Some(format!("sending terminal kill for session {session_id}"));
             }
             Err(_) => {
-                let backend = kill_backend.clone();
-                let handle = kill_handle.clone();
-                let spawn_result = std::thread::Builder::new()
-                    .name("orchestrator-terminal-kill".to_owned())
-                    .spawn(move || {
-                        let runtime = tokio::runtime::Builder::new_current_thread()
-                            .enable_all()
-                            .build();
-                        if let Ok(runtime) = runtime {
-                            runtime.block_on(async move {
-                                let _ = backend.kill(&handle).await;
-                            });
-                        }
-                    });
-
-                match spawn_result {
-                    Ok(_) => {
-                        self.status_warning = Some(format!(
-                            "sending terminal kill for session {}",
-                            kill_target.as_str()
-                        ));
-                    }
-                    Err(error) => {
-                        self.status_warning = Some(format!(
-                            "terminal kill unavailable: cannot spawn kill worker thread: {error}"
-                        ));
-                    }
-                }
+                self.archiving_session_id = None;
+                self.status_warning = Some(
+                    "session archive unavailable: tokio runtime is not active".to_owned(),
+                );
             }
         }
     }
@@ -1898,6 +1870,42 @@ fn apply_ticket_picker_event(&mut self, event: TicketPickerEvent) {
                 }
                 self.status_warning = Some(format!(
                     "diff load warning: {}",
+                    compact_focus_card_text(message.as_str())
+                ));
+            }
+            TicketPickerEvent::SessionArchived {
+                session_id,
+                warning,
+            } => {
+                self.archiving_session_id = None;
+                self.archive_session_confirm_session = None;
+                if let Some(session) = self.domain.sessions.get_mut(&session_id) {
+                    session.status = Some(WorkerSessionStatus::Done);
+                }
+                self.terminal_session_states.remove(&session_id);
+                self.terminal_session_streamed.remove(&session_id);
+                self.merge_pending_sessions.remove(&session_id);
+                self.merge_finalizing_sessions.remove(&session_id);
+                self.review_sync_instructions_sent.remove(&session_id);
+                if self.active_terminal_session_id() == Some(&session_id) {
+                    let _ = self.view_stack.pop_center();
+                }
+                let mut status = format!("archived session {}", session_id.as_str());
+                if let Some(message) = warning {
+                    status.push_str(": ");
+                    status.push_str(compact_focus_card_text(message.as_str()).as_str());
+                }
+                self.status_warning = Some(status);
+            }
+            TicketPickerEvent::SessionArchiveFailed {
+                session_id,
+                message,
+            } => {
+                self.archiving_session_id = None;
+                self.archive_session_confirm_session = None;
+                self.status_warning = Some(format!(
+                    "session archive warning ({}): {}",
+                    session_id.as_str(),
                     compact_focus_card_text(message.as_str())
                 ));
             }

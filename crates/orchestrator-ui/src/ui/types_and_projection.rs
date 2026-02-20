@@ -32,8 +32,7 @@ use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 use ratatui::Terminal;
 use ratatui_interact::components::{
-    Input, InputState, Select, SelectState, SelectStyle, TabConfig, TextArea, TextAreaState,
-    WrapMode,
+    Input, InputState, SelectState, TabConfig, TextArea, TextAreaState, WrapMode,
 };
 use ratskin::RatSkin;
 use tokio::runtime::Handle as TokioHandle;
@@ -75,6 +74,14 @@ pub trait TicketPickerProvider: Send + Sync {
     async fn archive_ticket(&self, _ticket: TicketSummary) -> Result<(), CoreError> {
         Err(CoreError::DependencyUnavailable(
             "ticket archiving is not supported by this ticket provider".to_owned(),
+        ))
+    }
+    async fn archive_session(
+        &self,
+        _session_id: WorkerSessionId,
+    ) -> Result<Option<String>, CoreError> {
+        Err(CoreError::DependencyUnavailable(
+            "session archiving is not supported by this ticket provider".to_owned(),
         ))
     }
     async fn reload_projection(&self) -> Result<ProjectionState, CoreError>;

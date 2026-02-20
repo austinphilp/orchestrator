@@ -204,6 +204,9 @@ impl Ui {
                 {
                     render_ticket_archive_confirm_overlay(frame, main, ticket);
                 }
+                if let Some(session_id) = shell_state.archive_session_confirm_session.as_ref() {
+                    render_archive_session_confirm_overlay(frame, main, session_id);
+                }
                 if let Some(modal) = shell_state.worktree_diff_modal.as_ref() {
                     render_worktree_diff_modal(frame, main, modal);
                 }

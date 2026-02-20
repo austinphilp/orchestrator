@@ -15,8 +15,9 @@ mod tests {
         WorkflowState,
     };
     use orchestrator_runtime::{
-        BackendCapabilities, BackendEvent, BackendKind, BackendNeedsInputEvent, RuntimeResult,
-        RuntimeSessionId, SessionHandle, SessionLifecycle, WorkerEventStream,
+        BackendCapabilities, BackendEvent, BackendKind, BackendNeedsInputEvent,
+        BackendNeedsInputOption, BackendNeedsInputQuestion, RuntimeResult, RuntimeSessionId,
+        SessionHandle, SessionLifecycle, WorkerEventStream,
     };
     use std::collections::VecDeque;
     use std::sync::{Arc, Mutex};
@@ -193,6 +194,13 @@ mod tests {
 
         async fn archive_ticket(&self, _ticket: TicketSummary) -> Result<(), CoreError> {
             Ok(())
+        }
+
+        async fn archive_session(
+            &self,
+            _session_id: WorkerSessionId,
+        ) -> Result<Option<String>, CoreError> {
+            Ok(None)
         }
 
         async fn reload_projection(&self) -> Result<ProjectionState, CoreError> {
@@ -1256,6 +1264,95 @@ mod tests {
         assert_eq!(modal.session_id.as_str(), "sess-1");
         assert_eq!(modal.prompt_id.as_str(), "prompt-plan-gate");
         assert!(shell_state.mode == UiMode::Terminal);
+    }
+
+    #[test]
+    fn needs_input_modal_uses_jk_navigation_and_enter_selection() {
+        let backend = Arc::new(ManualTerminalBackend::default());
+        let mut shell_state = UiShellState::new_with_integrations(
+            "ready".to_owned(),
+            sample_projection(true),
+            None,
+            None,
+            None,
+            Some(backend),
+        );
+        shell_state.open_terminal_and_enter_mode();
+
+        let sender = shell_state
+            .terminal_session_sender
+            .clone()
+            .expect("terminal sender");
+        sender
+            .try_send(TerminalSessionEvent::NeedsInput {
+                session_id: WorkerSessionId::new("sess-1"),
+                needs_input: BackendNeedsInputEvent {
+                    prompt_id: "prompt-list-navigation".to_owned(),
+                    question: "choose options".to_owned(),
+                    options: vec![],
+                    default_option: None,
+                    questions: vec![
+                        BackendNeedsInputQuestion {
+                            id: "q1".to_owned(),
+                            header: "Runtime".to_owned(),
+                            question: "Pick runtime".to_owned(),
+                            is_other: false,
+                            is_secret: false,
+                            options: Some(vec![
+                                BackendNeedsInputOption {
+                                    label: "Codex".to_owned(),
+                                    description: String::new(),
+                                },
+                                BackendNeedsInputOption {
+                                    label: "OpenCode".to_owned(),
+                                    description: String::new(),
+                                },
+                            ]),
+                        },
+                        BackendNeedsInputQuestion {
+                            id: "q2".to_owned(),
+                            header: "Mode".to_owned(),
+                            question: "Pick mode".to_owned(),
+                            is_other: false,
+                            is_secret: false,
+                            options: Some(vec![
+                                BackendNeedsInputOption {
+                                    label: "Planning".to_owned(),
+                                    description: String::new(),
+                                },
+                                BackendNeedsInputOption {
+                                    label: "Implementation".to_owned(),
+                                    description: String::new(),
+                                },
+                            ]),
+                        },
+                    ],
+                },
+            })
+            .expect("queue needs-input event");
+        shell_state.poll_terminal_session_events();
+
+        let modal = shell_state
+            .needs_input_modal
+            .as_ref()
+            .expect("needs-input modal should be open");
+        assert_eq!(modal.current_question_index, 0);
+        assert_eq!(modal.select_state.highlighted_index, 0);
+
+        let _ = route_needs_input_modal_key(&mut shell_state, key(KeyCode::Char('j')));
+        let modal = shell_state
+            .needs_input_modal
+            .as_ref()
+            .expect("needs-input modal should remain open");
+        assert_eq!(modal.select_state.highlighted_index, 1);
+
+        let _ = route_needs_input_modal_key(&mut shell_state, key(KeyCode::Enter));
+        let modal = shell_state
+            .needs_input_modal
+            .as_ref()
+            .expect("needs-input modal should advance to next question");
+        assert_eq!(modal.current_question_index, 1);
+        assert_eq!(modal.answer_drafts[0].selected_option_index, Some(1));
     }
 
     #[test]
@@ -2841,6 +2938,88 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn run_session_archive_task_emits_archived_event() {
+        let provider = Arc::new(TestTicketPickerProvider {
+            tickets: Vec::new(),
+            created: None,
+        });
+        let session_id = WorkerSessionId::new("sess-archive-ok");
+        let (sender, mut receiver) = mpsc::channel(1);
+
+        run_session_archive_task(provider, session_id.clone(), sender).await;
+
+        let event = receiver.recv().await.expect("ticket picker event");
+        match event {
+            TicketPickerEvent::SessionArchived {
+                session_id: event_session_id,
+                warning,
+            } => {
+                assert_eq!(event_session_id, session_id);
+                assert!(warning.is_none());
+            }
+            _ => panic!("expected session archived event"),
+        }
+    }
+
+    #[tokio::test]
+    async fn run_session_archive_task_emits_failed_event() {
+        struct FailingArchiveProvider;
+
+        #[async_trait]
+        impl TicketPickerProvider for FailingArchiveProvider {
+            async fn list_unfinished_tickets(&self) -> Result<Vec<TicketSummary>, CoreError> {
+                Ok(Vec::new())
+            }
+
+            async fn start_or_resume_ticket(
+                &self,
+                _ticket: TicketSummary,
+                _repository_override: Option<PathBuf>,
+            ) -> Result<SelectedTicketFlowResult, CoreError> {
+                Err(CoreError::DependencyUnavailable("not used".to_owned()))
+            }
+
+            async fn create_and_start_ticket_from_brief(
+                &self,
+                _brief: String,
+            ) -> Result<TicketSummary, CoreError> {
+                Err(CoreError::DependencyUnavailable("not used".to_owned()))
+            }
+
+            async fn archive_session(
+                &self,
+                _session_id: WorkerSessionId,
+            ) -> Result<Option<String>, CoreError> {
+                Err(CoreError::DependencyUnavailable(
+                    "session archive failed in test".to_owned(),
+                ))
+            }
+
+            async fn reload_projection(&self) -> Result<ProjectionState, CoreError> {
+                Ok(ProjectionState::default())
+            }
+        }
+
+        let provider = Arc::new(FailingArchiveProvider);
+        let session_id = WorkerSessionId::new("sess-archive-fail");
+        let (sender, mut receiver) = mpsc::channel(1);
+
+        run_session_archive_task(provider, session_id.clone(), sender).await;
+
+        let event = receiver.recv().await.expect("ticket picker event");
+        match event {
+            TicketPickerEvent::SessionArchiveFailed {
+                session_id: event_session_id,
+                message,
+            } => {
+                assert_eq!(event_session_id, session_id);
+                assert!(message.contains("session archive failed in test"));
+            }
+            _ => panic!("expected session archive failed event"),
+        }
+    }
+
     #[test]
     fn batch_jump_prefers_unresolved_then_falls_back_to_first_any() {
         let mut projection = ProjectionState::default();
@@ -2972,8 +3151,8 @@ mod tests {
             "ui.terminal.workflow.advance"
         );
         assert_eq!(
-            command_id(UiCommand::KillSelectedSession),
-            "ui.terminal.kill_selected_session"
+            command_id(UiCommand::ArchiveSelectedSession),
+            "ui.terminal.archive_selected_session"
         );
     }
 
@@ -3002,7 +3181,7 @@ mod tests {
             UiCommand::JumpBatchFyiDigest,
             UiCommand::OpenFocusCard,
             UiCommand::AdvanceTerminalWorkflowStage,
-            UiCommand::KillSelectedSession,
+            UiCommand::ArchiveSelectedSession,
             UiCommand::MinimizeCenterView,
         ];
 
@@ -3119,6 +3298,28 @@ mod tests {
         assert!(matches!(routed, RoutedInput::Ignore));
         assert!(!shell_state.terminal_escape_pending);
         assert!(shell_state.terminal_compose_input.is_empty());
+    }
+
+    #[test]
+    fn x_opens_session_archive_confirmation() {
+        let mut shell_state = UiShellState::new("ready".to_owned(), sample_projection(true));
+
+        let should_quit = handle_key_press(&mut shell_state, key(KeyCode::Char('x')));
+        assert!(!should_quit);
+        assert!(shell_state.archive_session_confirm_session.is_some());
+    }
+
+    #[test]
+    fn session_archive_confirm_esc_cancels() {
+        let mut shell_state = UiShellState::new("ready".to_owned(), sample_projection(true));
+        let selected = shell_state
+            .selected_session_id_for_terminal_action()
+            .expect("selected session");
+        shell_state.archive_session_confirm_session = Some(selected);
+
+        let routed = route_key_press(&mut shell_state, key(KeyCode::Esc));
+        assert!(matches!(routed, RoutedInput::Ignore));
+        assert!(shell_state.archive_session_confirm_session.is_none());
     }
 
     #[test]
