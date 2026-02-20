@@ -871,6 +871,83 @@ impl UiShellState {
         });
     }
 
+    fn workflow_state_for_session(&self, session_id: &WorkerSessionId) -> Option<WorkflowState> {
+        self.domain
+            .sessions
+            .get(session_id)
+            .and_then(|session| session.work_item_id.as_ref())
+            .and_then(|work_item_id| self.domain.work_items.get(work_item_id))
+            .and_then(|work_item| work_item.workflow_state.clone())
+    }
+
+    fn route_needs_input_inbox_for_session(
+        &self,
+        session_id: &WorkerSessionId,
+    ) -> Option<(InboxItemKind, &'static str, &'static str)> {
+        match self.workflow_state_for_session(session_id) {
+            Some(WorkflowState::New | WorkflowState::Planning) => Some((
+                InboxItemKind::NeedsDecision,
+                "plan-input-request",
+                "Plan input request",
+            )),
+            Some(
+                WorkflowState::AwaitingYourReview
+                | WorkflowState::ReadyForReview
+                | WorkflowState::InReview,
+            ) => Some((
+                InboxItemKind::ReadyForReview,
+                "review-input-request",
+                "Review input request",
+            )),
+            Some(WorkflowState::Merging | WorkflowState::Done | WorkflowState::Abandoned) => None,
+            Some(WorkflowState::Implementing | WorkflowState::Testing | WorkflowState::PRDrafted)
+            | None => Some((
+                InboxItemKind::NeedsApproval,
+                "workflow-awaiting-progression",
+                "Worker waiting for progression",
+            )),
+        }
+    }
+
+    fn workflow_transition_inbox_for_state(
+        workflow_state: &WorkflowState,
+    ) -> Option<(InboxItemKind, &'static str, &'static str)> {
+        match workflow_state {
+            WorkflowState::PRDrafted => Some((
+                InboxItemKind::NeedsApproval,
+                "workflow-awaiting-progression",
+                "Approval needed to progress this ticket",
+            )),
+            WorkflowState::AwaitingYourReview
+            | WorkflowState::ReadyForReview
+            | WorkflowState::InReview => Some((
+                InboxItemKind::ReadyForReview,
+                "review-idle",
+                "Ticket is idle in review stage",
+            )),
+            _ => None,
+        }
+    }
+
+    fn publish_review_idle_inbox_for_session(&mut self, session_id: &WorkerSessionId) {
+        if let Some((kind, coalesce_key, title_prefix)) = self
+            .workflow_state_for_session(session_id)
+            .as_ref()
+            .and_then(Self::workflow_transition_inbox_for_state)
+            .filter(|(kind, _, _)| *kind == InboxItemKind::ReadyForReview)
+        {
+            self.publish_inbox_for_session(
+                session_id,
+                kind,
+                format!(
+                    "{title_prefix}: {}",
+                    session_display_labels(&self.domain, session_id).compact_label
+                ),
+                coalesce_key,
+            );
+        }
+    }
+
     fn publish_error_for_session(
         &mut self,
         session_id: &WorkerSessionId,
@@ -908,10 +985,6 @@ impl UiShellState {
             .map(|question| question.question.as_str())
             .unwrap_or_else(|| event.question.as_str());
         compact_focus_card_text(summary)
-    }
-
-    fn needs_input_is_structured_plan_request(event: &BackendNeedsInputEvent) -> bool {
-        !event.questions.is_empty()
     }
 
     fn active_terminal_session_id(&self) -> Option<&WorkerSessionId> {
@@ -1520,20 +1593,14 @@ impl UiShellState {
                     needs_input,
                 } => {
                     let needs_input_summary = Self::needs_input_summary(&needs_input);
-                    let is_structured_plan_request =
-                        Self::needs_input_is_structured_plan_request(&needs_input);
-                    self.publish_inbox_for_session(
-                        &session_id,
-                        InboxItemKind::NeedsDecision,
-                        format!("Worker waiting for input: {needs_input_summary}"),
-                        "needs-input",
-                    );
-                    if is_structured_plan_request {
+                    if let Some((kind, coalesce_key, title_prefix)) =
+                        self.route_needs_input_inbox_for_session(&session_id)
+                    {
                         self.publish_inbox_for_session(
                             &session_id,
-                            InboxItemKind::NeedsDecision,
-                            format!("Plan input request: {needs_input_summary}"),
-                            "plan-input-request",
+                            kind,
+                            format!("{title_prefix}: {needs_input_summary}"),
+                            coalesce_key,
                         );
                     }
                     let prompt = self.needs_input_prompt_from_event(&session_id, needs_input);
@@ -1772,6 +1839,7 @@ impl UiShellState {
         changed |= self.merge_finalizing_sessions.len() != finalizing_len_before;
 
         for session_id in session_ids {
+            self.publish_review_idle_inbox_for_session(&session_id);
             changed |= self.ensure_review_sync_instruction(&session_id);
             changed |= self.enqueue_merge_queue_request(session_id, MergeQueueCommandKind::Reconcile);
         }
@@ -2168,6 +2236,20 @@ fn apply_ticket_picker_event(&mut self, event: TicketPickerEvent) {
 
                 if let Some(instruction) = outcome.instruction.as_deref() {
                     self.send_terminal_instruction_to_session(&outcome.session_id, instruction);
+                }
+                if let Some((kind, coalesce_key, title_prefix)) =
+                    Self::workflow_transition_inbox_for_state(&outcome.to)
+                {
+                    self.publish_inbox_for_session(
+                        &outcome.session_id,
+                        kind,
+                        format!(
+                            "{title_prefix}: {}",
+                            session_display_labels(&self.domain, &outcome.session_id)
+                                .compact_label
+                        ),
+                        coalesce_key,
+                    );
                 }
 
                 let labels = session_display_labels(&self.domain, &outcome.session_id);

@@ -1923,6 +1923,92 @@ mod tests {
     }
 
     #[test]
+    fn needs_input_routing_planning_state_uses_needs_decision_lane() {
+        let mut projection = sample_projection(true);
+        projection
+            .work_items
+            .get_mut(&WorkItemId::new("wi-1"))
+            .expect("work item")
+            .workflow_state = Some(WorkflowState::Planning);
+        let shell_state = UiShellState::new("ready".to_owned(), projection);
+
+        let route =
+            shell_state.route_needs_input_inbox_for_session(&WorkerSessionId::new("sess-1"));
+        assert_eq!(
+            route,
+            Some((
+                InboxItemKind::NeedsDecision,
+                "plan-input-request",
+                "Plan input request"
+            ))
+        );
+    }
+
+    #[test]
+    fn needs_input_routing_implementation_state_uses_approvals_lane() {
+        let mut projection = sample_projection(true);
+        projection
+            .work_items
+            .get_mut(&WorkItemId::new("wi-1"))
+            .expect("work item")
+            .workflow_state = Some(WorkflowState::Implementing);
+        let shell_state = UiShellState::new("ready".to_owned(), projection);
+
+        let route =
+            shell_state.route_needs_input_inbox_for_session(&WorkerSessionId::new("sess-1"));
+        assert_eq!(
+            route,
+            Some((
+                InboxItemKind::NeedsApproval,
+                "workflow-awaiting-progression",
+                "Worker waiting for progression"
+            ))
+        );
+    }
+
+    #[test]
+    fn needs_input_routing_review_state_uses_pr_lane() {
+        let mut projection = sample_projection(true);
+        projection
+            .work_items
+            .get_mut(&WorkItemId::new("wi-1"))
+            .expect("work item")
+            .workflow_state = Some(WorkflowState::ReadyForReview);
+        let shell_state = UiShellState::new("ready".to_owned(), projection);
+
+        let route =
+            shell_state.route_needs_input_inbox_for_session(&WorkerSessionId::new("sess-1"));
+        assert_eq!(
+            route,
+            Some((
+                InboxItemKind::ReadyForReview,
+                "review-input-request",
+                "Review input request"
+            ))
+        );
+    }
+
+    #[test]
+    fn workflow_transition_routing_maps_prdrafted_to_approvals_and_review_to_pr_lane() {
+        assert_eq!(
+            UiShellState::workflow_transition_inbox_for_state(&WorkflowState::PRDrafted),
+            Some((
+                InboxItemKind::NeedsApproval,
+                "workflow-awaiting-progression",
+                "Approval needed to progress this ticket"
+            ))
+        );
+        assert_eq!(
+            UiShellState::workflow_transition_inbox_for_state(&WorkflowState::InReview),
+            Some((
+                InboxItemKind::ReadyForReview,
+                "review-idle",
+                "Ticket is idle in review stage"
+            ))
+        );
+    }
+
+    #[test]
     fn ticket_picker_modal_prevents_pending_planning_prompt_activation() {
         let backend = Arc::new(ManualTerminalBackend::default());
         let mut projection = sample_projection(true);
