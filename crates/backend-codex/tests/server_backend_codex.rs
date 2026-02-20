@@ -18,6 +18,8 @@ fn backend_with_binary(binary: PathBuf) -> CodexBackend {
         base_args: Vec::new(),
         server_startup_timeout: Duration::from_secs(1),
         legacy_server_base_url: None,
+        harness_log_raw_events: false,
+        harness_log_normalized_events: false,
     })
 }
 
@@ -193,6 +195,8 @@ async fn codex_backend_rejects_legacy_http_base_url_config() {
         base_args: Vec::new(),
         server_startup_timeout: Duration::from_secs(1),
         legacy_server_base_url: Some("http://127.0.0.1:8788".to_owned()),
+        harness_log_raw_events: false,
+        harness_log_normalized_events: false,
     });
 
     let error = backend
@@ -201,7 +205,7 @@ async fn codex_backend_rejects_legacy_http_base_url_config() {
         .expect_err("legacy URL should fail");
     match error {
         RuntimeError::Configuration(message) => {
-            assert!(message.contains("ORCHESTRATOR_CODEX_SERVER_BASE_URL"));
+            assert!(message.contains("legacy Codex server base URL"));
         }
         other => panic!("expected configuration error, got {other:?}"),
     }

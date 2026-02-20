@@ -26,15 +26,9 @@ use tokio::task::JoinHandle;
 
 const DEFAULT_OPENCODE_BINARY: &str = "opencode";
 const DEFAULT_OPENCODE_SERVER_BASE_URL: &str = "http://127.0.0.1:8787";
-const ENV_ALLOW_UNSAFE_COMMAND_PATHS: &str = "ORCHESTRATOR_ALLOW_UNSAFE_COMMAND_PATHS";
-const ENV_HARNESS_LOG_RAW_EVENTS: &str = "ORCHESTRATOR_HARNESS_LOG_RAW_EVENTS";
-const ENV_HARNESS_LOG_NORMALIZED_EVENTS: &str = "ORCHESTRATOR_HARNESS_LOG_NORMALIZED_EVENTS";
 const HARNESS_LOG_DIR_NAME: &str = "logs";
 const HARNESS_RAW_LOG_FILE_NAME: &str = "harness-raw.log";
 const HARNESS_NORMALIZED_LOG_FILE_NAME: &str = "harness-normalized.log";
-const ENV_OPENCODE_SERVER_BASE_URL: &str = "ORCHESTRATOR_OPENCODE_SERVER_BASE_URL";
-const ENV_HARNESS_SERVER_STARTUP_TIMEOUT_SECS: &str =
-    "ORCHESTRATOR_HARNESS_SERVER_STARTUP_TIMEOUT_SECS";
 const DEFAULT_OUTPUT_BUFFER: usize = 256;
 const DEFAULT_SERVER_STARTUP_TIMEOUT_SECS: u64 = 10;
 const SESSION_EXPORT_HELP_MARKERS: &[&str] =
@@ -49,20 +43,22 @@ pub struct OpenCodeBackendConfig {
     pub output_buffer: usize,
     pub server_base_url: Option<String>,
     pub server_startup_timeout: Duration,
+    pub allow_unsafe_command_paths: bool,
+    pub harness_log_raw_events: bool,
+    pub harness_log_normalized_events: bool,
 }
 
 impl Default for OpenCodeBackendConfig {
     fn default() -> Self {
         Self {
-            binary: std::env::var_os("ORCHESTRATOR_OPENCODE_BIN")
-                .map(PathBuf::from)
-                .unwrap_or_else(|| PathBuf::from(DEFAULT_OPENCODE_BINARY)),
+            binary: PathBuf::from(DEFAULT_OPENCODE_BINARY),
             base_args: Vec::new(),
             output_buffer: DEFAULT_OUTPUT_BUFFER,
-            server_base_url: std::env::var(ENV_OPENCODE_SERVER_BASE_URL).ok(),
-            server_startup_timeout: Duration::from_secs(
-                parse_server_startup_timeout_secs().unwrap_or(DEFAULT_SERVER_STARTUP_TIMEOUT_SECS),
-            ),
+            server_base_url: Some(DEFAULT_OPENCODE_SERVER_BASE_URL.to_owned()),
+            server_startup_timeout: Duration::from_secs(DEFAULT_SERVER_STARTUP_TIMEOUT_SECS),
+            allow_unsafe_command_paths: false,
+            harness_log_raw_events: false,
+            harness_log_normalized_events: false,
         }
     }
 }
@@ -81,6 +77,8 @@ pub struct OpenCodeBackend {
 struct OpenCodeSession {
     backend_kind: BackendKind,
     remote_session_id: String,
+    harness_log_raw_events: bool,
+    harness_log_normalized_events: bool,
     relay_task: AsyncMutex<Option<JoinHandle<()>>>,
     event_tx: broadcast::Sender<BackendEvent>,
     terminal_event_sent: AtomicBool,
@@ -95,6 +93,7 @@ struct ServerState {
 impl OpenCodeSession {
     fn emit_non_terminal_event(&self, event: BackendEvent) {
         maybe_log_normalized_harness_event(
+            self.harness_log_normalized_events,
             self.backend_kind.clone(),
             self.remote_session_id.as_str(),
             false,
@@ -108,6 +107,7 @@ impl OpenCodeSession {
             return;
         }
         maybe_log_normalized_harness_event(
+            self.harness_log_normalized_events,
             self.backend_kind.clone(),
             self.remote_session_id.as_str(),
             true,
@@ -191,7 +191,10 @@ impl OpenCodeBackend {
                 return Ok(());
             }
 
-            validate_command_binary_path(&self.config.binary, false)?;
+            validate_command_binary_path(
+                &self.config.binary,
+                self.config.allow_unsafe_command_paths,
+            )?;
             let mut command = Command::new(&self.config.binary);
             command.args(&self.config.base_args);
             command.arg("serve");
@@ -418,6 +421,7 @@ impl OpenCodeBackend {
                     }
 
                     maybe_log_raw_harness_line(
+                        session.harness_log_raw_events,
                         backend_kind.clone(),
                         remote_session_id.as_str(),
                         line.as_slice(),
@@ -435,6 +439,7 @@ impl OpenCodeBackend {
 
             if !line_buffer.is_empty() {
                 maybe_log_raw_harness_line(
+                    session.harness_log_raw_events,
                     backend_kind.clone(),
                     remote_session_id.as_str(),
                     line_buffer.as_slice(),
@@ -527,12 +532,6 @@ fn parse_optional_features_from_help(help_text: &str) -> (bool, bool) {
         has_marker(SESSION_EXPORT_HELP_MARKERS),
         has_marker(DIFF_PROVIDER_HELP_MARKERS),
     )
-}
-
-fn parse_server_startup_timeout_secs() -> Option<u64> {
-    std::env::var(ENV_HARNESS_SERVER_STARTUP_TIMEOUT_SECS)
-        .ok()
-        .and_then(|value| value.trim().parse::<u64>().ok())
 }
 
 #[derive(Debug, Serialize)]
@@ -754,30 +753,13 @@ fn sanitize_error_body(body: &str) -> String {
     }
 }
 
-fn harness_log_raw_events_enabled() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| env_flag_enabled(ENV_HARNESS_LOG_RAW_EVENTS))
-}
-
-fn harness_log_normalized_events_enabled() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| env_flag_enabled(ENV_HARNESS_LOG_NORMALIZED_EVENTS))
-}
-
-fn env_flag_enabled(name: &str) -> bool {
-    std::env::var(name)
-        .ok()
-        .map(|value| {
-            matches!(
-                value.trim().to_ascii_lowercase().as_str(),
-                "1" | "true" | "yes" | "on"
-            )
-        })
-        .unwrap_or(false)
-}
-
-fn maybe_log_raw_harness_line(backend_kind: BackendKind, remote_session_id: &str, line: &[u8]) {
-    if !harness_log_raw_events_enabled() {
+fn maybe_log_raw_harness_line(
+    enabled: bool,
+    backend_kind: BackendKind,
+    remote_session_id: &str,
+    line: &[u8],
+) {
+    if !enabled {
         return;
     }
     let text = String::from_utf8_lossy(line).into_owned();
@@ -793,12 +775,13 @@ fn maybe_log_raw_harness_line(backend_kind: BackendKind, remote_session_id: &str
 }
 
 fn maybe_log_normalized_harness_event(
+    enabled: bool,
     backend_kind: BackendKind,
     remote_session_id: &str,
     terminal: bool,
     event: &BackendEvent,
 ) {
-    if !harness_log_normalized_events_enabled() {
+    if !enabled {
         return;
     }
     let payload = match event {
@@ -921,7 +904,7 @@ fn absolutize_path(path: PathBuf) -> PathBuf {
 #[async_trait]
 impl orchestrator_runtime::SessionLifecycle for OpenCodeBackend {
     async fn spawn(&self, spec: SpawnSpec) -> RuntimeResult<SessionHandle> {
-        validate_command_binary_path(&self.config.binary, false)?;
+        validate_command_binary_path(&self.config.binary, self.config.allow_unsafe_command_paths)?;
         let session_id = spec.session_id.clone();
         let base_url = self.ensure_server_base_url().await?;
         let instruction_prelude = spec.instruction_prelude.clone();
@@ -932,6 +915,8 @@ impl orchestrator_runtime::SessionLifecycle for OpenCodeBackend {
         let session = Arc::new(OpenCodeSession {
             backend_kind: self.backend_kind.clone(),
             remote_session_id: created.session_id.clone(),
+            harness_log_raw_events: self.config.harness_log_raw_events,
+            harness_log_normalized_events: self.config.harness_log_normalized_events,
             relay_task: AsyncMutex::new(None),
             event_tx: event_tx.clone(),
             terminal_event_sent: AtomicBool::new(false),
@@ -995,26 +980,6 @@ impl orchestrator_runtime::SessionLifecycle for OpenCodeBackend {
     }
 }
 
-fn parse_bool_env(name: &str, value: &str) -> RuntimeResult<bool> {
-    match value.trim().to_ascii_lowercase().as_str() {
-        "1" | "true" | "yes" | "on" => Ok(true),
-        "0" | "false" | "no" | "off" => Ok(false),
-        _ => Err(RuntimeError::Configuration(format!(
-            "{name} must be a boolean (true/false)."
-        ))),
-    }
-}
-
-fn read_bool_env(name: &str) -> RuntimeResult<bool> {
-    match std::env::var(name) {
-        Ok(value) => parse_bool_env(name, &value),
-        Err(std::env::VarError::NotPresent) => Ok(false),
-        Err(std::env::VarError::NotUnicode(_)) => Err(RuntimeError::Configuration(format!(
-            "{name} contained invalid UTF-8"
-        ))),
-    }
-}
-
 fn is_bare_command_name(path: &Path) -> bool {
     let mut components = path.components();
     matches!(components.next(), Some(Component::Normal(_))) && components.next().is_none()
@@ -1024,17 +989,12 @@ fn validate_command_binary_path(
     binary: &Path,
     allow_unsafe_command_paths: bool,
 ) -> RuntimeResult<()> {
-    let allow_unsafe = if allow_unsafe_command_paths {
-        true
-    } else {
-        read_bool_env(ENV_ALLOW_UNSAFE_COMMAND_PATHS)?
-    };
-    if allow_unsafe || is_bare_command_name(binary) {
+    if allow_unsafe_command_paths || is_bare_command_name(binary) {
         return Ok(());
     }
 
     Err(RuntimeError::Configuration(format!(
-        "OpenCode binary path '{}' is treated as unsafe by default. Use a bare command name or set {ENV_ALLOW_UNSAFE_COMMAND_PATHS}=true to allow explicit paths.",
+        "OpenCode binary path '{}' is treated as unsafe by default. Use a bare command name or enable allow_unsafe_command_paths in config.toml to allow explicit paths.",
         binary.display()
     )))
 }
@@ -1050,7 +1010,7 @@ impl WorkerBackend for OpenCodeBackend {
     }
 
     async fn health_check(&self) -> RuntimeResult<()> {
-        validate_command_binary_path(&self.config.binary, false)?;
+        validate_command_binary_path(&self.config.binary, self.config.allow_unsafe_command_paths)?;
         let base_url = self.ensure_server_base_url().await?;
         self.wait_for_server_health(&base_url).await
     }

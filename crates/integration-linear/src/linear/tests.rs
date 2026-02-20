@@ -1262,9 +1262,20 @@ mod tests {
 
     #[test]
     fn parse_workflow_state_map_parses_case_and_separator_variants() {
-        let mappings = parse_workflow_state_map_env(
-            "implementing=In Progress, ready_for_review=In Review, DONE=Done",
-        )
+        let mappings = parse_workflow_state_map_settings(&[
+            WorkflowStateMapSetting {
+                workflow_state: "implementing".to_owned(),
+                linear_state: "In Progress".to_owned(),
+            },
+            WorkflowStateMapSetting {
+                workflow_state: "ready_for_review".to_owned(),
+                linear_state: "In Review".to_owned(),
+            },
+            WorkflowStateMapSetting {
+                workflow_state: "DONE".to_owned(),
+                linear_state: "Done".to_owned(),
+            },
+        ])
         .expect("workflow state mapping should parse");
         assert_eq!(mappings.len(), 3);
         assert_eq!(mappings[0].workflow_state, WorkflowState::Implementing);
@@ -1275,8 +1286,17 @@ mod tests {
 
     #[test]
     fn parse_workflow_state_map_rejects_duplicate_workflow_states() {
-        let error = parse_workflow_state_map_env("Done=Done, done=Canceled")
-            .expect_err("duplicate workflow states should fail");
+        let error = parse_workflow_state_map_settings(&[
+            WorkflowStateMapSetting {
+                workflow_state: "Done".to_owned(),
+                linear_state: "Done".to_owned(),
+            },
+            WorkflowStateMapSetting {
+                workflow_state: "done".to_owned(),
+                linear_state: "Canceled".to_owned(),
+            },
+        ])
+        .expect_err("duplicate workflow states should fail");
         assert!(error.to_string().contains("duplicate mapping"));
     }
 
@@ -1300,7 +1320,7 @@ mod tests {
 
     #[test]
     fn parse_sync_interval_rejects_zero() {
-        let error = parse_sync_interval_secs("0").expect_err("zero interval should fail");
+        let error = parse_sync_interval_secs(0).expect_err("zero interval should fail");
         assert!(error.to_string().contains("greater than zero"));
     }
 

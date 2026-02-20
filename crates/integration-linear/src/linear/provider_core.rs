@@ -33,11 +33,6 @@ struct CachedTicket {
 }
 
 impl LinearTicketingProvider {
-    pub fn from_env() -> Result<Self, CoreError> {
-        let config = LinearConfig::from_env()?;
-        Self::new(config)
-    }
-
     pub fn new(config: LinearConfig) -> Result<Self, CoreError> {
         let transport = ReqwestGraphqlTransport::new(&config.api_url, &config.api_key)?;
         Ok(Self::with_transport(config, Arc::new(transport)))

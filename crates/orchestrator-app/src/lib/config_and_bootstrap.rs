@@ -32,12 +32,48 @@ pub struct AppConfig {
     pub ticketing_provider: String,
     #[serde(default = "default_harness_provider")]
     pub harness_provider: String,
+    #[serde(default)]
+    pub supervisor: SupervisorConfig,
+    #[serde(default)]
+    pub linear: LinearConfigToml,
+    #[serde(default)]
+    pub shortcut: ShortcutConfigToml,
+    #[serde(default)]
+    pub git: GitConfigToml,
+    #[serde(default)]
+    pub github: GithubConfigToml,
+    #[serde(default)]
+    pub runtime: RuntimeConfigToml,
+    #[serde(default)]
+    pub ui: UiConfigToml,
 }
 
 const LEGACY_DEFAULT_WORKSPACE_PATH: &str = "./";
 const LEGACY_DEFAULT_EVENT_STORE_PATH: &str = "./orchestrator-events.db";
 const DEFAULT_TICKETING_PROVIDER: &str = "linear";
 const DEFAULT_HARNESS_PROVIDER: &str = "codex";
+const DEFAULT_SUPERVISOR_MODEL: &str = "openai/gpt-4o-mini";
+const DEFAULT_OPENROUTER_BASE_URL: &str = "https://openrouter.ai/api/v1";
+const DEFAULT_LINEAR_API_URL: &str = "https://api.linear.app/graphql";
+const DEFAULT_LINEAR_SYNC_INTERVAL_SECS: u64 = 60;
+const DEFAULT_LINEAR_FETCH_LIMIT: u32 = 100;
+const DEFAULT_LINEAR_SYNC_ASSIGNED_TO_ME: bool = true;
+const DEFAULT_LINEAR_WORKFLOW_COMMENT_SUMMARIES: bool = false;
+const DEFAULT_LINEAR_WORKFLOW_ATTACH_PR_LINKS: bool = true;
+const DEFAULT_SHORTCUT_API_URL: &str = "https://api.app.shortcut.com/api/v3";
+const DEFAULT_SHORTCUT_FETCH_LIMIT: u32 = 100;
+const DEFAULT_GIT_BINARY: &str = "git";
+const DEFAULT_GH_BINARY: &str = "gh";
+const DEFAULT_ALLOW_UNSAFE_COMMAND_PATHS: bool = false;
+const DEFAULT_HARNESS_SERVER_STARTUP_TIMEOUT_SECS: u64 = 10;
+const DEFAULT_HARNESS_LOG_RAW_EVENTS: bool = false;
+const DEFAULT_HARNESS_LOG_NORMALIZED_EVENTS: bool = false;
+const DEFAULT_OPENCODE_BINARY: &str = "opencode";
+const DEFAULT_OPENCODE_SERVER_BASE_URL: &str = "http://127.0.0.1:8787";
+const DEFAULT_CODEX_BINARY: &str = "codex";
+const DEFAULT_UI_THEME: &str = "nord";
+const DEFAULT_TICKET_PICKER_PRIORITY_STATES: &[&str] =
+    &["In Progress", "Final Approval", "Todo", "Backlog"];
 
 fn default_workspace_path() -> String {
     default_orchestrator_data_dir()
@@ -59,7 +95,280 @@ fn default_harness_provider() -> String {
     DEFAULT_HARNESS_PROVIDER.to_owned()
 }
 
-const DEFAULT_SUPERVISOR_MODEL: &str = "openai/gpt-4o-mini";
+fn default_linear_sync_states() -> Vec<String> {
+    Vec::new()
+}
+
+fn default_linear_workflow_state_map() -> Vec<WorkflowStateMapEntry> {
+    vec![
+        WorkflowStateMapEntry::new("Implementing", "In Progress"),
+        WorkflowStateMapEntry::new("Testing", "In Progress"),
+        WorkflowStateMapEntry::new("PRDrafted", "In Review"),
+        WorkflowStateMapEntry::new("AwaitingYourReview", "In Review"),
+        WorkflowStateMapEntry::new("ReadyForReview", "In Review"),
+        WorkflowStateMapEntry::new("InReview", "In Review"),
+        WorkflowStateMapEntry::new("Merging", "In Review"),
+        WorkflowStateMapEntry::new("Done", "Done"),
+        WorkflowStateMapEntry::new("Abandoned", "Canceled"),
+    ]
+}
+
+fn default_ticket_picker_priority_states() -> Vec<String> {
+    DEFAULT_TICKET_PICKER_PRIORITY_STATES
+        .iter()
+        .map(|value| (*value).to_owned())
+        .collect()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SupervisorConfig {
+    #[serde(default = "default_supervisor_model")]
+    pub model: String,
+    #[serde(default = "default_openrouter_base_url")]
+    pub openrouter_base_url: String,
+}
+
+impl Default for SupervisorConfig {
+    fn default() -> Self {
+        Self {
+            model: default_supervisor_model(),
+            openrouter_base_url: default_openrouter_base_url(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorkflowStateMapEntry {
+    pub workflow_state: String,
+    pub linear_state: String,
+}
+
+impl WorkflowStateMapEntry {
+    fn new(workflow_state: &str, linear_state: &str) -> Self {
+        Self {
+            workflow_state: workflow_state.to_owned(),
+            linear_state: linear_state.to_owned(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LinearConfigToml {
+    #[serde(default = "default_linear_api_url")]
+    pub api_url: String,
+    #[serde(default = "default_linear_sync_interval_secs")]
+    pub sync_interval_secs: u64,
+    #[serde(default = "default_linear_fetch_limit")]
+    pub fetch_limit: u32,
+    #[serde(default = "default_linear_sync_assigned_to_me")]
+    pub sync_assigned_to_me: bool,
+    #[serde(default = "default_linear_sync_states")]
+    pub sync_states: Vec<String>,
+    #[serde(default = "default_linear_workflow_state_map")]
+    pub workflow_state_map: Vec<WorkflowStateMapEntry>,
+    #[serde(default = "default_linear_workflow_comment_summaries")]
+    pub workflow_comment_summaries: bool,
+    #[serde(default = "default_linear_workflow_attach_pr_links")]
+    pub workflow_attach_pr_links: bool,
+}
+
+impl Default for LinearConfigToml {
+    fn default() -> Self {
+        Self {
+            api_url: default_linear_api_url(),
+            sync_interval_secs: default_linear_sync_interval_secs(),
+            fetch_limit: default_linear_fetch_limit(),
+            sync_assigned_to_me: default_linear_sync_assigned_to_me(),
+            sync_states: default_linear_sync_states(),
+            workflow_state_map: default_linear_workflow_state_map(),
+            workflow_comment_summaries: default_linear_workflow_comment_summaries(),
+            workflow_attach_pr_links: default_linear_workflow_attach_pr_links(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ShortcutConfigToml {
+    #[serde(default = "default_shortcut_api_url")]
+    pub api_url: String,
+    #[serde(default = "default_shortcut_fetch_limit")]
+    pub fetch_limit: u32,
+}
+
+impl Default for ShortcutConfigToml {
+    fn default() -> Self {
+        Self {
+            api_url: default_shortcut_api_url(),
+            fetch_limit: default_shortcut_fetch_limit(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct GitConfigToml {
+    #[serde(default = "default_git_binary")]
+    pub binary: String,
+    #[serde(default)]
+    pub allow_delete_unmerged_branches: bool,
+    #[serde(default)]
+    pub allow_destructive_automation: bool,
+    #[serde(default)]
+    pub allow_force_push: bool,
+}
+
+impl Default for GitConfigToml {
+    fn default() -> Self {
+        Self {
+            binary: default_git_binary(),
+            allow_delete_unmerged_branches: false,
+            allow_destructive_automation: false,
+            allow_force_push: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct GithubConfigToml {
+    #[serde(default = "default_gh_binary")]
+    pub binary: String,
+}
+
+impl Default for GithubConfigToml {
+    fn default() -> Self {
+        Self {
+            binary: default_gh_binary(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RuntimeConfigToml {
+    #[serde(default = "default_allow_unsafe_command_paths")]
+    pub allow_unsafe_command_paths: bool,
+    #[serde(default = "default_harness_server_startup_timeout_secs")]
+    pub harness_server_startup_timeout_secs: u64,
+    #[serde(default = "default_harness_log_raw_events")]
+    pub harness_log_raw_events: bool,
+    #[serde(default = "default_harness_log_normalized_events")]
+    pub harness_log_normalized_events: bool,
+    #[serde(default = "default_opencode_binary")]
+    pub opencode_binary: String,
+    #[serde(default = "default_opencode_server_base_url")]
+    pub opencode_server_base_url: String,
+    #[serde(default = "default_codex_binary")]
+    pub codex_binary: String,
+}
+
+impl Default for RuntimeConfigToml {
+    fn default() -> Self {
+        Self {
+            allow_unsafe_command_paths: default_allow_unsafe_command_paths(),
+            harness_server_startup_timeout_secs: default_harness_server_startup_timeout_secs(),
+            harness_log_raw_events: default_harness_log_raw_events(),
+            harness_log_normalized_events: default_harness_log_normalized_events(),
+            opencode_binary: default_opencode_binary(),
+            opencode_server_base_url: default_opencode_server_base_url(),
+            codex_binary: default_codex_binary(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct UiConfigToml {
+    #[serde(default = "default_ui_theme")]
+    pub theme: String,
+    #[serde(default = "default_ticket_picker_priority_states")]
+    pub ticket_picker_priority_states: Vec<String>,
+}
+
+impl Default for UiConfigToml {
+    fn default() -> Self {
+        Self {
+            theme: default_ui_theme(),
+            ticket_picker_priority_states: default_ticket_picker_priority_states(),
+        }
+    }
+}
+
+fn default_supervisor_model() -> String {
+    DEFAULT_SUPERVISOR_MODEL.to_owned()
+}
+
+fn default_openrouter_base_url() -> String {
+    DEFAULT_OPENROUTER_BASE_URL.to_owned()
+}
+
+fn default_linear_api_url() -> String {
+    DEFAULT_LINEAR_API_URL.to_owned()
+}
+
+fn default_linear_sync_interval_secs() -> u64 {
+    DEFAULT_LINEAR_SYNC_INTERVAL_SECS
+}
+
+fn default_linear_fetch_limit() -> u32 {
+    DEFAULT_LINEAR_FETCH_LIMIT
+}
+
+fn default_linear_sync_assigned_to_me() -> bool {
+    DEFAULT_LINEAR_SYNC_ASSIGNED_TO_ME
+}
+
+fn default_linear_workflow_comment_summaries() -> bool {
+    DEFAULT_LINEAR_WORKFLOW_COMMENT_SUMMARIES
+}
+
+fn default_linear_workflow_attach_pr_links() -> bool {
+    DEFAULT_LINEAR_WORKFLOW_ATTACH_PR_LINKS
+}
+
+fn default_shortcut_api_url() -> String {
+    DEFAULT_SHORTCUT_API_URL.to_owned()
+}
+
+fn default_shortcut_fetch_limit() -> u32 {
+    DEFAULT_SHORTCUT_FETCH_LIMIT
+}
+
+fn default_git_binary() -> String {
+    DEFAULT_GIT_BINARY.to_owned()
+}
+
+fn default_gh_binary() -> String {
+    DEFAULT_GH_BINARY.to_owned()
+}
+
+fn default_allow_unsafe_command_paths() -> bool {
+    DEFAULT_ALLOW_UNSAFE_COMMAND_PATHS
+}
+
+fn default_harness_server_startup_timeout_secs() -> u64 {
+    DEFAULT_HARNESS_SERVER_STARTUP_TIMEOUT_SECS
+}
+
+fn default_harness_log_raw_events() -> bool {
+    DEFAULT_HARNESS_LOG_RAW_EVENTS
+}
+
+fn default_harness_log_normalized_events() -> bool {
+    DEFAULT_HARNESS_LOG_NORMALIZED_EVENTS
+}
+
+fn default_opencode_binary() -> String {
+    DEFAULT_OPENCODE_BINARY.to_owned()
+}
+
+fn default_opencode_server_base_url() -> String {
+    DEFAULT_OPENCODE_SERVER_BASE_URL.to_owned()
+}
+
+fn default_codex_binary() -> String {
+    DEFAULT_CODEX_BINARY.to_owned()
+}
+
+fn default_ui_theme() -> String {
+    DEFAULT_UI_THEME.to_owned()
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct StartupState {
@@ -74,6 +383,13 @@ impl Default for AppConfig {
             event_store_path: default_event_store_path(),
             ticketing_provider: default_ticketing_provider(),
             harness_provider: default_harness_provider(),
+            supervisor: SupervisorConfig::default(),
+            linear: LinearConfigToml::default(),
+            shortcut: ShortcutConfigToml::default(),
+            git: GitConfigToml::default(),
+            github: GithubConfigToml::default(),
+            runtime: RuntimeConfigToml::default(),
+            ui: UiConfigToml::default(),
         }
     }
 }
@@ -244,29 +560,149 @@ fn load_or_create_config(path: &std::path::Path) -> Result<AppConfig, CoreError>
         ))
     })?;
 
-    let mut changed = false;
-    if config.workspace.trim() == LEGACY_DEFAULT_WORKSPACE_PATH {
-        config.workspace = default_workspace_path();
-        changed = true;
-    }
-    if config.event_store_path.trim() == LEGACY_DEFAULT_EVENT_STORE_PATH {
-        config.event_store_path = default_event_store_path();
-        changed = true;
-    }
-    if config.ticketing_provider.trim().is_empty() {
-        config.ticketing_provider = default_ticketing_provider();
-        changed = true;
-    }
-    if config.harness_provider.trim().is_empty() {
-        config.harness_provider = default_harness_provider();
-        changed = true;
-    }
+    let changed = normalize_config(&mut config);
 
     if changed {
         persist_config(path, &config)?;
     }
 
     Ok(config)
+}
+
+fn normalize_config(config: &mut AppConfig) -> bool {
+    let mut changed = false;
+
+    if config.workspace.trim() == LEGACY_DEFAULT_WORKSPACE_PATH || config.workspace.trim().is_empty()
+    {
+        config.workspace = default_workspace_path();
+        changed = true;
+    }
+    if config.event_store_path.trim() == LEGACY_DEFAULT_EVENT_STORE_PATH
+        || config.event_store_path.trim().is_empty()
+    {
+        config.event_store_path = default_event_store_path();
+        changed = true;
+    }
+    if config.ticketing_provider.trim().is_empty() {
+        config.ticketing_provider = default_ticketing_provider();
+        changed = true;
+    } else {
+        let normalized = config.ticketing_provider.trim().to_ascii_lowercase();
+        if normalized != config.ticketing_provider {
+            config.ticketing_provider = normalized;
+            changed = true;
+        }
+    }
+    if config.harness_provider.trim().is_empty() {
+        config.harness_provider = default_harness_provider();
+        changed = true;
+    } else {
+        let normalized = config.harness_provider.trim().to_ascii_lowercase();
+        if normalized != config.harness_provider {
+            config.harness_provider = normalized;
+            changed = true;
+        }
+    }
+
+    changed |= normalize_non_empty_string(
+        &mut config.supervisor.model,
+        default_supervisor_model(),
+    );
+    changed |= normalize_non_empty_string(
+        &mut config.supervisor.openrouter_base_url,
+        default_openrouter_base_url(),
+    );
+    changed |= normalize_non_empty_string(&mut config.linear.api_url, default_linear_api_url());
+    if config.linear.sync_interval_secs == 0 {
+        config.linear.sync_interval_secs = default_linear_sync_interval_secs();
+        changed = true;
+    }
+    if config.linear.fetch_limit == 0 {
+        config.linear.fetch_limit = default_linear_fetch_limit();
+        changed = true;
+    }
+    changed |= normalize_string_vec(&mut config.linear.sync_states);
+    if config.linear.workflow_state_map.is_empty() {
+        config.linear.workflow_state_map = default_linear_workflow_state_map();
+        changed = true;
+    } else {
+        for entry in &mut config.linear.workflow_state_map {
+            if normalize_non_empty_string(&mut entry.workflow_state, String::new()) {
+                changed = true;
+            }
+            if normalize_non_empty_string(&mut entry.linear_state, String::new()) {
+                changed = true;
+            }
+        }
+        config.linear.workflow_state_map.retain(|entry| {
+            !entry.workflow_state.is_empty() && !entry.linear_state.is_empty()
+        });
+        if config.linear.workflow_state_map.is_empty() {
+            config.linear.workflow_state_map = default_linear_workflow_state_map();
+            changed = true;
+        }
+    }
+
+    changed |= normalize_non_empty_string(&mut config.shortcut.api_url, default_shortcut_api_url());
+    if config.shortcut.fetch_limit == 0 {
+        config.shortcut.fetch_limit = default_shortcut_fetch_limit();
+        changed = true;
+    }
+
+    changed |= normalize_non_empty_string(&mut config.git.binary, default_git_binary());
+    changed |= normalize_non_empty_string(&mut config.github.binary, default_gh_binary());
+
+    if config.runtime.harness_server_startup_timeout_secs == 0 {
+        config.runtime.harness_server_startup_timeout_secs =
+            default_harness_server_startup_timeout_secs();
+        changed = true;
+    }
+    changed |= normalize_non_empty_string(&mut config.runtime.opencode_binary, default_opencode_binary());
+    changed |= normalize_non_empty_string(
+        &mut config.runtime.opencode_server_base_url,
+        default_opencode_server_base_url(),
+    );
+    changed |= normalize_non_empty_string(&mut config.runtime.codex_binary, default_codex_binary());
+
+    changed |= normalize_non_empty_string(&mut config.ui.theme, default_ui_theme());
+    changed |= normalize_string_vec(&mut config.ui.ticket_picker_priority_states);
+    if config.ui.ticket_picker_priority_states.is_empty() {
+        config.ui.ticket_picker_priority_states = default_ticket_picker_priority_states();
+        changed = true;
+    }
+
+    changed
+}
+
+fn normalize_non_empty_string(value: &mut String, default: String) -> bool {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        if *value != default {
+            *value = default;
+            return true;
+        }
+        return false;
+    }
+
+    if trimmed != value {
+        *value = trimmed.to_owned();
+        return true;
+    }
+    false
+}
+
+fn normalize_string_vec(values: &mut Vec<String>) -> bool {
+    let normalized = values
+        .iter()
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+        .collect::<Vec<_>>();
+    if *values != normalized {
+        *values = normalized;
+        return true;
+    }
+    false
 }
 
 fn ensure_event_store_parent_dir(path: &str) -> Result<(), CoreError> {

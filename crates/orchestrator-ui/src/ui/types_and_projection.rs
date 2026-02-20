@@ -49,12 +49,106 @@ pub use keymap::{
 
 const TICKET_PICKER_EVENT_CHANNEL_CAPACITY: usize = 32;
 const TERMINAL_STREAM_EVENT_CHANNEL_CAPACITY: usize = 32;
-const TICKET_PICKER_PRIORITY_STATES_ENV: &str = "ORCHESTRATOR_TICKET_PICKER_PRIORITY_STATES";
-const UI_THEME_ENV: &str = "ORCHESTRATOR_UI_THEME";
 const TICKET_PICKER_PRIORITY_STATES_DEFAULT: &[&str] =
     &["In Progress", "Final Approval", "Todo", "Backlog"];
+const DEFAULT_UI_THEME: &str = "nord";
+const DEFAULT_SUPERVISOR_MODEL: &str = "openai/gpt-4o-mini";
 const MERGE_POLL_INTERVAL: Duration = Duration::from_secs(60);
 const MERGE_REQUEST_RATE_LIMIT: Duration = Duration::from_secs(1);
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct UiRuntimeConfig {
+    theme: String,
+    ticket_picker_priority_states: Vec<String>,
+    supervisor_model: String,
+}
+
+impl Default for UiRuntimeConfig {
+    fn default() -> Self {
+        Self {
+            theme: DEFAULT_UI_THEME.to_owned(),
+            ticket_picker_priority_states: TICKET_PICKER_PRIORITY_STATES_DEFAULT
+                .iter()
+                .map(|value| (*value).to_owned())
+                .collect(),
+            supervisor_model: DEFAULT_SUPERVISOR_MODEL.to_owned(),
+        }
+    }
+}
+
+static UI_RUNTIME_CONFIG: OnceLock<std::sync::RwLock<UiRuntimeConfig>> = OnceLock::new();
+
+fn ui_runtime_config_store() -> &'static std::sync::RwLock<UiRuntimeConfig> {
+    UI_RUNTIME_CONFIG.get_or_init(|| std::sync::RwLock::new(UiRuntimeConfig::default()))
+}
+
+pub fn set_ui_runtime_config(
+    theme: String,
+    ticket_picker_priority_states: Vec<String>,
+    supervisor_model: String,
+) {
+    let mut parsed_states = ticket_picker_priority_states
+        .into_iter()
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+        .collect::<Vec<_>>();
+    if parsed_states.is_empty() {
+        parsed_states = TICKET_PICKER_PRIORITY_STATES_DEFAULT
+            .iter()
+            .map(|value| (*value).to_owned())
+            .collect();
+    }
+
+    let config = UiRuntimeConfig {
+        theme: {
+            let trimmed = theme.trim();
+            if trimmed.is_empty() {
+                DEFAULT_UI_THEME.to_owned()
+            } else {
+                trimmed.to_owned()
+            }
+        },
+        ticket_picker_priority_states: parsed_states,
+        supervisor_model: {
+            let trimmed = supervisor_model.trim();
+            if trimmed.is_empty() {
+                DEFAULT_SUPERVISOR_MODEL.to_owned()
+            } else {
+                trimmed.to_owned()
+            }
+        },
+    };
+
+    if let Ok(mut guard) = ui_runtime_config_store().write() {
+        *guard = config;
+    }
+}
+
+fn ui_theme_config_value() -> String {
+    ui_runtime_config_store()
+        .read()
+        .map(|guard| guard.theme.clone())
+        .unwrap_or_else(|_| DEFAULT_UI_THEME.to_owned())
+}
+
+fn ticket_picker_priority_states_config_value() -> Vec<String> {
+    ui_runtime_config_store()
+        .read()
+        .map(|guard| guard.ticket_picker_priority_states.clone())
+        .unwrap_or_else(|_| {
+            TICKET_PICKER_PRIORITY_STATES_DEFAULT
+                .iter()
+                .map(|value| (*value).to_owned())
+                .collect()
+        })
+}
+
+fn supervisor_model_config_value() -> String {
+    ui_runtime_config_store()
+        .read()
+        .map(|guard| guard.supervisor_model.clone())
+        .unwrap_or_else(|_| DEFAULT_SUPERVISOR_MODEL.to_owned())
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CreateTicketFromPickerRequest {
@@ -529,8 +623,6 @@ const SUPERVISOR_STREAM_MAX_TRANSCRIPT_CHARS: usize = 24_000;
 const SUPERVISOR_STREAM_RENDER_LINE_LIMIT: usize = 80;
 const SUPERVISOR_STREAM_HIGH_COST_TOTAL_TOKENS: u32 = 900;
 const SUPERVISOR_STREAM_LOW_TOKEN_HEADROOM: u32 = 120;
-const DEFAULT_SUPERVISOR_MODEL: &str = "openai/gpt-4o-mini";
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SupervisorStreamLifecycle {
     Connecting,

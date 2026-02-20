@@ -534,11 +534,7 @@ fn build_global_supervisor_chat_request(query: &str) -> LlmChatRequest {
 }
 
 fn supervisor_model_from_env() -> String {
-    std::env::var("ORCHESTRATOR_SUPERVISOR_MODEL")
-        .ok()
-        .map(|value| value.trim().to_owned())
-        .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| DEFAULT_SUPERVISOR_MODEL.to_owned())
+    supervisor_model_config_value()
 }
 
 fn classify_supervisor_stream_error(message: &str) -> SupervisorResponseState {
@@ -668,4 +664,3 @@ fn latest_blocked_reason_for_work_item(
     }
     None
 }
-

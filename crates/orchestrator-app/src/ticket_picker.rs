@@ -255,7 +255,6 @@ where
     }
 }
 
-const DEFAULT_SUPERVISOR_MODEL: &str = "openai/gpt-4o-mini";
 const MAX_GENERATED_TITLE_LEN: usize = 180;
 
 async fn draft_ticket_from_brief(
@@ -377,11 +376,7 @@ fn truncate_to_char_boundary(value: &str, max_chars: usize) -> &str {
 }
 
 fn supervisor_model_from_env() -> String {
-    std::env::var("ORCHESTRATOR_SUPERVISOR_MODEL")
-        .ok()
-        .map(|value| value.trim().to_owned())
-        .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| DEFAULT_SUPERVISOR_MODEL.to_owned())
+    crate::supervisor_model_from_env()
 }
 
 #[cfg(test)]
