@@ -32,8 +32,7 @@ use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 use ratatui::Terminal;
 use ratatui_interact::components::{
-    Input, InputState, Select, SelectState, SelectStyle, TabConfig, TextArea, TextAreaState,
-    WrapMode,
+    Input, InputState, SelectState, TabConfig, TextArea, TextAreaState, WrapMode,
 };
 use ratskin::RatSkin;
 use tokio::runtime::Handle as TokioHandle;

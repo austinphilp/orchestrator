@@ -709,6 +709,27 @@ fn route_needs_input_modal_key(shell_state: &mut UiShellState, key: KeyEvent) ->
             shell_state.move_needs_input_question(-1);
         }
         KeyCode::Enter => {
+            let should_advance = shell_state
+                .needs_input_modal
+                .as_mut()
+                .map(|modal| {
+                    if modal.current_question_requires_option_selection() {
+                        if modal.select_state.total_options == 0 {
+                            return false;
+                        }
+                        let selected = modal
+                            .select_state
+                            .highlighted_index
+                            .min(modal.select_state.total_options.saturating_sub(1));
+                        modal.select_state.selected_index = Some(selected);
+                    }
+                    true
+                })
+                .unwrap_or(false);
+            if !should_advance {
+                return RoutedInput::Ignore;
+            }
+
             let should_submit = shell_state
                 .needs_input_modal
                 .as_ref()
@@ -737,46 +758,36 @@ fn route_needs_input_modal_key(shell_state: &mut UiShellState, key: KeyEvent) ->
                 };
                 let select_state = &mut modal.select_state;
                 if select_state.enabled && select_state.focused && select_state.total_options > 0 {
-                    if select_state.is_open {
-                        match select_code {
-                            KeyCode::Char(' ') => {
-                                select_state.select_highlighted();
-                            }
-                            KeyCode::Up => {
+                    match select_code {
+                        KeyCode::Char(' ') => {
+                            let selected = select_state
+                                .highlighted_index
+                                .min(select_state.total_options.saturating_sub(1));
+                            select_state.selected_index = Some(selected);
+                        }
+                        KeyCode::Up => {
+                            select_state.highlight_prev();
+                        }
+                        KeyCode::Down => {
+                            select_state.highlight_next();
+                        }
+                        KeyCode::Home => {
+                            select_state.highlight_first();
+                        }
+                        KeyCode::End => {
+                            select_state.highlight_last();
+                        }
+                        KeyCode::PageUp => {
+                            for _ in 0..5 {
                                 select_state.highlight_prev();
                             }
-                            KeyCode::Down => {
+                        }
+                        KeyCode::PageDown => {
+                            for _ in 0..5 {
                                 select_state.highlight_next();
                             }
-                            KeyCode::Home => {
-                                select_state.highlight_first();
-                            }
-                            KeyCode::End => {
-                                select_state.highlight_last();
-                            }
-                            KeyCode::PageUp => {
-                                for _ in 0..5 {
-                                    select_state.highlight_prev();
-                                }
-                            }
-                            KeyCode::PageDown => {
-                                for _ in 0..5 {
-                                    select_state.highlight_next();
-                                }
-                            }
-                            _ => {}
                         }
-                    } else {
-                        match select_code {
-                            KeyCode::Down | KeyCode::Char(' ') => {
-                                select_state.open();
-                            }
-                            KeyCode::Up => {
-                                select_state.open();
-                                select_state.highlight_last();
-                            }
-                            _ => {}
-                        }
+                        _ => {}
                     }
                 }
             }

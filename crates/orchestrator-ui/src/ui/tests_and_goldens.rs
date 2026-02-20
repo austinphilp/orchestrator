@@ -15,8 +15,9 @@ mod tests {
         WorkflowState,
     };
     use orchestrator_runtime::{
-        BackendCapabilities, BackendEvent, BackendKind, BackendNeedsInputEvent, RuntimeResult,
-        RuntimeSessionId, SessionHandle, SessionLifecycle, WorkerEventStream,
+        BackendCapabilities, BackendEvent, BackendKind, BackendNeedsInputEvent,
+        BackendNeedsInputOption, BackendNeedsInputQuestion, RuntimeResult, RuntimeSessionId,
+        SessionHandle, SessionLifecycle, WorkerEventStream,
     };
     use std::collections::VecDeque;
     use std::sync::{Arc, Mutex};
@@ -1282,6 +1283,95 @@ mod tests {
         assert_eq!(modal.session_id.as_str(), "sess-1");
         assert_eq!(modal.prompt_id.as_str(), "prompt-plan-gate");
         assert!(shell_state.mode == UiMode::Terminal);
+    }
+
+    #[test]
+    fn needs_input_modal_uses_jk_navigation_and_enter_selection() {
+        let backend = Arc::new(ManualTerminalBackend::default());
+        let mut shell_state = UiShellState::new_with_integrations(
+            "ready".to_owned(),
+            sample_projection(true),
+            None,
+            None,
+            None,
+            Some(backend),
+        );
+        shell_state.open_terminal_and_enter_mode();
+
+        let sender = shell_state
+            .terminal_session_sender
+            .clone()
+            .expect("terminal sender");
+        sender
+            .try_send(TerminalSessionEvent::NeedsInput {
+                session_id: WorkerSessionId::new("sess-1"),
+                needs_input: BackendNeedsInputEvent {
+                    prompt_id: "prompt-list-navigation".to_owned(),
+                    question: "choose options".to_owned(),
+                    options: vec![],
+                    default_option: None,
+                    questions: vec![
+                        BackendNeedsInputQuestion {
+                            id: "q1".to_owned(),
+                            header: "Runtime".to_owned(),
+                            question: "Pick runtime".to_owned(),
+                            is_other: false,
+                            is_secret: false,
+                            options: Some(vec![
+                                BackendNeedsInputOption {
+                                    label: "Codex".to_owned(),
+                                    description: String::new(),
+                                },
+                                BackendNeedsInputOption {
+                                    label: "OpenCode".to_owned(),
+                                    description: String::new(),
+                                },
+                            ]),
+                        },
+                        BackendNeedsInputQuestion {
+                            id: "q2".to_owned(),
+                            header: "Mode".to_owned(),
+                            question: "Pick mode".to_owned(),
+                            is_other: false,
+                            is_secret: false,
+                            options: Some(vec![
+                                BackendNeedsInputOption {
+                                    label: "Planning".to_owned(),
+                                    description: String::new(),
+                                },
+                                BackendNeedsInputOption {
+                                    label: "Implementation".to_owned(),
+                                    description: String::new(),
+                                },
+                            ]),
+                        },
+                    ],
+                },
+            })
+            .expect("queue needs-input event");
+        shell_state.poll_terminal_session_events();
+
+        let modal = shell_state
+            .needs_input_modal
+            .as_ref()
+            .expect("needs-input modal should be open");
+        assert_eq!(modal.current_question_index, 0);
+        assert_eq!(modal.select_state.highlighted_index, 0);
+
+        let _ = route_needs_input_modal_key(&mut shell_state, key(KeyCode::Char('j')));
+        let modal = shell_state
+            .needs_input_modal
+            .as_ref()
+            .expect("needs-input modal should remain open");
+        assert_eq!(modal.select_state.highlighted_index, 1);
+
+        let _ = route_needs_input_modal_key(&mut shell_state, key(KeyCode::Enter));
+        let modal = shell_state
+            .needs_input_modal
+            .as_ref()
+            .expect("needs-input modal should advance to next question");
+        assert_eq!(modal.current_question_index, 1);
+        assert_eq!(modal.answer_drafts[0].selected_option_index, Some(1));
     }
 
     #[test]

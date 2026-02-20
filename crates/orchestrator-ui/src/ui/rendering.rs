@@ -862,9 +862,17 @@ fn render_needs_input_modal(
     let inner = block.inner(popup);
     frame.render_widget(block, popup);
 
+    let options_len = question
+        .options
+        .as_ref()
+        .map(|options| options.len())
+        .unwrap_or(0);
+    let choice_rows = options_len.clamp(1, 6);
+    let choice_height = u16::try_from(choice_rows).unwrap_or(6).saturating_add(2);
+
     let mut constraints = vec![
         Constraint::Length(3),
-        Constraint::Length(5),
+        Constraint::Length(choice_height),
         Constraint::Length(3),
     ];
     if modal.error.is_some() {
@@ -887,28 +895,56 @@ fn render_needs_input_modal(
     );
 
     if let Some(options) = question.options.as_ref().filter(|options| !options.is_empty()) {
-        let option_labels = options
-            .iter()
-            .map(|option| option.label.clone())
-            .collect::<Vec<_>>();
-        let mut select_state = modal.select_state.clone();
-        select_state.focused = !modal.note_insert_mode;
-        let _ = Select::new(option_labels.as_slice(), &select_state)
-            .label("choice")
-            .placeholder("Select an option")
-            .style(SelectStyle::minimal().max_options(6))
-            .render_stateful(frame, choice_area);
-        if select_state.is_open {
-            let _ = Select::new(option_labels.as_slice(), &select_state)
-                .label("choice")
-                .placeholder("Select an option")
-                .style(SelectStyle::minimal().max_options(6))
-                .render_dropdown(frame, choice_area, anchor_area);
+        let selected_index = modal.select_state.selected_index;
+        let highlighted_index = modal
+            .select_state
+            .highlighted_index
+            .min(options.len().saturating_sub(1));
+        let visible_rows = usize::from(choice_area.height.saturating_sub(2)).max(1);
+        let mut start = highlighted_index.saturating_sub(visible_rows / 2);
+        if start + visible_rows > options.len() {
+            start = options.len().saturating_sub(visible_rows);
         }
+        let end = (start + visible_rows).min(options.len());
+
+        let mut lines = Vec::new();
+        for (idx, option) in options[start..end].iter().enumerate() {
+            let option_index = start + idx;
+            let cursor = if option_index == highlighted_index {
+                ">"
+            } else {
+                " "
+            };
+            let selected = if selected_index == Some(option_index) {
+                "[x]"
+            } else {
+                "[ ]"
+            };
+            let label = compact_focus_card_text(option.label.as_str());
+            let line = if option.description.trim().is_empty() {
+                format!("{cursor} {selected} {label}")
+            } else {
+                let description = compact_focus_card_text(option.description.as_str());
+                format!("{cursor} {selected} {label} - {description}")
+            };
+            let style = if option_index == highlighted_index {
+                Style::default().fg(Color::LightCyan)
+            } else {
+                Style::default()
+            };
+            lines.push(Line::from(Span::styled(line, style)));
+        }
+
+        frame.render_widget(
+            Paragraph::new(Text::from(lines))
+                .block(Block::default().title("choices").borders(Borders::ALL))
+                .wrap(Wrap { trim: false }),
+            choice_area,
+        );
     } else {
         frame.render_widget(
             Paragraph::new("No predefined options. Enter a response note.")
-                .block(Block::default().title("choice").borders(Borders::ALL)),
+                .block(Block::default().title("choices").borders(Borders::ALL)),
             choice_area,
         );
     }
@@ -921,7 +957,7 @@ fn render_needs_input_modal(
         .with_border(true);
     let _ = note_input.render_stateful(frame, note_area);
     if modal.note_insert_mode {
-        if let Some((x, y)) = needs_input_note_cursor(popup, modal) {
+        if let Some((x, y)) = needs_input_note_cursor(note_area, modal) {
             frame.set_cursor_position((x, y));
         }
     }
@@ -938,12 +974,23 @@ fn render_needs_input_modal(
         index += 1;
     }
     let help = format!(
-        "Enter: {} | Tab/S-Tab: question | i: note insert | Esc: close",
-        if modal.has_next_question() {
+        "{}Enter: {} | Tab/S-Tab: question | i: note insert | Esc: close",
+        if options_len > 0 {
+            "j/k: option | "
+        } else {
+            ""
+        },
+        if options_len > 0 {
+            if modal.has_next_question() {
+                "select option + next question"
+            } else {
+                "select option + submit"
+            }
+        } else if modal.has_next_question() {
             "next question"
         } else {
             "submit"
-        }
+        },
     );
     frame.render_widget(
         Paragraph::new(help).wrap(Wrap { trim: false }),
@@ -967,23 +1014,22 @@ fn needs_input_modal_popup(anchor_area: Rect) -> Option<Rect> {
     })
 }
 
-fn needs_input_note_cursor(popup: Rect, modal: &NeedsInputModalState) -> Option<(u16, u16)> {
+fn needs_input_note_cursor(note_area: Rect, modal: &NeedsInputModalState) -> Option<(u16, u16)> {
     if !modal.note_insert_mode {
         return None;
     }
 
-    let inner_x = popup.x.saturating_add(1);
-    let inner_y = popup.y.saturating_add(1);
+    let inner_x = note_area.x.saturating_add(1);
+    let inner_y = note_area.y.saturating_add(1);
     let line_prefix = 1u16;
-    let note_line_offset = 9u16;
     let note_len = modal.note_input_state.text.chars().count();
-    let inner_width = popup.width.saturating_sub(2);
+    let inner_width = note_area.width.saturating_sub(2);
     let max_offset = usize::from(inner_width.saturating_sub(2));
     let x_offset = note_len.min(max_offset);
     let cursor_x = inner_x
         .saturating_add(line_prefix)
         .saturating_add(u16::try_from(x_offset).ok()?);
-    let cursor_y = inner_y.saturating_add(note_line_offset);
+    let cursor_y = inner_y;
     Some((cursor_x, cursor_y))
 }
 
