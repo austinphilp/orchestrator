@@ -2,8 +2,8 @@ status: ready
 mode: Normal
 selected_inbox_index: 0
 selected_inbox_item_id: inbox-terminal
-center_stack: FocusCard(inbox-terminal) > Terminal(sess-terminal)
-center_title: Terminal sess-terminal
+center_stack: FocusCard(inbox-terminal) > Terminal
+center_title: Terminal session sess-terminal
 
 [inbox]
 Batch lanes: [2] Approvals 1
@@ -12,7 +12,7 @@ Attention:
 > [ ] NeedsApproval: Review terminal overlay behavior
 
 [center]
-Stack: FocusCard(inbox-terminal) > Terminal(sess-terminal)
+Stack: FocusCard(inbox-terminal) > Terminal
 
 No terminal output available yet.
 

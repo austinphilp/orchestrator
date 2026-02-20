@@ -196,6 +196,7 @@ fn render_center_panel(ui_state: &UiState) -> String {
 }
 
 fn render_terminal_top_bar(domain: &ProjectionState, session_id: &WorkerSessionId) -> String {
+    let labels = session_display_labels(domain, session_id);
     let text = if let Some(session) = domain.sessions.get(session_id) {
         let status = session
             .status
@@ -208,15 +209,15 @@ fn render_terminal_top_bar(domain: &ProjectionState, session_id: &WorkerSessionI
             .map(|entry| entry.as_str().to_owned())
             .unwrap_or_else(|| "none".to_owned());
         format!(
-            "session: {} | status: {} | checkpoint: {}",
-            session_id.as_str(),
+            "ticket: {} | status: {} | checkpoint: {}",
+            labels.compact_label,
             status,
             checkpoint
         )
     } else {
         format!(
-            "session: {} | status: unavailable | checkpoint: none",
-            session_id.as_str()
+            "ticket: {} | status: unavailable | checkpoint: none",
+            labels.compact_label
         )
     };
     sanitize_terminal_display_text(text.as_str())
@@ -718,28 +719,21 @@ fn ticket_labels_by_ticket_id(domain: &ProjectionState) -> HashMap<String, Strin
     let mut ticket_labels = HashMap::new();
     for event in &domain.events {
         if let OrchestrationEventPayload::TicketSynced(payload) = &event.payload {
-            ticket_labels.insert(
-                payload.ticket_id.as_str().to_owned(),
-                format_ticket_label(
-                    payload.identifier.as_str(),
-                    payload.title.as_str(),
-                    &payload.ticket_id,
-                ),
-            );
+            let title = payload.title.trim();
+            let identifier = payload.identifier.trim();
+            let label = if title.is_empty() {
+                if identifier.is_empty() {
+                    payload.ticket_id.as_str().to_owned()
+                } else {
+                    identifier.to_owned()
+                }
+            } else {
+                title.to_owned()
+            };
+            ticket_labels.insert(payload.ticket_id.as_str().to_owned(), label);
         }
     }
     ticket_labels
-}
-
-fn format_ticket_label(identifier: &str, title: &str, ticket_id: &TicketId) -> String {
-    let identifier = identifier.trim();
-    let title = title.trim();
-    match (identifier.is_empty(), title.is_empty()) {
-        (false, false) => format!("{identifier}: {title}"),
-        (false, true) => identifier.to_owned(),
-        (true, false) => title.to_owned(),
-        (true, true) => ticket_id.as_str().to_owned(),
-    }
 }
 
 fn project_label_for_session(
@@ -768,14 +762,15 @@ fn ticket_label_for_session(
     domain: &ProjectionState,
     ticket_labels: &HashMap<String, String>,
 ) -> String {
+    let fallback = format!("session {}", session.id.as_str());
     let Some(work_item_id) = session.work_item_id.as_ref() else {
-        return format!("session {}", session.id.as_str());
+        return fallback;
     };
     let Some(work_item) = domain.work_items.get(work_item_id) else {
-        return format!("session {}", session.id.as_str());
+        return fallback;
     };
     let Some(ticket_id) = work_item.ticket_id.as_ref() else {
-        return format!("session {}", session.id.as_str());
+        return fallback;
     };
     ticket_labels
         .get(ticket_id.as_str())
@@ -788,7 +783,7 @@ fn ticket_label_for_session(
                 Some(fallback.to_owned())
             }
         })
-        .unwrap_or_else(|| format!("session {}", session.id.as_str()))
+        .unwrap_or(fallback)
 }
 
 fn is_open_session_status(status: Option<&WorkerSessionStatus>) -> bool {
@@ -1071,6 +1066,7 @@ fn wrapped_row_count(text: &str, width: u16) -> u16 {
 fn render_terminal_needs_input_panel(
     frame: &mut ratatui::Frame<'_>,
     input_area: Rect,
+    domain: &ProjectionState,
     session_id: &WorkerSessionId,
     prompt: &NeedsInputComposerState,
     focused: bool,
@@ -1082,9 +1078,10 @@ fn render_terminal_needs_input_panel(
         return;
     };
 
+    let labels = session_display_labels(domain, session_id);
     let title = format!(
-        "input required | session {} | {} / {}",
-        session_id.as_str(),
+        "input required | {} | {} / {}",
+        labels.compact_label,
         prompt.current_question_index + 1,
         prompt.questions.len()
     );
@@ -1258,15 +1255,17 @@ fn needs_input_note_cursor(
 fn render_worktree_diff_modal(
     frame: &mut ratatui::Frame<'_>,
     anchor_area: Rect,
+    domain: &ProjectionState,
     modal: &WorktreeDiffModalState,
 ) {
     let Some(popup) = worktree_diff_modal_popup(anchor_area) else {
         return;
     };
 
+    let labels = session_display_labels(domain, &modal.session_id);
     let title = format!(
-        "diff | session: {} | base: {}",
-        modal.session_id.as_str(),
+        "diff | ticket: {} | base: {}",
+        labels.compact_label,
         modal.base_branch
     );
     frame.render_widget(Clear, popup);
@@ -1809,11 +1808,13 @@ fn worktree_diff_modal_popup(anchor_area: Rect) -> Option<Rect> {
 fn render_review_merge_confirm_overlay(
     frame: &mut ratatui::Frame<'_>,
     anchor_area: Rect,
+    domain: &ProjectionState,
     session_id: &WorkerSessionId,
 ) {
+    let labels = session_display_labels(domain, session_id);
     let content = format!(
-        "Merge pull request and reconcile completion?\n\nSession: {}\n\nEnter/y: confirm merge\nEsc/n: cancel",
-        session_id.as_str()
+        "Merge pull request and reconcile completion?\n\nTicket: {}\n\nEnter/y: confirm merge\nEsc/n: cancel",
+        labels.full_label
     );
     let Some(popup) = review_merge_confirm_popup(anchor_area) else {
         return;
@@ -1828,11 +1829,13 @@ fn render_review_merge_confirm_overlay(
 fn render_archive_session_confirm_overlay(
     frame: &mut ratatui::Frame<'_>,
     anchor_area: Rect,
+    domain: &ProjectionState,
     session_id: &WorkerSessionId,
 ) {
+    let labels = session_display_labels(domain, session_id);
     let content = format!(
-        "Archive selected session and clean up worktree/branch?\n\nSession: {}\n\nEnter/y: confirm archive\nEsc/n: cancel",
-        session_id.as_str()
+        "Archive selected session and clean up worktree/branch?\n\nTicket: {}\n\nEnter/y: confirm archive\nEsc/n: cancel",
+        labels.full_label
     );
     let Some(popup) = review_merge_confirm_popup(anchor_area) else {
         return;

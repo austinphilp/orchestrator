@@ -975,7 +975,7 @@ mod tests {
                     session_id: session_core,
                     project: "Core Platform".to_owned(),
                     group: SessionStateGroup::Other("waiting".to_owned()),
-                    ticket_label: "AP-101: Harden session lifecycle".to_owned(),
+                    ticket_label: "Harden session lifecycle".to_owned(),
                     badge: "waiting".to_owned(),
                     is_turn_active: false,
                 },
@@ -983,7 +983,7 @@ mod tests {
                     session_id: session_orchestrator,
                     project: "Orchestrator".to_owned(),
                     group: SessionStateGroup::Other("waiting".to_owned()),
-                    ticket_label: "AP-202: Session list redesign".to_owned(),
+                    ticket_label: "Session list redesign".to_owned(),
                     badge: "waiting".to_owned(),
                     is_turn_active: false,
                 },
@@ -1065,7 +1065,7 @@ mod tests {
         assert_eq!(rows[0].project, "orchestrator");
         assert_eq!(
             rows[0].ticket_label,
-            "AP-303: Repository label fallback".to_owned()
+            "Repository label fallback".to_owned()
         );
         assert_eq!(rows[0].group, SessionStateGroup::Other("waiting".to_owned()));
         assert_eq!(rows[0].badge, "waiting".to_owned());
@@ -1273,10 +1273,10 @@ mod tests {
         assert!(planning_header < implementation_header);
         assert!(implementation_header < review_header);
         assert!(review_header < other_header);
-        assert!(rendered.contains("     AP-401: Planning session row"));
-        assert!(rendered.contains("     AP-402: Implementation session row"));
-        assert!(rendered.contains("     AP-403: Review session row"));
-        assert!(rendered.contains("     [waiting] AP-404: Other session row"));
+        assert!(rendered.contains("     Planning session row"));
+        assert!(rendered.contains("     Implementation session row"));
+        assert!(rendered.contains("     Review session row"));
+        assert!(rendered.contains("     [waiting] Other session row"));
     }
 
     #[test]
@@ -1388,7 +1388,7 @@ mod tests {
         let rendered = render_sessions_panel(&projection, &terminal_session_states, None);
         let active_line = rendered
             .lines()
-            .find(|line| line.contains("AP-406: Active implementing session"))
+            .find(|line| line.contains("Active implementing session"))
             .expect("active session row");
         assert!(
             ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]

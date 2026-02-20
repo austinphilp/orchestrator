@@ -486,7 +486,8 @@ impl UiShellState {
             return;
         }
         self.archiving_session_id = Some(session_id.clone());
-        self.status_warning = Some(format!("archiving session {}", session_id.as_str()));
+        let labels = session_display_labels(&self.domain, &session_id);
+        self.status_warning = Some(format!("archiving {}", labels.compact_label));
         self.spawn_session_archive(session_id);
     }
 
@@ -1651,9 +1652,10 @@ impl UiShellState {
                                 instruction.as_str(),
                             );
                         }
+                        let labels = session_display_labels(&self.domain, &session_id);
                         self.status_warning = Some(format!(
-                            "merge conflict for review session {}: resolve conflicts and push updates",
-                            session_id.as_str()
+                            "merge conflict for review {}: resolve conflicts and push updates",
+                            labels.compact_label
                         ));
                     } else if let Some(view) = self.terminal_session_states.get_mut(&session_id) {
                         view.last_merge_conflict_signature = None;
@@ -1663,7 +1665,10 @@ impl UiShellState {
                         self.publish_inbox_for_session(
                             &session_id,
                             InboxItemKind::FYI,
-                            format!("Ticket merge completed for session {}", session_id.as_str()),
+                            format!(
+                                "Ticket merge completed for {}",
+                                session_display_labels(&self.domain, &session_id).compact_label
+                            ),
                             "merge-completed",
                         );
                         self.merge_pending_sessions.remove(&session_id);
@@ -1680,15 +1685,17 @@ impl UiShellState {
                                 work_item.workflow_state = Some(WorkflowState::Done);
                             }
                         }
+                        let labels = session_display_labels(&self.domain, &session_id);
                         self.status_warning = Some(format!(
-                            "merge completed for review session {}",
-                            session_id.as_str()
+                            "merge completed for review {}",
+                            labels.compact_label
                         ));
                         self.spawn_session_merge_finalize(session_id.clone());
                     } else if kind == MergeQueueCommandKind::Merge {
+                        let labels = session_display_labels(&self.domain, &session_id);
                         self.status_warning = Some(format!(
-                            "merge pending for review session {} (waiting for checks or merge queue)",
-                            session_id.as_str()
+                            "merge pending for review {} (waiting for checks or merge queue)",
+                            labels.compact_label
                         ));
                     }
                 }
@@ -1707,9 +1714,10 @@ impl UiShellState {
                 } => {
                     self.merge_finalizing_sessions.remove(&session_id);
                     self.publish_error_for_session(&session_id, "merge-finalize", message.as_str());
+                    let labels = session_display_labels(&self.domain, &session_id);
                     self.status_warning = Some(format!(
-                        "merged session {} finalized with warnings: {}",
-                        session_id.as_str(),
+                        "merged {} finalized with warnings: {}",
+                        labels.compact_label,
                         compact_focus_card_text(message.as_str())
                     ));
                 }
@@ -1890,13 +1898,15 @@ impl UiShellState {
         let Some(warning) = self.status_warning.as_deref() else {
             return;
         };
-        if !warning.contains(session_id.as_str()) {
+        let labels = session_display_labels(&self.domain, session_id);
+        let fallback = format!("session {}", session_id.as_str());
+        if !warning.contains(labels.compact_label.as_str()) && !warning.contains(fallback.as_str()) {
             return;
         }
-        let is_merge_status = warning.starts_with("merge queued for review session")
-            || warning.starts_with("merge pending for review session")
-            || warning.starts_with("merge completed for review session")
-            || warning.starts_with("merge conflict for review session");
+        let is_merge_status = warning.starts_with("merge queued for review")
+            || warning.starts_with("merge pending for review")
+            || warning.starts_with("merge completed for review")
+            || warning.starts_with("merge conflict for review");
         if is_merge_status {
             self.status_warning = None;
         }
@@ -2072,9 +2082,10 @@ impl UiShellState {
                     });
                 }
                 self.ensure_terminal_stream(started_session);
+                let labels = session_display_labels(&self.domain, session_id);
                 self.status_warning = Some(format!(
-                    "terminal session {} was not found; opened a fresh terminal",
-                    session_id.as_str()
+                    "terminal {} was not found; opened a fresh terminal",
+                    labels.compact_label
                 ));
             }
             Ok(None) => {
@@ -2159,9 +2170,10 @@ fn apply_ticket_picker_event(&mut self, event: TicketPickerEvent) {
                     self.send_terminal_instruction_to_session(&outcome.session_id, instruction);
                 }
 
+                let labels = session_display_labels(&self.domain, &outcome.session_id);
                 self.status_warning = Some(format!(
-                    "workflow advanced for session {}: {:?} -> {:?}",
-                    outcome.session_id.as_str(),
+                    "workflow advanced for {}: {:?} -> {:?}",
+                    labels.compact_label,
                     outcome.from,
                     outcome.to
                 ));
@@ -2171,9 +2183,10 @@ fn apply_ticket_picker_event(&mut self, event: TicketPickerEvent) {
                 message,
             } => {
                 self.publish_error_for_session(&session_id, "workflow-advance", message.as_str());
+                let labels = session_display_labels(&self.domain, &session_id);
                 self.status_warning = Some(format!(
                     "workflow advance warning for {}: {}",
-                    session_id.as_str(),
+                    labels.compact_label,
                     compact_focus_card_text(message.as_str())
                 ));
             }
@@ -2383,7 +2396,8 @@ fn apply_ticket_picker_event(&mut self, event: TicketPickerEvent) {
                 if self.active_terminal_session_id() == Some(&session_id) {
                     let _ = self.view_stack.pop_center();
                 }
-                let mut status = format!("archived session {}", session_id.as_str());
+                let labels = session_display_labels(&self.domain, &session_id);
+                let mut status = format!("archived {}", labels.compact_label);
                 if let Some(message) = warning {
                     status.push_str(": ");
                     status.push_str(compact_focus_card_text(message.as_str()).as_str());
@@ -2397,9 +2411,10 @@ fn apply_ticket_picker_event(&mut self, event: TicketPickerEvent) {
                 self.archiving_session_id = None;
                 self.archive_session_confirm_session = None;
                 self.publish_error_for_session(&session_id, "session-archive", message.as_str());
+                let labels = session_display_labels(&self.domain, &session_id);
                 self.status_warning = Some(format!(
                     "session archive warning ({}): {}",
-                    session_id.as_str(),
+                    labels.compact_label,
                     compact_focus_card_text(message.as_str())
                 ));
             }
@@ -3754,9 +3769,10 @@ fn apply_ticket_picker_event(&mut self, event: TicketPickerEvent) {
             .and_then(|work_item| work_item.workflow_state.clone());
 
         let Some(current_state) = current_state else {
+            let labels = session_display_labels(&self.domain, &session_id);
             self.status_warning = Some(format!(
-                "workflow advance unavailable: session {} has no canonical workflow state",
-                session_id.as_str()
+                "workflow advance unavailable: {} has no canonical workflow state",
+                labels.compact_label
             ));
             return;
         };
@@ -3777,9 +3793,10 @@ fn apply_ticket_picker_event(&mut self, event: TicketPickerEvent) {
             return;
         }
 
+        let labels = session_display_labels(&self.domain, &session_id);
         self.status_warning = Some(format!(
-            "advancing workflow for session {} from {:?}",
-            session_id.as_str(),
+            "advancing workflow for {} from {:?}",
+            labels.compact_label,
             current_state
         ));
         self.spawn_session_workflow_advance(session_id);
@@ -3802,9 +3819,10 @@ fn apply_ticket_picker_event(&mut self, event: TicketPickerEvent) {
         };
         self.merge_pending_sessions.insert(session_id.clone());
         let _ = self.enqueue_merge_queue_request(session_id.clone(), MergeQueueCommandKind::Merge);
+        let labels = session_display_labels(&self.domain, &session_id);
         self.status_warning = Some(format!(
-            "merge queued for review session {}",
-            session_id.as_str()
+            "merge queued for review {}",
+            labels.compact_label
         ));
     }
 

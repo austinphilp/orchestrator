@@ -342,7 +342,7 @@ impl CenterView {
             Self::FocusCardView { inbox_item_id } => {
                 format!("FocusCard({})", inbox_item_id.as_str())
             }
-            Self::TerminalView { session_id } => format!("Terminal({})", session_id.as_str()),
+            Self::TerminalView { .. } => "Terminal".to_owned(),
             Self::InspectorView {
                 work_item_id,
                 inspector,
@@ -478,6 +478,100 @@ impl UiState {
             .collect::<Vec<_>>()
             .join(" > ")
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SessionDisplayLabels {
+    full_label: String,
+    compact_label: String,
+}
+
+fn session_display_labels(domain: &ProjectionState, session_id: &WorkerSessionId) -> SessionDisplayLabels {
+    let fallback = format!("session {}", session_id.as_str());
+    let Some(work_item_id) = domain
+        .sessions
+        .get(session_id)
+        .and_then(|session| session.work_item_id.as_ref())
+    else {
+        return SessionDisplayLabels {
+            full_label: fallback.clone(),
+            compact_label: fallback,
+        };
+    };
+    let Some(work_item) = domain.work_items.get(work_item_id) else {
+        return SessionDisplayLabels {
+            full_label: fallback.clone(),
+            compact_label: fallback,
+        };
+    };
+    let Some(ticket_id) = work_item.ticket_id.as_ref() else {
+        return SessionDisplayLabels {
+            full_label: fallback.clone(),
+            compact_label: fallback,
+        };
+    };
+    let Some(metadata) = latest_ticket_metadata(domain, ticket_id) else {
+        return SessionDisplayLabels {
+            full_label: fallback.clone(),
+            compact_label: fallback,
+        };
+    };
+
+    let title = metadata.title;
+    let identifier = metadata.identifier;
+    let full_label = if title.trim().is_empty() {
+        if identifier.trim().is_empty() {
+            fallback.clone()
+        } else {
+            identifier.clone()
+        }
+    } else {
+        title
+    };
+    let compact_label = if identifier.trim().is_empty() {
+        fallback
+    } else {
+        identifier
+    };
+
+    SessionDisplayLabels {
+        full_label,
+        compact_label,
+    }
+}
+
+fn session_display_with_status(
+    domain: &ProjectionState,
+    session_id: &WorkerSessionId,
+    status: Option<&WorkerSessionStatus>,
+) -> String {
+    let labels = session_display_labels(domain, session_id);
+    let status_text = status
+        .map(|value| format!("{value:?}"))
+        .unwrap_or_else(|| "Unknown".to_owned());
+    format!("{} ({status_text})", labels.full_label)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TicketDisplayMetadata {
+    identifier: String,
+    title: String,
+}
+
+fn latest_ticket_metadata(domain: &ProjectionState, ticket_id: &TicketId) -> Option<TicketDisplayMetadata> {
+    for event in domain.events.iter().rev() {
+        let OrchestrationEventPayload::TicketSynced(payload) = &event.payload else {
+            continue;
+        };
+        if payload.ticket_id != *ticket_id {
+            continue;
+        }
+        return Some(TicketDisplayMetadata {
+            identifier: payload.identifier.trim().to_owned(),
+            title: payload.title.trim().to_owned(),
+        });
+    }
+    None
 }
 
 pub(crate) fn project_ui_state(
@@ -644,7 +738,10 @@ fn project_center_pane(
             }
 
             CenterPaneState {
-                title: format!("Terminal {}", session_id.as_str()),
+                title: format!(
+                    "Terminal {}",
+                    session_display_labels(domain, session_id).compact_label
+                ),
                 lines,
             }
         }
