@@ -85,7 +85,7 @@ impl Ui {
                 };
                 self.terminal.draw(|frame| {
                     let area = frame.area();
-                    let layout = Layout::vertical([Constraint::Min(1), Constraint::Length(3)]);
+                    let layout = Layout::vertical([Constraint::Min(1), Constraint::Length(4)]);
                     let [main, footer] = layout.areas(area);
                     let main_layout =
                         Layout::horizontal([Constraint::Percentage(35), Constraint::Percentage(65)]);
@@ -258,15 +258,25 @@ impl Ui {
                         }
                     }
 
-                    let footer_text = format!(
-                        "status: {} | mode: {} | {}",
-                        ui_state.status,
-                        shell_state.mode.label(),
-                        mode_help(shell_state.mode)
-                    );
+                    let footer_style = bottom_bar_style(shell_state.mode);
+                    let footer_text = Text::from(vec![
+                        Line::from(format!(
+                            "status: {} | mode: {}",
+                            ui_state.status,
+                            shell_state.mode.label()
+                        )),
+                        Line::from(mode_help(shell_state.mode)),
+                    ]);
                     frame.render_widget(
                         Paragraph::new(footer_text)
-                            .block(Block::default().title("shell").borders(Borders::ALL)),
+                            .style(footer_style)
+                            .block(
+                                Block::default()
+                                    .title("shell")
+                                    .borders(Borders::ALL)
+                                    .border_style(footer_style)
+                                    .style(footer_style),
+                            ),
                         footer,
                     );
 
@@ -342,5 +352,19 @@ impl Drop for Ui {
         let _ = disable_raw_mode();
         let _ = io::stdout().execute(SetCursorStyle::DefaultUserShape);
         let _ = io::stdout().execute(LeaveAlternateScreen);
+    }
+}
+
+fn bottom_bar_style(mode: UiMode) -> Style {
+    match mode {
+        UiMode::Normal => Style::default()
+            .fg(Color::Rgb(236, 239, 244))
+            .bg(Color::Rgb(59, 66, 82)),
+        UiMode::Insert => Style::default()
+            .fg(Color::Rgb(236, 239, 244))
+            .bg(Color::Rgb(76, 86, 106)),
+        UiMode::Terminal => Style::default()
+            .fg(Color::Rgb(236, 239, 244))
+            .bg(Color::Rgb(94, 129, 172)),
     }
 }
