@@ -641,7 +641,7 @@ fn render_ticket_picker_overlay_text(overlay: &TicketPickerOverlayState) -> Stri
         ]
     };
 
-    if overlay.loading {
+    if overlay.loading && !overlay.creating {
         lines.push("Loading unfinished tickets...".to_owned());
     }
     if let Some(starting_ticket_id) = overlay.starting_ticket_id.as_ref() {

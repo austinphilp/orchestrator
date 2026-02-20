@@ -3817,6 +3817,27 @@ mod tests {
     }
 
     #[test]
+    fn ticket_picker_overlay_hides_loading_message_while_creating() {
+        let mut overlay = TicketPickerOverlayState::default();
+        overlay.loading = true;
+        overlay.creating = true;
+
+        let rendered = render_ticket_picker_overlay_text(&overlay);
+        assert!(!rendered.contains("Loading unfinished tickets..."));
+        assert!(rendered.contains("Creating ticket..."));
+    }
+
+    #[test]
+    fn ticket_picker_overlay_shows_loading_message_when_not_creating() {
+        let mut overlay = TicketPickerOverlayState::default();
+        overlay.loading = true;
+        overlay.creating = false;
+
+        let rendered = render_ticket_picker_overlay_text(&overlay);
+        assert!(rendered.contains("Loading unfinished tickets..."));
+    }
+
+    #[test]
     fn ticket_picker_n_enters_new_ticket_mode() {
         let mut shell_state = UiShellState::new("ready".to_owned(), triage_projection());
         shell_state.ticket_picker_overlay.open();
