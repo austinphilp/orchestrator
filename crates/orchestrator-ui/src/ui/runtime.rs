@@ -91,10 +91,13 @@ impl Ui {
 
                 let center_text = render_center_panel(&ui_state);
                 if let Some(session_id) = shell_state.active_terminal_session_id().cloned() {
+                    let active_needs_input = shell_state.active_terminal_needs_input().cloned();
+                    let terminal_input_height =
+                        terminal_input_pane_height(center_area.height, active_needs_input.as_ref());
                     let center_layout = Layout::vertical([
                         Constraint::Length(3),
                         Constraint::Min(1),
-                        Constraint::Length(6),
+                        Constraint::Length(terminal_input_height),
                     ]);
                     let [terminal_meta_area, terminal_output_area, terminal_input_area] =
                         center_layout.areas(center_area);
@@ -140,12 +143,27 @@ impl Ui {
                         terminal_output_area,
                     );
 
-                    shell_state.terminal_compose_input.focused = shell_state.mode == UiMode::Terminal;
-                    TextArea::new()
-                        .label("input (Enter send, Shift+Enter newline)")
-                        .placeholder("Type a message to the harness here.\nPress Enter to send.")
-                        .wrap_mode(WrapMode::Soft)
-                        .render_stateful(frame, terminal_input_area, &mut shell_state.terminal_compose_input);
+                    if let Some(prompt) = active_needs_input.as_ref() {
+                        render_terminal_needs_input_panel(
+                            frame,
+                            terminal_input_area,
+                            &session_id,
+                            prompt,
+                            shell_state.mode == UiMode::Terminal,
+                        );
+                    } else {
+                        shell_state.terminal_compose_input.focused =
+                            shell_state.mode == UiMode::Terminal;
+                        TextArea::new()
+                            .label("input (Enter send, Shift+Enter newline)")
+                            .placeholder("Type a message to the harness here.\nPress Enter to send.")
+                            .wrap_mode(WrapMode::Soft)
+                            .render_stateful(
+                                frame,
+                                terminal_input_area,
+                                &mut shell_state.terminal_compose_input,
+                            );
+                    }
                 } else {
                     if shell_state.is_global_supervisor_chat_active() {
                         let [chat_output_area, chat_input_area] = Layout::vertical([
@@ -213,13 +231,10 @@ impl Ui {
                 if let Some(session_id) = shell_state.review_merge_confirm_session.as_ref() {
                     render_review_merge_confirm_overlay(frame, main, session_id);
                 }
-                if let Some(modal) = shell_state.needs_input_modal.as_ref() {
-                    render_needs_input_modal(frame, main, modal);
-                }
             })?;
 
             if shell_state.ticket_picker_overlay.has_repository_prompt()
-                || shell_state.needs_input_modal_is_note_insert_mode()
+                || shell_state.terminal_needs_input_is_note_insert_mode()
                 || (shell_state.mode == UiMode::Terminal && shell_state.is_terminal_view_active())
             {
                 let _ = io::stdout()

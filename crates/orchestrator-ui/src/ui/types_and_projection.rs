@@ -575,7 +575,7 @@ impl SupervisorResponseState {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 struct TerminalViewState {
     entries: Vec<TerminalTranscriptEntry>,
     error: Option<String>,
@@ -585,6 +585,8 @@ struct TerminalViewState {
     output_viewport_rows: usize,
     output_follow_tail: bool,
     turn_active: bool,
+    pending_needs_input_prompts: VecDeque<NeedsInputPromptState>,
+    active_needs_input: Option<NeedsInputComposerState>,
     last_merge_conflict_signature: Option<String>,
 }
 
@@ -599,8 +601,51 @@ impl Default for TerminalViewState {
             output_viewport_rows: 1,
             output_follow_tail: true,
             turn_active: false,
+            pending_needs_input_prompts: VecDeque::new(),
+            active_needs_input: None,
             last_merge_conflict_signature: None,
         }
+    }
+}
+
+impl TerminalViewState {
+    fn enqueue_needs_input_prompt(&mut self, prompt: NeedsInputPromptState) {
+        let duplicate_active = self
+            .active_needs_input
+            .as_ref()
+            .map(|active| active.prompt_id == prompt.prompt_id)
+            .unwrap_or(false);
+        if duplicate_active
+            || self
+                .pending_needs_input_prompts
+                .iter()
+                .any(|entry| entry.prompt_id == prompt.prompt_id)
+        {
+            return;
+        }
+        self.pending_needs_input_prompts.push_back(prompt);
+        self.activate_next_needs_input_prompt_if_idle();
+    }
+
+    fn activate_next_needs_input_prompt_if_idle(&mut self) {
+        if self.active_needs_input.is_some() {
+            return;
+        }
+        while let Some(prompt) = self.pending_needs_input_prompts.pop_front() {
+            if prompt.questions.is_empty() {
+                continue;
+            }
+            self.active_needs_input = Some(NeedsInputComposerState::new(
+                prompt.prompt_id,
+                prompt.questions,
+            ));
+            return;
+        }
+    }
+
+    fn complete_active_needs_input_prompt(&mut self) {
+        self.active_needs_input = None;
+        self.activate_next_needs_input_prompt_if_idle();
     }
 }
 
@@ -656,8 +701,7 @@ struct NeedsInputPromptState {
 }
 
 #[derive(Debug, Clone)]
-struct NeedsInputModalState {
-    session_id: WorkerSessionId,
+struct NeedsInputComposerState {
     prompt_id: String,
     questions: Vec<BackendNeedsInputQuestion>,
     answer_drafts: Vec<NeedsInputAnswerDraft>,
@@ -668,15 +712,10 @@ struct NeedsInputModalState {
     error: Option<String>,
 }
 
-impl NeedsInputModalState {
-    fn new(
-        session_id: WorkerSessionId,
-        prompt_id: String,
-        questions: Vec<BackendNeedsInputQuestion>,
-    ) -> Self {
+impl NeedsInputComposerState {
+    fn new(prompt_id: String, questions: Vec<BackendNeedsInputQuestion>) -> Self {
         let answer_drafts = vec![NeedsInputAnswerDraft::default(); questions.len()];
         let mut state = Self {
-            session_id,
             prompt_id,
             questions,
             answer_drafts,
