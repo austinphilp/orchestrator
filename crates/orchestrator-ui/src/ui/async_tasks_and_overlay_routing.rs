@@ -921,22 +921,22 @@ fn route_ticket_picker_key(shell_state: &mut UiShellState, key: KeyEvent) -> Rou
             return RoutedInput::Ignore;
         }
 
-        if key.modifiers == KeyModifiers::CONTROL {
+        if key.modifiers.contains(KeyModifiers::CONTROL) {
             return RoutedInput::Ignore;
         }
 
         match key.code {
-            KeyCode::Enter if key.modifiers.is_empty() => {
+            KeyCode::Enter if is_unmodified_enter(key) => {
                 shell_state.submit_created_ticket_from_picker(TicketCreateSubmitMode::CreateOnly);
             }
-            KeyCode::Enter if key.modifiers == KeyModifiers::SHIFT => {
+            KeyCode::Enter if is_shift_enter_without_other_modifiers(key) => {
                 shell_state
                     .submit_created_ticket_from_picker(TicketCreateSubmitMode::CreateAndStart);
             }
             KeyCode::Backspace if key.modifiers.is_empty() => {
                 shell_state.pop_create_ticket_brief_char();
             }
-            KeyCode::Char(ch) if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT => {
+            KeyCode::Char(ch) if allows_text_input_modifiers(key.modifiers) => {
                 shell_state.append_create_ticket_brief_char(ch);
             }
             _ => {}
@@ -974,6 +974,27 @@ fn route_ticket_picker_key(shell_state: &mut UiShellState, key: KeyEvent) -> Rou
         }
         _ => RoutedInput::Ignore,
     }
+}
+
+fn is_unmodified_enter(key: KeyEvent) -> bool {
+    matches!(key.code, KeyCode::Enter) && key.modifiers.is_empty()
+}
+
+fn is_shift_enter_without_other_modifiers(key: KeyEvent) -> bool {
+    if !matches!(key.code, KeyCode::Enter) {
+        return false;
+    }
+    key.modifiers.contains(KeyModifiers::SHIFT) && only_shift_modifier(key.modifiers)
+}
+
+fn allows_text_input_modifiers(modifiers: KeyModifiers) -> bool {
+    modifiers.is_empty() || only_shift_modifier(modifiers)
+}
+
+fn only_shift_modifier(modifiers: KeyModifiers) -> bool {
+    let mut non_shift = modifiers;
+    non_shift.remove(KeyModifiers::SHIFT);
+    non_shift.is_empty()
 }
 
 fn route_review_merge_confirm_key(shell_state: &mut UiShellState, key: KeyEvent) -> RoutedInput {
