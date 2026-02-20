@@ -1115,7 +1115,7 @@ impl UiShellState {
                     session_id,
                     needs_input,
                 } => {
-                    let prompt = self.needs_input_prompt_from_event(needs_input);
+                    let prompt = self.needs_input_prompt_from_event(&session_id, needs_input);
                     let view = self.terminal_session_states.entry(session_id).or_default();
                     view.enqueue_needs_input_prompt(prompt);
                 }
@@ -1384,6 +1384,17 @@ impl UiShellState {
                         | WorkflowState::Merging
                 )
             })
+            .unwrap_or(false)
+    }
+
+    fn session_requires_manual_needs_input_activation(&self, session_id: &WorkerSessionId) -> bool {
+        self.domain
+            .sessions
+            .get(session_id)
+            .and_then(|session| session.work_item_id.as_ref())
+            .and_then(|work_item_id| self.domain.work_items.get(work_item_id))
+            .and_then(|work_item| work_item.workflow_state.as_ref())
+            .map(|state| matches!(state, WorkflowState::New | WorkflowState::Planning))
             .unwrap_or(false)
     }
 
@@ -1987,7 +1998,7 @@ fn apply_ticket_picker_event(&mut self, event: TicketPickerEvent) {
         if self.mode != UiMode::Terminal || !self.is_terminal_view_active() {
             return false;
         }
-        if self.terminal_session_has_active_needs_input() {
+        if self.terminal_session_has_any_needs_input() {
             return false;
         }
 
@@ -2606,6 +2617,7 @@ fn apply_ticket_picker_event(&mut self, event: TicketPickerEvent) {
 
     fn needs_input_prompt_from_event(
         &self,
+        session_id: &WorkerSessionId,
         event: BackendNeedsInputEvent,
     ) -> NeedsInputPromptState {
         let questions = if event.questions.is_empty() {
@@ -2632,6 +2644,8 @@ fn apply_ticket_picker_event(&mut self, event: TicketPickerEvent) {
         NeedsInputPromptState {
             prompt_id: event.prompt_id,
             questions,
+            requires_manual_activation: self
+                .session_requires_manual_needs_input_activation(session_id),
         }
     }
 
@@ -2650,7 +2664,33 @@ fn apply_ticket_picker_event(&mut self, event: TicketPickerEvent) {
     }
 
     fn terminal_session_has_active_needs_input(&self) -> bool {
+        self.active_terminal_needs_input()
+            .map(|prompt| prompt.interaction_active)
+            .unwrap_or(false)
+    }
+
+    fn terminal_session_has_any_needs_input(&self) -> bool {
         self.active_terminal_needs_input().is_some()
+    }
+
+    fn activate_terminal_needs_input(&mut self, enable_note_insert_mode: bool) -> bool {
+        let Some(prompt) = self.active_terminal_needs_input_mut() else {
+            return false;
+        };
+        if prompt.interaction_active {
+            return false;
+        }
+        prompt.set_interaction_active(true);
+        if enable_note_insert_mode {
+            prompt.note_insert_mode = true;
+            prompt.note_input_state.focused = true;
+            prompt.select_state.focused = false;
+        } else {
+            prompt.note_insert_mode = false;
+            prompt.note_input_state.focused = false;
+            prompt.select_state.focused = prompt.current_question_requires_option_selection();
+        }
+        true
     }
 
     fn terminal_needs_input_is_note_insert_mode(&self) -> bool {
@@ -2673,6 +2713,9 @@ fn apply_ticket_picker_event(&mut self, event: TicketPickerEvent) {
         let Some(prompt) = self.active_terminal_needs_input_mut() else {
             return;
         };
+        if !prompt.interaction_active {
+            return;
+        }
         prompt.note_insert_mode = enabled;
         prompt.note_input_state.focused = enabled;
         prompt.select_state.focused = !enabled && prompt.current_question_requires_option_selection();
@@ -2682,7 +2725,7 @@ fn apply_ticket_picker_event(&mut self, event: TicketPickerEvent) {
         let Some(prompt) = self.active_terminal_needs_input_mut() else {
             return false;
         };
-        if !prompt.note_insert_mode {
+        if !prompt.interaction_active || !prompt.note_insert_mode {
             return false;
         }
 

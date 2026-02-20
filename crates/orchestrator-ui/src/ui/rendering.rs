@@ -977,13 +977,13 @@ fn render_terminal_needs_input_panel(
     }
 
     let mut note_input_state = prompt.note_input_state.clone();
-    note_input_state.focused = prompt.note_insert_mode && focused;
+    note_input_state.focused = prompt.interaction_active && prompt.note_insert_mode && focused;
     let note_input = Input::new(&note_input_state)
         .label("note")
         .placeholder("Optional with selection; required when no options")
         .with_border(true);
     let _ = note_input.render_stateful(frame, note_area);
-    if prompt.note_insert_mode && focused {
+    if prompt.interaction_active && prompt.note_insert_mode && focused {
         if let Some((x, y)) = needs_input_note_cursor(note_area, prompt) {
             frame.set_cursor_position((x, y));
         }
@@ -1000,25 +1000,29 @@ fn render_terminal_needs_input_panel(
         );
         index += 1;
     }
-    let help = format!(
-        "{}Enter: {} | Tab/S-Tab: question | i: note insert | Esc: normal mode",
-        if options_len > 0 {
-            "j/k: option | "
-        } else {
-            ""
-        },
-        if options_len > 0 {
-            if prompt.has_next_question() {
-                "select option + next question"
+    let help = if prompt.interaction_active {
+        format!(
+            "{}Enter: {} | Tab/S-Tab: question | i: note insert | Esc: normal mode",
+            if options_len > 0 {
+                "j/k: option | "
             } else {
-                "select option + submit"
-            }
-        } else if prompt.has_next_question() {
-            "next question"
-        } else {
-            "submit"
-        },
-    );
+                ""
+            },
+            if options_len > 0 {
+                if prompt.has_next_question() {
+                    "select option + next question"
+                } else {
+                    "select option + submit"
+                }
+            } else if prompt.has_next_question() {
+                "next question"
+            } else {
+                "submit"
+            },
+        )
+    } else {
+        "Press i to activate input | Esc: normal mode".to_owned()
+    };
     frame.render_widget(
         Paragraph::new(help).wrap(Wrap { trim: false }),
         sections[index],

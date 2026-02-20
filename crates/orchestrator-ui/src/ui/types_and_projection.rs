@@ -644,6 +644,7 @@ impl TerminalViewState {
             self.active_needs_input = Some(NeedsInputComposerState::new(
                 prompt.prompt_id,
                 prompt.questions,
+                !prompt.requires_manual_activation,
             ));
             return;
         }
@@ -704,6 +705,7 @@ struct NeedsInputAnswerDraft {
 struct NeedsInputPromptState {
     prompt_id: String,
     questions: Vec<BackendNeedsInputQuestion>,
+    requires_manual_activation: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -714,12 +716,17 @@ struct NeedsInputComposerState {
     current_question_index: usize,
     select_state: SelectState,
     note_input_state: InputState,
+    interaction_active: bool,
     note_insert_mode: bool,
     error: Option<String>,
 }
 
 impl NeedsInputComposerState {
-    fn new(prompt_id: String, questions: Vec<BackendNeedsInputQuestion>) -> Self {
+    fn new(
+        prompt_id: String,
+        questions: Vec<BackendNeedsInputQuestion>,
+        interaction_active: bool,
+    ) -> Self {
         let answer_drafts = vec![NeedsInputAnswerDraft::default(); questions.len()];
         let mut state = Self {
             prompt_id,
@@ -728,6 +735,7 @@ impl NeedsInputComposerState {
             current_question_index: 0,
             select_state: SelectState::new(0),
             note_input_state: InputState::empty(),
+            interaction_active,
             note_insert_mode: false,
             error: None,
         };
@@ -762,13 +770,13 @@ impl NeedsInputComposerState {
             .cloned()
             .unwrap_or_default();
         self.select_state = SelectState::new(options_len);
-        self.select_state.focused = options_len > 0;
+        self.select_state.focused = self.interaction_active && options_len > 0;
         if let Some(index) = draft.selected_option_index.filter(|index| *index < options_len) {
             self.select_state.selected_index = Some(index);
             self.select_state.highlighted_index = index;
         }
         self.note_input_state.set_text(draft.note);
-        self.note_input_state.focused = self.note_insert_mode;
+        self.note_input_state.focused = self.interaction_active && self.note_insert_mode;
     }
 
     fn move_to_question(&mut self, next_index: usize) {
@@ -790,6 +798,14 @@ impl NeedsInputComposerState {
             .and_then(|question| question.options.as_ref())
             .map(|options| !options.is_empty())
             .unwrap_or(false)
+    }
+
+    fn set_interaction_active(&mut self, active: bool) {
+        self.interaction_active = active;
+        if !active {
+            self.note_insert_mode = false;
+        }
+        self.refresh_controls_from_current_question();
     }
 
     fn build_runtime_answers(&mut self) -> RuntimeResult<Vec<BackendNeedsInputAnswer>> {
