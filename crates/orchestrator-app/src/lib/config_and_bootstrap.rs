@@ -281,6 +281,8 @@ pub struct UiConfigToml {
     pub theme: String,
     #[serde(default = "default_ticket_picker_priority_states")]
     pub ticket_picker_priority_states: Vec<String>,
+    #[serde(default = "default_ui_background_session_refresh_secs")]
+    pub background_session_refresh_secs: u64,
 }
 
 impl Default for UiConfigToml {
@@ -288,6 +290,7 @@ impl Default for UiConfigToml {
         Self {
             theme: default_ui_theme(),
             ticket_picker_priority_states: default_ticket_picker_priority_states(),
+            background_session_refresh_secs: default_ui_background_session_refresh_secs(),
         }
     }
 }
@@ -370,6 +373,10 @@ fn default_codex_binary() -> String {
 
 fn default_ui_theme() -> String {
     DEFAULT_UI_THEME.to_owned()
+}
+
+fn default_ui_background_session_refresh_secs() -> u64 {
+    15
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -670,6 +677,14 @@ fn normalize_config(config: &mut AppConfig) -> bool {
     changed |= normalize_string_vec(&mut config.ui.ticket_picker_priority_states);
     if config.ui.ticket_picker_priority_states.is_empty() {
         config.ui.ticket_picker_priority_states = default_ticket_picker_priority_states();
+        changed = true;
+    }
+    let normalized_background_refresh_secs = config
+        .ui
+        .background_session_refresh_secs
+        .clamp(2, 15);
+    if normalized_background_refresh_secs != config.ui.background_session_refresh_secs {
+        config.ui.background_session_refresh_secs = normalized_background_refresh_secs;
         changed = true;
     }
 

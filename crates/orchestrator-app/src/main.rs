@@ -43,6 +43,7 @@ async fn main() -> Result<()> {
         config.ui.theme.clone(),
         config.ui.ticket_picker_priority_states.clone(),
         config.supervisor.model.clone(),
+        config.ui.background_session_refresh_secs,
     );
 
     let openrouter_api_key = required_env(ENV_OPENROUTER_API_KEY)?;
