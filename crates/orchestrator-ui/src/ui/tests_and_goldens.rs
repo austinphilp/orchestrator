@@ -1399,6 +1399,70 @@ mod tests {
     }
 
     #[test]
+    fn resolved_inbox_rows_keep_animation_tick_active_until_auto_dismiss() {
+        let mut projection = sample_projection(true);
+        let work_item_id = WorkItemId::new("wi-1");
+        let session_id = WorkerSessionId::new("sess-1");
+        let inbox_item_id = InboxItemId::new("inbox-1");
+        projection
+            .inbox_items
+            .get_mut(&inbox_item_id)
+            .expect("inbox item")
+            .resolved = true;
+        projection.events = vec![
+            StoredEventEnvelope {
+                event_id: "evt-inbox-created".to_owned(),
+                sequence: 1,
+                occurred_at: "2026-02-19T00:00:00Z".to_owned(),
+                work_item_id: Some(work_item_id.clone()),
+                session_id: Some(session_id.clone()),
+                event_type: OrchestrationEventType::InboxItemCreated,
+                payload: OrchestrationEventPayload::InboxItemCreated(
+                    orchestrator_core::InboxItemCreatedPayload {
+                        inbox_item_id: inbox_item_id.clone(),
+                        work_item_id: work_item_id.clone(),
+                        kind: InboxItemKind::NeedsApproval,
+                        title: "Review PR readiness".to_owned(),
+                    },
+                ),
+                schema_version: 1,
+            },
+            StoredEventEnvelope {
+                event_id: "evt-inbox-resolved".to_owned(),
+                sequence: 2,
+                occurred_at: "2026-02-19T00:00:30Z".to_owned(),
+                work_item_id: Some(work_item_id.clone()),
+                session_id: Some(session_id.clone()),
+                event_type: OrchestrationEventType::InboxItemResolved,
+                payload: OrchestrationEventPayload::InboxItemResolved(
+                    orchestrator_core::InboxItemResolvedPayload {
+                        inbox_item_id,
+                        work_item_id: work_item_id.clone(),
+                    },
+                ),
+                schema_version: 1,
+            },
+            StoredEventEnvelope {
+                event_id: "evt-anchor".to_owned(),
+                sequence: 3,
+                occurred_at: "2026-02-19T00:00:59Z".to_owned(),
+                work_item_id: Some(work_item_id),
+                session_id: Some(session_id),
+                event_type: OrchestrationEventType::UserResponded,
+                payload: OrchestrationEventPayload::UserResponded(UserRespondedPayload {
+                    session_id: None,
+                    work_item_id: None,
+                    message: "noop".to_owned(),
+                }),
+                schema_version: 1,
+            },
+        ];
+
+        let shell_state = UiShellState::new("ready".to_owned(), projection);
+        assert!(shell_state.has_active_animated_indicator());
+    }
+
+    #[test]
     fn session_panel_selection_tracks_session_id_when_rows_reorder() {
         let mut projection = ProjectionState::default();
         let work_item_a = WorkItemId::new("wi-a");

@@ -3010,7 +3010,8 @@ fn apply_ticket_picker_event(&mut self, event: TicketPickerEvent) {
     }
 
     fn has_active_animated_indicator(&self) -> bool {
-        self.terminal_session_states
+        let has_active_terminal_turn = self
+            .terminal_session_states
             .iter()
             .any(|(session_id, state)| {
                 state.turn_active
@@ -3021,7 +3022,15 @@ fn apply_ticket_picker_event(&mut self, event: TicketPickerEvent) {
                             .and_then(|session| session.status.as_ref()),
                         Some(WorkerSessionStatus::Running)
                     )
-            })
+            });
+        if has_active_terminal_turn {
+            return true;
+        }
+
+        attention_inbox_snapshot(&self.domain, &AttentionEngineConfig::default(), &[])
+            .items
+            .iter()
+            .any(|item| item.resolved)
     }
 
     fn append_live_supervisor_chat(&self, ui_state: &mut UiState) {

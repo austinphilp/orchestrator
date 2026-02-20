@@ -184,6 +184,8 @@ struct WorkerIdleTimeline {
     last_user_action_minute: Option<u64>,
 }
 
+const RESOLVED_AUTO_DISMISS_AFTER_SECS: u64 = 60;
+
 pub fn attention_inbox_snapshot(
     state: &ProjectionState,
     config: &AttentionEngineConfig,
@@ -193,12 +195,19 @@ pub fn attention_inbox_snapshot(
         .iter()
         .map(|id| id.as_str().to_owned())
         .collect::<HashSet<_>>();
-    let (created_minutes, idle_timeline, as_of_minute) = collect_timeline(state);
+    let (created_minutes, resolved_seconds, idle_timeline, as_of_minute, as_of_second) =
+        collect_timeline(state);
 
     let mut items = state
         .inbox_items
         .values()
         .filter_map(|item| {
+            if item.resolved
+                && is_resolved_item_auto_dismissed(&item.id, &resolved_seconds, as_of_second)
+            {
+                return None;
+            }
+
             let work_item = state.work_items.get(&item.work_item_id);
             let session_id = work_item.and_then(|entry| entry.session_id.clone());
             let session_status = session_id
@@ -287,6 +296,17 @@ pub fn attention_inbox_snapshot(
         batch_surfaces: build_batch_surfaces(&items),
         items,
     }
+}
+
+fn is_resolved_item_auto_dismissed(
+    inbox_item_id: &InboxItemId,
+    resolved_seconds: &HashMap<InboxItemId, u64>,
+    as_of_second: u64,
+) -> bool {
+    let Some(resolved_at) = resolved_seconds.get(inbox_item_id).copied() else {
+        return false;
+    };
+    as_of_second.saturating_sub(resolved_at) >= RESOLVED_AUTO_DISMISS_AFTER_SECS
 }
 
 fn session_has_ended(status: Option<&WorkerSessionStatus>) -> bool {
@@ -458,7 +478,9 @@ fn collect_timeline(
     state: &ProjectionState,
 ) -> (
     HashMap<InboxItemId, u64>,
+    HashMap<InboxItemId, u64>,
     Option<HashMap<WorkerSessionId, WorkerIdleTimeline>>,
+    u64,
     u64,
 ) {
     let mut events_ordered = state.events.iter().collect::<Vec<_>>();
@@ -480,27 +502,37 @@ fn collect_timeline(
                 .map(|session_id| (work_item_id.clone(), session_id.clone()))
         })
         .collect::<HashMap<_, _>>();
+    let mut session_work_items = work_item_sessions
+        .iter()
+        .map(|(work_item_id, session_id)| (session_id.clone(), work_item_id.clone()))
+        .collect::<HashMap<_, _>>();
 
     let mut created_minutes = HashMap::new();
+    let mut resolved_seconds = HashMap::new();
     let mut timelines = HashMap::<WorkerSessionId, WorkerIdleTimeline>::new();
     let mut as_of_minute = 0;
+    let mut as_of_second = 0;
     let mut saw_timestamp = false;
 
     for event in events_ordered {
-        let Some(minute) = parse_rfc3339_minute(event.occurred_at.as_str()) else {
+        let Some(second) = parse_event_unix_seconds(event.occurred_at.as_str()) else {
             continue;
         };
+        let minute = second / 60;
         let event_work_item_id = event.work_item_id.as_ref();
         let event_session_id = event.session_id.as_ref();
         saw_timestamp = true;
         as_of_minute = as_of_minute.max(minute);
+        as_of_second = as_of_second.max(second);
 
         match &event.payload {
             OrchestrationEventPayload::InboxItemCreated(payload) => {
                 created_minutes.insert(payload.inbox_item_id.clone(), minute);
+                resolved_seconds.remove(&payload.inbox_item_id);
             }
             OrchestrationEventPayload::SessionSpawned(payload) => {
                 work_item_sessions.insert(payload.work_item_id.clone(), payload.session_id.clone());
+                session_work_items.insert(payload.session_id.clone(), payload.work_item_id.clone());
                 let timeline = timelines.entry(payload.session_id.clone()).or_default();
                 mark_progress(timeline, minute);
                 clear_attention_holds(timeline);
@@ -514,6 +546,13 @@ fn collect_timeline(
                 let timeline = timelines.entry(payload.session_id.clone()).or_default();
                 mark_progress(timeline, minute);
                 clear_attention_holds(timeline);
+                if let Some(work_item_id) = session_work_items.get(&payload.session_id) {
+                    if let Some(work_item) = state.work_items.get(work_item_id) {
+                        for inbox_item_id in &work_item.inbox_items {
+                            resolved_seconds.insert(inbox_item_id.clone(), second);
+                        }
+                    }
+                }
             }
             OrchestrationEventPayload::SessionNeedsInput(payload) => {
                 let timeline = timelines.entry(payload.session_id.clone()).or_default();
@@ -546,6 +585,7 @@ fn collect_timeline(
                 }
             }
             OrchestrationEventPayload::InboxItemResolved(payload) => {
+                resolved_seconds.insert(payload.inbox_item_id.clone(), second);
                 if let Some(session_id) = resolve_session_id(
                     event_session_id,
                     Some(&payload.work_item_id),
@@ -568,10 +608,18 @@ fn collect_timeline(
                     timeline.waiting_for_input_since = None;
                 }
             }
+            OrchestrationEventPayload::SessionCrashed(payload) => {
+                if let Some(work_item_id) = session_work_items.get(&payload.session_id) {
+                    if let Some(work_item) = state.work_items.get(work_item_id) {
+                        for inbox_item_id in &work_item.inbox_items {
+                            resolved_seconds.insert(inbox_item_id.clone(), second);
+                        }
+                    }
+                }
+            }
             OrchestrationEventPayload::TicketSynced(_)
             | OrchestrationEventPayload::WorkItemCreated(_)
             | OrchestrationEventPayload::WorktreeCreated(_)
-            | OrchestrationEventPayload::SessionCrashed(_)
             | OrchestrationEventPayload::SupervisorQueryStarted(_)
             | OrchestrationEventPayload::SupervisorQueryChunk(_)
             | OrchestrationEventPayload::SupervisorQueryCancelled(_)
@@ -580,7 +628,13 @@ fn collect_timeline(
     }
 
     let timeline = saw_timestamp.then_some(timelines);
-    (created_minutes, timeline, as_of_minute)
+    (
+        created_minutes,
+        resolved_seconds,
+        timeline,
+        as_of_minute,
+        as_of_second,
+    )
 }
 
 fn events_are_sequence_sorted(events: &[StoredEventEnvelope]) -> bool {
@@ -612,10 +666,20 @@ fn resolve_session_id<'a>(
     session_id.or_else(|| work_item_id.and_then(|id| work_item_sessions.get(id)))
 }
 
-fn parse_rfc3339_minute(value: &str) -> Option<u64> {
-    let timestamp = OffsetDateTime::parse(value, &Rfc3339).ok()?;
-    let minutes = timestamp.unix_timestamp().div_euclid(60);
-    (minutes >= 0).then_some(minutes as u64)
+fn parse_event_unix_seconds(value: &str) -> Option<u64> {
+    if let Ok(timestamp) = OffsetDateTime::parse(value, &Rfc3339) {
+        let seconds = timestamp.unix_timestamp();
+        if seconds >= 0 {
+            return Some(seconds as u64);
+        }
+    }
+
+    let trimmed = value.trim().strip_suffix('Z').unwrap_or(value.trim());
+    let seconds = trimmed
+        .split_once('.')
+        .map(|(left, _)| left)
+        .unwrap_or(trimmed);
+    seconds.parse::<u64>().ok()
 }
 
 #[cfg(test)]
@@ -1222,5 +1286,246 @@ mod tests {
             .batch_surfaces
             .iter()
             .all(|surface| surface.total_count == 0 && surface.unresolved_count == 0));
+    }
+
+    #[test]
+    fn resolved_item_remains_visible_before_auto_dismiss_window() {
+        let mut projection = base_projection();
+        let work_item_id = crate::WorkItemId::new("wi-1");
+        let session_id = WorkerSessionId::new("sess-1");
+        let inbox_id = InboxItemId::new("inbox-1");
+        projection
+            .inbox_items
+            .get_mut(&inbox_id)
+            .expect("inbox item")
+            .resolved = true;
+
+        projection.events = vec![
+            event(
+                1,
+                "2026-02-16T10:00:00Z",
+                Some(&work_item_id),
+                None,
+                OrchestrationEventPayload::InboxItemCreated(InboxItemCreatedPayload {
+                    inbox_item_id: inbox_id.clone(),
+                    work_item_id: work_item_id.clone(),
+                    kind: InboxItemKind::NeedsApproval,
+                    title: "Review PR".to_owned(),
+                }),
+            ),
+            event(
+                2,
+                "2026-02-16T10:00:30Z",
+                Some(&work_item_id),
+                Some(&session_id),
+                OrchestrationEventPayload::InboxItemResolved(crate::InboxItemResolvedPayload {
+                    inbox_item_id: inbox_id,
+                    work_item_id: work_item_id.clone(),
+                }),
+            ),
+            event(
+                3,
+                "2026-02-16T10:00:59Z",
+                Some(&work_item_id),
+                Some(&session_id),
+                OrchestrationEventPayload::UserResponded(UserRespondedPayload {
+                    session_id: Some(session_id.clone()),
+                    work_item_id: Some(work_item_id.clone()),
+                    message: "noop".to_owned(),
+                }),
+            ),
+        ];
+
+        let snapshot =
+            attention_inbox_snapshot(&projection, &AttentionEngineConfig::default(), &[]);
+        assert_eq!(snapshot.items.len(), 1);
+        assert!(snapshot.items[0].resolved);
+    }
+
+    #[test]
+    fn resolved_item_is_filtered_at_or_after_60_seconds() {
+        let mut projection = base_projection();
+        let work_item_id = crate::WorkItemId::new("wi-1");
+        let session_id = WorkerSessionId::new("sess-1");
+        let inbox_id = InboxItemId::new("inbox-1");
+        projection
+            .inbox_items
+            .get_mut(&inbox_id)
+            .expect("inbox item")
+            .resolved = true;
+
+        projection.events = vec![
+            event(
+                1,
+                "2026-02-16T10:00:00Z",
+                Some(&work_item_id),
+                None,
+                OrchestrationEventPayload::InboxItemCreated(InboxItemCreatedPayload {
+                    inbox_item_id: inbox_id.clone(),
+                    work_item_id: work_item_id.clone(),
+                    kind: InboxItemKind::NeedsApproval,
+                    title: "Review PR".to_owned(),
+                }),
+            ),
+            event(
+                2,
+                "2026-02-16T10:00:30Z",
+                Some(&work_item_id),
+                Some(&session_id),
+                OrchestrationEventPayload::InboxItemResolved(crate::InboxItemResolvedPayload {
+                    inbox_item_id: inbox_id,
+                    work_item_id: work_item_id.clone(),
+                }),
+            ),
+            event(
+                3,
+                "2026-02-16T10:01:30Z",
+                Some(&work_item_id),
+                Some(&session_id),
+                OrchestrationEventPayload::UserResponded(UserRespondedPayload {
+                    session_id: Some(session_id.clone()),
+                    work_item_id: Some(work_item_id.clone()),
+                    message: "noop".to_owned(),
+                }),
+            ),
+        ];
+
+        let snapshot =
+            attention_inbox_snapshot(&projection, &AttentionEngineConfig::default(), &[]);
+        assert!(snapshot.items.is_empty());
+    }
+
+    #[test]
+    fn session_completed_resolution_auto_dismisses_after_60_seconds() {
+        let mut projection = base_projection();
+        let work_item_id = crate::WorkItemId::new("wi-1");
+        let session_id = WorkerSessionId::new("sess-1");
+        let inbox_id = InboxItemId::new("inbox-1");
+        projection
+            .inbox_items
+            .get_mut(&inbox_id)
+            .expect("inbox item")
+            .resolved = true;
+
+        projection.events = vec![
+            event(
+                1,
+                "2026-02-16T10:00:00Z",
+                Some(&work_item_id),
+                None,
+                OrchestrationEventPayload::InboxItemCreated(InboxItemCreatedPayload {
+                    inbox_item_id: inbox_id,
+                    work_item_id: work_item_id.clone(),
+                    kind: InboxItemKind::NeedsApproval,
+                    title: "Review PR".to_owned(),
+                }),
+            ),
+            event(
+                2,
+                "2026-02-16T10:00:00Z",
+                Some(&work_item_id),
+                Some(&session_id),
+                OrchestrationEventPayload::SessionCompleted(crate::SessionCompletedPayload {
+                    session_id: session_id.clone(),
+                    summary: Some("done".to_owned()),
+                }),
+            ),
+            event(
+                3,
+                "2026-02-16T10:01:01Z",
+                Some(&work_item_id),
+                Some(&session_id),
+                OrchestrationEventPayload::UserResponded(UserRespondedPayload {
+                    session_id: Some(session_id.clone()),
+                    work_item_id: Some(work_item_id.clone()),
+                    message: "noop".to_owned(),
+                }),
+            ),
+        ];
+
+        let snapshot =
+            attention_inbox_snapshot(&projection, &AttentionEngineConfig::default(), &[]);
+        assert!(snapshot.items.is_empty());
+    }
+
+    #[test]
+    fn epoch_timestamp_format_is_parsed_for_timeline() {
+        let mut projection = base_projection();
+        let work_item_id = crate::WorkItemId::new("wi-1");
+        let inbox_id = InboxItemId::new("inbox-1");
+
+        projection.events = vec![
+            event(
+                1,
+                "1760600000.000000000Z",
+                Some(&work_item_id),
+                None,
+                OrchestrationEventPayload::InboxItemCreated(InboxItemCreatedPayload {
+                    inbox_item_id: inbox_id,
+                    work_item_id: work_item_id.clone(),
+                    kind: InboxItemKind::NeedsApproval,
+                    title: "Review PR".to_owned(),
+                }),
+            ),
+            event(
+                2,
+                "1760600120.000000000Z",
+                None,
+                None,
+                OrchestrationEventPayload::UserResponded(UserRespondedPayload {
+                    session_id: None,
+                    work_item_id: None,
+                    message: "noop".to_owned(),
+                }),
+            ),
+        ];
+
+        let snapshot =
+            attention_inbox_snapshot(&projection, &AttentionEngineConfig::default(), &[]);
+        assert_eq!(snapshot.items.len(), 1);
+        assert_eq!(snapshot.items[0].score_breakdown.minutes_since_created, 2);
+    }
+
+    #[test]
+    fn unparseable_resolution_timestamp_does_not_auto_dismiss() {
+        let mut projection = base_projection();
+        let work_item_id = crate::WorkItemId::new("wi-1");
+        let session_id = WorkerSessionId::new("sess-1");
+        let inbox_id = InboxItemId::new("inbox-1");
+        projection
+            .inbox_items
+            .get_mut(&inbox_id)
+            .expect("inbox item")
+            .resolved = true;
+
+        projection.events = vec![
+            event(
+                1,
+                "not-a-timestamp",
+                Some(&work_item_id),
+                None,
+                OrchestrationEventPayload::InboxItemCreated(InboxItemCreatedPayload {
+                    inbox_item_id: inbox_id.clone(),
+                    work_item_id: work_item_id.clone(),
+                    kind: InboxItemKind::NeedsApproval,
+                    title: "Review PR".to_owned(),
+                }),
+            ),
+            event(
+                2,
+                "still-not-a-timestamp",
+                Some(&work_item_id),
+                Some(&session_id),
+                OrchestrationEventPayload::InboxItemResolved(crate::InboxItemResolvedPayload {
+                    inbox_item_id: inbox_id,
+                    work_item_id: work_item_id.clone(),
+                }),
+            ),
+        ];
+
+        let snapshot =
+            attention_inbox_snapshot(&projection, &AttentionEngineConfig::default(), &[]);
+        assert_eq!(snapshot.items.len(), 1);
+        assert!(snapshot.items[0].resolved);
     }
 }
