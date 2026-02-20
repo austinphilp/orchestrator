@@ -479,6 +479,7 @@ mod tests {
                 state: None,
                 priority: None,
                 labels: Vec::new(),
+                assign_to_api_key_user: false,
             })
             .await
             .expect("create succeeds");
@@ -502,6 +503,155 @@ mod tests {
             requests[1].variables["input"]["description"],
             json!("Exercise create path")
         );
+        assert!(!requests[1].variables["input"]
+            .as_object()
+            .expect("issueCreate input object")
+            .contains_key("assigneeId"));
+    }
+
+    #[tokio::test]
+    async fn create_ticket_assigns_to_cached_viewer_when_requested() {
+        let sync_query = TicketQuery::default();
+        let config = config_with(Duration::from_secs(60), sync_query);
+        let transport = Arc::new(StubTransport::default());
+        transport
+            .push_response(list_payload(
+                "viewer-77",
+                vec![issue_json(
+                    "issue-seed",
+                    "AP-700",
+                    "Seed",
+                    "Todo",
+                    "2026-02-16T12:00:00.000Z",
+                    Some("viewer-77"),
+                )],
+            ))
+            .await;
+        transport
+            .push_response(teams_payload(&[("team-1", Some("ENG"), "Engineering")]))
+            .await;
+        transport
+            .push_response(issue_create_payload(issue_json(
+                "issue-805",
+                "AP-805",
+                "Assign from cache",
+                "Todo",
+                "2026-02-16T13:02:00.000Z",
+                Some("viewer-77"),
+            )))
+            .await;
+        let provider = LinearTicketingProvider::with_transport(config, transport.clone());
+
+        provider.sync_once().await.expect("seed cache");
+        provider
+            .create_ticket(CreateTicketRequest {
+                title: "Assign from cache".to_owned(),
+                description: None,
+                project: None,
+                state: None,
+                priority: None,
+                labels: Vec::new(),
+                assign_to_api_key_user: true,
+            })
+            .await
+            .expect("create succeeds");
+
+        let requests = transport.requests().await;
+        assert_eq!(requests.len(), 3);
+        assert!(requests[2].query.contains("IssueCreate"));
+        assert_eq!(
+            requests[2].variables["input"]["assigneeId"],
+            json!("viewer-77")
+        );
+    }
+
+    #[tokio::test]
+    async fn create_ticket_fetches_viewer_for_assignment_when_cache_empty() {
+        let sync_query = TicketQuery::default();
+        let config = config_with(Duration::from_secs(60), sync_query);
+        let transport = Arc::new(StubTransport::default());
+        transport
+            .push_response(teams_payload(&[("team-1", Some("ENG"), "Engineering")]))
+            .await;
+        transport
+            .push_response(json!({ "viewer": { "id": "viewer-88" } }))
+            .await;
+        transport
+            .push_response(issue_create_payload(issue_json(
+                "issue-806",
+                "AP-806",
+                "Assign from viewer fetch",
+                "Todo",
+                "2026-02-16T13:03:00.000Z",
+                Some("viewer-88"),
+            )))
+            .await;
+        let provider = LinearTicketingProvider::with_transport(config, transport.clone());
+
+        provider
+            .create_ticket(CreateTicketRequest {
+                title: "Assign from viewer fetch".to_owned(),
+                description: None,
+                project: None,
+                state: None,
+                priority: None,
+                labels: Vec::new(),
+                assign_to_api_key_user: true,
+            })
+            .await
+            .expect("create succeeds");
+
+        let requests = transport.requests().await;
+        assert_eq!(requests.len(), 3);
+        assert!(requests[1].query.contains("ViewerHealth"));
+        assert_eq!(
+            requests[2].variables["input"]["assigneeId"],
+            json!("viewer-88")
+        );
+    }
+
+    #[tokio::test]
+    async fn create_ticket_continues_unassigned_when_viewer_lookup_fails() {
+        let sync_query = TicketQuery::default();
+        let config = config_with(Duration::from_secs(60), sync_query);
+        let transport = Arc::new(StubTransport::default());
+        transport
+            .push_response(teams_payload(&[("team-1", Some("ENG"), "Engineering")]))
+            .await;
+        transport.push_response(json!({ "viewer": {} })).await;
+        transport
+            .push_response(issue_create_payload(issue_json(
+                "issue-807",
+                "AP-807",
+                "Assignment fallback",
+                "Todo",
+                "2026-02-16T13:04:00.000Z",
+                None,
+            )))
+            .await;
+        let provider = LinearTicketingProvider::with_transport(config, transport.clone());
+
+        let summary = provider
+            .create_ticket(CreateTicketRequest {
+                title: "Assignment fallback".to_owned(),
+                description: None,
+                project: None,
+                state: None,
+                priority: None,
+                labels: Vec::new(),
+                assign_to_api_key_user: true,
+            })
+            .await
+            .expect("create succeeds even when viewer lookup fails");
+        assert!(summary.assignee.is_none());
+
+        let requests = transport.requests().await;
+        assert_eq!(requests.len(), 3);
+        assert!(requests[1].query.contains("ViewerHealth"));
+        assert!(!requests[2].variables["input"]
+            .as_object()
+            .expect("issueCreate input object")
+            .contains_key("assigneeId"));
     }
 
     #[tokio::test]
@@ -545,6 +695,7 @@ mod tests {
                 state: None,
                 priority: None,
                 labels: Vec::new(),
+                assign_to_api_key_user: false,
             })
             .await
             .expect("create succeeds");
@@ -584,6 +735,7 @@ mod tests {
                 state: None,
                 priority: None,
                 labels: Vec::new(),
+                assign_to_api_key_user: false,
             })
             .await
             .expect_err("unknown project should fail");
@@ -629,6 +781,7 @@ mod tests {
                 state: Some("ENG:Todo".to_owned()),
                 priority: None,
                 labels: Vec::new(),
+                assign_to_api_key_user: false,
             })
             .await
             .expect("create succeeds");
@@ -662,6 +815,7 @@ mod tests {
                 state: None,
                 priority: None,
                 labels: Vec::new(),
+                assign_to_api_key_user: false,
             })
             .await
             .expect_err("empty title should fail");
@@ -690,6 +844,7 @@ mod tests {
                 state: None,
                 priority: None,
                 labels: Vec::new(),
+                assign_to_api_key_user: false,
             })
             .await
             .expect_err("missing team should fail");
@@ -733,6 +888,7 @@ mod tests {
                 state: Some("Unknown".to_owned()),
                 priority: None,
                 labels: Vec::new(),
+                assign_to_api_key_user: false,
             })
             .await
             .expect_err("missing state should fail");
@@ -775,6 +931,7 @@ mod tests {
                 state: Some("Engineering:Todo".to_owned()),
                 priority: None,
                 labels: Vec::new(),
+                assign_to_api_key_user: false,
             })
             .await
             .expect("create succeeds");
@@ -816,6 +973,7 @@ mod tests {
                 state: None,
                 priority: None,
                 labels: Vec::new(),
+                assign_to_api_key_user: false,
             })
             .await
             .expect("create succeeds");
@@ -842,6 +1000,7 @@ mod tests {
                 state: None,
                 priority: None,
                 labels: vec!["orchestrator".to_owned()],
+                assign_to_api_key_user: false,
             })
             .await
             .expect_err("labels not supported should fail");

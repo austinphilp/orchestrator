@@ -3936,7 +3936,8 @@ mod tests {
 
     #[tokio::test]
     async fn run_ticket_picker_create_task_emits_created_event() {
-        let created = sample_ticket_summary("issue-200", "AP-200", "Todo");
+        let mut created = sample_ticket_summary("issue-200", "AP-200", "Todo");
+        created.assignee = None;
         let refreshed = vec![sample_ticket_summary("issue-201", "AP-201", "Todo")];
         let provider = Arc::new(TestTicketPickerProvider {
             tickets: refreshed.clone(),
@@ -3968,7 +3969,10 @@ mod tests {
                 assert_eq!(submit_mode, TicketCreateSubmitMode::CreateOnly);
                 assert!(projection.is_some());
                 assert_eq!(tickets.unwrap_or_default(), refreshed);
-                assert!(warning.is_none());
+                assert!(warning
+                    .as_deref()
+                    .unwrap_or_default()
+                    .contains("ticket may be unassigned"));
             }
             _ => panic!("expected ticket created event"),
         }

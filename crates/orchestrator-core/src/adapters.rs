@@ -12,6 +12,10 @@ fn default_base_branch() -> String {
     DEFAULT_BASE_BRANCH.to_owned()
 }
 
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
 #[async_trait]
 pub trait Supervisor: Send + Sync {
     async fn health_check(&self) -> Result<(), CoreError>;
@@ -55,6 +59,8 @@ pub struct CreateTicketRequest {
     pub state: Option<String>,
     pub priority: Option<i32>,
     pub labels: Vec<String>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub assign_to_api_key_user: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

@@ -147,6 +147,19 @@ impl TicketingProvider for LinearTicketingProvider {
         if let Some(team_state) = context.team_state {
             input["stateId"] = json!(team_state.id);
         }
+        if request.assign_to_api_key_user {
+            match resolve_linear_viewer_id(&self.transport, &self.cache).await {
+                Ok(Some(viewer_id)) => {
+                    input["assigneeId"] = json!(viewer_id);
+                }
+                Ok(None) => {
+                    warn!("Linear viewer id lookup returned empty id; creating ticket unassigned");
+                }
+                Err(error) => {
+                    warn!(error = %error, "Linear viewer lookup failed; creating ticket unassigned");
+                }
+            }
+        }
 
         let response = self
             .transport
