@@ -6,7 +6,10 @@ use orchestrator_core::{
     LlmMessage, LlmProvider, LlmRole, ProjectionState, SelectedTicketFlowResult, Supervisor,
     TicketQuery, TicketSummary, TicketingProvider, VcsProvider, WorkerBackend, WorkerSessionId,
 };
-use orchestrator_ui::{SessionWorktreeDiff, SessionWorkflowAdvanceOutcome, TicketPickerProvider};
+use orchestrator_ui::{
+    CreateTicketFromPickerRequest, SessionWorktreeDiff, SessionWorkflowAdvanceOutcome,
+    TicketPickerProvider,
+};
 use std::path::PathBuf;
 
 use crate::App;
@@ -110,8 +113,11 @@ where
         self.app.startup_state().await.map(|state| state.projection)
     }
 
-    async fn create_ticket_from_brief(&self, brief: String) -> Result<TicketSummary, CoreError> {
-        let brief = brief.trim();
+    async fn create_ticket_from_brief(
+        &self,
+        request: CreateTicketFromPickerRequest,
+    ) -> Result<TicketSummary, CoreError> {
+        let brief = request.brief.trim();
         if brief.is_empty() {
             return Err(CoreError::InvalidCommandArgs {
                 command_id: "ui.ticket_picker.create".to_owned(),
@@ -120,11 +126,16 @@ where
         }
 
         let (title, description) = draft_ticket_from_brief(&self.app.supervisor, brief).await?;
+        let project = request
+            .selected_project
+            .map(|value| value.trim().to_owned())
+            .filter(|value| !value.is_empty() && !value.eq_ignore_ascii_case("No Project"));
         let ticket = self
             .ticketing
             .create_ticket(CreateTicketRequest {
                 title,
                 description: Some(description),
+                project,
                 state: None,
                 priority: None,
                 labels: Vec::new(),

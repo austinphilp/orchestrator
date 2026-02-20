@@ -364,6 +364,13 @@ impl TicketPickerOverlayState {
         }
     }
 
+    fn selected_project_name(&self) -> Option<String> {
+        let project_index = self.selected_project_index()?;
+        self.project_groups
+            .get(project_index)
+            .map(|project_group| project_group.project.clone())
+    }
+
     fn selected_ticket(&self) -> Option<&TicketSummary> {
         let row = self.selected_row()?;
         let TicketPickerRowRef::Ticket {

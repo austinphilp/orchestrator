@@ -934,9 +934,13 @@ impl UiShellState {
             .text()
             .trim()
             .to_owned();
+        let selected_project = self.ticket_picker_overlay.selected_project_name();
         self.ticket_picker_overlay.error = None;
         self.ticket_picker_overlay.creating = true;
-        self.spawn_ticket_picker_create(brief);
+        self.spawn_ticket_picker_create(CreateTicketFromPickerRequest {
+            brief,
+            selected_project,
+        });
     }
 
     fn spawn_ticket_picker_load(&mut self) {
@@ -1002,7 +1006,7 @@ impl UiShellState {
         }
     }
 
-    fn spawn_ticket_picker_create(&mut self, brief: String) {
+    fn spawn_ticket_picker_create(&mut self, request: CreateTicketFromPickerRequest) {
         let Some(provider) = self.ticket_picker_provider.clone() else {
             self.ticket_picker_overlay.creating = false;
             self.ticket_picker_overlay.error =
@@ -1019,7 +1023,7 @@ impl UiShellState {
         match TokioHandle::try_current() {
             Ok(handle) => {
                 handle.spawn(async move {
-                    run_ticket_picker_create_task(provider, brief, sender).await;
+                    run_ticket_picker_create_task(provider, request, sender).await;
                 });
             }
             Err(_) => {

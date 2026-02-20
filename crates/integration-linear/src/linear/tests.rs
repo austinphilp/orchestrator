@@ -475,6 +475,7 @@ mod tests {
             .create_ticket(CreateTicketRequest {
                 title: "Add linear ticket create test".to_owned(),
                 description: Some("Exercise create path".to_owned()),
+                project: None,
                 state: None,
                 priority: None,
                 labels: Vec::new(),
@@ -501,6 +502,94 @@ mod tests {
             requests[1].variables["input"]["description"],
             json!("Exercise create path")
         );
+    }
+
+    #[tokio::test]
+    async fn create_ticket_sets_project_id_when_project_is_selected() {
+        let sync_query = TicketQuery::default();
+        let config = config_with(Duration::from_secs(60), sync_query);
+        let transport = Arc::new(StubTransport::default());
+        transport
+            .push_response(json!({
+                "teams": {
+                    "nodes": [{
+                        "id": "team-1",
+                        "key": "ENG",
+                        "name": "Engineering",
+                        "projects": {
+                            "nodes": [
+                                {"id": "project-1", "name": "Orchestrator"}
+                            ]
+                        }
+                    }]
+                }
+            }))
+            .await;
+        transport
+            .push_response(issue_create_payload(issue_json(
+                "issue-811",
+                "AP-811",
+                "Project selected",
+                "Todo",
+                "2026-02-16T13:05:00.000Z",
+                Some("viewer-1"),
+            )))
+            .await;
+        let provider = LinearTicketingProvider::with_transport(config, transport.clone());
+
+        provider
+            .create_ticket(CreateTicketRequest {
+                title: "Project selected".to_owned(),
+                description: None,
+                project: Some("orchestrator".to_owned()),
+                state: None,
+                priority: None,
+                labels: Vec::new(),
+            })
+            .await
+            .expect("create succeeds");
+
+        let requests = transport.requests().await;
+        assert_eq!(requests[1].variables["input"]["projectId"], json!("project-1"));
+    }
+
+    #[tokio::test]
+    async fn create_ticket_rejects_unknown_project() {
+        let sync_query = TicketQuery::default();
+        let config = config_with(Duration::from_secs(60), sync_query);
+        let transport = Arc::new(StubTransport::default());
+        transport
+            .push_response(json!({
+                "teams": {
+                    "nodes": [{
+                        "id": "team-1",
+                        "key": "ENG",
+                        "name": "Engineering",
+                        "projects": {
+                            "nodes": [
+                                {"id": "project-1", "name": "Other Project"}
+                            ]
+                        }
+                    }]
+                }
+            }))
+            .await;
+        let provider = LinearTicketingProvider::with_transport(config, transport);
+
+        let create_error = provider
+            .create_ticket(CreateTicketRequest {
+                title: "Missing project".to_owned(),
+                description: None,
+                project: Some("Orchestrator".to_owned()),
+                state: None,
+                priority: None,
+                labels: Vec::new(),
+            })
+            .await
+            .expect_err("unknown project should fail");
+        assert!(create_error
+            .to_string()
+            .contains("No Linear project matches"));
     }
 
     #[tokio::test]
@@ -536,6 +625,7 @@ mod tests {
             .create_ticket(CreateTicketRequest {
                 title: "State-mapped issue".to_owned(),
                 description: None,
+                project: None,
                 state: Some("ENG:Todo".to_owned()),
                 priority: None,
                 labels: Vec::new(),
@@ -568,6 +658,7 @@ mod tests {
             .create_ticket(CreateTicketRequest {
                 title: "   ".to_owned(),
                 description: None,
+                project: None,
                 state: None,
                 priority: None,
                 labels: Vec::new(),
@@ -595,6 +686,7 @@ mod tests {
             .create_ticket(CreateTicketRequest {
                 title: "Missing team".to_owned(),
                 description: None,
+                project: None,
                 state: None,
                 priority: None,
                 labels: Vec::new(),
@@ -637,6 +729,7 @@ mod tests {
             .create_ticket(CreateTicketRequest {
                 title: "Missing state".to_owned(),
                 description: None,
+                project: None,
                 state: Some("Unknown".to_owned()),
                 priority: None,
                 labels: Vec::new(),
@@ -678,6 +771,7 @@ mod tests {
             .create_ticket(CreateTicketRequest {
                 title: "Team name token".to_owned(),
                 description: None,
+                project: None,
                 state: Some("Engineering:Todo".to_owned()),
                 priority: None,
                 labels: Vec::new(),
@@ -718,6 +812,7 @@ mod tests {
             .create_ticket(CreateTicketRequest {
                 title: "No description".to_owned(),
                 description: Some("   ".to_owned()),
+                project: None,
                 state: None,
                 priority: None,
                 labels: Vec::new(),
@@ -743,6 +838,7 @@ mod tests {
             .create_ticket(CreateTicketRequest {
                 title: "Label test".to_owned(),
                 description: None,
+                project: None,
                 state: None,
                 priority: None,
                 labels: vec!["orchestrator".to_owned()],

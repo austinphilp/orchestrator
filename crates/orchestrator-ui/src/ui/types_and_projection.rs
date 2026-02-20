@@ -56,6 +56,12 @@ const TICKET_PICKER_PRIORITY_STATES_DEFAULT: &[&str] =
 const MERGE_POLL_INTERVAL: Duration = Duration::from_secs(60);
 const MERGE_REQUEST_RATE_LIMIT: Duration = Duration::from_secs(1);
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreateTicketFromPickerRequest {
+    pub brief: String,
+    pub selected_project: Option<String>,
+}
+
 #[async_trait]
 pub trait TicketPickerProvider: Send + Sync {
     async fn list_unfinished_tickets(&self) -> Result<Vec<TicketSummary>, CoreError>;
@@ -67,7 +73,10 @@ pub trait TicketPickerProvider: Send + Sync {
         ticket: TicketSummary,
         repository_override: Option<PathBuf>,
     ) -> Result<SelectedTicketFlowResult, CoreError>;
-    async fn create_ticket_from_brief(&self, brief: String) -> Result<TicketSummary, CoreError>;
+    async fn create_ticket_from_brief(
+        &self,
+        request: CreateTicketFromPickerRequest,
+    ) -> Result<TicketSummary, CoreError>;
     async fn archive_ticket(&self, _ticket: TicketSummary) -> Result<(), CoreError> {
         Err(CoreError::DependencyUnavailable(
             "ticket archiving is not supported by this ticket provider".to_owned(),

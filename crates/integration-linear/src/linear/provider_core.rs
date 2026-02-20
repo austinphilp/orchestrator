@@ -459,12 +459,14 @@ struct LinearTeamProjectConnection {
 
 #[derive(Debug, Clone, Deserialize)]
 struct LinearTeamProjectNode {
+    id: String,
     name: String,
 }
 
 #[derive(Debug)]
 struct LinearCreateIssueContext {
     team_id: String,
+    project_id: Option<String>,
     team_state: Option<ResolvedLinearState>,
 }
 
@@ -558,8 +560,10 @@ async fn resolve_linear_team_state_id(
 async fn resolve_linear_create_context(
     transport: &Arc<dyn GraphqlTransport>,
     state: Option<&str>,
+    project: Option<&str>,
 ) -> Result<LinearCreateIssueContext, CoreError> {
     let teams = resolve_linear_teams(transport).await?;
+    let project = project.map(str::trim).filter(|value| !value.is_empty());
     let CreateTicketStateSpec {
         team_token,
         state_name,
@@ -571,19 +575,52 @@ async fn resolve_linear_create_context(
             state_name: None,
         });
 
-    let team = if let Some(token) = team_token.as_deref() {
-        teams
-            .iter()
-            .find(|team| team_matches_token(team, token))
-            .cloned()
-            .ok_or_else(|| {
-                CoreError::Configuration(format!(
-                    "No Linear team matches `{token}`. Available teams: {}",
-                    linear_team_list_hint(&teams)
-                ))
-            })?
+    let (team, project_id) = if let Some(project_name) = project {
+        let mut project_matches = Vec::new();
+        for team in &teams {
+            for candidate in &team.projects.nodes {
+                if candidate.name.eq_ignore_ascii_case(project_name) {
+                    project_matches.push((team.clone(), candidate.id.clone()));
+                }
+            }
+        }
+        if project_matches.is_empty() {
+            return Err(CoreError::Configuration(format!(
+                "No Linear project matches `{project_name}`. Available teams: {}",
+                linear_team_list_hint(&teams)
+            )));
+        }
+        if project_matches.len() > 1 {
+            return Err(CoreError::Configuration(format!(
+                "Project `{project_name}` exists in multiple teams. Specify a unique project name. Available teams: {}",
+                linear_team_list_hint(&teams)
+            )));
+        }
+        let (matched_team, matched_project_id) = project_matches.pop().expect("single match");
+        if let Some(token) = team_token.as_deref() {
+            if !team_matches_token(&matched_team, token) {
+                return Err(CoreError::Configuration(format!(
+                    "Project `{project_name}` does not belong to team `{token}`."
+                )));
+            }
+        }
+        (matched_team, Some(matched_project_id))
+    } else if let Some(token) = team_token.as_deref() {
+        (
+            teams
+                .iter()
+                .find(|team| team_matches_token(team, token))
+                .cloned()
+                .ok_or_else(|| {
+                    CoreError::Configuration(format!(
+                        "No Linear team matches `{token}`. Available teams: {}",
+                        linear_team_list_hint(&teams)
+                    ))
+                })?,
+            None,
+        )
     } else if teams.len() == 1 {
-        teams[0].clone()
+        (teams[0].clone(), None)
     } else if state_name.is_none() {
         return Err(CoreError::Configuration(
             "Linear issueCreate requires a team when multiple teams are available. Provide the team in `state` as `<team-id|team-key>:<state>` or configure a default team.".to_owned(),
@@ -614,6 +651,7 @@ async fn resolve_linear_create_context(
         let (team, state) = matches.pop().expect("single match found");
         return Ok(LinearCreateIssueContext {
             team_id: team.id,
+            project_id: None,
             team_state: Some(state),
         });
     };
@@ -634,6 +672,7 @@ async fn resolve_linear_create_context(
 
     Ok(LinearCreateIssueContext {
         team_id: team.id,
+        project_id,
         team_state,
     })
 }
