@@ -1206,7 +1206,7 @@ fn render_terminal_needs_input_panel(
     }
     let help = if prompt.interaction_active {
         format!(
-            "{}Enter: {} | Tab/S-Tab: question | i: note insert | Esc: normal mode",
+            "{}Enter: {} | h/l or arrows: question | i: note insert | Esc: normal mode",
             if options_len > 0 {
                 "j/k: option | "
             } else {

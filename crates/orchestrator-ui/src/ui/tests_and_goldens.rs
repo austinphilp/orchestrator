@@ -2144,6 +2144,92 @@ mod tests {
     }
 
     #[test]
+    fn inline_needs_input_uses_tab_for_pane_focus_and_hl_for_question_navigation() {
+        let backend = Arc::new(ManualTerminalBackend::default());
+        let mut shell_state = UiShellState::new_with_integrations(
+            "ready".to_owned(),
+            sample_projection(true),
+            None,
+            None,
+            None,
+            Some(backend),
+        );
+        shell_state.open_terminal_and_enter_mode();
+
+        let sender = shell_state
+            .terminal_session_sender
+            .clone()
+            .expect("terminal sender");
+        sender
+            .try_send(TerminalSessionEvent::NeedsInput {
+                session_id: WorkerSessionId::new("sess-1"),
+                needs_input: BackendNeedsInputEvent {
+                    prompt_id: "prompt-list-navigation".to_owned(),
+                    question: "choose options".to_owned(),
+                    options: vec![],
+                    default_option: None,
+                    questions: vec![
+                        BackendNeedsInputQuestion {
+                            id: "q1".to_owned(),
+                            header: "Runtime".to_owned(),
+                            question: "Pick runtime".to_owned(),
+                            is_other: false,
+                            is_secret: false,
+                            options: Some(vec![
+                                BackendNeedsInputOption {
+                                    label: "Codex".to_owned(),
+                                    description: String::new(),
+                                },
+                                BackendNeedsInputOption {
+                                    label: "OpenCode".to_owned(),
+                                    description: String::new(),
+                                },
+                            ]),
+                        },
+                        BackendNeedsInputQuestion {
+                            id: "q2".to_owned(),
+                            header: "Mode".to_owned(),
+                            question: "Pick mode".to_owned(),
+                            is_other: false,
+                            is_secret: false,
+                            options: Some(vec![
+                                BackendNeedsInputOption {
+                                    label: "Planning".to_owned(),
+                                    description: String::new(),
+                                },
+                                BackendNeedsInputOption {
+                                    label: "Implementation".to_owned(),
+                                    description: String::new(),
+                                },
+                            ]),
+                        },
+                    ],
+                },
+            })
+            .expect("queue needs-input event");
+        shell_state.poll_terminal_session_events();
+
+        let initially_left_focused = shell_state.is_left_pane_focused();
+        let _ = route_needs_input_modal_key(&mut shell_state, key(KeyCode::Tab));
+        assert_ne!(shell_state.is_left_pane_focused(), initially_left_focused);
+
+        let prompt = shell_state
+            .terminal_session_states
+            .get(&WorkerSessionId::new("sess-1"))
+            .and_then(|view| view.active_needs_input.as_ref())
+            .expect("needs-input prompt should remain active");
+        assert_eq!(prompt.current_question_index, 0);
+
+        let _ = route_needs_input_modal_key(&mut shell_state, key(KeyCode::Char('l')));
+        let prompt = shell_state
+            .terminal_session_states
+            .get(&WorkerSessionId::new("sess-1"))
+            .and_then(|view| view.active_needs_input.as_ref())
+            .expect("needs-input prompt should advance to next question");
+        assert_eq!(prompt.current_question_index, 1);
+    }
+
+    #[test]
     fn offscreen_needs_input_does_not_auto_switch_terminal_view() {
         let backend = Arc::new(ManualTerminalBackend::default());
         let mut projection = sample_projection(true);
@@ -3431,7 +3517,7 @@ mod tests {
     }
 
     #[test]
-    fn tab_cycles_sidebar_focus_and_moves_selection_in_focused_panel() {
+    fn tab_toggles_pane_focus_and_backtab_cycles_sidebar_focus() {
         let mut projection = sample_projection(true);
         let extra_work_item_id = WorkItemId::new("wi-extra");
         let extra_session_id = WorkerSessionId::new("sess-extra");
@@ -3462,8 +3548,15 @@ mod tests {
 
         let initial_inbox_index = shell_state.ui_state().selected_inbox_index;
         assert!(shell_state.is_inbox_sidebar_focused());
+        assert!(shell_state.is_left_pane_focused());
 
         handle_key_press(&mut shell_state, key(KeyCode::Tab));
+        assert!(shell_state.is_right_pane_focused());
+
+        handle_key_press(&mut shell_state, key(KeyCode::Tab));
+        assert!(shell_state.is_left_pane_focused());
+
+        handle_key_press(&mut shell_state, key(KeyCode::BackTab));
         assert!(shell_state.is_sessions_sidebar_focused());
 
         let before_session = shell_state
@@ -3475,13 +3568,6 @@ mod tests {
             .expect("selected session after move");
         assert_ne!(before_session, after_session);
         assert_eq!(shell_state.ui_state().selected_inbox_index, initial_inbox_index);
-
-        handle_key_press(&mut shell_state, key(KeyCode::BackTab));
-        assert!(shell_state.is_right_pane_focused());
-
-        handle_key_press(&mut shell_state, key(KeyCode::BackTab));
-        assert!(shell_state.is_left_pane_focused());
-        assert!(shell_state.is_sessions_sidebar_focused());
     }
 
     #[test]

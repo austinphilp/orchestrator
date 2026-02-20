@@ -27,8 +27,8 @@ Stack: Inbox
 [3] PR Reviews: 1 unresolved / 1 total
 [4] FYI Digest: 1 unresolved / 1 total
 j/k or arrows: move selection
-Tab: cycle inbox/sessions focus in left pane
-Shift+Tab: toggle left/right pane focus
+Tab: toggle left/right pane focus
+Shift+Tab: cycle inbox/sessions focus in left pane
 [ / ]: cycle batch lanes
 g/G: jump first/last item
 Enter: open focus card
