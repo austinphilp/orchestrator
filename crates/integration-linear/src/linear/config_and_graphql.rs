@@ -122,6 +122,7 @@ query Teams {
       name
       projects {
         nodes {
+          id
           name
         }
       }

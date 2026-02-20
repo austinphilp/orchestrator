@@ -449,10 +449,10 @@ async fn run_ticket_picker_start_task(
 
 async fn run_ticket_picker_create_task(
     provider: Arc<dyn TicketPickerProvider>,
-    brief: String,
+    request: CreateTicketFromPickerRequest,
     sender: mpsc::Sender<TicketPickerEvent>,
 ) {
-    let created_ticket = match provider.create_ticket_from_brief(brief).await {
+    let created_ticket = match provider.create_ticket_from_brief(request).await {
         Ok(ticket) => ticket,
         Err(error) => {
             let tickets = match provider.list_unfinished_tickets().await {
@@ -567,7 +567,7 @@ fn resolve_shell_home() -> Option<String> {
 fn render_ticket_picker_overlay_text(overlay: &TicketPickerOverlayState) -> String {
     let mut lines = if overlay.new_ticket_mode {
         vec![
-            "Type brief | Enter: create | Shift+Enter: newline | Backspace: edit | Esc: cancel"
+            "Describe ticket | Enter: create | Shift+Enter: newline | Backspace: edit | Esc: cancel"
                 .to_owned(),
         ]
     } else {
@@ -613,6 +613,14 @@ fn render_ticket_picker_overlay_text(overlay: &TicketPickerOverlayState) -> Stri
         }
         lines.push("Enter local repository path, then press Enter. Esc to cancel.".to_owned());
         lines.push(format!("Path: {}", overlay.repository_prompt_input.text()));
+        lines.push(String::new());
+    }
+
+    if overlay.new_ticket_mode {
+        let selected_project = overlay
+            .selected_project_name()
+            .unwrap_or_else(|| "No Project".to_owned());
+        lines.push(format!("Assigned project: {selected_project}"));
         lines.push(String::new());
     }
 

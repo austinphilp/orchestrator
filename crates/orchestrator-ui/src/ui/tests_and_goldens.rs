@@ -185,7 +185,7 @@ mod tests {
 
         async fn create_ticket_from_brief(
             &self,
-            _brief: String,
+            _request: CreateTicketFromPickerRequest,
         ) -> Result<TicketSummary, CoreError> {
             self.created.clone().ok_or_else(|| {
                 CoreError::DependencyUnavailable("create unavailable in test provider".to_owned())
@@ -2850,6 +2850,12 @@ mod tests {
     #[test]
     fn ticket_picker_new_ticket_mode_overlay_text_does_not_duplicate_brief_label() {
         let mut overlay = TicketPickerOverlayState::default();
+        overlay.apply_tickets(
+            vec![sample_ticket_summary("issue-310", "AP-310", "Todo")],
+            Vec::new(),
+            &["Todo".to_owned()],
+        );
+        overlay.move_selection(1);
         overlay.begin_new_ticket_mode();
         overlay.new_ticket_brief_input.set_text("draft");
 
@@ -2857,6 +2863,7 @@ mod tests {
         assert!(!rendered.contains("Brief:"));
         assert!(rendered.contains("Enter: create"));
         assert!(rendered.contains("Shift+Enter: newline"));
+        assert!(rendered.contains("Assigned project: Core"));
     }
 
     #[test]
@@ -2953,7 +2960,15 @@ mod tests {
         });
         let (sender, mut receiver) = mpsc::channel(1);
 
-        run_ticket_picker_create_task(provider, "brief".to_owned(), sender).await;
+        run_ticket_picker_create_task(
+            provider,
+            CreateTicketFromPickerRequest {
+                brief: "brief".to_owned(),
+                selected_project: Some("Core".to_owned()),
+            },
+            sender,
+        )
+        .await;
 
         let event = receiver.recv().await.expect("ticket picker event");
         match event {
@@ -3102,7 +3117,7 @@ mod tests {
 
             async fn create_ticket_from_brief(
                 &self,
-                _brief: String,
+                _request: CreateTicketFromPickerRequest,
             ) -> Result<TicketSummary, CoreError> {
                 Err(CoreError::DependencyUnavailable("not used".to_owned()))
             }
@@ -3184,7 +3199,7 @@ mod tests {
 
             async fn create_ticket_from_brief(
                 &self,
-                _brief: String,
+                _request: CreateTicketFromPickerRequest,
             ) -> Result<TicketSummary, CoreError> {
                 Err(CoreError::DependencyUnavailable("not used".to_owned()))
             }

@@ -121,8 +121,12 @@ impl TicketingProvider for LinearTicketingProvider {
             ));
         }
 
-        let context =
-            resolve_linear_create_context(&self.transport, request.state.as_deref()).await?;
+        let context = resolve_linear_create_context(
+            &self.transport,
+            request.state.as_deref(),
+            request.project.as_deref(),
+        )
+        .await?;
         let mut input = json!({
             "teamId": context.team_id,
             "title": title,
@@ -136,6 +140,9 @@ impl TicketingProvider for LinearTicketingProvider {
         }
         if let Some(priority) = request.priority {
             input["priority"] = json!(priority);
+        }
+        if let Some(project_id) = context.project_id.as_deref() {
+            input["projectId"] = json!(project_id);
         }
         if let Some(team_state) = context.team_state {
             input["stateId"] = json!(team_state.id);

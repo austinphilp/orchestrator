@@ -190,6 +190,43 @@ impl ShortcutTicketingProvider {
         extract_list(payload, "workflowStates")
     }
 
+    async fn fetch_projects(&self) -> Result<Vec<ShortcutProjectRecord>, CoreError> {
+        let request = self
+            .client
+            .get(self.endpoint("projects"))
+            .query(&[("page_size", self.config.fetch_limit.to_string())]);
+        let payload = self.request_json::<Value>(request).await?;
+        extract_list(payload, "projects")
+    }
+
+    async fn resolve_project_id(&self, project_name: &str) -> Result<String, CoreError> {
+        let target = project_name.trim();
+        if target.is_empty() {
+            return Err(CoreError::Configuration(
+                "Shortcut project name cannot be empty.".to_owned(),
+            ));
+        }
+
+        let mut matches = self
+            .fetch_projects()
+            .await?
+            .into_iter()
+            .filter(|project| project.name.eq_ignore_ascii_case(target))
+            .collect::<Vec<_>>();
+
+        if matches.is_empty() {
+            return Err(CoreError::Configuration(format!(
+                "Shortcut project `{target}` was not found."
+            )));
+        }
+        if matches.len() > 1 {
+            return Err(CoreError::Configuration(format!(
+                "Shortcut project `{target}` is ambiguous; multiple projects share that name."
+            )));
+        }
+        Ok(matches.pop().expect("single project match").id)
+    }
+
     async fn resolve_workflow_state_id(&self, state_name: &str) -> Result<String, CoreError> {
         let states = self.fetch_workflow_states().await?;
         let target = state_name.trim();
@@ -303,12 +340,9 @@ impl TicketingProvider for ShortcutTicketingProvider {
     }
 
     async fn list_projects(&self) -> Result<Vec<String>, CoreError> {
-        let request = self
-            .client
-            .get(self.endpoint("projects"))
-            .query(&[("page_size", self.config.fetch_limit.to_string())]);
-        let payload = self.request_json::<Value>(request).await?;
-        let projects = extract_list::<ShortcutProjectRecord>(payload, "projects")?
+        let projects = self
+            .fetch_projects()
+            .await?
             .into_iter()
             .map(|project| project.name)
             .filter(|name| !name.trim().is_empty())
@@ -363,6 +397,13 @@ impl TicketingProvider for ShortcutTicketingProvider {
         });
         if let Some(state_id) = workflow_state_id {
             payload["workflowStateId"] = json!(state_id);
+        }
+        if let Some(project) = request.project.as_deref() {
+            let project = project.trim();
+            if !project.is_empty() && !project.eq_ignore_ascii_case("No Project") {
+                let project_id = self.resolve_project_id(project).await?;
+                payload["project_id"] = json!(project_id);
+            }
         }
 
         let response = self.client.post(self.endpoint("stories")).json(&payload);
@@ -643,6 +684,7 @@ struct ShortcutProject {
 #[derive(Debug, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 struct ShortcutProjectRecord {
+    pub id: String,
     pub name: String,
 }
 

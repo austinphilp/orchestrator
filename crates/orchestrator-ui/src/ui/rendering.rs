@@ -808,10 +808,23 @@ fn render_ticket_picker_overlay(
             height: input_height,
         };
         if overlay.new_ticket_mode {
+            let project_area = Rect {
+                x: popup.x.saturating_add(1),
+                y: popup.y.saturating_add(popup.height.saturating_sub(5)),
+                width: popup.width.saturating_sub(2),
+                height: 1,
+            };
+            let selected_project = overlay
+                .selected_project_name()
+                .unwrap_or_else(|| "No Project".to_owned());
+            frame.render_widget(
+                Paragraph::new(format!("Assigned project: {selected_project}")),
+                project_area,
+            );
             let mut state = overlay.new_ticket_brief_input.clone();
             state.focused = true;
             TextArea::new()
-                .label("brief")
+                .label("describe ticket")
                 .placeholder("ticket summary")
                 .wrap_mode(WrapMode::Soft)
                 .render_stateful(frame, input_area, &mut state);
