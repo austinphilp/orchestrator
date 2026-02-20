@@ -14,7 +14,7 @@ use orchestrator_core::{
 use orchestrator_github::{GhCliClient, ProcessCommandRunner as GhProcessCommandRunner};
 use orchestrator_supervisor::OpenRouterSupervisor;
 use orchestrator_ui::Ui;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 const ENV_HARNESS_SESSION_ID: &str = "ORCHESTRATOR_HARNESS_SESSION_ID";
@@ -26,13 +26,8 @@ const STARTUP_RESUME_NUDGE: &str =
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
-        )
-        .init();
-
     let mut config = AppConfig::from_env()?;
+    init_file_logging(config.event_store_path.as_str())?;
     let cli = parse_cli_flags()?;
 
     config.ticketing_provider = resolve_provider_name(
@@ -113,6 +108,50 @@ async fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+fn init_file_logging(event_store_path: &str) -> Result<(), CoreError> {
+    let log_path = log_file_path(event_store_path);
+    if let Some(parent) = log_path.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent).map_err(|error| {
+                CoreError::Configuration(format!(
+                    "failed to create orchestrator log directory '{}': {error}",
+                    parent.display()
+                ))
+            })?;
+        }
+    }
+
+    let log_file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+        .map_err(|error| {
+            CoreError::Configuration(format!(
+                "failed to open orchestrator log file '{}': {error}",
+                log_path.display()
+            ))
+        })?;
+
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
+        )
+        .with_ansi(false)
+        .with_writer(std::sync::Mutex::new(log_file))
+        .init();
+
+    Ok(())
+}
+
+fn log_file_path(event_store_path: &str) -> PathBuf {
+    let event_store = Path::new(event_store_path);
+    event_store
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."))
+        .join("orchestrator.log")
 }
 
 #[derive(Debug, Default)]

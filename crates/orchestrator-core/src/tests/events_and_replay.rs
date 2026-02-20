@@ -387,6 +387,53 @@ fn projection_updates_session_status_for_completed_and_crashed_signals() {
 }
 
 #[test]
+fn inbox_items_created_after_session_end_are_auto_resolved() {
+    let inbox_item_id = InboxItemId::new("inbox-after-done");
+    let events = vec![
+        StoredEventEnvelope::from((
+            1,
+            sample_event(
+                "evt-session-spawned",
+                OrchestrationEventPayload::SessionSpawned(SessionSpawnedPayload {
+                    session_id: WorkerSessionId::new("sess-1"),
+                    work_item_id: WorkItemId::new("wi-1"),
+                    model: "gpt".to_owned(),
+                }),
+            ),
+        )),
+        StoredEventEnvelope::from((
+            2,
+            sample_event(
+                "evt-session-completed",
+                OrchestrationEventPayload::SessionCompleted(SessionCompletedPayload {
+                    session_id: WorkerSessionId::new("sess-1"),
+                    summary: Some("done".to_owned()),
+                }),
+            ),
+        )),
+        StoredEventEnvelope::from((
+            3,
+            sample_event(
+                "evt-inbox-created-after-done",
+                OrchestrationEventPayload::InboxItemCreated(InboxItemCreatedPayload {
+                    inbox_item_id: inbox_item_id.clone(),
+                    work_item_id: WorkItemId::new("wi-1"),
+                    kind: InboxItemKind::Blocked,
+                    title: "late error".to_owned(),
+                }),
+            ),
+        )),
+    ];
+
+    let projection = rebuild_projection(&events);
+    let inbox_item = projection
+        .inbox_items
+        .get(&inbox_item_id)
+        .expect("inbox item exists");
+    assert!(inbox_item.resolved);
+}
+
+#[test]
 fn artifact_payload_uses_reference_metadata_not_embedded_blob() {
     let payload = ArtifactCreatedPayload {
         artifact_id: ArtifactId::new("artifact-1"),

@@ -821,6 +821,15 @@ impl UiShellState {
         title: String,
         coalesce_key: &str,
     ) {
+        if !is_open_session_status(
+            self.domain
+                .sessions
+                .get(session_id)
+                .and_then(|session| session.status.as_ref()),
+        ) {
+            return;
+        }
+
         let Some(work_item_id) = self.work_item_id_for_session(session_id) else {
             return;
         };

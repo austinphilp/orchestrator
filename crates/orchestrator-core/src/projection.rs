@@ -158,6 +158,14 @@ pub fn apply_event(state: &mut ProjectionState, event: StoredEventEnvelope) {
             state.orchestrator_status = Some(format!("{:?}", payload.to));
         }
         OrchestrationEventPayload::InboxItemCreated(payload) => {
+            let resolved = state
+                .work_items
+                .get(&payload.work_item_id)
+                .and_then(|work_item| work_item.session_id.as_ref())
+                .and_then(|session_id| state.sessions.get(session_id))
+                .and_then(|session| session.status.as_ref())
+                .map(session_has_ended)
+                .unwrap_or(false);
             state.inbox_items.insert(
                 payload.inbox_item_id.clone(),
                 InboxItemProjection {
@@ -165,7 +173,7 @@ pub fn apply_event(state: &mut ProjectionState, event: StoredEventEnvelope) {
                     work_item_id: payload.work_item_id.clone(),
                     kind: payload.kind.clone(),
                     title: payload.title.clone(),
-                    resolved: false,
+                    resolved,
                 },
             );
             let work_item = state
@@ -211,6 +219,13 @@ fn resolve_inbox_items_for_session(state: &mut ProjectionState, session_id: &Wor
             item.resolved = true;
         }
     }
+}
+
+fn session_has_ended(status: &WorkerSessionStatus) -> bool {
+    matches!(
+        status,
+        WorkerSessionStatus::Done | WorkerSessionStatus::Crashed
+    )
 }
 
 pub fn rebuild_projection(events: &[StoredEventEnvelope]) -> ProjectionState {
