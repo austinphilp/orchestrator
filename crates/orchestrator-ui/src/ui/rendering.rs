@@ -51,11 +51,11 @@ fn render_inbox_panel(ui_state: &UiState) -> String {
 fn session_panel_rows(
     domain: &ProjectionState,
     terminal_session_states: &HashMap<WorkerSessionId, TerminalViewState>,
-) -> Vec<(WorkerSessionId, String, String)> {
+) -> Vec<SessionPanelRow> {
     let work_item_repo = work_item_repository_labels(domain);
     let ticket_labels = ticket_labels_by_ticket_id(domain);
 
-    let mut sessions_by_project: HashMap<String, Vec<(WorkerSessionId, String)>> = HashMap::new();
+    let mut rows = Vec::new();
     for session in domain.sessions.values() {
         if !is_open_session_status(session.status.as_ref()) {
             continue;
@@ -73,28 +73,30 @@ fn session_panel_rows(
 
         let project = project_label_for_session(session, domain, &work_item_repo);
         let ticket = ticket_label_for_session(session, domain, &ticket_labels);
-        let status = workflow_badge_for_session(session, domain, terminal_session_states);
-        let line = format!("  [{}] {}", status, ticket);
-        sessions_by_project
-            .entry(project)
-            .or_default()
-            .push((session.id.clone(), line));
+        let badge = workflow_badge_for_session(session, domain);
+        let group = session_state_group_for_session(session, domain, badge.as_str());
+        let is_turn_active = session_turn_is_running(terminal_session_states, session);
+        rows.push(SessionPanelRow {
+            session_id: session.id.clone(),
+            project,
+            group,
+            ticket_label: ticket,
+            badge,
+            is_turn_active,
+        });
     }
 
-    if sessions_by_project.is_empty() {
-        return Vec::new();
-    }
-
-    let mut rows = Vec::new();
-    let mut projects = sessions_by_project.keys().cloned().collect::<Vec<_>>();
-    projects.sort_unstable();
-    for project in projects {
-        let mut sessions = sessions_by_project.remove(&project).unwrap_or_default();
-        sessions.sort_unstable_by(|left, right| left.1.cmp(&right.1));
-        for (session_id, line) in sessions {
-            rows.push((session_id, project.clone(), line));
-        }
-    }
+    rows.sort_unstable_by(|left, right| {
+        left.project
+            .cmp(&right.project)
+            .then_with(|| left.group.sort_key().cmp(&right.group.sort_key()))
+            .then_with(|| {
+                left.ticket_label
+                    .to_ascii_lowercase()
+                    .cmp(&right.ticket_label.to_ascii_lowercase())
+            })
+            .then_with(|| left.session_id.as_str().cmp(right.session_id.as_str()))
+    });
 
     rows
 }
@@ -110,21 +112,79 @@ fn render_sessions_panel(
     }
 
     let mut lines = Vec::new();
-    let mut previous_repo: Option<String> = None;
-    for (session_id, repo, line) in session_rows {
-        let is_selected = selected_session_id == Some(&session_id);
+    let mut previous_project: Option<String> = None;
+    let mut previous_group: Option<SessionStateGroup> = None;
+    for row in session_rows {
+        let is_selected = selected_session_id == Some(&row.session_id);
         let marker = if is_selected { ">" } else { " " };
-        if previous_repo.as_deref() != Some(repo.as_str()) {
-            if previous_repo.is_some() {
+        if previous_project.as_deref() != Some(row.project.as_str()) {
+            if previous_project.is_some() {
                 lines.push(String::new());
             }
-            lines.push(format!("{repo}:"));
-            previous_repo = Some(repo);
+            lines.push(format!("{}:", row.project));
+            previous_project = Some(row.project.clone());
+            previous_group = None;
         }
+        if previous_group.as_ref() != Some(&row.group) {
+            lines.push(format!("  {}:", row.group.display_label()));
+            previous_group = Some(row.group.clone());
+        }
+        let spinner = if row.is_turn_active {
+            format!(" {}", loading_spinner_frame())
+        } else {
+            String::new()
+        };
+        let line = if row.group.is_other() {
+            format!("    [{}] {}{}", row.badge, row.ticket_label, spinner)
+        } else {
+            format!("    {}{}", row.ticket_label, spinner)
+        };
         lines.push(format!("{marker}{line}"));
     }
 
     lines.join("\n")
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SessionPanelRow {
+    session_id: WorkerSessionId,
+    project: String,
+    group: SessionStateGroup,
+    ticket_label: String,
+    badge: String,
+    is_turn_active: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum SessionStateGroup {
+    Planning,
+    Implementation,
+    Review,
+    Other(String),
+}
+
+impl SessionStateGroup {
+    fn sort_key(&self) -> (u8, &str) {
+        match self {
+            Self::Planning => (0, ""),
+            Self::Implementation => (1, ""),
+            Self::Review => (2, ""),
+            Self::Other(label) => (3, label.as_str()),
+        }
+    }
+
+    fn display_label(&self) -> &'static str {
+        match self {
+            Self::Planning => "Planning",
+            Self::Implementation => "Implementation",
+            Self::Review => "Review",
+            Self::Other(_) => "Other",
+        }
+    }
+
+    fn is_other(&self) -> bool {
+        matches!(self, Self::Other(_))
+    }
 }
 
 fn render_center_panel(ui_state: &UiState) -> String {
@@ -733,9 +793,8 @@ fn session_status_label(status: Option<&WorkerSessionStatus>) -> &'static str {
 fn workflow_badge_for_session(
     session: &SessionProjection,
     domain: &ProjectionState,
-    terminal_session_states: &HashMap<WorkerSessionId, TerminalViewState>,
 ) -> String {
-    let workflow = session
+    session
         .work_item_id
         .as_ref()
         .and_then(|work_item_id| domain.work_items.get(work_item_id))
@@ -748,14 +807,43 @@ fn workflow_badge_for_session(
                 None
             }
         })
-        .unwrap_or_else(|| session_status_label(session.status.as_ref()).to_owned());
-    if matches!(session.status.as_ref(), Some(WorkerSessionStatus::Running))
-        && session_turn_is_active(terminal_session_states, &session.id)
-    {
-        format!("{workflow} {}", loading_spinner_frame())
-    } else {
-        workflow
+        .unwrap_or_else(|| session_status_label(session.status.as_ref()).to_owned())
+}
+
+fn session_state_group_for_session(
+    session: &SessionProjection,
+    domain: &ProjectionState,
+    fallback_badge: &str,
+) -> SessionStateGroup {
+    let workflow_state = session
+        .work_item_id
+        .as_ref()
+        .and_then(|work_item_id| domain.work_items.get(work_item_id))
+        .and_then(|work_item| work_item.workflow_state.as_ref());
+    match workflow_state {
+        Some(WorkflowState::New | WorkflowState::Planning) => SessionStateGroup::Planning,
+        Some(WorkflowState::Implementing | WorkflowState::Testing | WorkflowState::PRDrafted) => {
+            SessionStateGroup::Implementation
+        }
+        Some(
+            WorkflowState::AwaitingYourReview
+            | WorkflowState::ReadyForReview
+            | WorkflowState::InReview
+            | WorkflowState::Merging,
+        ) => SessionStateGroup::Review,
+        Some(WorkflowState::Done | WorkflowState::Abandoned) => {
+            SessionStateGroup::Other("complete".to_owned())
+        }
+        None => SessionStateGroup::Other(fallback_badge.to_owned()),
     }
+}
+
+fn session_turn_is_running(
+    terminal_session_states: &HashMap<WorkerSessionId, TerminalViewState>,
+    session: &SessionProjection,
+) -> bool {
+    matches!(session.status.as_ref(), Some(WorkerSessionStatus::Running))
+        && session_turn_is_active(terminal_session_states, &session.id)
 }
 
 fn workflow_state_to_badge_label(state: &WorkflowState) -> String {

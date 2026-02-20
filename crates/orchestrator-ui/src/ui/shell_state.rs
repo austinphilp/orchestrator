@@ -515,14 +515,14 @@ impl UiShellState {
         }
     }
 
-    fn session_panel_rows(&self) -> Vec<(WorkerSessionId, String, String)> {
+    fn session_panel_rows(&self) -> Vec<SessionPanelRow> {
         session_panel_rows(&self.domain, &self.terminal_session_states)
     }
 
     fn session_ids_for_navigation(&self) -> Vec<WorkerSessionId> {
         self.session_panel_rows()
             .into_iter()
-            .map(|(session_id, _repo, _line)| session_id)
+            .map(|row| row.session_id)
             .collect()
     }
 
