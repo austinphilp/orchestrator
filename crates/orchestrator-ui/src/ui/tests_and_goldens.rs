@@ -2009,6 +2009,260 @@ mod tests {
     }
 
     #[test]
+    fn planning_structured_prompt_hides_working_indicator() {
+        let backend = Arc::new(ManualTerminalBackend::default());
+        let mut projection = sample_projection(true);
+        projection
+            .work_items
+            .get_mut(&WorkItemId::new("wi-1"))
+            .expect("work item")
+            .workflow_state = Some(WorkflowState::Planning);
+        let mut shell_state = UiShellState::new_with_integrations(
+            "ready".to_owned(),
+            projection,
+            None,
+            None,
+            None,
+            Some(backend),
+        );
+        shell_state.open_terminal_and_enter_mode();
+
+        let sender = shell_state
+            .terminal_session_sender
+            .clone()
+            .expect("terminal sender");
+        sender
+            .try_send(TerminalSessionEvent::NeedsInput {
+                session_id: WorkerSessionId::new("sess-1"),
+                needs_input: BackendNeedsInputEvent {
+                    prompt_id: "prompt-planning-structured".to_owned(),
+                    question: "Provide plan confirmation".to_owned(),
+                    options: Vec::new(),
+                    default_option: None,
+                    questions: vec![BackendNeedsInputQuestion {
+                        id: "plan-choice".to_owned(),
+                        header: "Plan".to_owned(),
+                        question: "Choose plan path".to_owned(),
+                        is_other: false,
+                        is_secret: false,
+                        options: Some(vec![
+                            BackendNeedsInputOption {
+                                label: "Path A".to_owned(),
+                                description: "Recommended".to_owned(),
+                            },
+                            BackendNeedsInputOption {
+                                label: "Path B".to_owned(),
+                                description: "Fallback".to_owned(),
+                            },
+                        ]),
+                    }],
+                },
+            })
+            .expect("queue needs-input event");
+        shell_state.poll_terminal_session_events();
+        shell_state
+            .terminal_session_states
+            .get_mut(&WorkerSessionId::new("sess-1"))
+            .expect("terminal state")
+            .turn_active = true;
+
+        assert_eq!(
+            terminal_activity_indicator(
+                &shell_state.domain,
+                &shell_state.terminal_session_states,
+                &WorkerSessionId::new("sess-1"),
+            ),
+            TerminalActivityIndicator::None
+        );
+    }
+
+    #[test]
+    fn planning_unstructured_prompt_keeps_working_indicator_when_turn_active() {
+        let backend = Arc::new(ManualTerminalBackend::default());
+        let mut projection = sample_projection(true);
+        projection
+            .work_items
+            .get_mut(&WorkItemId::new("wi-1"))
+            .expect("work item")
+            .workflow_state = Some(WorkflowState::Planning);
+        let mut shell_state = UiShellState::new_with_integrations(
+            "ready".to_owned(),
+            projection,
+            None,
+            None,
+            None,
+            Some(backend),
+        );
+        shell_state.open_terminal_and_enter_mode();
+
+        let sender = shell_state
+            .terminal_session_sender
+            .clone()
+            .expect("terminal sender");
+        sender
+            .try_send(TerminalSessionEvent::NeedsInput {
+                session_id: WorkerSessionId::new("sess-1"),
+                needs_input: BackendNeedsInputEvent {
+                    prompt_id: "prompt-planning-unstructured".to_owned(),
+                    question: "Provide next step".to_owned(),
+                    options: vec!["Continue".to_owned()],
+                    default_option: Some("Continue".to_owned()),
+                    questions: Vec::new(),
+                },
+            })
+            .expect("queue needs-input event");
+        shell_state.poll_terminal_session_events();
+        shell_state
+            .terminal_session_states
+            .get_mut(&WorkerSessionId::new("sess-1"))
+            .expect("terminal state")
+            .turn_active = true;
+
+        assert_eq!(
+            terminal_activity_indicator(
+                &shell_state.domain,
+                &shell_state.terminal_session_states,
+                &WorkerSessionId::new("sess-1"),
+            ),
+            TerminalActivityIndicator::Working
+        );
+    }
+
+    #[test]
+    fn non_planning_structured_prompt_keeps_working_indicator_when_turn_active() {
+        let backend = Arc::new(ManualTerminalBackend::default());
+        let mut shell_state = UiShellState::new_with_integrations(
+            "ready".to_owned(),
+            sample_projection(true),
+            None,
+            None,
+            None,
+            Some(backend),
+        );
+        shell_state.open_terminal_and_enter_mode();
+
+        let sender = shell_state
+            .terminal_session_sender
+            .clone()
+            .expect("terminal sender");
+        sender
+            .try_send(TerminalSessionEvent::NeedsInput {
+                session_id: WorkerSessionId::new("sess-1"),
+                needs_input: BackendNeedsInputEvent {
+                    prompt_id: "prompt-implementing-structured".to_owned(),
+                    question: "Provide implementation confirmation".to_owned(),
+                    options: Vec::new(),
+                    default_option: None,
+                    questions: vec![BackendNeedsInputQuestion {
+                        id: "impl-choice".to_owned(),
+                        header: "Implementation".to_owned(),
+                        question: "Choose next implementation step".to_owned(),
+                        is_other: false,
+                        is_secret: false,
+                        options: Some(vec![BackendNeedsInputOption {
+                            label: "Continue".to_owned(),
+                            description: "Recommended".to_owned(),
+                        }]),
+                    }],
+                },
+            })
+            .expect("queue needs-input event");
+        shell_state.poll_terminal_session_events();
+        shell_state
+            .terminal_session_states
+            .get_mut(&WorkerSessionId::new("sess-1"))
+            .expect("terminal state")
+            .turn_active = true;
+
+        assert_eq!(
+            terminal_activity_indicator(
+                &shell_state.domain,
+                &shell_state.terminal_session_states,
+                &WorkerSessionId::new("sess-1"),
+            ),
+            TerminalActivityIndicator::Working
+        );
+    }
+
+    #[test]
+    fn working_indicator_restores_after_structured_planning_prompt_completion() {
+        let backend = Arc::new(ManualTerminalBackend::default());
+        let mut projection = sample_projection(true);
+        projection
+            .work_items
+            .get_mut(&WorkItemId::new("wi-1"))
+            .expect("work item")
+            .workflow_state = Some(WorkflowState::Planning);
+        let mut shell_state = UiShellState::new_with_integrations(
+            "ready".to_owned(),
+            projection,
+            None,
+            None,
+            None,
+            Some(backend),
+        );
+        shell_state.open_terminal_and_enter_mode();
+
+        let sender = shell_state
+            .terminal_session_sender
+            .clone()
+            .expect("terminal sender");
+        sender
+            .try_send(TerminalSessionEvent::NeedsInput {
+                session_id: WorkerSessionId::new("sess-1"),
+                needs_input: BackendNeedsInputEvent {
+                    prompt_id: "prompt-planning-complete".to_owned(),
+                    question: "Provide plan confirmation".to_owned(),
+                    options: Vec::new(),
+                    default_option: None,
+                    questions: vec![BackendNeedsInputQuestion {
+                        id: "plan-choice".to_owned(),
+                        header: "Plan".to_owned(),
+                        question: "Choose plan path".to_owned(),
+                        is_other: false,
+                        is_secret: false,
+                        options: Some(vec![BackendNeedsInputOption {
+                            label: "Path A".to_owned(),
+                            description: "Recommended".to_owned(),
+                        }]),
+                    }],
+                },
+            })
+            .expect("queue needs-input event");
+        shell_state.poll_terminal_session_events();
+        let session_id = WorkerSessionId::new("sess-1");
+        shell_state
+            .terminal_session_states
+            .get_mut(&session_id)
+            .expect("terminal state")
+            .turn_active = true;
+
+        assert_eq!(
+            terminal_activity_indicator(
+                &shell_state.domain,
+                &shell_state.terminal_session_states,
+                &session_id,
+            ),
+            TerminalActivityIndicator::None
+        );
+
+        shell_state
+            .terminal_session_states
+            .get_mut(&session_id)
+            .expect("terminal state")
+            .complete_active_needs_input_prompt();
+
+        assert_eq!(
+            terminal_activity_indicator(
+                &shell_state.domain,
+                &shell_state.terminal_session_states,
+                &session_id,
+            ),
+            TerminalActivityIndicator::Working
+        );
+    }
+
+    #[test]
     fn ticket_picker_modal_prevents_pending_planning_prompt_activation() {
         let backend = Arc::new(ManualTerminalBackend::default());
         let mut projection = sample_projection(true);

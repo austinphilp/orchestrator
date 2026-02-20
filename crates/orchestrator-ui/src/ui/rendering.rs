@@ -442,6 +442,9 @@ fn terminal_activity_indicator(
     terminal_session_states: &HashMap<WorkerSessionId, TerminalViewState>,
     session_id: &WorkerSessionId,
 ) -> TerminalActivityIndicator {
+    if suppress_working_indicator_for_planning_prompt(domain, terminal_session_states, session_id) {
+        return TerminalActivityIndicator::None;
+    }
     if terminal_session_is_running(domain, terminal_session_states, session_id) {
         return TerminalActivityIndicator::Working;
     }
@@ -466,6 +469,35 @@ fn terminal_session_is_running(
         return false;
     }
     session_turn_is_active(terminal_session_states, session_id)
+}
+
+fn suppress_working_indicator_for_planning_prompt(
+    domain: &ProjectionState,
+    terminal_session_states: &HashMap<WorkerSessionId, TerminalViewState>,
+    session_id: &WorkerSessionId,
+) -> bool {
+    if !session_is_in_workflow_state(domain, session_id, WorkflowState::Planning) {
+        return false;
+    }
+    terminal_session_states
+        .get(session_id)
+        .and_then(|state| state.active_needs_input.as_ref())
+        .map(|prompt| prompt.is_structured_plan_request)
+        .unwrap_or(false)
+}
+
+fn session_is_in_workflow_state(
+    domain: &ProjectionState,
+    session_id: &WorkerSessionId,
+    expected_state: WorkflowState,
+) -> bool {
+    domain
+        .sessions
+        .get(session_id)
+        .and_then(|session| session.work_item_id.as_ref())
+        .and_then(|work_item_id| domain.work_items.get(work_item_id))
+        .and_then(|work_item| work_item.workflow_state.as_ref())
+        == Some(&expected_state)
 }
 
 fn terminal_session_is_awaiting_input(
