@@ -940,16 +940,22 @@ mod tests {
         assert_eq!(
             rows,
             vec![
-                (
-                    session_core,
-                    "Core Platform".to_owned(),
-                    "  [waiting] AP-101: Harden session lifecycle".to_owned()
-                ),
-                (
-                    session_orchestrator,
-                    "Orchestrator".to_owned(),
-                    "  [waiting] AP-202: Session list redesign".to_owned()
-                ),
+                SessionPanelRow {
+                    session_id: session_core,
+                    project: "Core Platform".to_owned(),
+                    group: SessionStateGroup::Other("waiting".to_owned()),
+                    ticket_label: "AP-101: Harden session lifecycle".to_owned(),
+                    badge: "waiting".to_owned(),
+                    is_turn_active: false,
+                },
+                SessionPanelRow {
+                    session_id: session_orchestrator,
+                    project: "Orchestrator".to_owned(),
+                    group: SessionStateGroup::Other("waiting".to_owned()),
+                    ticket_label: "AP-202: Session list redesign".to_owned(),
+                    badge: "waiting".to_owned(),
+                    is_turn_active: false,
+                },
             ]
         );
     }
@@ -1024,9 +1030,14 @@ mod tests {
 
         let rows = session_panel_rows(&projection, &HashMap::new());
         assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].0, session_id);
-        assert_eq!(rows[0].1, "orchestrator");
-        assert_eq!(rows[0].2, "  [waiting] AP-303: Repository label fallback");
+        assert_eq!(rows[0].session_id, session_id);
+        assert_eq!(rows[0].project, "orchestrator");
+        assert_eq!(
+            rows[0].ticket_label,
+            "AP-303: Repository label fallback".to_owned()
+        );
+        assert_eq!(rows[0].group, SessionStateGroup::Other("waiting".to_owned()));
+        assert_eq!(rows[0].badge, "waiting".to_owned());
     }
 
     #[test]
@@ -1060,9 +1071,300 @@ mod tests {
 
         let rows = session_panel_rows(&projection, &HashMap::new());
         assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].0, session_id);
-        assert_eq!(rows[0].1, "Orchestrator");
-        assert_eq!(rows[0].2, "  [waiting] session sess-no-ticket");
+        assert_eq!(rows[0].session_id, session_id);
+        assert_eq!(rows[0].project, "Orchestrator");
+        assert_eq!(rows[0].ticket_label, "session sess-no-ticket");
+        assert_eq!(rows[0].group, SessionStateGroup::Other("waiting".to_owned()));
+        assert_eq!(rows[0].badge, "waiting".to_owned());
+    }
+
+    #[test]
+    fn session_panel_groups_sessions_by_state_order_with_other_last() {
+        let mut projection = ProjectionState::default();
+        let project = ProjectId::new("Orchestrator");
+
+        let make_ticket = |suffix: &str| {
+            TicketId::from_provider_uuid(TicketProvider::Linear, format!("ticket-{suffix}"))
+        };
+        let make_work_item = |suffix: &str| WorkItemId::new(format!("wi-{suffix}"));
+        let make_session = |suffix: &str| WorkerSessionId::new(format!("sess-{suffix}"));
+
+        let planning_ticket = make_ticket("planning");
+        let implementation_ticket = make_ticket("implementation");
+        let review_ticket = make_ticket("review");
+        let other_ticket = make_ticket("other");
+
+        let planning_work_item = make_work_item("planning");
+        let implementation_work_item = make_work_item("implementation");
+        let review_work_item = make_work_item("review");
+        let other_work_item = make_work_item("other");
+
+        let planning_session = make_session("planning");
+        let implementation_session = make_session("implementation");
+        let review_session = make_session("review");
+        let other_session = make_session("other");
+
+        projection.work_items.insert(
+            planning_work_item.clone(),
+            WorkItemProjection {
+                id: planning_work_item.clone(),
+                ticket_id: Some(planning_ticket.clone()),
+                project_id: Some(project.clone()),
+                workflow_state: Some(WorkflowState::Planning),
+                session_id: Some(planning_session.clone()),
+                worktree_id: None,
+                inbox_items: vec![],
+                artifacts: vec![],
+            },
+        );
+        projection.work_items.insert(
+            implementation_work_item.clone(),
+            WorkItemProjection {
+                id: implementation_work_item.clone(),
+                ticket_id: Some(implementation_ticket.clone()),
+                project_id: Some(project.clone()),
+                workflow_state: Some(WorkflowState::Implementing),
+                session_id: Some(implementation_session.clone()),
+                worktree_id: None,
+                inbox_items: vec![],
+                artifacts: vec![],
+            },
+        );
+        projection.work_items.insert(
+            review_work_item.clone(),
+            WorkItemProjection {
+                id: review_work_item.clone(),
+                ticket_id: Some(review_ticket.clone()),
+                project_id: Some(project.clone()),
+                workflow_state: Some(WorkflowState::InReview),
+                session_id: Some(review_session.clone()),
+                worktree_id: None,
+                inbox_items: vec![],
+                artifacts: vec![],
+            },
+        );
+        projection.work_items.insert(
+            other_work_item.clone(),
+            WorkItemProjection {
+                id: other_work_item.clone(),
+                ticket_id: Some(other_ticket.clone()),
+                project_id: Some(project),
+                workflow_state: None,
+                session_id: Some(other_session.clone()),
+                worktree_id: None,
+                inbox_items: vec![],
+                artifacts: vec![],
+            },
+        );
+
+        for (session_id, work_item_id) in [
+            (&planning_session, &planning_work_item),
+            (&implementation_session, &implementation_work_item),
+            (&review_session, &review_work_item),
+            (&other_session, &other_work_item),
+        ] {
+            projection.sessions.insert(
+                session_id.clone(),
+                SessionProjection {
+                    id: session_id.clone(),
+                    work_item_id: Some(work_item_id.clone()),
+                    status: Some(WorkerSessionStatus::WaitingForUser),
+                    latest_checkpoint: None,
+                },
+            );
+        }
+
+        for (sequence, (work_item_id, ticket_id, identifier, title)) in [
+            (
+                planning_work_item,
+                planning_ticket,
+                "AP-401",
+                "Planning session row",
+            ),
+            (
+                implementation_work_item,
+                implementation_ticket,
+                "AP-402",
+                "Implementation session row",
+            ),
+            (
+                review_work_item,
+                review_ticket,
+                "AP-403",
+                "Review session row",
+            ),
+            (other_work_item, other_ticket, "AP-404", "Other session row"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            projection.events.push(StoredEventEnvelope {
+                event_id: format!("evt-ticket-{}", sequence + 1),
+                sequence: (sequence + 1) as u64,
+                occurred_at: "2026-02-19T00:00:00Z".to_owned(),
+                work_item_id: Some(work_item_id),
+                session_id: None,
+                event_type: OrchestrationEventType::TicketSynced,
+                payload: OrchestrationEventPayload::TicketSynced(
+                    orchestrator_core::TicketSyncedPayload {
+                        ticket_id,
+                        identifier: identifier.to_owned(),
+                        title: title.to_owned(),
+                        state: "In Progress".to_owned(),
+                        assignee: None,
+                        priority: None,
+                    },
+                ),
+                schema_version: 1,
+            });
+        }
+
+        let rendered = render_sessions_panel(&projection, &HashMap::new(), None);
+        let lines = rendered.lines().collect::<Vec<_>>();
+
+        let planning_header = lines
+            .iter()
+            .position(|line| *line == "  Planning:")
+            .expect("planning header");
+        let implementation_header = lines
+            .iter()
+            .position(|line| *line == "  Implementation:")
+            .expect("implementation header");
+        let review_header = lines
+            .iter()
+            .position(|line| *line == "  Review:")
+            .expect("review header");
+        let other_header = lines
+            .iter()
+            .position(|line| *line == "  Other:")
+            .expect("other header");
+
+        assert!(planning_header < implementation_header);
+        assert!(implementation_header < review_header);
+        assert!(review_header < other_header);
+        assert!(rendered.contains("     AP-401: Planning session row"));
+        assert!(rendered.contains("     AP-402: Implementation session row"));
+        assert!(rendered.contains("     AP-403: Review session row"));
+        assert!(rendered.contains("     [waiting] AP-404: Other session row"));
+    }
+
+    #[test]
+    fn session_panel_only_renders_non_empty_state_sections() {
+        let mut projection = ProjectionState::default();
+        let work_item_id = WorkItemId::new("wi-impl-only");
+        let session_id = WorkerSessionId::new("sess-impl-only");
+        let ticket_id = TicketId::from_provider_uuid(TicketProvider::Linear, "ticket-impl-only");
+
+        projection.work_items.insert(
+            work_item_id.clone(),
+            WorkItemProjection {
+                id: work_item_id.clone(),
+                ticket_id: Some(ticket_id.clone()),
+                project_id: Some(ProjectId::new("Orchestrator")),
+                workflow_state: Some(WorkflowState::Implementing),
+                session_id: Some(session_id.clone()),
+                worktree_id: None,
+                inbox_items: vec![],
+                artifacts: vec![],
+            },
+        );
+        projection.sessions.insert(
+            session_id,
+            SessionProjection {
+                id: WorkerSessionId::new("sess-impl-only"),
+                work_item_id: Some(work_item_id.clone()),
+                status: Some(WorkerSessionStatus::WaitingForUser),
+                latest_checkpoint: None,
+            },
+        );
+        projection.events.push(StoredEventEnvelope {
+            event_id: "evt-ticket-impl-only".to_owned(),
+            sequence: 1,
+            occurred_at: "2026-02-19T00:00:00Z".to_owned(),
+            work_item_id: Some(work_item_id),
+            session_id: None,
+            event_type: OrchestrationEventType::TicketSynced,
+            payload: OrchestrationEventPayload::TicketSynced(orchestrator_core::TicketSyncedPayload {
+                ticket_id,
+                identifier: "AP-405".to_owned(),
+                title: "Implementation only".to_owned(),
+                state: "In Progress".to_owned(),
+                assignee: None,
+                priority: None,
+            }),
+            schema_version: 1,
+        });
+
+        let rendered = render_sessions_panel(&projection, &HashMap::new(), None);
+        assert!(rendered.contains("  Implementation:"));
+        assert!(!rendered.contains("  Planning:"));
+        assert!(!rendered.contains("  Review:"));
+        assert!(!rendered.contains("  Other:"));
+    }
+
+    #[test]
+    fn session_panel_keeps_loading_indicator_for_active_turns() {
+        let mut projection = ProjectionState::default();
+        let work_item_id = WorkItemId::new("wi-active");
+        let session_id = WorkerSessionId::new("sess-active");
+        let ticket_id = TicketId::from_provider_uuid(TicketProvider::Linear, "ticket-active");
+
+        projection.work_items.insert(
+            work_item_id.clone(),
+            WorkItemProjection {
+                id: work_item_id.clone(),
+                ticket_id: Some(ticket_id.clone()),
+                project_id: Some(ProjectId::new("Orchestrator")),
+                workflow_state: Some(WorkflowState::Implementing),
+                session_id: Some(session_id.clone()),
+                worktree_id: None,
+                inbox_items: vec![],
+                artifacts: vec![],
+            },
+        );
+        projection.sessions.insert(
+            session_id.clone(),
+            SessionProjection {
+                id: session_id.clone(),
+                work_item_id: Some(work_item_id.clone()),
+                status: Some(WorkerSessionStatus::Running),
+                latest_checkpoint: None,
+            },
+        );
+        projection.events.push(StoredEventEnvelope {
+            event_id: "evt-ticket-active".to_owned(),
+            sequence: 1,
+            occurred_at: "2026-02-19T00:00:00Z".to_owned(),
+            work_item_id: Some(work_item_id),
+            session_id: None,
+            event_type: OrchestrationEventType::TicketSynced,
+            payload: OrchestrationEventPayload::TicketSynced(orchestrator_core::TicketSyncedPayload {
+                ticket_id,
+                identifier: "AP-406".to_owned(),
+                title: "Active implementing session".to_owned(),
+                state: "In Progress".to_owned(),
+                assignee: None,
+                priority: None,
+            }),
+            schema_version: 1,
+        });
+
+        let mut terminal_session_states = HashMap::new();
+        let mut terminal_view = TerminalViewState::default();
+        terminal_view.turn_active = true;
+        terminal_session_states.insert(session_id, terminal_view);
+
+        let rendered = render_sessions_panel(&projection, &terminal_session_states, None);
+        let active_line = rendered
+            .lines()
+            .find(|line| line.contains("AP-406: Active implementing session"))
+            .expect("active session row");
+        assert!(
+            ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
+                .iter()
+                .any(|frame| active_line.ends_with(frame))
+        );
+        assert!(!active_line.contains("[implementation]"));
     }
 
     #[test]
