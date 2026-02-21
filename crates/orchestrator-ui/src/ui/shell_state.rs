@@ -34,6 +34,7 @@ struct UiShellState {
     mode_key_buffer: Vec<KeyStroke>,
     which_key_overlay: Option<WhichKeyOverlayState>,
     mode: UiMode,
+    application_mode: ApplicationMode,
     terminal_escape_pending: bool,
     supervisor_provider: Option<Arc<dyn LlmProvider>>,
     supervisor_command_dispatcher: Option<Arc<dyn SupervisorCommandDispatcher>>,
@@ -89,6 +90,8 @@ struct UiShellState {
     dirty_approval_reconcile_sessions: HashSet<WorkerSessionId>,
     session_ci_status_cache: HashMap<WorkerSessionId, SessionCiStatusCache>,
     ci_failure_signatures_notified: HashMap<WorkerSessionId, String>,
+    autopilot_advancing_sessions: HashSet<WorkerSessionId>,
+    autopilot_archiving_sessions: HashSet<WorkerSessionId>,
     worktree_diff_modal: Option<WorktreeDiffModalState>,
     draw_cache_epoch: u64,
     attention_projection_cache: Option<AttentionProjectionCache>,
@@ -160,6 +163,7 @@ impl UiShellState {
             mode_key_buffer: Vec::new(),
             which_key_overlay: None,
             mode: UiMode::Normal,
+            application_mode: ApplicationMode::Manual,
             terminal_escape_pending: false,
             supervisor_provider,
             supervisor_command_dispatcher,
@@ -215,6 +219,8 @@ impl UiShellState {
             dirty_approval_reconcile_sessions: HashSet::new(),
             session_ci_status_cache: HashMap::new(),
             ci_failure_signatures_notified: HashMap::new(),
+            autopilot_advancing_sessions: HashSet::new(),
+            autopilot_archiving_sessions: HashSet::new(),
             worktree_diff_modal: None,
             draw_cache_epoch: 0,
             attention_projection_cache: None,
@@ -1950,6 +1956,99 @@ impl UiShellState {
         changed
     }
 
+    fn tick_autopilot_and_report(&mut self) -> bool {
+        if self.application_mode != ApplicationMode::Autopilot {
+            return false;
+        }
+
+        let mut changed = false;
+        changed |= self.ensure_terminal_streams_for_open_sessions();
+
+        let open_session_ids = self
+            .domain
+            .sessions
+            .iter()
+            .filter_map(|(session_id, session)| {
+                is_open_session_status(session.status.as_ref()).then_some(session_id.clone())
+            })
+            .collect::<Vec<_>>();
+        let open_set = open_session_ids.iter().cloned().collect::<HashSet<_>>();
+        self.autopilot_advancing_sessions
+            .retain(|session_id| open_set.contains(session_id));
+        self.autopilot_archiving_sessions
+            .retain(|session_id| open_set.contains(session_id));
+
+        for session_id in open_session_ids {
+            changed |= self.autopilot_handle_needs_input_for_session(&session_id);
+
+            if self.session_requires_progression_approval(&session_id)
+                && self
+                    .autopilot_advancing_sessions
+                    .insert(session_id.clone())
+            {
+                self.spawn_session_workflow_advance(session_id.clone());
+                changed = true;
+            }
+
+            if self.session_is_in_review_stage(&session_id)
+                && !self.merge_pending_sessions.contains(&session_id)
+                && !self.merge_finalizing_sessions.contains(&session_id)
+            {
+                if self.enqueue_merge_queue_request(session_id.clone(), MergeQueueCommandKind::Merge)
+                {
+                    self.merge_pending_sessions.insert(session_id.clone());
+                    changed = true;
+                }
+            }
+
+            if matches!(
+                self.workflow_state_for_session(&session_id),
+                Some(WorkflowState::Done | WorkflowState::Abandoned)
+            ) && self.autopilot_archiving_sessions.insert(session_id.clone())
+            {
+                self.spawn_session_archive(session_id);
+                changed = true;
+            }
+        }
+
+        changed
+    }
+
+    fn ensure_terminal_streams_for_open_sessions(&mut self) -> bool {
+        let session_ids = self
+            .domain
+            .sessions
+            .iter()
+            .filter_map(|(session_id, session)| {
+                is_open_session_status(session.status.as_ref()).then_some(session_id.clone())
+            })
+            .collect::<Vec<_>>();
+        let mut changed = false;
+        for session_id in session_ids {
+            changed |= self.ensure_terminal_stream_and_report(session_id);
+        }
+        changed
+    }
+
+    fn autopilot_handle_needs_input_for_session(&mut self, session_id: &WorkerSessionId) -> bool {
+        let should_submit = {
+            let Some(prompt) = self
+                .terminal_session_states
+                .get_mut(session_id)
+                .and_then(|view| view.active_needs_input.as_mut())
+            else {
+                return false;
+            };
+            Self::select_autopilot_answers_for_prompt(prompt)
+        };
+
+        if !should_submit {
+            return false;
+        }
+
+        self.submit_terminal_needs_input_response_for_session(session_id)
+    }
+
     fn flush_deferred_terminal_output_for_session(&mut self, session_id: &WorkerSessionId) -> bool {
         let Some(view) = self.terminal_session_states.get_mut(session_id) else {
             return false;
@@ -3076,6 +3175,7 @@ impl UiShellState {
                 outcome,
             } => {
                 self.apply_domain_event(outcome.event.clone());
+                self.autopilot_advancing_sessions.remove(&outcome.session_id);
 
                 if let Some(instruction) = outcome.instruction.as_deref() {
                     self.send_terminal_instruction_to_session(&outcome.session_id, instruction);
@@ -3111,6 +3211,7 @@ impl UiShellState {
                 session_id,
                 message,
             } => {
+                self.autopilot_advancing_sessions.remove(&session_id);
                 self.publish_error_for_session(&session_id, "workflow-advance", message.as_str());
                 let labels = session_display_labels(&self.domain, &session_id);
                 self.status_warning = Some(format!(
@@ -3328,6 +3429,7 @@ impl UiShellState {
                 warning,
                 event,
             } => {
+                self.autopilot_archiving_sessions.remove(&session_id);
                 self.archiving_session_id = None;
                 self.archive_session_confirm_session = None;
                 self.apply_domain_event(event);
@@ -3356,6 +3458,7 @@ impl UiShellState {
                 session_id,
                 message,
             } => {
+                self.autopilot_archiving_sessions.remove(&session_id);
                 self.archiving_session_id = None;
                 self.archive_session_confirm_session = None;
                 self.publish_error_for_session(&session_id, "session-archive", message.as_str());
@@ -4134,6 +4237,20 @@ impl UiShellState {
         }
     }
 
+    fn application_mode_label(&self) -> &'static str {
+        self.application_mode.label()
+    }
+
+    fn set_application_mode_autopilot(&mut self) {
+        self.application_mode = ApplicationMode::Autopilot;
+        self.status_warning = Some("application mode: autopilot".to_owned());
+    }
+
+    fn set_application_mode_manual(&mut self) {
+        self.application_mode = ApplicationMode::Manual;
+        self.status_warning = Some("application mode: manual".to_owned());
+    }
+
     fn enter_normal_mode(&mut self) {
         self.mode = UiMode::Normal;
         self.mode_key_buffer.clear();
@@ -4187,6 +4304,11 @@ impl UiShellState {
         event: BackendNeedsInputEvent,
     ) -> NeedsInputPromptState {
         let is_structured_plan_request = !event.questions.is_empty();
+        let default_option_labels = if event.questions.is_empty() {
+            vec![event.default_option.clone()]
+        } else {
+            vec![None; event.questions.len()]
+        };
         let questions = if event.questions.is_empty() {
             vec![BackendNeedsInputQuestion {
                 id: event.prompt_id.clone(),
@@ -4211,6 +4333,7 @@ impl UiShellState {
         NeedsInputPromptState {
             prompt_id: event.prompt_id,
             questions,
+            default_option_labels,
             requires_manual_activation: self
                 .session_requires_manual_needs_input_activation(session_id),
             is_structured_plan_request,
@@ -4346,37 +4469,60 @@ impl UiShellState {
     }
 
     fn submit_terminal_needs_input_response(&mut self) {
-        let Some(backend) = self.worker_backend.clone() else {
-            if let Some(prompt) = self.active_terminal_needs_input_mut() {
-                prompt.error = Some("input response unavailable: no worker backend configured".to_owned());
-            }
-            return;
-        };
         let Some(session_id) = self.active_terminal_session_id().cloned() else {
             return;
         };
-        let Some(active_prompt) = self
+        let _ = self.submit_terminal_needs_input_response_for_session(&session_id);
+    }
+
+    fn set_needs_input_error_for_session(&mut self, session_id: &WorkerSessionId, message: &str) {
+        if let Some(prompt) = self
             .terminal_session_states
-            .get_mut(&session_id)
+            .get_mut(session_id)
             .and_then(|view| view.active_needs_input.as_mut())
-        else {
-            return;
+        {
+            prompt.error = Some(message.to_owned());
+        }
+    }
+
+    fn submit_terminal_needs_input_response_for_session(
+        &mut self,
+        session_id: &WorkerSessionId,
+    ) -> bool {
+        let Some(backend) = self.worker_backend.clone() else {
+            self.set_needs_input_error_for_session(
+                session_id,
+                "input response unavailable: no worker backend configured",
+            );
+            return false;
         };
-        let prompt_id = active_prompt.prompt_id.clone();
-        let answers = match active_prompt.build_runtime_answers() {
-            Ok(answers) => answers,
-            Err(error) => {
-                active_prompt.error = Some(sanitize_terminal_display_text(error.to_string().as_str()));
-                return;
-            }
+
+        let (prompt_id, answers) = {
+            let Some(active_prompt) = self
+                .terminal_session_states
+                .get_mut(session_id)
+                .and_then(|view| view.active_needs_input.as_mut())
+            else {
+                return false;
+            };
+            let prompt_id = active_prompt.prompt_id.clone();
+            let answers = match active_prompt.build_runtime_answers() {
+                Ok(answers) => answers,
+                Err(error) => {
+                    active_prompt.error =
+                        Some(sanitize_terminal_display_text(error.to_string().as_str()));
+                    return false;
+                }
+            };
+            (prompt_id, answers)
         };
+
         let Some(handle) = self.terminal_session_handle(&session_id) else {
-            if let Some(prompt) = self.active_terminal_needs_input_mut() {
-                prompt.error = Some(
-                    "input response unavailable: cannot resolve backend session handle".to_owned(),
-                );
-            }
-            return;
+            self.set_needs_input_error_for_session(
+                session_id,
+                "input response unavailable: cannot resolve backend session handle",
+            );
+            return false;
         };
 
         match TokioHandle::try_current() {
@@ -4393,14 +4539,72 @@ impl UiShellState {
                     self.acknowledge_needs_decision_for_work_item(&work_item_id);
                 }
                 let _ = self.mark_reconcile_dirty_for_session(&session_id);
+                true
             }
             Err(_) => {
-                if let Some(prompt) = self.active_terminal_needs_input_mut() {
-                    prompt.error =
-                        Some("input response unavailable: tokio runtime unavailable".to_owned());
-                }
+                self.set_needs_input_error_for_session(
+                    session_id,
+                    "input response unavailable: tokio runtime unavailable",
+                );
+                false
             }
         }
+    }
+
+    fn recommended_option_index(options: &[BackendNeedsInputOption]) -> Option<usize> {
+        options.iter().position(|option| {
+            option
+                .label
+                .to_ascii_lowercase()
+                .contains("(recommended)")
+        })
+    }
+
+    fn select_autopilot_answers_for_prompt(prompt: &mut NeedsInputComposerState) -> bool {
+        for (index, question) in prompt.questions.iter().enumerate() {
+            let Some(draft) = prompt.answer_drafts.get_mut(index) else {
+                return false;
+            };
+            let Some(options) = question.options.as_ref() else {
+                if draft.note.trim().is_empty() {
+                    return false;
+                }
+                continue;
+            };
+            if options.is_empty() {
+                if draft.note.trim().is_empty() {
+                    return false;
+                }
+                continue;
+            }
+            if draft
+                .selected_option_index
+                .is_some_and(|selected| selected < options.len())
+            {
+                if index == prompt.current_question_index {
+                    prompt.select_state.selected_index = draft.selected_option_index;
+                    if let Some(selected) = draft.selected_option_index {
+                        prompt.select_state.highlighted_index = selected;
+                    }
+                }
+                continue;
+            }
+            let default_index = prompt
+                .default_option_labels
+                .get(index)
+                .and_then(|label| label.as_deref())
+                .and_then(|label| options.iter().position(|option| option.label == label));
+            let selected = Self::recommended_option_index(options)
+                .or(default_index)
+                .unwrap_or(0);
+            draft.selected_option_index = Some(selected);
+            if index == prompt.current_question_index {
+                prompt.select_state.selected_index = Some(selected);
+                prompt.select_state.highlighted_index = selected;
+            }
+        }
+
+        true
     }
 
     fn toggle_worktree_diff_modal(&mut self) {
@@ -4701,6 +4905,7 @@ impl UiShellState {
         changed |= self.enqueue_merge_reconcile_polls_at(now);
         changed |= self.run_sparse_reconcile_fallbacks();
         changed |= self.dispatch_merge_queue_requests_at(now);
+        changed |= self.tick_autopilot_and_report();
         changed
     }
 

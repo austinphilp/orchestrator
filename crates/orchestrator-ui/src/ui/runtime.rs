@@ -368,9 +368,10 @@ impl Ui {
                     let footer_style = bottom_bar_style(shell_state.mode);
                     let footer_text = Text::from(vec![
                         Line::from(format!(
-                            "status: {} | mode: {}",
+                            "status: {} | mode: {} | app: {}",
                             ui_state.status,
-                            shell_state.mode.label()
+                            shell_state.mode.label(),
+                            shell_state.application_mode_label()
                         )),
                         Line::from(mode_help(shell_state.mode)),
                     ]);
