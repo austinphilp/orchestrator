@@ -601,7 +601,6 @@ fn render_terminal_transcript_line_count(state: &TerminalViewState) -> usize {
     count
 }
 
-#[cfg(test)]
 fn render_terminal_transcript_entries(state: &TerminalViewState) -> Vec<RenderedTerminalLine> {
     render_terminal_transcript_lines(state)
         .into_iter()

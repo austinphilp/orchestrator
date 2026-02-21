@@ -122,22 +122,40 @@ impl Ui {
 
                     let sessions_viewport_rows =
                         usize::from(sessions_area.height.saturating_sub(2).max(1));
-                    let session_rows = shell_state.session_panel_rows_for_draw();
-                    let selected_session_id =
-                        shell_state.selected_session_id_for_panel_from_rows(&session_rows);
-                    let session_metrics = session_panel_line_metrics_from_rows(
-                        &session_rows,
-                        selected_session_id.as_ref(),
-                    );
+                    let selected_session_index = shell_state.selected_session_index;
+                    let selected_session_id_hint = shell_state.selected_session_id.clone();
+                    let session_panel_scroll_line = shell_state.session_panel_scroll_line();
+                    let (session_metrics, sessions_text) = {
+                        let session_rows = shell_state.session_panel_rows_for_draw();
+                        let selected_session_id = if session_rows.is_empty() {
+                            None
+                        } else if let Some(selected_session_id) = selected_session_id_hint.as_ref() {
+                            if session_rows
+                                .iter()
+                                .any(|row| &row.session_id == selected_session_id)
+                            {
+                                Some(selected_session_id.clone())
+                            } else {
+                                let index = selected_session_index.unwrap_or(0).min(session_rows.len() - 1);
+                                session_rows.get(index).map(|row| row.session_id.clone())
+                            }
+                        } else {
+                            let index = selected_session_index.unwrap_or(0).min(session_rows.len() - 1);
+                            session_rows.get(index).map(|row| row.session_id.clone())
+                        };
+                        let metrics =
+                            session_panel_line_metrics_from_rows(session_rows, selected_session_id.as_ref());
+                        let text = render_sessions_panel_text_virtualized_from_rows(
+                            session_rows,
+                            selected_session_id.as_ref(),
+                            session_panel_scroll_line,
+                            sessions_viewport_rows,
+                        );
+                        (metrics, text)
+                    };
                     shell_state.sync_session_panel_viewport(
                         session_metrics.total_lines,
                         session_metrics.selected_line,
-                        sessions_viewport_rows,
-                    );
-                    let sessions_text = render_sessions_panel_text_virtualized_from_rows(
-                        &session_rows,
-                        selected_session_id.as_ref(),
-                        shell_state.session_panel_scroll_line(),
                         sessions_viewport_rows,
                     );
                     let sessions_title = if shell_state.is_sessions_sidebar_focused() {

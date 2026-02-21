@@ -1270,7 +1270,6 @@ struct TerminalFoldSection {
     folded: bool,
 }
 
-#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct RenderedTerminalLine {
     text: String,
