@@ -458,6 +458,7 @@ where
             WorkflowState::AwaitingYourReview
                 | WorkflowState::ReadyForReview
                 | WorkflowState::InReview
+                | WorkflowState::PendingMerge
         ) {
             "normal_review_path"
         } else {
@@ -514,7 +515,7 @@ where
         &mut store,
         &runtime,
         &current,
-        &WorkflowState::Merging,
+        &WorkflowState::PendingMerge,
         WorkflowTransitionReason::MergeInitiated,
         &WorkflowGuardContext {
             has_draft_pr: true,
@@ -522,7 +523,7 @@ where
         },
         command_id,
     )?;
-    transitions.push("InReview->Merging".to_owned());
+    transitions.push("InReview->PendingMerge".to_owned());
     current = next;
 
     match code_host.get_pull_request_merge_state(&pr).await {
@@ -594,7 +595,7 @@ fn rollback_merge_to_review_state(
         },
         command_id,
     );
-    transitions.push("Merging->InReview".to_owned());
+    transitions.push("PendingMerge->InReview".to_owned());
 
     let message = json!({
         "command": command_id,

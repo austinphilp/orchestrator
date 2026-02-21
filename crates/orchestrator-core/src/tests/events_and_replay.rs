@@ -84,6 +84,23 @@ fn workflow_transition_reason_field_remains_backward_compatible() {
 }
 
 #[test]
+fn workflow_transition_with_legacy_merging_state_deserializes_as_pending_merge() {
+    let workflow_json = r#"{"type":"WorkflowTransition","data":{"work_item_id":"wi-legacy","from":"InReview","to":"Merging"}}"#;
+    let workflow_payload: OrchestrationEventPayload =
+        serde_json::from_str(workflow_json).expect("deserialize legacy merging workflow transition");
+
+    match workflow_payload {
+        OrchestrationEventPayload::WorkflowTransition(payload) => {
+            assert_eq!(payload.work_item_id, WorkItemId::new("wi-legacy"));
+            assert_eq!(payload.from, WorkflowState::InReview);
+            assert_eq!(payload.to, WorkflowState::PendingMerge);
+            assert!(payload.reason.is_none());
+        }
+        other => panic!("expected WorkflowTransition payload, got {other:?}"),
+    }
+}
+
+#[test]
 fn append_assigns_monotonic_sequence_and_ordered_reads() {
     let mut store = SqliteEventStore::in_memory().expect("in-memory store");
 

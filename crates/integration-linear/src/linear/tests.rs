@@ -1497,28 +1497,33 @@ mod tests {
                 linear_state: "In Review".to_owned(),
             },
             WorkflowStateMapSetting {
+                workflow_state: "pending_merge".to_owned(),
+                linear_state: "In Review".to_owned(),
+            },
+            WorkflowStateMapSetting {
                 workflow_state: "DONE".to_owned(),
                 linear_state: "Done".to_owned(),
             },
         ])
         .expect("workflow state mapping should parse");
-        assert_eq!(mappings.len(), 3);
+        assert_eq!(mappings.len(), 4);
         assert_eq!(mappings[0].workflow_state, WorkflowState::Implementing);
         assert_eq!(mappings[0].linear_state, "In Progress");
         assert_eq!(mappings[1].workflow_state, WorkflowState::ReadyForReview);
-        assert_eq!(mappings[2].workflow_state, WorkflowState::Done);
+        assert_eq!(mappings[2].workflow_state, WorkflowState::PendingMerge);
+        assert_eq!(mappings[3].workflow_state, WorkflowState::Done);
     }
 
     #[test]
     fn parse_workflow_state_map_rejects_duplicate_workflow_states() {
         let error = parse_workflow_state_map_settings(&[
             WorkflowStateMapSetting {
-                workflow_state: "Done".to_owned(),
-                linear_state: "Done".to_owned(),
+                workflow_state: "pending_merge".to_owned(),
+                linear_state: "In Review".to_owned(),
             },
             WorkflowStateMapSetting {
-                workflow_state: "done".to_owned(),
-                linear_state: "Canceled".to_owned(),
+                workflow_state: "merging".to_owned(),
+                linear_state: "Queued for Merge".to_owned(),
             },
         ])
         .expect_err("duplicate workflow states should fail");

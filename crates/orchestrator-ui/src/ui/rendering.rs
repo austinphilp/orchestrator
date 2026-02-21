@@ -1010,7 +1010,7 @@ fn session_state_group_for_session(
             WorkflowState::AwaitingYourReview
             | WorkflowState::ReadyForReview
             | WorkflowState::InReview
-            | WorkflowState::Merging,
+            | WorkflowState::PendingMerge,
         ) => SessionStateGroup::Review,
         Some(WorkflowState::Done | WorkflowState::Abandoned) => {
             SessionStateGroup::Other("complete".to_owned())
@@ -1035,8 +1035,8 @@ fn workflow_state_to_badge_label(state: &WorkflowState) -> String {
         }
         WorkflowState::AwaitingYourReview
         | WorkflowState::ReadyForReview
-        | WorkflowState::InReview
-        | WorkflowState::Merging => "review",
+        | WorkflowState::InReview => "review",
+        WorkflowState::PendingMerge => "pending-merge",
         WorkflowState::Done | WorkflowState::Abandoned => "complete",
     }
     .to_owned()

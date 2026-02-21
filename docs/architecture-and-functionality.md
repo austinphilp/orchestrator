@@ -113,7 +113,7 @@ The repository is a Rust workspace with a layered design:
 - App command path currently includes workflows such as PR-ready approval and opening review tabs in:
   - `orchestrator-app/src/command_dispatch.rs`
 - PR completion flow includes:
-  - Manual merge path: `AwaitingYourReview -> ReadyForReview -> InReview -> Merging -> Done`
+  - Manual merge path: `AwaitingYourReview -> ReadyForReview -> InReview -> PendingMerge -> Done`
     - During `workflow.merge_pr`, draft PRs are automatically converted to ready-for-review before merge is attempted.
   - External/direct GitHub merge path: `AwaitingYourReview -> ReadyForReview -> InReview -> Done`
 
@@ -127,7 +127,7 @@ The repository is a Rust workspace with a layered design:
     - Plan-input prompts in `New`/`Planning` route to `NeedsDecision`.
     - Non-planning prompts that require user progression route to `NeedsApproval`.
     - Idle `Planning`/`Implementing` sessions that are not actively working and are not waiting for plan input route to `NeedsApproval`.
-    - Idle review-stage tickets (`AwaitingYourReview`/`ReadyForReview`/`InReview`) route to `ReadyForReview` (PR lane).
+    - Idle review-stage tickets (`AwaitingYourReview`/`ReadyForReview`/`InReview`/`PendingMerge`) route to `ReadyForReview` (PR lane).
   - Terminal/session feed output scrolling is bounded by rendered wrapped line counts so manual scroll and follow-tail behavior stay in sync.
 - Keymap trie/which-key logic:
   - `orchestrator-ui/src/keymap.rs`

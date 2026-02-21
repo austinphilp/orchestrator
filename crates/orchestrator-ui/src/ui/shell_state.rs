@@ -1030,13 +1030,14 @@ impl UiShellState {
             Some(
                 WorkflowState::AwaitingYourReview
                 | WorkflowState::ReadyForReview
-                | WorkflowState::InReview,
+                | WorkflowState::InReview
+                | WorkflowState::PendingMerge,
             ) => Some((
                 InboxItemKind::ReadyForReview,
                 "review-input-request",
                 "Review input request",
             )),
-            Some(WorkflowState::Merging | WorkflowState::Done | WorkflowState::Abandoned) => None,
+            Some(WorkflowState::Done | WorkflowState::Abandoned) => None,
             Some(WorkflowState::Implementing | WorkflowState::Testing | WorkflowState::PRDrafted)
             | None => Some((
                 InboxItemKind::NeedsApproval,
@@ -1057,7 +1058,8 @@ impl UiShellState {
             )),
             WorkflowState::AwaitingYourReview
             | WorkflowState::ReadyForReview
-            | WorkflowState::InReview => Some((
+            | WorkflowState::InReview
+            | WorkflowState::PendingMerge => Some((
                 InboxItemKind::ReadyForReview,
                 "review-idle",
                 "Ticket is idle in review stage",
@@ -2171,7 +2173,7 @@ impl UiShellState {
                     WorkflowState::AwaitingYourReview
                         | WorkflowState::ReadyForReview
                         | WorkflowState::InReview
-                        | WorkflowState::Merging
+                        | WorkflowState::PendingMerge
                 )
             })
             .unwrap_or(false)

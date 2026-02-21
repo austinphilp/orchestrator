@@ -1123,7 +1123,7 @@ mod tests {
                 _ => None,
             })
             .collect::<Vec<_>>();
-        assert!(transition_targets.contains(&WorkflowState::Merging));
+        assert!(transition_targets.contains(&WorkflowState::PendingMerge));
         assert_eq!(transition_targets.last(), Some(&WorkflowState::InReview));
     }
 
@@ -1273,7 +1273,7 @@ mod tests {
                 _ => None,
             })
             .collect::<Vec<_>>();
-        assert!(transition_targets.contains(&WorkflowState::Merging));
+        assert!(transition_targets.contains(&WorkflowState::PendingMerge));
         assert_eq!(transition_targets.last(), Some(&WorkflowState::InReview));
     }
 
@@ -1293,7 +1293,7 @@ mod tests {
                 payload: OrchestrationEventPayload::WorkflowTransition(WorkflowTransitionPayload {
                     work_item_id: work_item_id.clone(),
                     from: WorkflowState::InReview,
-                    to: WorkflowState::Merging,
+                    to: WorkflowState::PendingMerge,
                     reason: Some(WorkflowTransitionReason::MergeInitiated),
                 }),
                 schema_version: DOMAIN_EVENT_SCHEMA_VERSION,
@@ -1343,7 +1343,7 @@ mod tests {
             .as_array()
             .expect("transitions")
             .iter()
-            .any(|transition| transition == "Merging->Done"));
+            .any(|transition| transition == "PendingMerge->Done"));
 
         let persisted_store = SqliteEventStore::open(temp_db.path()).expect("reopen store");
         let events = persisted_store.read_ordered().expect("read events");

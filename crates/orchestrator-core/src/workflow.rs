@@ -214,11 +214,11 @@ fn transition_guards(
         ) => Some(REQUIRES_ACTIVE_SESSION),
         (
             WorkflowState::InReview,
-            WorkflowState::Merging,
+            WorkflowState::PendingMerge,
             WorkflowTransitionReason::MergeInitiated,
         ) => Some(REQUIRES_PR),
         (
-            WorkflowState::Merging,
+            WorkflowState::PendingMerge,
             WorkflowState::InReview,
             WorkflowTransitionReason::MergeFailed,
         ) => Some(REQUIRES_PR),
@@ -245,7 +245,7 @@ fn transition_guards(
             WorkflowTransitionReason::ReviewApprovedAndMerged,
         ) => Some(REQUIRES_MERGE_COMPLETED),
         (
-            WorkflowState::Merging,
+            WorkflowState::PendingMerge,
             WorkflowState::Done,
             WorkflowTransitionReason::ReviewApprovedAndMerged,
         ) => Some(REQUIRES_MERGE_COMPLETED),
@@ -258,7 +258,7 @@ fn transition_guards(
             | WorkflowState::AwaitingYourReview
             | WorkflowState::ReadyForReview
             | WorkflowState::InReview
-            | WorkflowState::Merging,
+            | WorkflowState::PendingMerge,
             WorkflowState::Abandoned,
             WorkflowTransitionReason::Cancelled,
         ) => Some(NO_GUARDS),
@@ -448,7 +448,7 @@ mod tests {
     fn in_review_to_merging_requires_draft_pr() {
         let failed = validate_workflow_transition(
             &WorkflowState::InReview,
-            &WorkflowState::Merging,
+            &WorkflowState::PendingMerge,
             &WorkflowTransitionReason::MergeInitiated,
             &WorkflowGuardContext::default(),
         )
@@ -463,7 +463,7 @@ mod tests {
 
         let success = apply_workflow_transition(
             &WorkflowState::InReview,
-            &WorkflowState::Merging,
+            &WorkflowState::PendingMerge,
             &WorkflowTransitionReason::MergeInitiated,
             &WorkflowGuardContext {
                 has_draft_pr: true,
@@ -471,13 +471,13 @@ mod tests {
             },
         )
         .expect("transition should pass");
-        assert_eq!(success, WorkflowState::Merging);
+        assert_eq!(success, WorkflowState::PendingMerge);
     }
 
     #[test]
     fn merging_to_done_requires_merge_completed() {
         let failed = validate_workflow_transition(
-            &WorkflowState::Merging,
+            &WorkflowState::PendingMerge,
             &WorkflowState::Done,
             &WorkflowTransitionReason::ReviewApprovedAndMerged,
             &WorkflowGuardContext::default(),
@@ -492,7 +492,7 @@ mod tests {
         ));
 
         let success = apply_workflow_transition(
-            &WorkflowState::Merging,
+            &WorkflowState::PendingMerge,
             &WorkflowState::Done,
             &WorkflowTransitionReason::ReviewApprovedAndMerged,
             &WorkflowGuardContext {
@@ -507,7 +507,7 @@ mod tests {
     #[test]
     fn merging_to_in_review_requires_draft_pr() {
         let failed = validate_workflow_transition(
-            &WorkflowState::Merging,
+            &WorkflowState::PendingMerge,
             &WorkflowState::InReview,
             &WorkflowTransitionReason::MergeFailed,
             &WorkflowGuardContext::default(),
@@ -522,7 +522,7 @@ mod tests {
         ));
 
         let success = apply_workflow_transition(
-            &WorkflowState::Merging,
+            &WorkflowState::PendingMerge,
             &WorkflowState::InReview,
             &WorkflowTransitionReason::MergeFailed,
             &WorkflowGuardContext {
@@ -705,7 +705,7 @@ mod tests {
             Case {
                 name: "merge initiation requires draft pr",
                 from: WorkflowState::InReview,
-                to: WorkflowState::Merging,
+                to: WorkflowState::PendingMerge,
                 reason: WorkflowTransitionReason::MergeInitiated,
                 guards: WorkflowGuardContext {
                     has_draft_pr: true,
@@ -716,7 +716,7 @@ mod tests {
             },
             Case {
                 name: "merge failure rollback requires draft pr",
-                from: WorkflowState::Merging,
+                from: WorkflowState::PendingMerge,
                 to: WorkflowState::InReview,
                 reason: WorkflowTransitionReason::MergeFailed,
                 guards: WorkflowGuardContext::default(),
@@ -782,7 +782,7 @@ mod tests {
             WorkflowState::AwaitingYourReview,
             WorkflowState::ReadyForReview,
             WorkflowState::InReview,
-            WorkflowState::Merging,
+            WorkflowState::PendingMerge,
         ];
 
         for state in cancellable_states {

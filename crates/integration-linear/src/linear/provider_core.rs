@@ -835,7 +835,7 @@ fn workflow_state_label(state: &WorkflowState) -> &'static str {
         WorkflowState::AwaitingYourReview => "AwaitingYourReview",
         WorkflowState::ReadyForReview => "ReadyForReview",
         WorkflowState::InReview => "InReview",
-        WorkflowState::Merging => "Merging",
+        WorkflowState::PendingMerge => "PendingMerge",
         WorkflowState::Done => "Done",
         WorkflowState::Abandoned => "Abandoned",
     }

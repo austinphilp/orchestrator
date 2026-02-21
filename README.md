@@ -62,7 +62,7 @@ workflow_state_map = [
   { workflow_state = "AwaitingYourReview", linear_state = "In Review" },
   { workflow_state = "ReadyForReview", linear_state = "In Review" },
   { workflow_state = "InReview", linear_state = "In Review" },
-  { workflow_state = "Merging", linear_state = "In Review" },
+  { workflow_state = "PendingMerge", linear_state = "In Review" },
   { workflow_state = "Done", linear_state = "Done" },
   { workflow_state = "Abandoned", linear_state = "Canceled" },
 ]

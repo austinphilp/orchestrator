@@ -70,7 +70,7 @@ impl<S: Supervisor, G: GithubClient> App<S, G> {
             WorkflowState::AwaitingYourReview
             | WorkflowState::ReadyForReview
             | WorkflowState::InReview
-            | WorkflowState::Merging => Err(CoreError::Configuration(
+            | WorkflowState::PendingMerge => Err(CoreError::Configuration(
                 "workflow advance in review stages is merge-driven; use merge confirm/reconcile"
                     .to_owned(),
             )),

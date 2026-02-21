@@ -44,8 +44,8 @@ pub use events::{
     SupervisorQueryCancellationSource, SupervisorQueryCancelledPayload,
     SupervisorQueryChunkPayload, SupervisorQueryFinishedPayload, SupervisorQueryKind,
     SupervisorQueryStartedPayload, TicketDetailsSyncedPayload, TicketSyncedPayload,
-    UserRespondedPayload,
-    WorkItemCreatedPayload, WorkflowTransitionPayload, WorktreeCreatedPayload,
+    UserRespondedPayload, WorkItemCreatedPayload, WorkflowTransitionPayload,
+    WorktreeCreatedPayload,
 };
 pub use identifiers::{
     ArtifactId, InboxItemId, ProjectId, TicketId, TicketProvider, WorkItemId, WorkerSessionId,
