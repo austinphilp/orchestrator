@@ -2942,7 +2942,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn autopilot_controls_all_open_sessions_for_advance_and_archive() {
+    async fn autopilot_tick_does_not_auto_advance_or_archive_sessions() {
         let provider = Arc::new(AutopilotRecordingProvider::default());
         let mut projection = ProjectionState::default();
 
@@ -3036,8 +3036,8 @@ mod tests {
 
         let advanced = provider.advanced_sessions();
         let archived = provider.archived_sessions();
-        assert!(advanced.iter().any(|session_id| session_id.as_str() == "sess-1"));
-        assert!(archived.iter().any(|session_id| session_id.as_str() == "sess-2"));
+        assert!(advanced.is_empty());
+        assert!(archived.is_empty());
     }
 
     #[test]
