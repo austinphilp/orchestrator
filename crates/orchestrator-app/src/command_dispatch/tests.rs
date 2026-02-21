@@ -4,11 +4,11 @@ mod tests {
     use orchestrator_core::test_support::TestDbPath;
     use orchestrator_core::{
         ArtifactCreatedPayload, ArtifactId, ArtifactKind, ArtifactRecord, BackendKind,
-        CodeHostKind, NewEventEnvelope, OrchestrationEventPayload, PullRequestMergeState,
-        PullRequestRef, PullRequestSummary, RepositoryRef, ReviewerRequest, RuntimeMappingRecord,
-        SessionRecord, TicketId, TicketProvider, TicketRecord, WorkItemId, WorkerSessionId,
-        WorkerSessionStatus, WorkflowState, WorkflowTransitionPayload, WorktreeId, WorktreeRecord,
-        DOMAIN_EVENT_SCHEMA_VERSION,
+        CodeHostKind, NewEventEnvelope, OrchestrationEventPayload, PullRequestCiStatus,
+        PullRequestMergeState, PullRequestRef, PullRequestSummary, RepositoryRef, ReviewerRequest,
+        RuntimeMappingRecord, SessionRecord, TicketId, TicketProvider, TicketRecord, WorkItemId,
+        WorkerSessionId, WorkerSessionStatus, WorkflowState, WorkflowTransitionPayload,
+        WorktreeId, WorktreeRecord, DOMAIN_EVENT_SCHEMA_VERSION,
     };
     use serde_json::json;
     use std::sync::Mutex;
@@ -103,6 +103,8 @@ mod tests {
         merge_state_error: Option<String>,
         ready_error: Option<String>,
         merge_error: Option<String>,
+        ci_statuses: Vec<PullRequestCiStatus>,
+        ci_status_error: Option<String>,
     }
 
     impl MockCodeHost {
@@ -121,6 +123,8 @@ mod tests {
                 merge_state_error: None,
                 ready_error: None,
                 merge_error: None,
+                ci_statuses: Vec::new(),
+                ci_status_error: None,
             }
         }
 
@@ -133,6 +137,8 @@ mod tests {
                 merge_state_error: None,
                 ready_error: None,
                 merge_error: None,
+                ci_statuses: Vec::new(),
+                ci_status_error: None,
             }
         }
 
@@ -149,6 +155,8 @@ mod tests {
                 merge_state_error: None,
                 ready_error: None,
                 merge_error: Some(merge_error.into()),
+                ci_statuses: Vec::new(),
+                ci_status_error: None,
             }
         }
 
@@ -165,6 +173,8 @@ mod tests {
                 merge_state_error: None,
                 ready_error: Some(ready_error.into()),
                 merge_error: None,
+                ci_statuses: Vec::new(),
+                ci_status_error: None,
             }
         }
 
@@ -187,7 +197,14 @@ mod tests {
                 merge_state_error: Some(merge_state_error.into()),
                 ready_error: None,
                 merge_error: Some(merge_error.into()),
+                ci_statuses: Vec::new(),
+                ci_status_error: None,
             }
+        }
+
+        fn with_ci_statuses(mut self, ci_statuses: Vec<PullRequestCiStatus>) -> Self {
+            self.ci_statuses = ci_statuses;
+            self
         }
 
         fn fallback_calls(&self) -> Vec<(String, String)> {
@@ -259,6 +276,16 @@ mod tests {
                 return Err(CoreError::DependencyUnavailable(message.clone()));
             }
             Ok(())
+        }
+
+        async fn list_pull_request_ci_statuses(
+            &self,
+            _pr: &PullRequestRef,
+        ) -> Result<Vec<PullRequestCiStatus>, CoreError> {
+            if let Some(message) = &self.ci_status_error {
+                return Err(CoreError::DependencyUnavailable(message.clone()));
+            }
+            Ok(self.ci_statuses.clone())
         }
 
         async fn find_open_pull_request_for_branch(
@@ -829,6 +856,73 @@ mod tests {
         assert_eq!(parsed["completed"], false);
         assert_eq!(parsed["merged"], false);
         assert_eq!(parsed["merge_conflict"], false);
+    }
+
+    #[tokio::test]
+    async fn execute_workflow_reconcile_pr_merge_includes_ci_failure_details() {
+        let temp_db = TestDbPath::new("app-runtime-command-reconcile-pr-ci-failures");
+        let work_item_id = WorkItemId::new("wi-reconcile-pr-ci-failures");
+        let session_id = WorkerSessionId::new("sess-reconcile-pr-ci-failures");
+        let mut store = SqliteEventStore::open(temp_db.path()).expect("open store");
+        seed_runtime_mapping(&mut store, &work_item_id, session_id.as_str()).expect("seed mapping");
+
+        let code_host = MockCodeHost::with_merge_state(
+            Some(PullRequestRef {
+                repository: RepositoryRef {
+                    id: "acme/repo".to_owned(),
+                    name: "acme/repo".to_owned(),
+                    root: std::path::PathBuf::from("/workspace/wi-reconcile-pr-ci-failures"),
+                },
+                number: 888,
+                url: "https://github.com/acme/repo/pull/888".to_owned(),
+            }),
+            PullRequestMergeState {
+                merged: false,
+                is_draft: false,
+                merge_conflict: false,
+                base_branch: Some("main".to_owned()),
+                head_branch: Some("ap/AP-888-fix".to_owned()),
+            },
+        )
+        .with_ci_statuses(vec![
+            PullRequestCiStatus {
+                name: "build".to_owned(),
+                workflow: Some("Build".to_owned()),
+                bucket: "pass".to_owned(),
+                state: "SUCCESS".to_owned(),
+                link: None,
+            },
+            PullRequestCiStatus {
+                name: "tests".to_owned(),
+                workflow: Some("Tests".to_owned()),
+                bucket: "fail".to_owned(),
+                state: "FAILURE".to_owned(),
+                link: Some("https://github.com/acme/repo/actions/runs/123".to_owned()),
+            },
+        ]);
+
+        let (_stream_id, mut stream) = execute_workflow_reconcile_pr_merge(
+            &code_host,
+            temp_db.path().to_str().expect("path"),
+            SupervisorCommandContext {
+                selected_work_item_id: Some(work_item_id.as_str().to_owned()),
+                selected_session_id: Some(session_id.as_str().to_owned()),
+                scope: Some(format!("session:{}", session_id.as_str())),
+            },
+        )
+        .await
+        .expect("reconcile should include CI details");
+
+        let first_chunk = stream
+            .next_chunk()
+            .await
+            .expect("read runtime chunk")
+            .expect("expected runtime message");
+        let parsed: serde_json::Value =
+            serde_json::from_str(first_chunk.delta.as_str()).expect("parse reconcile response");
+        assert_eq!(parsed["ci_has_failures"], true);
+        assert_eq!(parsed["ci_statuses"].as_array().map(Vec::len), Some(2));
+        assert_eq!(parsed["ci_failures"][0], "Tests / tests");
     }
 
     #[tokio::test]

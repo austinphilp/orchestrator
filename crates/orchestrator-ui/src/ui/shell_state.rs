@@ -63,6 +63,8 @@ struct UiShellState {
     merge_pending_sessions: HashSet<WorkerSessionId>,
     merge_finalizing_sessions: HashSet<WorkerSessionId>,
     review_sync_instructions_sent: HashSet<WorkerSessionId>,
+    session_ci_status_cache: HashMap<WorkerSessionId, SessionCiStatusCache>,
+    ci_failure_signatures_notified: HashMap<WorkerSessionId, String>,
     worktree_diff_modal: Option<WorktreeDiffModalState>,
 }
 
@@ -168,6 +170,8 @@ impl UiShellState {
             merge_pending_sessions: HashSet::new(),
             merge_finalizing_sessions: HashSet::new(),
             review_sync_instructions_sent: HashSet::new(),
+            session_ci_status_cache: HashMap::new(),
+            ci_failure_signatures_notified: HashMap::new(),
             worktree_diff_modal: None,
         }
     }
@@ -630,6 +634,13 @@ impl UiShellState {
         session_id: &WorkerSessionId,
     ) -> Option<&SessionInfoSummaryCache> {
         self.session_info_summary_cache.get(session_id)
+    }
+
+    fn session_ci_status_cache_for(
+        &self,
+        session_id: &WorkerSessionId,
+    ) -> Option<&SessionCiStatusCache> {
+        self.session_ci_status_cache.get(session_id)
     }
 
     fn move_session_selection(&mut self, delta: isize) -> bool {
@@ -1930,8 +1941,83 @@ impl UiShellState {
                     merge_conflict,
                     base_branch,
                     head_branch,
+                    ci_checks,
+                    ci_failures,
+                    ci_has_failures,
+                    ci_status_error,
                     error,
                 } => {
+                    self.session_ci_status_cache.insert(
+                        session_id.clone(),
+                        SessionCiStatusCache {
+                            checks: ci_checks.clone(),
+                            error: ci_status_error.clone(),
+                        },
+                    );
+
+                    let mut failure_labels = if ci_failures.is_empty() {
+                        ci_checks
+                            .iter()
+                            .filter(|check| check.bucket.eq_ignore_ascii_case("fail"))
+                            .map(|check| {
+                                let workflow_prefix = check
+                                    .workflow
+                                    .as_deref()
+                                    .map(str::trim)
+                                    .filter(|workflow| !workflow.is_empty())
+                                    .map(|workflow| format!("{workflow} / "))
+                                    .unwrap_or_default();
+                                format!("{workflow_prefix}{}", check.name)
+                            })
+                            .collect::<Vec<_>>()
+                    } else {
+                        ci_failures
+                            .iter()
+                            .map(|entry| entry.trim())
+                            .filter(|entry| !entry.is_empty())
+                            .map(str::to_owned)
+                            .collect::<Vec<_>>()
+                    };
+                    failure_labels.sort();
+                    failure_labels.dedup();
+
+                    if ci_has_failures && !failure_labels.is_empty() {
+                        let signature = failure_labels.join("|");
+                        let should_notify = self
+                            .ci_failure_signatures_notified
+                            .get(&session_id)
+                            .map(|existing| existing != &signature)
+                            .unwrap_or(true);
+                        if should_notify && self.session_is_in_review_stage(&session_id) {
+                            let failed = failure_labels.join(", ");
+                            let instruction = format!(
+                                "CI pipeline failure detected while this ticket is in review ({failed}). Investigate failing GitHub Actions checks, implement a fix, push updates, and report what changed. Use CI as the source of truth instead of running the full local build/test suite."
+                            );
+                            self.send_terminal_instruction_to_session(
+                                &session_id,
+                                instruction.as_str(),
+                            );
+                            let labels = session_display_labels(&self.domain, &session_id);
+                            self.publish_inbox_for_session(
+                                &session_id,
+                                InboxItemKind::FYI,
+                                format!(
+                                    "CI checks failed for {}; harness is fixing: {}",
+                                    labels.compact_label, failed
+                                ),
+                                "ci-pipeline-failure",
+                            );
+                            self.status_warning = Some(format!(
+                                "ci checks failing for {}; harness is fixing",
+                                labels.compact_label
+                            ));
+                        }
+                        self.ci_failure_signatures_notified
+                            .insert(session_id.clone(), signature);
+                    } else {
+                        self.ci_failure_signatures_notified.remove(&session_id);
+                    }
+
                     if let Some(error) = error {
                         self.publish_error_for_session(&session_id, "merge-queue", error.as_str());
                         if kind == MergeQueueCommandKind::Merge {
@@ -2096,6 +2182,14 @@ impl UiShellState {
         self.merge_finalizing_sessions
             .retain(|session_id| active_review_sessions.contains(session_id));
         changed |= self.merge_finalizing_sessions.len() != finalizing_len_before;
+        let ci_cache_len_before = self.session_ci_status_cache.len();
+        self.session_ci_status_cache
+            .retain(|session_id, _| active_review_sessions.contains(session_id));
+        changed |= self.session_ci_status_cache.len() != ci_cache_len_before;
+        let ci_notified_len_before = self.ci_failure_signatures_notified.len();
+        self.ci_failure_signatures_notified
+            .retain(|session_id, _| active_review_sessions.contains(session_id));
+        changed |= self.ci_failure_signatures_notified.len() != ci_notified_len_before;
 
         for session_id in session_ids {
             self.publish_review_idle_inbox_for_session(&session_id);
@@ -2264,7 +2358,8 @@ impl UiShellState {
         let is_merge_status = warning.starts_with("merge queued for review")
             || warning.starts_with("merge pending for review")
             || warning.starts_with("merge completed for review")
-            || warning.starts_with("merge conflict for review");
+            || warning.starts_with("merge conflict for review")
+            || warning.starts_with("ci checks failing for");
         if is_merge_status {
             self.status_warning = None;
         }

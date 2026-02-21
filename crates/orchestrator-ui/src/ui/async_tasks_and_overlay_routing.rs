@@ -62,6 +62,10 @@ async fn run_merge_queue_command_task(
                     merge_conflict: false,
                     base_branch: None,
                     head_branch: None,
+                    ci_checks: Vec::new(),
+                    ci_failures: Vec::new(),
+                    ci_has_failures: false,
+                    ci_status_error: None,
                     error: Some(sanitize_terminal_display_text(error.to_string().as_str())),
                 })
                 .await;
@@ -83,6 +87,10 @@ async fn run_merge_queue_command_task(
                     merge_conflict: false,
                     base_branch: None,
                     head_branch: None,
+                    ci_checks: Vec::new(),
+                    ci_failures: Vec::new(),
+                    ci_has_failures: false,
+                    ci_status_error: None,
                     error: Some(sanitize_terminal_display_text(error.to_string().as_str())),
                 })
                 .await;
@@ -104,6 +112,10 @@ async fn run_merge_queue_command_task(
                         merge_conflict: false,
                         base_branch: None,
                         head_branch: None,
+                        ci_checks: Vec::new(),
+                        ci_failures: Vec::new(),
+                        ci_has_failures: false,
+                        ci_status_error: None,
                         error: Some(sanitize_terminal_display_text(error.to_string().as_str())),
                     })
                     .await;
@@ -121,6 +133,10 @@ async fn run_merge_queue_command_task(
             merge_conflict: parsed.merge_conflict,
             base_branch: parsed.base_branch,
             head_branch: parsed.head_branch,
+            ci_checks: parsed.ci_checks,
+            ci_failures: parsed.ci_failures,
+            ci_has_failures: parsed.ci_has_failures,
+            ci_status_error: parsed.ci_status_error,
             error: None,
         })
         .await;
@@ -239,6 +255,10 @@ struct MergeQueueResponse {
     merge_conflict: bool,
     base_branch: Option<String>,
     head_branch: Option<String>,
+    ci_checks: Vec<CiCheckStatus>,
+    ci_failures: Vec<String>,
+    ci_has_failures: bool,
+    ci_status_error: Option<String>,
 }
 
 fn parse_merge_queue_response(output: &str) -> MergeQueueResponse {
@@ -269,6 +289,77 @@ fn parse_merge_queue_response(output: &str) -> MergeQueueResponse {
             .and_then(|entry| entry.as_str())
             .map(|entry| entry.trim().to_owned())
             .filter(|entry| !entry.is_empty()),
+        ci_checks: value
+            .get("ci_statuses")
+            .and_then(|entry| entry.as_array())
+            .map(|rows| {
+                rows.iter()
+                    .filter_map(|row| {
+                        let name = row
+                            .get("name")
+                            .and_then(|entry| entry.as_str())
+                            .map(str::trim)
+                            .filter(|entry| !entry.is_empty())
+                            .map(str::to_owned)?;
+                        let workflow = row
+                            .get("workflow")
+                            .and_then(|entry| entry.as_str())
+                            .map(str::trim)
+                            .filter(|entry| !entry.is_empty())
+                            .map(str::to_owned);
+                        let bucket = row
+                            .get("bucket")
+                            .and_then(|entry| entry.as_str())
+                            .map(str::trim)
+                            .filter(|entry| !entry.is_empty())
+                            .map(str::to_ascii_lowercase)
+                            .unwrap_or_else(|| "unknown".to_owned());
+                        let state = row
+                            .get("state")
+                            .and_then(|entry| entry.as_str())
+                            .map(str::trim)
+                            .filter(|entry| !entry.is_empty())
+                            .map(str::to_owned)
+                            .unwrap_or_else(|| bucket.clone());
+                        let link = row
+                            .get("link")
+                            .and_then(|entry| entry.as_str())
+                            .map(str::trim)
+                            .filter(|entry| !entry.is_empty())
+                            .map(str::to_owned);
+                        Some(CiCheckStatus {
+                            name,
+                            workflow,
+                            bucket,
+                            state,
+                            link,
+                        })
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default(),
+        ci_failures: value
+            .get("ci_failures")
+            .and_then(|entry| entry.as_array())
+            .map(|rows| {
+                rows.iter()
+                    .filter_map(|entry| entry.as_str())
+                    .map(str::trim)
+                    .filter(|entry| !entry.is_empty())
+                    .map(str::to_owned)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default(),
+        ci_has_failures: value
+            .get("ci_has_failures")
+            .and_then(|entry| entry.as_bool())
+            .unwrap_or(false),
+        ci_status_error: value
+            .get("ci_status_error")
+            .and_then(|entry| entry.as_str())
+            .map(str::trim)
+            .filter(|entry| !entry.is_empty())
+            .map(str::to_owned),
     }
 }
 

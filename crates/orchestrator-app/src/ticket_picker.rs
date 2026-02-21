@@ -11,6 +11,7 @@ use orchestrator_ui::{
     SessionWorkflowAdvanceOutcome, TicketPickerProvider,
 };
 use std::path::PathBuf;
+use tracing::warn;
 
 use crate::App;
 
@@ -357,10 +358,10 @@ async fn draft_ticket_from_brief(
         }
     }
 
-    parse_ticket_draft(draft.as_str(), brief)
+    Ok(parse_ticket_draft(draft.as_str(), brief))
 }
 
-fn parse_ticket_draft(draft: &str, fallback_brief: &str) -> Result<(String, String), CoreError> {
+fn parse_ticket_draft(draft: &str, fallback_brief: &str) -> (String, String) {
     let mut title = String::new();
     let mut description_lines = Vec::new();
     let mut in_description = false;
@@ -395,12 +396,19 @@ fn parse_ticket_draft(draft: &str, fallback_brief: &str) -> Result<(String, Stri
     }
 
     let title = title.trim();
-    if title.is_empty() {
-        return Err(CoreError::DependencyUnavailable(
-            "supervisor ticket draft did not include a title".to_owned(),
-        ));
+    let used_fallback_title = title.is_empty();
+    let title = if used_fallback_title {
+        fallback_title_from_brief(fallback_brief)
+    } else {
+        truncate_to_char_boundary(title, MAX_GENERATED_TITLE_LEN).to_owned()
+    };
+    if used_fallback_title {
+        warn!(
+            draft_preview = %compact_preview(draft, 220),
+            brief_preview = %compact_preview(fallback_brief, 120),
+            "supervisor ticket draft omitted title; using fallback title derived from brief"
+        );
     }
-    let title = truncate_to_char_boundary(title, MAX_GENERATED_TITLE_LEN).to_owned();
 
     let description = description_lines.join("\n").trim().to_owned();
     let description = if description.is_empty() {
@@ -409,7 +417,36 @@ fn parse_ticket_draft(draft: &str, fallback_brief: &str) -> Result<(String, Stri
         description
     };
 
-    Ok((title, description))
+    (title, description)
+}
+
+fn fallback_title_from_brief(brief: &str) -> String {
+    let first_line = brief
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or("New ticket");
+    let candidate = first_line
+        .trim_start_matches('#')
+        .trim_start_matches('-')
+        .trim();
+    if candidate.is_empty() {
+        "New ticket".to_owned()
+    } else {
+        truncate_to_char_boundary(candidate, MAX_GENERATED_TITLE_LEN).to_owned()
+    }
+}
+
+fn compact_preview(value: &str, max_chars: usize) -> String {
+    let single_line = value
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    let compact = single_line.trim();
+    if compact.is_empty() {
+        return "<empty>".to_owned();
+    }
+    truncate_to_char_boundary(compact, max_chars).to_owned()
 }
 
 fn truncate_to_char_boundary(value: &str, max_chars: usize) -> &str {
@@ -448,8 +485,7 @@ Allow creating tickets with n.
 - create and start
 ";
 
-        let (title, description) =
-            parse_ticket_draft(draft, "fallback brief").expect("parse ticket draft");
+        let (title, description) = parse_ticket_draft(draft, "fallback brief");
         assert_eq!(title, "Add create ticket shortcut in picker");
         assert!(description.contains("## Summary"));
         assert!(description.contains("## Scope"));
@@ -457,18 +493,16 @@ Allow creating tickets with n.
 
     #[test]
     fn parse_ticket_draft_uses_fallback_when_description_missing() {
-        let (title, description) =
-            parse_ticket_draft("Title: New work item", "fallback brief text")
-                .expect("parse ticket draft");
+        let (title, description) = parse_ticket_draft("Title: New work item", "fallback brief text");
         assert_eq!(title, "New work item");
         assert_eq!(description, "fallback brief text");
     }
 
     #[test]
-    fn parse_ticket_draft_rejects_missing_title() {
-        let error = parse_ticket_draft("Description:\nNo title", "fallback")
-            .expect_err("missing title should fail");
-        assert!(error.to_string().contains("did not include a title"));
+    fn parse_ticket_draft_uses_fallback_when_title_missing() {
+        let (title, description) = parse_ticket_draft("Description:\nNo title", "fallback brief");
+        assert_eq!(title, "fallback brief");
+        assert_eq!(description, "No title");
     }
 }
 

@@ -248,6 +248,7 @@ impl Ui {
                                 &session_id,
                                 shell_state.session_info_diff_cache_for(&session_id),
                                 shell_state.session_info_summary_cache_for(&session_id),
+                                shell_state.session_ci_status_cache_for(&session_id),
                             );
                             frame.render_widget(
                                 Paragraph::new(sidebar_text).block(

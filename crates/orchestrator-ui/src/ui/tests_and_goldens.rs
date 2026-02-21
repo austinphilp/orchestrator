@@ -209,6 +209,61 @@ mod tests {
         }
     }
 
+    #[derive(Default)]
+    struct RecordingTicketPickerProvider {
+        published_inbox_requests: Arc<Mutex<Vec<InboxPublishRequest>>>,
+    }
+
+    impl RecordingTicketPickerProvider {
+        fn published_inbox_requests(&self) -> Vec<InboxPublishRequest> {
+            self.published_inbox_requests
+                .lock()
+                .expect("published inbox requests lock")
+                .clone()
+        }
+    }
+
+    #[async_trait]
+    impl TicketPickerProvider for RecordingTicketPickerProvider {
+        async fn list_unfinished_tickets(&self) -> Result<Vec<TicketSummary>, CoreError> {
+            Ok(Vec::new())
+        }
+
+        async fn start_or_resume_ticket(
+            &self,
+            _ticket: TicketSummary,
+            _repository_override: Option<PathBuf>,
+        ) -> Result<SelectedTicketFlowResult, CoreError> {
+            Err(CoreError::DependencyUnavailable(
+                "not used in recording test provider".to_owned(),
+            ))
+        }
+
+        async fn create_ticket_from_brief(
+            &self,
+            _request: CreateTicketFromPickerRequest,
+        ) -> Result<TicketSummary, CoreError> {
+            Err(CoreError::DependencyUnavailable(
+                "not used in recording test provider".to_owned(),
+            ))
+        }
+
+        async fn reload_projection(&self) -> Result<ProjectionState, CoreError> {
+            Ok(ProjectionState::default())
+        }
+
+        async fn publish_inbox_item(
+            &self,
+            request: InboxPublishRequest,
+        ) -> Result<ProjectionState, CoreError> {
+            self.published_inbox_requests
+                .lock()
+                .expect("published inbox requests lock")
+                .push(request);
+            Ok(ProjectionState::default())
+        }
+    }
+
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
     }
@@ -3513,6 +3568,25 @@ mod tests {
                 error: None,
                 context_fingerprint: Some("fp".to_owned()),
             }),
+            Some(&SessionCiStatusCache {
+                checks: vec![
+                    CiCheckStatus {
+                        name: "build".to_owned(),
+                        workflow: Some("Build".to_owned()),
+                        bucket: "pass".to_owned(),
+                        state: "SUCCESS".to_owned(),
+                        link: None,
+                    },
+                    CiCheckStatus {
+                        name: "tests".to_owned(),
+                        workflow: Some("Tests".to_owned()),
+                        bucket: "pending".to_owned(),
+                        state: "IN_PROGRESS".to_owned(),
+                        link: Some("https://github.com/acme/repo/actions/runs/1".to_owned()),
+                    },
+                ],
+                error: None,
+            }),
         );
 
         assert!(rendered.contains("PR:"));
@@ -3520,6 +3594,8 @@ mod tests {
         assert!(rendered.contains("Ticket:"));
         assert!(rendered.contains("AP-244"));
         assert!(rendered.contains("Open inbox:"));
+        assert!(rendered.contains("CI status:"));
+        assert!(rendered.contains("[PASS] Build / build"));
         assert!(rendered.contains("Summary:"));
     }
 
@@ -3684,6 +3760,10 @@ mod tests {
                 merge_conflict: false,
                 base_branch: None,
                 head_branch: None,
+                ci_checks: Vec::new(),
+                ci_failures: Vec::new(),
+                ci_has_failures: false,
+                ci_status_error: None,
                 error: None,
             })
             .expect("send merge event");
@@ -3693,6 +3773,86 @@ mod tests {
             shell_state.status_warning.as_deref(),
             Some("merge pending for review session sess-1 (waiting for checks or merge queue)")
         );
+    }
+
+    #[tokio::test]
+    async fn merge_queue_ci_failures_notify_harness_and_publish_fyi() {
+        let mut projection = sample_projection(true);
+        projection
+            .work_items
+            .get_mut(&WorkItemId::new("wi-1"))
+            .expect("work item")
+            .workflow_state = Some(WorkflowState::InReview);
+        let backend = Arc::new(ManualTerminalBackend::default());
+        let provider = Arc::new(RecordingTicketPickerProvider::default());
+        let mut shell_state = UiShellState::new_with_integrations(
+            "ready".to_owned(),
+            projection,
+            None,
+            None,
+            Some(provider.clone()),
+            Some(backend),
+        );
+        let session_id = WorkerSessionId::new("sess-1");
+        shell_state
+            .terminal_session_states
+            .entry(session_id.clone())
+            .or_default();
+        let (sender, receiver) = mpsc::channel(4);
+        shell_state.merge_event_receiver = Some(receiver);
+
+        sender
+            .try_send(MergeQueueEvent::Completed {
+                session_id: session_id.clone(),
+                kind: MergeQueueCommandKind::Reconcile,
+                completed: false,
+                merge_conflict: false,
+                base_branch: Some("main".to_owned()),
+                head_branch: Some("ap/AP-900-ci-fix".to_owned()),
+                ci_checks: vec![
+                    CiCheckStatus {
+                        name: "build".to_owned(),
+                        workflow: Some("Build".to_owned()),
+                        bucket: "pass".to_owned(),
+                        state: "SUCCESS".to_owned(),
+                        link: None,
+                    },
+                    CiCheckStatus {
+                        name: "tests".to_owned(),
+                        workflow: Some("Tests".to_owned()),
+                        bucket: "fail".to_owned(),
+                        state: "FAILURE".to_owned(),
+                        link: None,
+                    },
+                ],
+                ci_failures: vec!["Tests / tests".to_owned()],
+                ci_has_failures: true,
+                ci_status_error: None,
+                error: None,
+            })
+            .expect("send merge event");
+
+        shell_state.poll_merge_queue_events();
+        tokio::time::sleep(Duration::from_millis(20)).await;
+
+        let rendered = render_terminal_transcript_entries(
+            shell_state
+                .terminal_session_states
+                .get(&session_id)
+                .expect("terminal view state"),
+        )
+        .into_iter()
+        .map(|line| line.text)
+        .collect::<Vec<_>>()
+        .join("\n");
+        assert!(rendered.contains("CI pipeline failure detected"));
+        assert!(rendered.contains("Use CI as the source of truth"));
+
+        let published = provider.published_inbox_requests();
+        assert_eq!(published.len(), 1);
+        assert_eq!(published[0].kind, InboxItemKind::FYI);
+        assert_eq!(published[0].coalesce_key, "ci-pipeline-failure");
+        assert!(published[0].title.contains("harness is fixing"));
     }
 
     #[test]

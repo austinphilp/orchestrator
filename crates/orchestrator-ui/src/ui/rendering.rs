@@ -265,6 +265,7 @@ fn render_session_info_panel(
     session_id: &WorkerSessionId,
     diff_cache: Option<&SessionInfoDiffCache>,
     summary_cache: Option<&SessionInfoSummaryCache>,
+    ci_cache: Option<&SessionCiStatusCache>,
 ) -> String {
     let mut lines = Vec::new();
     lines.push(format!("session: {}", session_id.as_str()));
@@ -365,6 +366,43 @@ fn render_session_info_panel(
         }
     } else {
         lines.push("- No work item context.".to_owned());
+    }
+
+    lines.push(String::new());
+    lines.push("CI status:".to_owned());
+    match ci_cache {
+        Some(cache) if cache.error.is_some() => lines.push(format!(
+            "- CI status unavailable: {}",
+            compact_focus_card_text(cache.error.as_deref().unwrap_or_default())
+        )),
+        Some(cache) if cache.checks.is_empty() => {
+            lines.push("- No required CI checks reported.".to_owned())
+        }
+        Some(cache) => {
+            for check in &cache.checks {
+                let workflow_prefix = check
+                    .workflow
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|workflow| !workflow.is_empty())
+                    .map(|workflow| format!("{workflow} / "))
+                    .unwrap_or_default();
+                let bucket = check.bucket.trim();
+                let status_label = if bucket.is_empty() {
+                    "unknown".to_owned()
+                } else {
+                    bucket.to_ascii_uppercase()
+                };
+                lines.push(format!(
+                    "- [{status_label}] {workflow_prefix}{}",
+                    compact_focus_card_text(check.name.as_str())
+                ));
+                if let Some(link) = check.link.as_deref() {
+                    lines.push(format!("  {}", compact_focus_card_text(link)));
+                }
+            }
+        }
+        None => lines.push("- No CI status polled yet.".to_owned()),
     }
 
     lines.push(String::new());

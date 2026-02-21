@@ -752,6 +752,10 @@ enum MergeQueueEvent {
         merge_conflict: bool,
         base_branch: Option<String>,
         head_branch: Option<String>,
+        ci_checks: Vec<CiCheckStatus>,
+        ci_failures: Vec<String>,
+        ci_has_failures: bool,
+        ci_status_error: Option<String>,
         error: Option<String>,
     },
     SessionFinalized {

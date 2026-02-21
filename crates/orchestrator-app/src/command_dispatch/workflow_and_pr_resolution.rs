@@ -397,6 +397,10 @@ where
                 "merge_conflict": false,
                 "base_branch": serde_json::Value::Null,
                 "head_branch": serde_json::Value::Null,
+                "ci_statuses": [],
+                "ci_failures": [],
+                "ci_has_failures": false,
+                "ci_status_error": serde_json::Value::Null,
                 "completed": false,
                 "transitions": []
             })
@@ -405,6 +409,28 @@ where
         }
         Err(error) => return Err(error),
     };
+
+    let (ci_statuses, ci_status_error) = match code_host.list_pull_request_ci_statuses(&pr).await {
+        Ok(statuses) => (statuses, None),
+        Err(error) => (
+            Vec::new(),
+            Some(sanitize_error_display_text(error.to_string().as_str())),
+        ),
+    };
+    let ci_failures = ci_statuses
+        .iter()
+        .filter(|entry| entry.bucket.eq_ignore_ascii_case("fail"))
+        .map(|entry| {
+            let workflow_prefix = entry
+                .workflow
+                .as_deref()
+                .map(str::trim)
+                .filter(|workflow| !workflow.is_empty())
+                .map(|workflow| format!("{workflow} / "))
+                .unwrap_or_default();
+            format!("{workflow_prefix}{}", entry.name)
+        })
+        .collect::<Vec<_>>();
 
     let merge_state = code_host
         .get_pull_request_merge_state(&pr)
@@ -426,6 +452,10 @@ where
             "merge_conflict": merge_state.merge_conflict,
             "base_branch": merge_state.base_branch,
             "head_branch": merge_state.head_branch,
+            "ci_statuses": ci_statuses,
+            "ci_failures": ci_failures.clone(),
+            "ci_has_failures": !ci_failures.is_empty(),
+            "ci_status_error": ci_status_error,
             "completed": false,
             "transitions": []
         })
@@ -474,6 +504,10 @@ where
         "merge_conflict": merge_state.merge_conflict,
         "base_branch": merge_state.base_branch,
         "head_branch": merge_state.head_branch,
+        "ci_statuses": ci_statuses,
+        "ci_failures": ci_failures.clone(),
+        "ci_has_failures": !ci_failures.is_empty(),
+        "ci_status_error": ci_status_error,
         "current_state_before": current_state_before,
         "completion_mode": completion_mode,
         "completed": current == WorkflowState::Done,

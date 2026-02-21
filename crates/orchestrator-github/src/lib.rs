@@ -6,10 +6,11 @@ use std::process::Command;
 
 use orchestrator_core::{
     CodeHostKind, CodeHostProvider, CoreError, CreatePullRequestRequest, GithubClient,
-    PullRequestMergeState, PullRequestRef, PullRequestSummary, RepositoryRef, ReviewerRequest,
-    UrlOpener,
+    PullRequestCiStatus, PullRequestMergeState, PullRequestRef, PullRequestSummary, RepositoryRef,
+    ReviewerRequest, UrlOpener,
 };
 use serde::Deserialize;
+use serde_json::Value;
 
 const ENV_GH_BIN: &str = "ORCHESTRATOR_GH_BIN";
 const ENV_ALLOW_UNSAFE_COMMAND_PATHS: &str = "ORCHESTRATOR_ALLOW_UNSAFE_COMMAND_PATHS";
@@ -279,6 +280,17 @@ impl<R: CommandRunner> GhCliClient<R> {
             OsString::from("number,url"),
             OsString::from("--limit"),
             OsString::from("1"),
+        ]
+    }
+
+    fn pull_request_ci_statuses_args(pr: &PullRequestRef) -> Vec<OsString> {
+        vec![
+            OsString::from("pr"),
+            OsString::from("checks"),
+            OsString::from(pr.number.to_string()),
+            OsString::from("--required"),
+            OsString::from("--json"),
+            OsString::from("name,bucket,state,link,workflow"),
         ]
     }
 
@@ -557,6 +569,26 @@ impl<R: CommandRunner> GhCliClient<R> {
             GhMergeStrategy::Rebase => detail.contains("rebase"),
         }
     }
+
+    fn extract_ci_workflow_name(value: &Value) -> Option<String> {
+        match value {
+            Value::String(raw) => {
+                let trimmed = raw.trim();
+                if trimmed.is_empty() {
+                    None
+                } else {
+                    Some(trimmed.to_owned())
+                }
+            }
+            Value::Object(map) => map
+                .get("name")
+                .and_then(|entry| entry.as_str())
+                .map(str::trim)
+                .filter(|entry| !entry.is_empty())
+                .map(str::to_owned),
+            _ => None,
+        }
+    }
 }
 
 fn is_bare_command_name(path: &Path) -> bool {
@@ -778,6 +810,83 @@ impl<R: CommandRunner> CodeHostProvider for GhCliClient<R> {
         })
     }
 
+    async fn list_pull_request_ci_statuses(
+        &self,
+        pr: &PullRequestRef,
+    ) -> Result<Vec<PullRequestCiStatus>, CoreError> {
+        if pr.number == 0 {
+            return Err(CoreError::Configuration(
+                "Pull request number must be greater than zero.".to_owned(),
+            ));
+        }
+        Self::ensure_repo_root_available(&pr.repository.root, "read pull request CI checks")?;
+
+        let args = Self::pull_request_ci_statuses_args(pr);
+        let output = self.run_gh_raw(&args, Some(pr.repository.root.as_path()))?;
+        if !output.status.success() && output.status.code() != Some(8) {
+            return Err(self.command_failed(&args, &output));
+        }
+
+        let body = String::from_utf8_lossy(&output.stdout);
+        if body.trim().is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let parsed: Vec<GhPullRequestCheck> =
+            serde_json::from_slice(&output.stdout).map_err(|error| {
+                CoreError::DependencyUnavailable(format!(
+                    "Failed to parse `gh pr checks` JSON output: {error}. Output: {}",
+                    Self::truncate_for_error(body.as_ref())
+                ))
+            })?;
+
+        let mut checks = Vec::with_capacity(parsed.len());
+        for entry in parsed {
+            let workflow = entry
+                .workflow
+                .as_ref()
+                .and_then(Self::extract_ci_workflow_name);
+            let name = entry
+                .name
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_owned)
+                .or_else(|| workflow.clone())
+                .unwrap_or_else(|| "unnamed-check".to_owned());
+            let bucket = entry
+                .bucket
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(|value| value.to_ascii_lowercase())
+                .unwrap_or_else(|| "unknown".to_owned());
+            let state = entry
+                .state
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_owned)
+                .unwrap_or_else(|| bucket.clone());
+            let link = entry
+                .link
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_owned);
+
+            checks.push(PullRequestCiStatus {
+                name,
+                workflow,
+                bucket,
+                state,
+                link,
+            });
+        }
+
+        Ok(checks)
+    }
+
     async fn merge_pull_request(&self, pr: &PullRequestRef) -> Result<(), CoreError> {
         if pr.number == 0 {
             return Err(CoreError::Configuration(
@@ -932,6 +1041,20 @@ struct GhPullRequestMergeState {
     base_ref_name: Option<String>,
     #[serde(rename = "headRefName", default)]
     head_ref_name: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GhPullRequestCheck {
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    bucket: Option<String>,
+    #[serde(default)]
+    state: Option<String>,
+    #[serde(default)]
+    link: Option<String>,
+    #[serde(default)]
+    workflow: Option<Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1608,6 +1731,69 @@ mod tests {
         assert_eq!(queue.len(), 1);
         assert_eq!(queue[0].reference.repository.id, "octo/docs");
         assert!(queue[0].is_draft);
+    }
+
+    #[tokio::test]
+    async fn pull_request_ci_statuses_parse_required_check_rows() {
+        let runner = StubRunner::with_results(vec![Ok(output(
+            0,
+            r#"[{"name":"build","bucket":"pass","state":"SUCCESS","link":"https://github.com/octo/repo/actions/runs/1","workflow":"Build"},{"name":"tests","bucket":"fail","state":"FAILURE","link":"https://github.com/octo/repo/actions/runs/2","workflow":{"name":"Tests"}}]"#,
+            "",
+        ))]);
+        let client = GhCliClient::new(runner, PathBuf::from("gh"), false).expect("init");
+        let pr = PullRequestRef {
+            repository: sample_repository(),
+            number: 99,
+            url: "https://github.com/octocat/orchestrator/pull/99".to_owned(),
+        };
+
+        let checks = CodeHostProvider::list_pull_request_ci_statuses(&client, &pr)
+            .await
+            .expect("read CI checks");
+        assert_eq!(checks.len(), 2);
+        assert_eq!(checks[0].name, "build");
+        assert_eq!(checks[0].bucket, "pass");
+        assert_eq!(checks[0].workflow.as_deref(), Some("Build"));
+        assert_eq!(checks[1].name, "tests");
+        assert_eq!(checks[1].bucket, "fail");
+        assert_eq!(checks[1].workflow.as_deref(), Some("Tests"));
+
+        let calls = client.runner.calls.lock().expect("lock");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(
+            calls[0].1,
+            vec![
+                OsString::from("pr"),
+                OsString::from("checks"),
+                OsString::from("99"),
+                OsString::from("--required"),
+                OsString::from("--json"),
+                OsString::from("name,bucket,state,link,workflow"),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn pull_request_ci_statuses_accept_pending_exit_code() {
+        let runner = StubRunner::with_results(vec![Ok(output(
+            8,
+            r#"[{"name":"tests","bucket":"pending","state":"IN_PROGRESS"}]"#,
+            "",
+        ))]);
+        let client = GhCliClient::new(runner, PathBuf::from("gh"), false).expect("init");
+        let pr = PullRequestRef {
+            repository: sample_repository(),
+            number: 101,
+            url: "https://github.com/octocat/orchestrator/pull/101".to_owned(),
+        };
+
+        let checks = CodeHostProvider::list_pull_request_ci_statuses(&client, &pr)
+            .await
+            .expect("read pending CI checks");
+        assert_eq!(checks.len(), 1);
+        assert_eq!(checks[0].name, "tests");
+        assert_eq!(checks[0].bucket, "pending");
+        assert_eq!(checks[0].state, "IN_PROGRESS");
     }
 
     #[tokio::test]

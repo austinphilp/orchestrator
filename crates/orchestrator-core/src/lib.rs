@@ -20,11 +20,11 @@ pub use adapters::{
     GetTicketRequest, GithubClient, LlmChatRequest, LlmFinishReason, LlmMessage, LlmProvider,
     LlmProviderKind, LlmRateLimitState, LlmResponseStream, LlmResponseSubscription, LlmRole,
     LlmStreamChunk, LlmTokenUsage, LlmTool, LlmToolCall, LlmToolCallOutput, LlmToolChoice,
-    LlmToolChoiceFunction, LlmToolFunction, LlmToolResult, PullRequestMergeState, PullRequestRef,
-    PullRequestSummary, RepositoryRef, ReviewerRequest, Supervisor, TicketAttachment,
-    TicketDetails, TicketQuery, TicketSummary, TicketingProvider, UpdateTicketDescriptionRequest,
-    UpdateTicketStateRequest, UrlOpener, VcsProvider, WorktreeManager, WorktreeStatus,
-    WorktreeSummary,
+    LlmToolChoiceFunction, LlmToolFunction, LlmToolResult, PullRequestCiStatus,
+    PullRequestMergeState, PullRequestRef, PullRequestSummary, RepositoryRef, ReviewerRequest,
+    Supervisor, TicketAttachment, TicketDetails, TicketQuery, TicketSummary, TicketingProvider,
+    UpdateTicketDescriptionRequest, UpdateTicketStateRequest, UrlOpener, VcsProvider,
+    WorktreeManager, WorktreeStatus, WorktreeSummary,
 };
 pub use attention_engine::{
     attention_inbox_snapshot, AttentionBatchKind, AttentionBatchSurface, AttentionEngineConfig,

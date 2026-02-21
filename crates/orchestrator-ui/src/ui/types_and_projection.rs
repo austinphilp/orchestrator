@@ -660,6 +660,21 @@ struct SessionInfoSummaryCache {
     context_fingerprint: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+struct SessionCiStatusCache {
+    checks: Vec<CiCheckStatus>,
+    error: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CiCheckStatus {
+    name: String,
+    workflow: Option<String>,
+    bucket: String,
+    state: String,
+    link: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum SessionInfoSummaryEvent {
     Completed {

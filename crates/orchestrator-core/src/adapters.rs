@@ -316,6 +316,17 @@ pub struct PullRequestMergeState {
     pub head_branch: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PullRequestCiStatus {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workflow: Option<String>,
+    pub bucket: String,
+    pub state: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub link: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct ReviewerRequest {
     pub users: Vec<String>,
@@ -341,6 +352,12 @@ pub trait CodeHostProvider: Send + Sync {
         &self,
         pr: &PullRequestRef,
     ) -> Result<PullRequestMergeState, CoreError>;
+    async fn list_pull_request_ci_statuses(
+        &self,
+        _pr: &PullRequestRef,
+    ) -> Result<Vec<PullRequestCiStatus>, CoreError> {
+        Ok(Vec::new())
+    }
     async fn merge_pull_request(&self, pr: &PullRequestRef) -> Result<(), CoreError>;
     async fn find_open_pull_request_for_branch(
         &self,
