@@ -963,6 +963,11 @@ impl UiShellState {
         session_id: WorkerSessionId,
         is_working: bool,
     ) {
+        self.domain.session_runtime.insert(
+            session_id.clone(),
+            orchestrator_core::SessionRuntimeProjection { is_working },
+        );
+
         if self.session_is_in_planning_stage(&session_id) {
             self.pending_session_working_state_persists.insert(
                 session_id,
@@ -982,6 +987,10 @@ impl UiShellState {
         session_id: WorkerSessionId,
         is_working: bool,
     ) {
+        self.domain.session_runtime.insert(
+            session_id.clone(),
+            orchestrator_core::SessionRuntimeProjection { is_working },
+        );
         self.pending_session_working_state_persists
             .remove(&session_id);
         self.spawn_set_session_working_state(session_id, is_working);
@@ -1096,24 +1105,11 @@ impl UiShellState {
     }
 
     fn session_is_actively_working(&self, session_id: &WorkerSessionId) -> bool {
-        if self
-            .terminal_session_states
-            .get(session_id)
-            .map(|state| {
-                state.active_needs_input.is_some() || !state.pending_needs_input_prompts.is_empty()
-            })
-            .unwrap_or(false)
-        {
-            return false;
-        }
-
-        if self
-            .terminal_session_states
-            .get(session_id)
-            .map(|state| state.turn_active)
-            .unwrap_or(false)
-        {
-            return true;
+        if let Some(state) = self.terminal_session_states.get(session_id) {
+            if state.active_needs_input.is_some() || !state.pending_needs_input_prompts.is_empty() {
+                return false;
+            }
+            return state.turn_active;
         }
 
         self.domain
@@ -1131,6 +1127,14 @@ impl UiShellState {
             return false;
         }
 
+        let has_prompt = self
+            .terminal_session_states
+            .get(session_id)
+            .map(|state| {
+                state.active_needs_input.is_some() || !state.pending_needs_input_prompts.is_empty()
+            })
+            .unwrap_or(false);
+
         if matches!(
             self.domain
                 .sessions
@@ -1138,15 +1142,10 @@ impl UiShellState {
                 .and_then(|session| session.status.as_ref()),
             Some(WorkerSessionStatus::WaitingForUser)
         ) {
-            return true;
+            return has_prompt;
         }
 
-        self.terminal_session_states
-            .get(session_id)
-            .map(|state| {
-                state.active_needs_input.is_some() || !state.pending_needs_input_prompts.is_empty()
-            })
-            .unwrap_or(false)
+        has_prompt
     }
 
     fn session_requires_progression_approval(&self, session_id: &WorkerSessionId) -> bool {
