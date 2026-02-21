@@ -254,7 +254,7 @@ impl UiShellState {
 
     fn ui_state_for_draw(&mut self, now: Instant) -> UiState {
         let status = self.status_text();
-        let attention_projection = self.attention_projection_for_draw(now).clone();
+        let attention_projection = self.attention_projection_for_draw(now);
         let terminal_view_state = None;
         let mut ui_state = project_ui_state_with_attention(
             status.as_str(),
@@ -263,14 +263,14 @@ impl UiShellState {
             self.selected_inbox_index,
             self.selected_inbox_item_id.as_ref(),
             terminal_view_state,
-            &attention_projection,
+            attention_projection.as_ref(),
         );
         self.append_global_supervisor_chat_state(&mut ui_state);
         self.append_live_supervisor_chat(&mut ui_state);
         ui_state
     }
 
-    fn attention_projection_for_draw(&mut self, now: Instant) -> &UiAttentionProjection {
+    fn attention_projection_for_draw(&mut self, now: Instant) -> Arc<UiAttentionProjection> {
         let should_refresh = self
             .attention_projection_cache
             .as_ref()
@@ -286,16 +286,16 @@ impl UiShellState {
             self.attention_projection_recomputes =
                 self.attention_projection_recomputes.saturating_add(1);
             self.attention_projection_cache = Some(AttentionProjectionCache {
-                projection: build_ui_attention_projection(&self.domain),
+                projection: Arc::new(build_ui_attention_projection(&self.domain)),
                 refreshed_at: now,
                 epoch: self.draw_cache_epoch,
             });
         }
-        &self
-            .attention_projection_cache
+        self.attention_projection_cache
             .as_ref()
             .expect("attention projection cache should be present")
             .projection
+            .clone()
     }
 
     fn status_text(&self) -> String {
@@ -653,25 +653,29 @@ impl UiShellState {
         session_panel_rows(&self.domain, &self.terminal_session_states)
     }
 
-    fn session_panel_rows_for_draw(&mut self) -> Vec<SessionPanelRow> {
-        if let Some(cache) = self.session_panel_rows_cache.as_ref() {
-            if cache.epoch == self.draw_cache_epoch {
-                return cache.rows.clone();
-            }
+    fn session_panel_rows_for_draw(&mut self) -> &[SessionPanelRow] {
+        let cache_is_fresh = self
+            .session_panel_rows_cache
+            .as_ref()
+            .map(|cache| cache.epoch == self.draw_cache_epoch)
+            .unwrap_or(false);
+        if !cache_is_fresh {
+            self.event_derived_label_cache.refresh(&self.domain);
+            self.session_panel_rows_cache = Some(SessionPanelRowsCache {
+                rows: session_panel_rows_with_labels(
+                    &self.domain,
+                    &self.terminal_session_states,
+                    &self.event_derived_label_cache.work_item_repo,
+                    &self.event_derived_label_cache.ticket_labels,
+                ),
+                epoch: self.draw_cache_epoch,
+            });
         }
-
-        self.event_derived_label_cache.refresh(&self.domain);
-        let rows = session_panel_rows_with_labels(
-            &self.domain,
-            &self.terminal_session_states,
-            &self.event_derived_label_cache.work_item_repo,
-            &self.event_derived_label_cache.ticket_labels,
-        );
-        self.session_panel_rows_cache = Some(SessionPanelRowsCache {
-            rows: rows.clone(),
-            epoch: self.draw_cache_epoch,
-        });
-        rows
+        self.session_panel_rows_cache
+            .as_ref()
+            .expect("session panel rows cache should be present")
+            .rows
+            .as_slice()
     }
 
     fn session_ids_for_navigation(&self) -> Vec<WorkerSessionId> {
@@ -683,17 +687,6 @@ impl UiShellState {
 
     fn selected_session_id_for_panel(&self) -> Option<WorkerSessionId> {
         let session_ids = self.session_ids_for_navigation();
-        self.selected_session_id_for_panel_from_ids(session_ids.as_slice())
-    }
-
-    fn selected_session_id_for_panel_from_rows(
-        &self,
-        rows: &[SessionPanelRow],
-    ) -> Option<WorkerSessionId> {
-        let session_ids = rows
-            .iter()
-            .map(|row| row.session_id.clone())
-            .collect::<Vec<_>>();
         self.selected_session_id_for_panel_from_ids(session_ids.as_slice())
     }
 
@@ -5188,7 +5181,7 @@ fn terminal_output_line_count_for_scroll(view: &TerminalViewState) -> usize {
     if view.output_rendered_line_count > 0 {
         return view.output_rendered_line_count;
     }
-    render_terminal_transcript_entries(view).len()
+    render_terminal_transcript_line_count(view)
 }
 
 fn editor_state_text(state: &EditorState) -> String {

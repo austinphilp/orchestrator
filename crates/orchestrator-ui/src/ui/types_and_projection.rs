@@ -552,7 +552,7 @@ struct UiAttentionProjection {
 
 #[derive(Debug, Clone)]
 struct AttentionProjectionCache {
-    projection: UiAttentionProjection,
+    projection: Arc<UiAttentionProjection>,
     refreshed_at: Instant,
     epoch: u64,
 }
