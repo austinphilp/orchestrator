@@ -8,14 +8,16 @@ center_title: Terminal
 [inbox]
 Batch lanes: [1] Decide / Unblock 1 | [2] Approvals 1 | [3] PR Reviews 1 | [4] FYI Digest 1
 
-Urgent:
+󰞋 Decide / Unblock:
 > [ ] NeedsDecision: Choose parser migration strategy
 
-Attention:
+󰄬 Approvals:
   [ ] NeedsApproval: Approve PR-ready transition
+
+󰳴 PR Reviews:
   [ ] ReadyForReview: Review implementation evidence
 
-Background:
+󰋼 FYI Digest:
   [ ] FYI: FYI: background agent progress
 
 [center]

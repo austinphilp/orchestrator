@@ -82,7 +82,7 @@ The repository is a Rust workspace with a layered design:
   - `orchestrator-core/src/workflow.rs`
   - `orchestrator-core/src/commands.rs`
   - `orchestrator-core/src/events.rs`
-- Attention ranking/lanes for prioritization:
+- Attention scoring plus batch-lane grouping for inbox prioritization:
   - `orchestrator-core/src/attention_engine.rs`
 
 ## Supervisor (LLM) support

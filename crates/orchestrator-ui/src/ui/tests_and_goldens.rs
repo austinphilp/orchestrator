@@ -4077,7 +4077,7 @@ mod tests {
     }
 
     #[test]
-    fn inbox_view_projects_priority_bands_and_batch_surfaces() {
+    fn inbox_view_projects_batch_lanes_and_surfaces() {
         let ui_state = project_ui_state(
             "ready",
             &triage_projection(),
@@ -4123,9 +4123,13 @@ mod tests {
 
         let rendered = render_inbox_panel(&ui_state);
         assert!(rendered.contains("Batch lanes:"));
-        assert!(rendered.contains("Urgent:"));
-        assert!(rendered.contains("Attention:"));
-        assert!(rendered.contains("Background:"));
+        assert!(rendered.contains("󰞋 Decide / Unblock:"));
+        assert!(rendered.contains("󰄬 Approvals:"));
+        assert!(rendered.contains("󰳴 PR Reviews:"));
+        assert!(rendered.contains("󰋼 FYI Digest:"));
+        assert!(!rendered.contains("Urgent:"));
+        assert!(!rendered.contains("Attention:"));
+        assert!(!rendered.contains("Background:"));
     }
 
     #[test]
