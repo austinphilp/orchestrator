@@ -823,6 +823,14 @@ fn render_ticket_picker_overlay_text(overlay: &TicketPickerOverlayState) -> Stri
 }
 
 fn route_needs_input_modal_key(shell_state: &mut UiShellState, key: KeyEvent) -> RoutedInput {
+    if is_escape_to_normal(key)
+        && shell_state.is_terminal_view_active()
+        && shell_state.active_terminal_session_requires_manual_needs_input_activation()
+    {
+        let _ = shell_state.deactivate_terminal_needs_input_interaction();
+        return RoutedInput::Ignore;
+    }
+
     if shell_state.apply_terminal_needs_input_note_key(key) {
         return RoutedInput::Ignore;
     }
@@ -832,7 +840,10 @@ fn route_needs_input_modal_key(shell_state: &mut UiShellState, key: KeyEvent) ->
         return RoutedInput::Ignore;
     }
 
-    if is_escape_to_normal(key) || !shell_state.is_terminal_view_active() {
+    if !shell_state.is_terminal_view_active() {
+        return RoutedInput::Ignore;
+    }
+    if is_escape_to_normal(key) {
         return RoutedInput::Ignore;
     }
     if !key.modifiers.is_empty() {
