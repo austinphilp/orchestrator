@@ -290,6 +290,36 @@ impl<S: Supervisor, G: GithubClient> App<S, G> {
                 schema_version: DOMAIN_EVENT_SCHEMA_VERSION,
             })?;
         }
+        if self.config.runtime.event_prune_enabled {
+            match store.prune_completed_session_events(
+                orchestrator_core::EventPrunePolicy {
+                    retention_days: self.config.runtime.event_retention_days,
+                },
+                now_unix_seconds(),
+            ) {
+                Ok(report) => {
+                    tracing::info!(
+                        retention_days = self.config.runtime.event_retention_days,
+                        cutoff_unix_seconds = report.cutoff_unix_seconds,
+                        candidate_sessions = report.candidate_sessions,
+                        eligible_sessions = report.eligible_sessions,
+                        pruned_work_items = report.pruned_work_items,
+                        deleted_events = report.deleted_events,
+                        deleted_event_artifact_refs = report.deleted_event_artifact_refs,
+                        skipped_invalid_timestamps = report.skipped_invalid_timestamps,
+                        trigger = "session_crashed",
+                        "event prune maintenance completed"
+                    );
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        session_id = session_id.as_str(),
+                        error = %error,
+                        "event prune maintenance failed after session crash"
+                    );
+                }
+            }
+        }
         Ok(())
     }
 
@@ -611,6 +641,34 @@ impl<S: Supervisor, G: GithubClient> App<S, G> {
             }),
             schema_version: DOMAIN_EVENT_SCHEMA_VERSION,
         })?;
+        if self.config.runtime.event_prune_enabled {
+            match store.prune_completed_session_events(
+                orchestrator_core::EventPrunePolicy {
+                    retention_days: self.config.runtime.event_retention_days,
+                },
+                now_unix_seconds(),
+            ) {
+                Ok(report) => {
+                    tracing::info!(
+                        retention_days = self.config.runtime.event_retention_days,
+                        cutoff_unix_seconds = report.cutoff_unix_seconds,
+                        candidate_sessions = report.candidate_sessions,
+                        eligible_sessions = report.eligible_sessions,
+                        pruned_work_items = report.pruned_work_items,
+                        deleted_events = report.deleted_events,
+                        deleted_event_artifact_refs = report.deleted_event_artifact_refs,
+                        skipped_invalid_timestamps = report.skipped_invalid_timestamps,
+                        trigger = "session_completed",
+                        "event prune maintenance completed"
+                    );
+                }
+                Err(error) => {
+                    cleanup_warnings.push(format!(
+                        "event prune maintenance failed after session completion: {error}"
+                    ));
+                }
+            }
+        }
 
         Ok(cleanup_warnings)
     }
@@ -628,6 +686,13 @@ fn now_nanos() -> u128 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_nanos()
+}
+
+fn now_unix_seconds() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
 }
 
 fn normalize_inbox_coalesce_key(raw: &str) -> String {

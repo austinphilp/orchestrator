@@ -68,9 +68,9 @@ pub use projection::{
 };
 pub use status::{ArtifactKind, InboxItemKind, WorkerSessionStatus, WorkflowState};
 pub use store::{
-    ArtifactRecord, EventStore, RetrievalScope, RuntimeMappingRecord, SessionRecord,
-    SqliteEventStore, StoredEventWithArtifacts, TicketRecord, TicketWorkItemMapping,
-    WorktreeRecord,
+    ArtifactRecord, EventPrunePolicy, EventPruneReport, EventStore, RetrievalScope,
+    RuntimeMappingRecord, SessionRecord, SqliteEventStore, StoredEventWithArtifacts, TicketRecord,
+    TicketWorkItemMapping, WorktreeRecord,
 };
 pub use ticket_selection::{
     start_or_resume_selected_ticket, SelectedTicketFlowAction, SelectedTicketFlowConfig,
