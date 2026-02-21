@@ -644,11 +644,7 @@ fn render_terminal_transcript_lines_into(state: &TerminalViewState, lines: &mut 
                 {
                     lines.push(String::new());
                 }
-<<<<<<< HEAD
                 lines.push(line.clone());
-=======
-                lines.push(line.clone());
->>>>>>> ceddd89 (AP-259: truncate in-memory transcript history to configurable limit)
                 if is_user_outgoing_terminal_message(line) {
                     lines.push(String::new());
                 }
