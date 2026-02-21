@@ -78,6 +78,7 @@ const DEFAULT_CODEX_BINARY: &str = "codex";
 const DEFAULT_EVENT_RETENTION_DAYS: u64 = 14;
 const DEFAULT_EVENT_PRUNE_ENABLED: bool = true;
 const DEFAULT_UI_THEME: &str = "nord";
+const DEFAULT_UI_TRANSCRIPT_LINE_LIMIT: usize = 100;
 const DEFAULT_TICKET_PICKER_PRIORITY_STATES: &[&str] =
     &["In Progress", "Final Approval", "Todo", "Backlog"];
 
@@ -290,6 +291,8 @@ pub struct UiConfigToml {
     pub theme: String,
     #[serde(default = "default_ticket_picker_priority_states")]
     pub ticket_picker_priority_states: Vec<String>,
+    #[serde(default = "default_ui_transcript_line_limit")]
+    pub transcript_line_limit: usize,
     #[serde(default = "default_ui_background_session_refresh_secs")]
     pub background_session_refresh_secs: u64,
     #[serde(default = "default_ui_session_info_background_refresh_secs")]
@@ -301,6 +304,7 @@ impl Default for UiConfigToml {
         Self {
             theme: default_ui_theme(),
             ticket_picker_priority_states: default_ticket_picker_priority_states(),
+            transcript_line_limit: default_ui_transcript_line_limit(),
             background_session_refresh_secs: default_ui_background_session_refresh_secs(),
             session_info_background_refresh_secs: default_ui_session_info_background_refresh_secs(),
         }
@@ -401,6 +405,10 @@ fn default_ui_background_session_refresh_secs() -> u64 {
 
 fn default_ui_session_info_background_refresh_secs() -> u64 {
     15
+}
+
+fn default_ui_transcript_line_limit() -> usize {
+    DEFAULT_UI_TRANSCRIPT_LINE_LIMIT
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -705,6 +713,11 @@ fn normalize_config(config: &mut AppConfig) -> bool {
     changed |= normalize_string_vec(&mut config.ui.ticket_picker_priority_states);
     if config.ui.ticket_picker_priority_states.is_empty() {
         config.ui.ticket_picker_priority_states = default_ticket_picker_priority_states();
+        changed = true;
+    }
+    let normalized_transcript_line_limit = config.ui.transcript_line_limit.max(1);
+    if normalized_transcript_line_limit != config.ui.transcript_line_limit {
+        config.ui.transcript_line_limit = normalized_transcript_line_limit;
         changed = true;
     }
     let normalized_background_refresh_secs = config

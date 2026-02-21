@@ -45,6 +45,7 @@ async fn main() -> Result<()> {
         config.ui.theme.clone(),
         config.ui.ticket_picker_priority_states.clone(),
         config.supervisor.model.clone(),
+        config.ui.transcript_line_limit,
         config.ui.background_session_refresh_secs,
         config.ui.session_info_background_refresh_secs,
     );

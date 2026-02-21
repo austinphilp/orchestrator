@@ -328,8 +328,19 @@ mod tests {
             self.resolved_inbox_requests
                 .lock()
                 .expect("resolved inbox requests lock")
-                .push(request);
-            Ok(None)
+                .push(request.clone());
+            Ok(Some(stored_event_for_test(
+                "evt-test-inbox-resolved",
+                2,
+                Some(request.work_item_id.clone()),
+                None,
+                OrchestrationEventPayload::InboxItemResolved(
+                    orchestrator_core::InboxItemResolvedPayload {
+                        inbox_item_id: request.inbox_item_id,
+                        work_item_id: request.work_item_id,
+                    },
+                ),
+            )))
         }
     }
 
@@ -7551,6 +7562,41 @@ mod tests {
         let total_with_indicator =
             terminal_total_rendered_rows(&mut state, width, TerminalActivityIndicator::Working);
         assert_eq!(total_with_indicator, full.lines.len() + 2);
+    }
+
+    #[test]
+    fn terminal_transcript_truncates_to_default_line_limit() {
+        let mut state = TerminalViewState::default();
+        let payload = (1..=101)
+            .map(|line| format!("line {line}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n";
+        append_terminal_assistant_output(&mut state, payload.into_bytes());
+
+        assert_eq!(state.entries.len(), 100);
+        assert!(state.transcript_truncated);
+        assert_eq!(state.transcript_truncated_line_count, 1);
+        assert_eq!(
+            state.entries.first(),
+            Some(&TerminalTranscriptEntry::Message("line 2".to_owned()))
+        );
+        assert_eq!(
+            state.entries.last(),
+            Some(&TerminalTranscriptEntry::Message("line 101".to_owned()))
+        );
+    }
+
+    #[test]
+    fn terminal_top_bar_shows_transcript_truncation_indicator() {
+        let projection = sample_projection(true);
+        let session_id = WorkerSessionId::new("sess-1");
+        let mut view = TerminalViewState::default();
+        view.transcript_truncated = true;
+        view.transcript_truncated_line_count = 7;
+
+        let rendered = render_terminal_top_bar(&projection, &session_id, Some(&view));
+        assert!(rendered.contains("history: truncated (-7 lines)"));
     }
 
     #[test]

@@ -12,16 +12,16 @@ impl Ui {
         enable_raw_mode()?;
         let mut stdout = io::stdout();
         stdout.execute(EnterAlternateScreen)?;
-        let keyboard_enhancement_enabled = match crossterm::terminal::supports_keyboard_enhancement()
-        {
-            Ok(true) => stdout
-                .execute(crossterm::event::PushKeyboardEnhancementFlags(
-                    crossterm::event::KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
-                        | crossterm::event::KeyboardEnhancementFlags::REPORT_EVENT_TYPES,
-                ))
-                .is_ok(),
-            _ => false,
-        };
+        let keyboard_enhancement_enabled =
+            match crossterm::terminal::supports_keyboard_enhancement() {
+                Ok(true) => stdout
+                    .execute(crossterm::event::PushKeyboardEnhancementFlags(
+                        crossterm::event::KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
+                            | crossterm::event::KeyboardEnhancementFlags::REPORT_EVENT_TYPES,
+                    ))
+                    .is_ok(),
+                _ => false,
+            };
         let backend = CrosstermBackend::new(stdout);
         let terminal = Terminal::new(backend)?;
         Ok(Self {
@@ -90,8 +90,9 @@ impl Ui {
             let animation_frame_ready = animation_frame_interval
                 .map(|interval| now.duration_since(last_animation_frame) >= interval)
                 .unwrap_or(false);
-            let should_draw =
-                force_draw || changed || (animation_frame_interval.is_some() && animation_frame_ready);
+            let should_draw = force_draw
+                || changed
+                || (animation_frame_interval.is_some() && animation_frame_ready);
             let should_refresh_ui_state = changed
                 || cached_ui_state.is_none()
                 || matches!(animation_state, AnimationState::ResolvedOnly) && animation_frame_ready;
@@ -113,8 +114,10 @@ impl Ui {
                     let area = frame.area();
                     let layout = Layout::vertical([Constraint::Min(1), Constraint::Length(4)]);
                     let [main, footer] = layout.areas(area);
-                    let main_layout =
-                        Layout::horizontal([Constraint::Percentage(35), Constraint::Percentage(65)]);
+                    let main_layout = Layout::horizontal([
+                        Constraint::Percentage(35),
+                        Constraint::Percentage(65),
+                    ]);
                     let [left_area, center_area] = main_layout.areas(main);
                     let left_layout =
                         Layout::vertical([Constraint::Percentage(45), Constraint::Percentage(55)]);
@@ -163,9 +166,11 @@ impl Ui {
                     } else {
                         "sessions"
                     };
-                    let mut sessions_block = Block::default().title(sessions_title).borders(Borders::ALL);
+                    let mut sessions_block =
+                        Block::default().title(sessions_title).borders(Borders::ALL);
                     if shell_state.is_sessions_sidebar_focused() {
-                        sessions_block = sessions_block.border_style(Style::default().fg(Color::LightBlue));
+                        sessions_block =
+                            sessions_block.border_style(Style::default().fg(Color::LightBlue));
                     }
                     frame.render_widget(
                         Paragraph::new(sessions_text).block(sessions_block),
@@ -180,12 +185,10 @@ impl Ui {
                     };
                     let mut inbox_block = Block::default().title(inbox_title).borders(Borders::ALL);
                     if shell_state.is_inbox_sidebar_focused() {
-                        inbox_block = inbox_block.border_style(Style::default().fg(Color::LightBlue));
+                        inbox_block =
+                            inbox_block.border_style(Style::default().fg(Color::LightBlue));
                     }
-                    frame.render_widget(
-                        Paragraph::new(inbox_text).block(inbox_block),
-                        inbox_area,
-                    );
+                    frame.render_widget(Paragraph::new(inbox_text).block(inbox_block), inbox_area);
 
                     let center_focused_style = shell_state
                         .is_right_pane_focused()
@@ -217,8 +220,15 @@ impl Ui {
                         ]);
                         let [terminal_meta_area, terminal_output_area, terminal_input_area] =
                             center_layout.areas(terminal_area);
-                        let meta_text = render_terminal_top_bar(&shell_state.domain, &session_id);
-                        let mut terminal_meta_block = Block::default().title("terminal").borders(Borders::ALL);
+                        let terminal_view_state =
+                            shell_state.terminal_session_states.get(&session_id);
+                        let meta_text = render_terminal_top_bar(
+                            &shell_state.domain,
+                            &session_id,
+                            terminal_view_state,
+                        );
+                        let mut terminal_meta_block =
+                            Block::default().title("terminal").borders(Borders::ALL);
                         if let Some(style) = center_focused_style {
                             terminal_meta_block = terminal_meta_block.border_style(style);
                         }
@@ -265,7 +275,8 @@ impl Ui {
                                 text: Text::raw("No terminal output available yet."),
                                 local_scroll_top: 0,
                             });
-                        let mut terminal_output_block = Block::default().title("output").borders(Borders::ALL);
+                        let mut terminal_output_block =
+                            Block::default().title("output").borders(Borders::ALL);
                         if let Some(style) = center_focused_style {
                             terminal_output_block = terminal_output_block.border_style(style);
                         }
@@ -288,12 +299,12 @@ impl Ui {
                             );
                         } else {
                             frame.render_widget(
-                                        EditorView::new(&mut shell_state.terminal_compose_editor)
-                                            .theme(nord_editor_theme(
-                                                Block::default()
-                                                    .title("input (Esc+Enter send | Ctrl+Enter send)")
-                                                    .borders(Borders::ALL),
-                                            ))
+                                EditorView::new(&mut shell_state.terminal_compose_editor)
+                                    .theme(nord_editor_theme(
+                                        Block::default()
+                                            .title("input (Esc+Enter send | Ctrl+Enter send)")
+                                            .borders(Borders::ALL),
+                                    ))
                                     .wrap(true),
                                 terminal_input_area,
                             );
@@ -309,9 +320,7 @@ impl Ui {
                             );
                             frame.render_widget(
                                 Paragraph::new(sidebar_text).block(
-                                    Block::default()
-                                        .title("session info")
-                                        .borders(Borders::ALL),
+                                    Block::default().title("session info").borders(Borders::ALL),
                                 ),
                                 sidebar_area,
                             );
@@ -319,11 +328,9 @@ impl Ui {
                     } else {
                         let center_text = render_center_panel(&ui_state);
                         if shell_state.is_global_supervisor_chat_active() {
-                            let [chat_output_area, chat_input_area] = Layout::vertical([
-                                Constraint::Min(3),
-                                Constraint::Length(3),
-                            ])
-                            .areas(center_area);
+                            let [chat_output_area, chat_input_area] =
+                                Layout::vertical([Constraint::Min(3), Constraint::Length(3)])
+                                    .areas(center_area);
                             frame.render_widget(
                                 Paragraph::new(center_text).block({
                                     let mut block = Block::default()
@@ -368,15 +375,13 @@ impl Ui {
                         Line::from(mode_help(shell_state.mode)),
                     ]);
                     frame.render_widget(
-                        Paragraph::new(footer_text)
-                            .style(footer_style)
-                            .block(
-                                Block::default()
-                                    .title("shell")
-                                    .borders(Borders::ALL)
-                                    .border_style(footer_style)
-                                    .style(footer_style),
-                            ),
+                        Paragraph::new(footer_text).style(footer_style).block(
+                            Block::default()
+                                .title("shell")
+                                .borders(Borders::ALL)
+                                .border_style(footer_style)
+                                .style(footer_style),
+                        ),
                         footer,
                     );
 
@@ -420,7 +425,8 @@ impl Ui {
 
                 if shell_state.ticket_picker_overlay.has_repository_prompt()
                     || shell_state.terminal_needs_input_is_note_insert_mode()
-                    || (shell_state.mode == UiMode::Terminal && shell_state.is_terminal_view_active())
+                    || (shell_state.mode == UiMode::Terminal
+                        && shell_state.is_terminal_view_active())
                 {
                     let _ = io::stdout()
                         .execute(Show)

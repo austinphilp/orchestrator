@@ -2142,6 +2142,8 @@ impl UiShellState {
                     view.deferred_output.clear();
                     view.last_background_flush_at = None;
                     view.entries.clear();
+                    view.transcript_truncated = false;
+                    view.transcript_truncated_line_count = 0;
                     view.output_fragment.clear();
                     view.render_cache.invalidate_all();
                     view.output_rendered_line_count = 0;
