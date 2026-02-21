@@ -4126,6 +4126,7 @@ mod tests {
             .get_mut(&WorkerSessionId::new("sess-2"))
             .expect("offscreen state should exist");
         offscreen_state.last_background_flush_at = Some(Instant::now() - Duration::from_secs(16));
+        shell_state.recompute_background_terminal_flush_deadline();
 
         assert!(shell_state.flush_background_terminal_output_and_report());
         let flushed = shell_state
