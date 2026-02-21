@@ -4579,6 +4579,11 @@ impl UiShellState {
         self.spawn_active_session_summary_refresh()
     }
 
+    #[cfg(test)]
+    fn tick_session_info_summary_refresh(&mut self) -> bool {
+        self.tick_session_info_summary_refresh_at(Instant::now())
+    }
+
     fn drain_async_events_and_report(&mut self) -> bool {
         let mut changed = false;
         changed |= self.tick_supervisor_stream_and_report();
