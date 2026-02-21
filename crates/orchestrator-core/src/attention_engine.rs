@@ -59,12 +59,34 @@ impl AttentionBatchKind {
         }
     }
 
+    pub fn glyph(self) -> &'static str {
+        match self {
+            Self::DecideOrUnblock => "󰞋",
+            Self::Approvals => "󰄬",
+            Self::ReviewReady => "󰳴",
+            Self::FyiDigest => "󰋼",
+        }
+    }
+
+    pub fn heading_label(self) -> String {
+        format!("{} {}", self.glyph(), self.label())
+    }
+
     pub fn hotkey(self) -> char {
         match self {
             Self::DecideOrUnblock => '1',
             Self::Approvals => '2',
             Self::ReviewReady => '3',
             Self::FyiDigest => '4',
+        }
+    }
+
+    pub fn rank(self) -> u8 {
+        match self {
+            Self::DecideOrUnblock => 0,
+            Self::Approvals => 1,
+            Self::ReviewReady => 2,
+            Self::FyiDigest => 3,
         }
     }
 }
@@ -284,11 +306,11 @@ pub fn attention_inbox_snapshot(
         .collect::<Vec<_>>();
 
     items.sort_by(|a, b| {
-        a.priority_band
+        a.batch_kind
             .rank()
-            .cmp(&b.priority_band.rank())
-            .then_with(|| b.priority_score.cmp(&a.priority_score))
+            .cmp(&b.batch_kind.rank())
             .then_with(|| a.resolved.cmp(&b.resolved))
+            .then_with(|| b.priority_score.cmp(&a.priority_score))
             .then_with(|| a.inbox_item_id.as_str().cmp(b.inbox_item_id.as_str()))
     });
 
@@ -1268,6 +1290,99 @@ mod tests {
         assert!(snapshot.batch_surfaces[1].first_any_index.is_some());
         assert_eq!(snapshot.batch_surfaces[2].unresolved_count, 1);
         assert_eq!(snapshot.batch_surfaces[3].unresolved_count, 1);
+    }
+
+    #[test]
+    fn inbox_items_are_sorted_lane_first_and_unresolved_first_within_lane() {
+        let mut projection = ProjectionState::default();
+        let rows = vec![
+            (
+                "wi-fyi-resolved",
+                "inbox-fyi-resolved",
+                InboxItemKind::FYI,
+                true,
+            ),
+            (
+                "wi-approval-unresolved",
+                "inbox-approval-unresolved",
+                InboxItemKind::NeedsApproval,
+                false,
+            ),
+            (
+                "wi-decision-unresolved",
+                "inbox-decision-unresolved",
+                InboxItemKind::NeedsDecision,
+                false,
+            ),
+            (
+                "wi-decision-resolved",
+                "inbox-decision-resolved",
+                InboxItemKind::Blocked,
+                true,
+            ),
+            (
+                "wi-review-unresolved",
+                "inbox-review-unresolved",
+                InboxItemKind::ReadyForReview,
+                false,
+            ),
+        ];
+
+        for (work_item_raw, inbox_item_raw, kind, resolved) in rows {
+            let work_item_id = crate::WorkItemId::new(work_item_raw);
+            let session_id = WorkerSessionId::new(format!("sess-{work_item_raw}"));
+            let inbox_item_id = InboxItemId::new(inbox_item_raw);
+            projection.work_items.insert(
+                work_item_id.clone(),
+                WorkItemProjection {
+                    id: work_item_id.clone(),
+                    ticket_id: None,
+                    project_id: None,
+                    workflow_state: Some(WorkflowState::Implementing),
+                    session_id: Some(session_id.clone()),
+                    worktree_id: None,
+                    inbox_items: vec![inbox_item_id.clone()],
+                    artifacts: vec![],
+                },
+            );
+            projection.sessions.insert(
+                session_id.clone(),
+                SessionProjection {
+                    id: session_id,
+                    work_item_id: Some(work_item_id.clone()),
+                    status: Some(WorkerSessionStatus::Running),
+                    latest_checkpoint: None,
+                },
+            );
+            projection.inbox_items.insert(
+                inbox_item_id.clone(),
+                InboxItemProjection {
+                    id: inbox_item_id,
+                    work_item_id,
+                    kind,
+                    title: "row".to_owned(),
+                    resolved,
+                },
+            );
+        }
+
+        let snapshot =
+            attention_inbox_snapshot(&projection, &AttentionEngineConfig::default(), &[]);
+        let ordered_ids = snapshot
+            .items
+            .iter()
+            .map(|item| item.inbox_item_id.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            ordered_ids,
+            vec![
+                "inbox-decision-unresolved",
+                "inbox-decision-resolved",
+                "inbox-approval-unresolved",
+                "inbox-review-unresolved",
+                "inbox-fyi-resolved",
+            ]
+        );
     }
 
     #[test]

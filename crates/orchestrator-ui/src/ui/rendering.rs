@@ -23,26 +23,33 @@ fn render_inbox_panel(ui_state: &UiState) -> String {
         lines.push(String::new());
     }
 
-    let mut active_band = None;
-    for (index, row) in ui_state.inbox_rows.iter().enumerate() {
-        if active_band != Some(row.priority_band) {
-            if active_band.is_some() {
-                lines.push(String::new());
-            }
-            lines.push(format!("{}:", row.priority_band.label()));
-            active_band = Some(row.priority_band);
+    let mut wrote_lane_section = false;
+    for surface in ui_state
+        .inbox_batch_surfaces
+        .iter()
+        .filter(|surface| surface.total_count > 0)
+    {
+        if wrote_lane_section {
+            lines.push(String::new());
         }
+        lines.push(format!("{}:", surface.kind.heading_label()));
+        wrote_lane_section = true;
 
-        let selected = if Some(index) == ui_state.selected_inbox_index {
-            ">"
-        } else {
-            " "
-        };
-        let resolved = if row.resolved { "x" } else { " " };
-        lines.push(format!(
-            "{selected} [{resolved}] {:?}: {}",
-            row.kind, row.title
-        ));
+        for (index, row) in ui_state.inbox_rows.iter().enumerate() {
+            if row.batch_kind != surface.kind {
+                continue;
+            }
+            let selected = if Some(index) == ui_state.selected_inbox_index {
+                ">"
+            } else {
+                " "
+            };
+            let resolved = if row.resolved { "x" } else { " " };
+            lines.push(format!(
+                "{selected} [{resolved}] {:?}: {}",
+                row.kind, row.title
+            ));
+        }
     }
 
     lines.join("\n")
