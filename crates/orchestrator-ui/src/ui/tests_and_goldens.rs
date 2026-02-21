@@ -5250,7 +5250,7 @@ mod tests {
     }
 
     #[test]
-    fn merge_reconcile_event_trigger_runs_for_queued_idle_review_session_without_pr_artifact() {
+    fn merge_reconcile_event_trigger_does_not_enqueue_periodic_reconcile_requests() {
         let projection = review_projection_without_pr_artifact();
         let dispatcher = Arc::new(TestSupervisorDispatcher::new(Vec::new()));
         let mut shell_state = UiShellState::new_with_integrations(
@@ -5282,13 +5282,7 @@ mod tests {
         let _ = shell_state.mark_reconcile_dirty_for_session(&session_id);
         assert!(shell_state.enqueue_event_driven_reconciles());
 
-        assert_eq!(shell_state.merge_queue.len(), 1);
-        let request = shell_state
-            .merge_queue
-            .front()
-            .expect("merge reconcile request queued");
-        assert_eq!(request.kind, MergeQueueCommandKind::Reconcile);
-        assert_eq!(request.session_id, session_id);
+        assert!(shell_state.merge_queue.is_empty());
     }
 
     #[test]

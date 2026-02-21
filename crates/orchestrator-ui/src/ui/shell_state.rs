@@ -63,9 +63,6 @@ struct UiShellState {
     review_merge_confirm_session: Option<WorkerSessionId>,
     merge_queue: VecDeque<MergeQueueRequest>,
     merge_last_dispatched_at: Option<Instant>,
-    review_fallback_last_sweep_at: Option<Instant>,
-    approval_fallback_last_sweep_at: Option<Instant>,
-    approval_reconcile_last_poll_at: Option<Instant>,
     merge_event_sender: Option<mpsc::Sender<MergeQueueEvent>>,
     merge_event_receiver: Option<mpsc::Receiver<MergeQueueEvent>>,
     review_reconcile_eligible_sessions: HashSet<WorkerSessionId>,
@@ -213,9 +210,6 @@ impl UiShellState {
             review_merge_confirm_session: None,
             merge_queue: VecDeque::new(),
             merge_last_dispatched_at: None,
-            review_fallback_last_sweep_at: None,
-            approval_fallback_last_sweep_at: None,
-            approval_reconcile_last_poll_at: None,
             merge_event_sender: merge_event_sender.clone(),
             merge_event_receiver,
             review_reconcile_eligible_sessions: HashSet::new(),
@@ -1283,25 +1277,6 @@ impl UiShellState {
         }
     }
 
-    fn publish_review_idle_inbox_for_session(&mut self, session_id: &WorkerSessionId) {
-        if let Some((kind, coalesce_key, title_prefix)) = self
-            .workflow_state_for_session(session_id)
-            .as_ref()
-            .and_then(Self::workflow_transition_inbox_for_state)
-            .filter(|(kind, _, _)| *kind == InboxItemKind::ReadyForReview)
-        {
-            self.publish_inbox_for_session(
-                session_id,
-                kind,
-                format!(
-                    "{title_prefix}: {}",
-                    session_display_labels(&self.domain, session_id).compact_label
-                ),
-                coalesce_key,
-            );
-        }
-    }
-
     fn publish_error_for_session(
         &mut self,
         session_id: &WorkerSessionId,
@@ -2073,8 +2048,8 @@ impl UiShellState {
                         if self.active_terminal_session_id() == Some(&session_id) {
                             self.schedule_session_info_summary_refresh_for_active_session();
                         }
+                        changed |= self.mark_reconcile_dirty_for_session(&session_id);
                     }
-                    changed |= self.mark_reconcile_dirty_for_session(&session_id);
                 }
                 TerminalSessionEvent::NeedsInput {
                     session_id,
@@ -2516,7 +2491,6 @@ impl UiShellState {
         changed |= self.ci_failure_signatures_notified.len() != ci_notified_len_before;
 
         for session_id in session_ids {
-            self.publish_review_idle_inbox_for_session(&session_id);
             changed |= self.ensure_review_sync_instruction(&session_id);
         }
         changed
@@ -2672,20 +2646,10 @@ impl UiShellState {
     }
 
     fn enqueue_merge_reconcile_polls_at(&mut self, _now: Instant) -> bool {
-        self.mark_all_eligible_reconcile_dirty();
         self.enqueue_event_driven_reconciles()
     }
 
-    fn enqueue_progression_approval_reconcile_polls_at(&mut self, now: Instant) -> bool {
-        if self
-            .approval_reconcile_last_poll_at
-            .map(|previous| now.duration_since(previous) < APPROVAL_RECONCILE_POLL_INTERVAL)
-            .unwrap_or(false)
-        {
-            return false;
-        }
-        self.approval_reconcile_last_poll_at = Some(now);
-        self.mark_all_eligible_reconcile_dirty();
+    fn enqueue_progression_approval_reconcile_polls_at(&mut self, _now: Instant) -> bool {
         self.enqueue_event_driven_reconciles()
     }
 
@@ -2733,97 +2697,24 @@ impl UiShellState {
             .retain(|session_id, _| active_review_sessions.contains(session_id));
         changed |= self.ci_failure_signatures_notified.len() != ci_notified_len_before;
         let queue_len_before = self.merge_queue.len();
-        self.merge_queue
-            .retain(|request| active_review_sessions.contains(&request.session_id));
+        self.merge_queue.retain(|request| {
+            request.kind == MergeQueueCommandKind::Merge
+                && active_review_sessions.contains(&request.session_id)
+        });
         changed |= self.merge_queue.len() != queue_len_before;
 
         let review_dirty = self.dirty_review_reconcile_sessions.drain().collect::<Vec<_>>();
-        let now = Instant::now();
         for session_id in review_dirty {
             if !self.review_reconcile_eligible_sessions.contains(&session_id) {
                 continue;
             }
-            self.publish_review_idle_inbox_for_session(&session_id);
             changed |= self.ensure_review_sync_instruction(&session_id);
-            if !self.merge_pending_sessions.contains(&session_id) {
-                continue;
-            }
-            if self.session_is_actively_working(&session_id) {
-                tracing::debug!(
-                    session_id = session_id.as_str(),
-                    "skipping merge reconcile poll because session is actively working"
-                );
-                continue;
-            }
-            let state = self
-                .merge_poll_states
-                .entry(session_id.clone())
-                .or_insert_with(|| MergeReconcilePollState::new(now));
-            if now < state.next_poll_at {
-                tracing::debug!(
-                    session_id = session_id.as_str(),
-                    "skipping merge reconcile poll due to backoff window"
-                );
-                continue;
-            }
-            state.last_poll_started_at = Some(now);
-            state.next_poll_at = now + merge_poll_base_interval_config_value();
-            changed |=
-                self.enqueue_merge_queue_request(session_id, MergeQueueCommandKind::Reconcile);
         }
         changed
     }
 
     fn run_sparse_reconcile_fallbacks(&mut self) -> bool {
-        let now = Instant::now();
-        let mut changed = false;
-
-        let approval_due = self
-            .approval_fallback_last_sweep_at
-            .map(|previous| now.duration_since(previous) >= RECONCILE_SPARSE_FALLBACK_INTERVAL)
-            .unwrap_or(true);
-        let review_due = self
-            .review_fallback_last_sweep_at
-            .map(|previous| now.duration_since(previous) >= RECONCILE_SPARSE_FALLBACK_INTERVAL)
-            .unwrap_or(true);
-
-        if !approval_due && !review_due {
-            return false;
-        }
-
-        self.rebuild_reconcile_eligibility_indexes();
-
-        if approval_due {
-            self.approval_fallback_last_sweep_at = Some(now);
-            changed = true;
-            for session_id in self
-                .approval_reconcile_candidate_sessions
-                .iter()
-                .cloned()
-                .collect::<Vec<_>>()
-            {
-                changed |= self.reconcile_progression_approval_inbox_for_session(&session_id);
-            }
-        }
-
-        if review_due {
-            self.review_fallback_last_sweep_at = Some(now);
-            changed = true;
-            if self.supervisor_command_dispatcher.is_some() {
-                for session_id in self
-                    .merge_pending_sessions
-                    .iter()
-                    .cloned()
-                    .collect::<Vec<_>>()
-                {
-                    if self.review_reconcile_eligible_sessions.contains(&session_id) {
-                        changed |= self.mark_reconcile_dirty_for_session(&session_id);
-                    }
-                }
-            }
-        }
-
-        changed
+        false
     }
 
     fn ensure_review_sync_instruction(&mut self, session_id: &WorkerSessionId) -> bool {
@@ -5027,7 +4918,6 @@ impl UiShellState {
                 .values()
                 .any(|view| view.turn_active || !view.deferred_output.is_empty());
         let merge_busy = !self.merge_queue.is_empty()
-            || !self.merge_pending_sessions.is_empty()
             || !self.merge_finalizing_sessions.is_empty();
         let summary_busy = self
             .session_info_summary_cache
@@ -5053,15 +4943,6 @@ impl UiShellState {
             .filter(|_| !self.ticket_picker_overlay.loading);
         let summary_deadline = self.session_info_summary_deadline;
         let background_flush_deadline = self.background_terminal_flush_deadline;
-        let reconcile_sweep_deadline = [
-            self.approval_fallback_last_sweep_at
-                .map(|previous| previous + RECONCILE_SPARSE_FALLBACK_INTERVAL),
-            self.review_fallback_last_sweep_at
-                .map(|previous| previous + RECONCILE_SPARSE_FALLBACK_INTERVAL),
-        ]
-        .into_iter()
-        .flatten()
-        .min();
         let merge_dispatch_deadline = if self.merge_queue.is_empty() {
             None
         } else {
@@ -5076,7 +4957,6 @@ impl UiShellState {
             ticket_refresh_deadline,
             summary_deadline,
             background_flush_deadline,
-            reconcile_sweep_deadline,
             merge_dispatch_deadline,
         ]
         .into_iter()

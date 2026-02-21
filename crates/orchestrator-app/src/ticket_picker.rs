@@ -1,3 +1,4 @@
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -399,6 +400,7 @@ async fn run_pr_pipeline_polling_task<S, G>(
 {
     let mut ticker = tokio::time::interval(poll_interval);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut last_reconcile_signatures: HashMap<WorkerSessionId, String> = HashMap::new();
     loop {
         tokio::select! {
             _ = shutdown_receiver.changed() => {
@@ -434,14 +436,32 @@ async fn run_pr_pipeline_polling_task<S, G>(
             _ = ticker.tick() => {
                 match load_projection_state(app.clone()).await {
                     Ok(projection) => {
-                        for (session_id, context) in review_session_contexts(&projection) {
-                            dispatch_merge_queue_command(
+                        let review_contexts = review_session_contexts(&projection);
+                        let active_review_sessions = review_contexts
+                            .iter()
+                            .map(|(session_id, _)| session_id.clone())
+                            .collect::<HashSet<_>>();
+                        last_reconcile_signatures
+                            .retain(|session_id, _| active_review_sessions.contains(session_id));
+
+                        for (session_id, context) in review_contexts {
+                            let event = run_merge_queue_command(
                                 app.clone(),
-                                sender.clone(),
-                                session_id,
+                                session_id.clone(),
                                 MergeQueueCommandKind::Reconcile,
                                 context,
-                            ).await;
+                            )
+                            .await;
+                            let signature = reconcile_state_signature(&event);
+                            let changed = last_reconcile_signatures
+                                .get(&session_id)
+                                .map(|previous| previous != &signature)
+                                .unwrap_or(true);
+                            if !changed {
+                                continue;
+                            }
+                            last_reconcile_signatures.insert(session_id, signature);
+                            let _ = sender.send(event).await;
                         }
                     }
                     Err(error) => {
@@ -531,60 +551,8 @@ async fn dispatch_merge_queue_command<S, G>(
     S: Supervisor + LlmProvider + Send + Sync + 'static,
     G: GithubClient + CodeHostProvider + Send + Sync + 'static,
 {
-    let command = match kind {
-        MergeQueueCommandKind::Reconcile => Command::WorkflowReconcilePrMerge,
-        MergeQueueCommandKind::Merge => Command::WorkflowMergePr,
-    };
-    let invocation = match CommandRegistry::default().to_untyped_invocation(&command) {
-        Ok(invocation) => invocation,
-        Err(error) => {
-            send_merge_queue_error(&sender, session_id, kind, error.to_string().as_str()).await;
-            return;
-        }
-    };
-
-    let (_, mut stream) = match SupervisorCommandDispatcher::dispatch_supervisor_command(
-        app.as_ref(),
-        invocation,
-        context,
-    )
-    .await
-    {
-        Ok(response) => response,
-        Err(error) => {
-            send_merge_queue_error(&sender, session_id, kind, error.to_string().as_str()).await;
-            return;
-        }
-    };
-
-    let mut output = String::new();
-    loop {
-        match stream.next_chunk().await {
-            Ok(Some(chunk)) => output.push_str(chunk.delta.as_str()),
-            Ok(None) => break,
-            Err(error) => {
-                send_merge_queue_error(&sender, session_id, kind, error.to_string().as_str()).await;
-                return;
-            }
-        }
-    }
-
-    let parsed = parse_merge_queue_response(output.as_str());
-    let _ = sender
-        .send(MergeQueueEvent::Completed {
-            session_id,
-            kind,
-            completed: parsed.completed,
-            merge_conflict: parsed.merge_conflict,
-            base_branch: parsed.base_branch,
-            head_branch: parsed.head_branch,
-            ci_checks: parsed.ci_checks,
-            ci_failures: parsed.ci_failures,
-            ci_has_failures: parsed.ci_has_failures,
-            ci_status_error: parsed.ci_status_error,
-            error: None,
-        })
-        .await;
+    let event = run_merge_queue_command(app, session_id, kind, context).await;
+    let _ = sender.send(event).await;
 }
 
 async fn send_merge_queue_error(
@@ -608,6 +576,138 @@ async fn send_merge_queue_error(
             error: Some(sanitize_terminal_display_text(detail)),
         })
         .await;
+}
+
+async fn run_merge_queue_command<S, G>(
+    app: Arc<App<S, G>>,
+    session_id: WorkerSessionId,
+    kind: MergeQueueCommandKind,
+    context: SupervisorCommandContext,
+) -> MergeQueueEvent
+where
+    S: Supervisor + LlmProvider + Send + Sync + 'static,
+    G: GithubClient + CodeHostProvider + Send + Sync + 'static,
+{
+    let command = match kind {
+        MergeQueueCommandKind::Reconcile => Command::WorkflowReconcilePrMerge,
+        MergeQueueCommandKind::Merge => Command::WorkflowMergePr,
+    };
+    let invocation = match CommandRegistry::default().to_untyped_invocation(&command) {
+        Ok(invocation) => invocation,
+        Err(error) => {
+            return merge_queue_error_event(session_id, kind, error.to_string().as_str());
+        }
+    };
+
+    let (_, mut stream) = match SupervisorCommandDispatcher::dispatch_supervisor_command(
+        app.as_ref(),
+        invocation,
+        context,
+    )
+    .await
+    {
+        Ok(response) => response,
+        Err(error) => {
+            return merge_queue_error_event(session_id, kind, error.to_string().as_str());
+        }
+    };
+
+    let mut output = String::new();
+    loop {
+        match stream.next_chunk().await {
+            Ok(Some(chunk)) => output.push_str(chunk.delta.as_str()),
+            Ok(None) => break,
+            Err(error) => {
+                return merge_queue_error_event(session_id, kind, error.to_string().as_str());
+            }
+        }
+    }
+
+    let parsed = parse_merge_queue_response(output.as_str());
+    MergeQueueEvent::Completed {
+        session_id,
+        kind,
+        completed: parsed.completed,
+        merge_conflict: parsed.merge_conflict,
+        base_branch: parsed.base_branch,
+        head_branch: parsed.head_branch,
+        ci_checks: parsed.ci_checks,
+        ci_failures: parsed.ci_failures,
+        ci_has_failures: parsed.ci_has_failures,
+        ci_status_error: parsed.ci_status_error,
+        error: None,
+    }
+}
+
+fn merge_queue_error_event(
+    session_id: WorkerSessionId,
+    kind: MergeQueueCommandKind,
+    detail: &str,
+) -> MergeQueueEvent {
+    MergeQueueEvent::Completed {
+        session_id,
+        kind,
+        completed: false,
+        merge_conflict: false,
+        base_branch: None,
+        head_branch: None,
+        ci_checks: Vec::new(),
+        ci_failures: Vec::new(),
+        ci_has_failures: false,
+        ci_status_error: None,
+        error: Some(sanitize_terminal_display_text(detail)),
+    }
+}
+
+fn reconcile_state_signature(event: &MergeQueueEvent) -> String {
+    let MergeQueueEvent::Completed {
+        kind,
+        completed,
+        merge_conflict,
+        base_branch,
+        head_branch,
+        ci_checks,
+        ci_failures,
+        ci_has_failures,
+        ci_status_error,
+        error,
+        ..
+    } = event
+    else {
+        return "non-completed".to_owned();
+    };
+    if *kind != MergeQueueCommandKind::Reconcile {
+        return "non-reconcile".to_owned();
+    }
+
+    let mut check_rows = ci_checks
+        .iter()
+        .map(|check| {
+            format!(
+                "{}|{}|{}|{}|{}",
+                check.name,
+                check.workflow.as_deref().unwrap_or_default(),
+                check.bucket,
+                check.state,
+                check.link.as_deref().unwrap_or_default()
+            )
+        })
+        .collect::<Vec<_>>();
+    check_rows.sort();
+
+    let mut failures = ci_failures.clone();
+    failures.sort();
+    failures.dedup();
+
+    format!(
+        "completed={completed};merge_conflict={merge_conflict};base={};head={};ci_has_failures={ci_has_failures};ci_status_error={};error={};checks={};failures={}",
+        base_branch.as_deref().unwrap_or_default(),
+        head_branch.as_deref().unwrap_or_default(),
+        ci_status_error.as_deref().unwrap_or_default(),
+        error.as_deref().unwrap_or_default(),
+        check_rows.join("||"),
+        failures.join("||"),
+    )
 }
 
 #[derive(Debug, Default)]
@@ -1042,6 +1142,108 @@ Allow creating tickets with n.
         assert_eq!(sessions.len(), 1);
         assert_eq!(sessions[0].0, review_session_id);
         assert_eq!(sessions[0].1.scope.as_deref(), Some("session:sess-review"));
+    }
+
+    #[test]
+    fn reconcile_state_signature_is_order_insensitive_for_checks_and_failures() {
+        let event_a = MergeQueueEvent::Completed {
+            session_id: WorkerSessionId::new("sess-review"),
+            kind: MergeQueueCommandKind::Reconcile,
+            completed: false,
+            merge_conflict: false,
+            base_branch: Some("main".to_owned()),
+            head_branch: Some("feature".to_owned()),
+            ci_checks: vec![
+                CiCheckStatus {
+                    name: "build".to_owned(),
+                    workflow: Some("CI".to_owned()),
+                    bucket: "pass".to_owned(),
+                    state: "SUCCESS".to_owned(),
+                    link: Some("https://example.com/build".to_owned()),
+                },
+                CiCheckStatus {
+                    name: "tests".to_owned(),
+                    workflow: Some("CI".to_owned()),
+                    bucket: "fail".to_owned(),
+                    state: "FAILURE".to_owned(),
+                    link: Some("https://example.com/tests".to_owned()),
+                },
+            ],
+            ci_failures: vec!["CI / tests".to_owned(), "CI / tests".to_owned()],
+            ci_has_failures: true,
+            ci_status_error: None,
+            error: None,
+        };
+        let event_b = MergeQueueEvent::Completed {
+            session_id: WorkerSessionId::new("sess-review"),
+            kind: MergeQueueCommandKind::Reconcile,
+            completed: false,
+            merge_conflict: false,
+            base_branch: Some("main".to_owned()),
+            head_branch: Some("feature".to_owned()),
+            ci_checks: vec![
+                CiCheckStatus {
+                    name: "tests".to_owned(),
+                    workflow: Some("CI".to_owned()),
+                    bucket: "fail".to_owned(),
+                    state: "FAILURE".to_owned(),
+                    link: Some("https://example.com/tests".to_owned()),
+                },
+                CiCheckStatus {
+                    name: "build".to_owned(),
+                    workflow: Some("CI".to_owned()),
+                    bucket: "pass".to_owned(),
+                    state: "SUCCESS".to_owned(),
+                    link: Some("https://example.com/build".to_owned()),
+                },
+            ],
+            ci_failures: vec!["CI / tests".to_owned()],
+            ci_has_failures: true,
+            ci_status_error: None,
+            error: None,
+        };
+
+        assert_eq!(
+            reconcile_state_signature(&event_a),
+            reconcile_state_signature(&event_b)
+        );
+    }
+
+    #[test]
+    fn reconcile_state_signature_changes_when_ci_error_changes() {
+        let base_event = MergeQueueEvent::Completed {
+            session_id: WorkerSessionId::new("sess-review"),
+            kind: MergeQueueCommandKind::Reconcile,
+            completed: false,
+            merge_conflict: false,
+            base_branch: Some("main".to_owned()),
+            head_branch: Some("feature".to_owned()),
+            ci_checks: vec![],
+            ci_failures: vec![],
+            ci_has_failures: false,
+            ci_status_error: Some("dependency unavailable: GitHub CLI command failed".to_owned()),
+            error: None,
+        };
+        let changed = MergeQueueEvent::Completed {
+            session_id: WorkerSessionId::new("sess-review"),
+            kind: MergeQueueCommandKind::Reconcile,
+            completed: false,
+            merge_conflict: false,
+            base_branch: Some("main".to_owned()),
+            head_branch: Some("feature".to_owned()),
+            ci_checks: vec![],
+            ci_failures: vec![],
+            ci_has_failures: false,
+            ci_status_error: Some(
+                "dependency unavailable: GitHub CLI command failed (`gh pr checks 82`)".to_owned(),
+            ),
+            error: None,
+        };
+
+        assert_ne!(
+            reconcile_state_signature(&base_event),
+            reconcile_state_signature(&changed)
+        );
     }
 }
 
