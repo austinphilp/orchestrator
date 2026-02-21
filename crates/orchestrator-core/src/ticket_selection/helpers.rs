@@ -307,7 +307,7 @@ fn normalize_base_branch(value: &str) -> String {
 fn start_instruction(provider: &TicketProvider, ticket: &TicketSummary) -> String {
     let provider_name = ticket_provider_name(provider);
     format!(
-        "Ticket provider: {provider_name}. Begin planning for {}: {}. Stay in planning mode and do not begin implementation until an explicit workflow transition command is provided. For ticket operations, use the {provider_name} ticketing integration/skill.",
+        "Ticket provider: {provider_name}. Begin planning for {}: {}. In planning mode, write the complete detailed implementation plan to IMPLEMENTATION_PLAN.md in the worktree root. In chat, return only a concise high-level summary of the plan in 2-4 paragraphs, with no code fences or excessive formatting. Stay in planning mode and do not begin implementation until an explicit workflow transition command is provided. For ticket operations, use the {provider_name} ticketing integration/skill.",
         ticket.identifier, ticket.title
     )
 }
@@ -315,7 +315,7 @@ fn start_instruction(provider: &TicketProvider, ticket: &TicketSummary) -> Strin
 fn start_turn_instruction(provider: &TicketProvider, ticket: &TicketSummary) -> String {
     let provider_name = ticket_provider_name(provider);
     format!(
-        "Begin work on {}: {} in Planning mode only. Produce a concrete implementation plan and wait for an explicit workflow transition before starting implementation. For ticket operations, use the {provider_name} ticketing integration/skill.",
+        "Begin work on {}: {} in Planning mode only. Write the full detailed implementation plan to IMPLEMENTATION_PLAN.md in the worktree root. In your user-facing response, provide only a concise summary of the strategy and major phases in 2-4 paragraphs, with no code fences or excessive formatting. Wait for an explicit workflow transition before starting implementation. For ticket operations, use the {provider_name} ticketing integration/skill.",
         ticket.identifier, ticket.title
     )
 }
@@ -323,7 +323,7 @@ fn start_turn_instruction(provider: &TicketProvider, ticket: &TicketSummary) -> 
 fn resume_instruction(provider: &TicketProvider, ticket: &TicketSummary) -> String {
     let provider_name = ticket_provider_name(provider);
     format!(
-        "Ticket provider: {provider_name}. Resume work on {}: {} in Planning mode. Reconcile the current state, refresh the plan, and wait for an explicit workflow transition command before implementation. For ticket operations, use the {provider_name} ticketing integration/skill.",
+        "Ticket provider: {provider_name}. Resume work on {}: {} in Planning mode. Reconcile the current state, refresh the plan, and write the full detailed plan to IMPLEMENTATION_PLAN.md in the worktree root. In chat, provide only a concise 2-4 paragraph summary with no code fences or excessive formatting. Wait for an explicit workflow transition command before implementation. For ticket operations, use the {provider_name} ticketing integration/skill.",
         ticket.identifier, ticket.title
     )
 }
@@ -366,4 +366,3 @@ fn next_event_id(prefix: &str) -> String {
     let count = EVENT_ID_COUNTER.fetch_add(1, Ordering::Relaxed);
     format!("evt-{prefix}-{now}-{count}")
 }
-

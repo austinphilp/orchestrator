@@ -619,6 +619,15 @@ mod tests {
     }
 
     #[test]
+    fn new_to_planning_instruction_requires_plan_file_and_summary_only() {
+        assert!(NEW_TO_PLANNING_TRANSITION_INSTRUCTION.contains("IMPLEMENTATION_PLAN.md"));
+        assert!(NEW_TO_PLANNING_TRANSITION_INSTRUCTION.contains("concise 2-4 paragraph summary"));
+        assert!(
+            NEW_TO_PLANNING_TRANSITION_INSTRUCTION.contains("no code fences or excessive formatting")
+        );
+    }
+
+    #[test]
     fn config_parses_from_toml_file() {
         let home = unique_temp_dir("parse");
         let config_path = home.join("config.toml");
