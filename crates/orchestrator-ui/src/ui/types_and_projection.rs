@@ -52,7 +52,7 @@ const TERMINAL_STREAM_EVENT_CHANNEL_CAPACITY: usize = 128;
 const TICKET_PICKER_PRIORITY_STATES_DEFAULT: &[&str] =
     &["In Progress", "Final Approval", "Todo", "Backlog"];
 const DEFAULT_UI_THEME: &str = "nord";
-const DEFAULT_SUPERVISOR_MODEL: &str = "openai/gpt-4o-mini";
+const DEFAULT_SUPERVISOR_MODEL: &str = "c/claude-haiku-4.5";
 const DEFAULT_BACKGROUND_SESSION_REFRESH_SECS: u64 = 15;
 const DEFAULT_TRANSCRIPT_LINE_LIMIT: usize = 100;
 const MIN_BACKGROUND_SESSION_REFRESH_SECS: u64 = 2;
@@ -685,6 +685,31 @@ fn session_display_labels(domain: &ProjectionState, session_id: &WorkerSessionId
     SessionDisplayLabels {
         full_label,
         compact_label,
+    }
+}
+
+fn session_info_sidebar_title(domain: &ProjectionState, session_id: &WorkerSessionId) -> String {
+    let Some(work_item_id) = domain
+        .sessions
+        .get(session_id)
+        .and_then(|session| session.work_item_id.as_ref())
+    else {
+        return "session info".to_owned();
+    };
+    let Some(work_item) = domain.work_items.get(work_item_id) else {
+        return "session info".to_owned();
+    };
+    let Some(ticket_id) = work_item.ticket_id.as_ref() else {
+        return "session info".to_owned();
+    };
+    let Some(metadata) = latest_ticket_metadata(domain, ticket_id) else {
+        return "session info".to_owned();
+    };
+    let title = metadata.title.trim();
+    if title.is_empty() {
+        "session info".to_owned()
+    } else {
+        compact_focus_card_text(title)
     }
 }
 
