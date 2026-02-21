@@ -3075,6 +3075,199 @@ mod tests {
     }
 
     #[test]
+    fn planning_needs_input_auto_advance_moves_next_question_to_normal_mode() {
+        let backend = Arc::new(ManualTerminalBackend::default());
+        let mut projection = sample_projection(true);
+        projection
+            .work_items
+            .get_mut(&WorkItemId::new("wi-1"))
+            .expect("work item")
+            .workflow_state = Some(WorkflowState::Planning);
+        let mut shell_state = UiShellState::new_with_integrations(
+            "ready".to_owned(),
+            projection,
+            None,
+            None,
+            None,
+            Some(backend),
+        );
+        shell_state.open_terminal_and_enter_mode();
+
+        let sender = shell_state
+            .terminal_session_sender
+            .clone()
+            .expect("terminal sender");
+        sender
+            .try_send(TerminalSessionEvent::NeedsInput {
+                session_id: WorkerSessionId::new("sess-1"),
+                needs_input: BackendNeedsInputEvent {
+                    prompt_id: "prompt-planning-auto-advance".to_owned(),
+                    question: "choose options".to_owned(),
+                    options: vec![],
+                    default_option: None,
+                    questions: vec![
+                        BackendNeedsInputQuestion {
+                            id: "q1".to_owned(),
+                            header: "Runtime".to_owned(),
+                            question: "Pick runtime".to_owned(),
+                            is_other: false,
+                            is_secret: false,
+                            options: Some(vec![
+                                BackendNeedsInputOption {
+                                    label: "Codex".to_owned(),
+                                    description: String::new(),
+                                },
+                                BackendNeedsInputOption {
+                                    label: "OpenCode".to_owned(),
+                                    description: String::new(),
+                                },
+                            ]),
+                        },
+                        BackendNeedsInputQuestion {
+                            id: "q2".to_owned(),
+                            header: "Mode".to_owned(),
+                            question: "Pick mode".to_owned(),
+                            is_other: false,
+                            is_secret: false,
+                            options: Some(vec![
+                                BackendNeedsInputOption {
+                                    label: "Planning".to_owned(),
+                                    description: String::new(),
+                                },
+                                BackendNeedsInputOption {
+                                    label: "Implementation".to_owned(),
+                                    description: String::new(),
+                                },
+                            ]),
+                        },
+                    ],
+                },
+            })
+            .expect("queue needs-input event");
+        shell_state.poll_terminal_session_events();
+
+        handle_key_press(&mut shell_state, key(KeyCode::Char('i')));
+        handle_key_press(&mut shell_state, key(KeyCode::Char('n')));
+        handle_key_press(&mut shell_state, key(KeyCode::Enter));
+
+        let prompt = shell_state
+            .terminal_session_states
+            .get(&WorkerSessionId::new("sess-1"))
+            .and_then(|view| view.active_needs_input.as_ref())
+            .expect("needs-input prompt should advance to next question");
+        assert_eq!(prompt.current_question_index, 1);
+        assert_eq!(prompt.answer_drafts[0].note.as_str(), "n");
+        assert!(!prompt.note_insert_mode);
+        assert_eq!(prompt.note_editor_state.mode, EditorMode::Normal);
+        assert!(prompt.select_state.focused);
+        assert_eq!(editor_state_text(&prompt.note_editor_state), "");
+
+        handle_key_press(&mut shell_state, key(KeyCode::Char('j')));
+        let prompt = shell_state
+            .terminal_session_states
+            .get(&WorkerSessionId::new("sess-1"))
+            .and_then(|view| view.active_needs_input.as_ref())
+            .expect("prompt should remain active");
+        assert_eq!(prompt.select_state.highlighted_index, 1);
+        assert_eq!(editor_state_text(&prompt.note_editor_state), "");
+    }
+
+    #[test]
+    fn implementing_needs_input_auto_advance_keeps_insert_mode() {
+        let backend = Arc::new(ManualTerminalBackend::default());
+        let mut projection = sample_projection(true);
+        projection
+            .work_items
+            .get_mut(&WorkItemId::new("wi-1"))
+            .expect("work item")
+            .workflow_state = Some(WorkflowState::Implementing);
+        let mut shell_state = UiShellState::new_with_integrations(
+            "ready".to_owned(),
+            projection,
+            None,
+            None,
+            None,
+            Some(backend),
+        );
+        shell_state.open_terminal_and_enter_mode();
+
+        let sender = shell_state
+            .terminal_session_sender
+            .clone()
+            .expect("terminal sender");
+        sender
+            .try_send(TerminalSessionEvent::NeedsInput {
+                session_id: WorkerSessionId::new("sess-1"),
+                needs_input: BackendNeedsInputEvent {
+                    prompt_id: "prompt-implementing-auto-advance".to_owned(),
+                    question: "choose options".to_owned(),
+                    options: vec![],
+                    default_option: None,
+                    questions: vec![
+                        BackendNeedsInputQuestion {
+                            id: "q1".to_owned(),
+                            header: "Runtime".to_owned(),
+                            question: "Pick runtime".to_owned(),
+                            is_other: false,
+                            is_secret: false,
+                            options: Some(vec![
+                                BackendNeedsInputOption {
+                                    label: "Codex".to_owned(),
+                                    description: String::new(),
+                                },
+                                BackendNeedsInputOption {
+                                    label: "OpenCode".to_owned(),
+                                    description: String::new(),
+                                },
+                            ]),
+                        },
+                        BackendNeedsInputQuestion {
+                            id: "q2".to_owned(),
+                            header: "Mode".to_owned(),
+                            question: "Pick mode".to_owned(),
+                            is_other: false,
+                            is_secret: false,
+                            options: Some(vec![
+                                BackendNeedsInputOption {
+                                    label: "Planning".to_owned(),
+                                    description: String::new(),
+                                },
+                                BackendNeedsInputOption {
+                                    label: "Implementation".to_owned(),
+                                    description: String::new(),
+                                },
+                            ]),
+                        },
+                    ],
+                },
+            })
+            .expect("queue needs-input event");
+        shell_state.poll_terminal_session_events();
+
+        handle_key_press(&mut shell_state, key(KeyCode::Char('i')));
+        handle_key_press(&mut shell_state, key(KeyCode::Char('n')));
+        handle_key_press(&mut shell_state, key(KeyCode::Enter));
+
+        let prompt = shell_state
+            .terminal_session_states
+            .get(&WorkerSessionId::new("sess-1"))
+            .and_then(|view| view.active_needs_input.as_ref())
+            .expect("needs-input prompt should advance to next question");
+        assert_eq!(prompt.current_question_index, 1);
+        assert!(prompt.note_insert_mode);
+        assert_eq!(prompt.note_editor_state.mode, EditorMode::Insert);
+
+        handle_key_press(&mut shell_state, key(KeyCode::Char('j')));
+        let prompt = shell_state
+            .terminal_session_states
+            .get(&WorkerSessionId::new("sess-1"))
+            .and_then(|view| view.active_needs_input.as_ref())
+            .expect("prompt should remain active");
+        assert_eq!(editor_state_text(&prompt.note_editor_state), "j");
+        assert_eq!(prompt.select_state.highlighted_index, 0);
+    }
+
+    #[test]
     fn inline_needs_input_uses_tab_for_pane_focus_and_hl_for_question_navigation() {
         let backend = Arc::new(ManualTerminalBackend::default());
         let mut shell_state = UiShellState::new_with_integrations(
