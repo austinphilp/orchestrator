@@ -3160,7 +3160,6 @@ mod tests {
 
         assert!(shell_state.tick_autopilot_and_report());
         tokio::task::yield_now().await;
-
         let advanced = provider.advanced_sessions();
         let archived = provider.archived_sessions();
         assert!(advanced.is_empty());
