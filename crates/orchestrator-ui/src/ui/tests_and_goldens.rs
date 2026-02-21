@@ -3315,11 +3315,9 @@ mod tests {
                 1,
                 Some(WorkItemId::new("wi-1")),
                 Some(session_id.clone()),
-                OrchestrationEventPayload::WorkflowTransition(WorkflowTransitionPayload {
-                    work_item_id: WorkItemId::new("wi-1"),
-                    from: WorkflowState::Implementing,
-                    to: WorkflowState::Planning,
-                    reason: Some(WorkflowTransitionReason::Cancelled),
+                OrchestrationEventPayload::SessionCompleted(SessionCompletedPayload {
+                    session_id: session_id.clone(),
+                    summary: Some("archived".to_owned()),
                 }),
             ),
         });
