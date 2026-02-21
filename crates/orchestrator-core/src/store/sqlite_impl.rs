@@ -416,6 +416,38 @@ impl SqliteEventStore {
         Ok(working != 0)
     }
 
+    pub fn list_session_working_states(
+        &self,
+    ) -> Result<std::collections::HashMap<WorkerSessionId, bool>, CoreError> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "
+                SELECT s.session_id, COALESCE(f.is_working, 0)
+                FROM sessions s
+                LEFT JOIN session_runtime_flags f
+                    ON f.session_id = s.session_id
+                ",
+            )
+            .map_err(|err| CoreError::Persistence(err.to_string()))?;
+
+        let rows = stmt
+            .query_map([], |row| {
+                let session_id = WorkerSessionId::new(row.get::<_, String>(0)?);
+                let is_working = row.get::<_, i64>(1)? != 0;
+                Ok((session_id, is_working))
+            })
+            .map_err(|err| CoreError::Persistence(err.to_string()))?;
+
+        let mut states = std::collections::HashMap::new();
+        for row in rows {
+            let (session_id, is_working) =
+                row.map_err(|err| CoreError::Persistence(err.to_string()))?;
+            states.insert(session_id, is_working);
+        }
+        Ok(states)
+    }
+
     pub fn upsert_harness_session_binding(
         &self,
         session_id: &WorkerSessionId,

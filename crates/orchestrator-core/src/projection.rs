@@ -30,6 +30,11 @@ pub struct SessionProjection {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionRuntimeProjection {
+    pub is_working: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InboxItemProjection {
     pub id: InboxItemId,
     pub work_item_id: WorkItemId,
@@ -52,6 +57,7 @@ pub struct ProjectionState {
     pub orchestrator_status: Option<String>,
     pub work_items: HashMap<WorkItemId, WorkItemProjection>,
     pub sessions: HashMap<WorkerSessionId, SessionProjection>,
+    pub session_runtime: HashMap<WorkerSessionId, SessionRuntimeProjection>,
     pub inbox_items: HashMap<InboxItemId, InboxItemProjection>,
     pub artifacts: HashMap<ArtifactId, ArtifactProjection>,
     pub events: Vec<StoredEventEnvelope>,

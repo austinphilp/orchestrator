@@ -126,6 +126,7 @@ The repository is a Rust workspace with a layered design:
   - Inbox lane routing rules:
     - Plan-input prompts in `New`/`Planning` route to `NeedsDecision`.
     - Non-planning prompts that require user progression route to `NeedsApproval`.
+    - Idle `Planning`/`Implementing` sessions that are not actively working and are not waiting for plan input route to `NeedsApproval`.
     - Idle review-stage tickets (`AwaitingYourReview`/`ReadyForReview`/`InReview`) route to `ReadyForReview` (PR lane).
   - Terminal/session feed output scrolling is bounded by rendered wrapped line counts so manual scroll and follow-tail behavior stay in sync.
 - Keymap trie/which-key logic:

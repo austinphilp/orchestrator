@@ -64,7 +64,7 @@ pub use orchestrator_runtime::{
 };
 pub use projection::{
     apply_event, rebuild_projection, retrieve_events, ArtifactProjection, InboxItemProjection,
-    ProjectionState, SessionProjection, WorkItemProjection,
+    ProjectionState, SessionProjection, SessionRuntimeProjection, WorkItemProjection,
 };
 pub use status::{ArtifactKind, InboxItemKind, WorkerSessionStatus, WorkflowState};
 pub use store::{

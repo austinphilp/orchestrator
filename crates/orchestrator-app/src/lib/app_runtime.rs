@@ -95,7 +95,14 @@ impl<S: Supervisor, G: GithubClient> App<S, G> {
     pub fn projection_state(&self) -> Result<ProjectionState, CoreError> {
         let store = open_event_store(&self.config.event_store_path)?;
         let events = store.read_ordered()?;
-        Ok(rebuild_projection(&events))
+        let mut projection = rebuild_projection(&events);
+        let session_working_states = store.list_session_working_states()?;
+        for (session_id, is_working) in session_working_states {
+            projection
+                .session_runtime
+                .insert(session_id, SessionRuntimeProjection { is_working });
+        }
+        Ok(projection)
     }
 
     pub fn publish_inbox_item(

@@ -806,3 +806,87 @@ fn session_working_state_round_trips_and_defaults_to_false() {
             .expect("unknown session defaults to false")
     );
 }
+
+#[test]
+fn list_session_working_states_reports_defaults_and_updates() {
+    let db = unique_db("session-working-state-list");
+
+    let mut writer = SqliteEventStore::open(db.path()).expect("open store");
+    let mapping_a = RuntimeMappingRecord {
+        ticket: TicketRecord {
+            ticket_id: TicketId::from_provider_uuid(TicketProvider::Linear, "1001"),
+            provider: TicketProvider::Linear,
+            provider_ticket_id: "1001".to_owned(),
+            identifier: "AP-1001".to_owned(),
+            title: "Working-state A".to_owned(),
+            state: "in_progress".to_owned(),
+            updated_at: "2026-02-20T08:00:00Z".to_owned(),
+        },
+        work_item_id: WorkItemId::new("wi-working-list-1"),
+        worktree: WorktreeRecord {
+            worktree_id: WorktreeId::new("wt-working-list-1"),
+            work_item_id: WorkItemId::new("wi-working-list-1"),
+            path: "/tmp/orchestrator/wt-working-list-1".to_owned(),
+            branch: "ap/AP-1001".to_owned(),
+            base_branch: "main".to_owned(),
+            created_at: "2026-02-20T08:00:10Z".to_owned(),
+        },
+        session: SessionRecord {
+            session_id: WorkerSessionId::new("sess-working-list-1"),
+            work_item_id: WorkItemId::new("wi-working-list-1"),
+            backend_kind: BackendKind::OpenCode,
+            workdir: "/tmp/orchestrator/wt-working-list-1".to_owned(),
+            model: None,
+            status: WorkerSessionStatus::Running,
+            created_at: "2026-02-20T08:00:20Z".to_owned(),
+            updated_at: "2026-02-20T08:00:30Z".to_owned(),
+        },
+    };
+    let mapping_b = RuntimeMappingRecord {
+        ticket: TicketRecord {
+            ticket_id: TicketId::from_provider_uuid(TicketProvider::Linear, "1002"),
+            provider: TicketProvider::Linear,
+            provider_ticket_id: "1002".to_owned(),
+            identifier: "AP-1002".to_owned(),
+            title: "Working-state B".to_owned(),
+            state: "in_progress".to_owned(),
+            updated_at: "2026-02-20T08:01:00Z".to_owned(),
+        },
+        work_item_id: WorkItemId::new("wi-working-list-2"),
+        worktree: WorktreeRecord {
+            worktree_id: WorktreeId::new("wt-working-list-2"),
+            work_item_id: WorkItemId::new("wi-working-list-2"),
+            path: "/tmp/orchestrator/wt-working-list-2".to_owned(),
+            branch: "ap/AP-1002".to_owned(),
+            base_branch: "main".to_owned(),
+            created_at: "2026-02-20T08:01:10Z".to_owned(),
+        },
+        session: SessionRecord {
+            session_id: WorkerSessionId::new("sess-working-list-2"),
+            work_item_id: WorkItemId::new("wi-working-list-2"),
+            backend_kind: BackendKind::OpenCode,
+            workdir: "/tmp/orchestrator/wt-working-list-2".to_owned(),
+            model: None,
+            status: WorkerSessionStatus::Running,
+            created_at: "2026-02-20T08:01:20Z".to_owned(),
+            updated_at: "2026-02-20T08:01:30Z".to_owned(),
+        },
+    };
+    writer
+        .upsert_runtime_mapping(&mapping_a)
+        .expect("insert runtime mapping a");
+    writer
+        .upsert_runtime_mapping(&mapping_b)
+        .expect("insert runtime mapping b");
+    writer
+        .set_session_working_state(&mapping_a.session.session_id, true)
+        .expect("set working state true");
+    drop(writer);
+
+    let reopened = SqliteEventStore::open(db.path()).expect("reopen store");
+    let states = reopened
+        .list_session_working_states()
+        .expect("list working states");
+    assert_eq!(states.get(&mapping_a.session.session_id), Some(&true));
+    assert_eq!(states.get(&mapping_b.session.session_id), Some(&false));
+}

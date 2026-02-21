@@ -10,9 +10,9 @@ mod tests {
         ArtifactId, ArtifactKind, ArtifactProjection, CoreError, InboxItemProjection,
         LlmProviderKind, LlmResponseStream, LlmResponseSubscription, LlmStreamChunk,
         OrchestrationEventPayload, OrchestrationEventType, SessionBlockedPayload,
-        SessionCheckpointPayload, SessionNeedsInputPayload, SessionProjection, StoredEventEnvelope,
-        SupervisorQueryFinishedPayload, TicketProvider, UserRespondedPayload, WorkItemProjection,
-        WorkflowState,
+        SessionCheckpointPayload, SessionNeedsInputPayload, SessionProjection,
+        SessionRuntimeProjection, StoredEventEnvelope, SupervisorQueryFinishedPayload,
+        TicketProvider, UserRespondedPayload, WorkItemProjection, WorkflowState,
     };
     use orchestrator_runtime::{
         BackendCapabilities, BackendEvent, BackendKind, BackendNeedsInputEvent,
@@ -2025,6 +2025,67 @@ mod tests {
                 "Review input request"
             ))
         );
+    }
+
+    #[test]
+    fn progression_approval_required_for_idle_planning_session_without_plan_input() {
+        let mut projection = sample_projection(true);
+        let work_item_id = WorkItemId::new("wi-1");
+        let session_id = WorkerSessionId::new("sess-1");
+        projection
+            .work_items
+            .get_mut(&work_item_id)
+            .expect("work item")
+            .workflow_state = Some(WorkflowState::Planning);
+        projection
+            .sessions
+            .get_mut(&session_id)
+            .expect("session")
+            .status = Some(WorkerSessionStatus::Running);
+        projection.session_runtime.insert(
+            session_id.clone(),
+            SessionRuntimeProjection { is_working: false },
+        );
+
+        let shell_state = UiShellState::new("ready".to_owned(), projection);
+        assert!(shell_state.session_requires_progression_approval(&session_id));
+    }
+
+    #[test]
+    fn progression_approval_not_required_when_planning_is_waiting_for_input() {
+        let mut projection = sample_projection(true);
+        let work_item_id = WorkItemId::new("wi-1");
+        let session_id = WorkerSessionId::new("sess-1");
+        projection
+            .work_items
+            .get_mut(&work_item_id)
+            .expect("work item")
+            .workflow_state = Some(WorkflowState::Planning);
+        projection
+            .sessions
+            .get_mut(&session_id)
+            .expect("session")
+            .status = Some(WorkerSessionStatus::WaitingForUser);
+        projection.session_runtime.insert(
+            session_id.clone(),
+            SessionRuntimeProjection { is_working: false },
+        );
+
+        let shell_state = UiShellState::new("ready".to_owned(), projection);
+        assert!(!shell_state.session_requires_progression_approval(&session_id));
+    }
+
+    #[test]
+    fn progression_approval_not_required_when_implementing_session_is_actively_working() {
+        let mut projection = sample_projection(true);
+        let session_id = WorkerSessionId::new("sess-1");
+        projection.session_runtime.insert(
+            session_id.clone(),
+            SessionRuntimeProjection { is_working: true },
+        );
+
+        let shell_state = UiShellState::new("ready".to_owned(), projection);
+        assert!(!shell_state.session_requires_progression_approval(&session_id));
     }
 
     #[test]
