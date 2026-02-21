@@ -35,9 +35,9 @@ fn resolve_runtime_mapping_for_context_with_command(
     command_id: &str,
 ) -> Result<RuntimeMappingRecord, CoreError> {
     if let Some(session_id) = context.selected_session_id.as_deref() {
-        if let Some(mapping) = store.find_runtime_mapping_by_session_id(&WorkerSessionId::new(
-            session_id.to_owned(),
-        ))? {
+        if let Some(mapping) = store
+            .find_runtime_mapping_by_session_id(&WorkerSessionId::new(session_id.to_owned()))?
+        {
             return Ok(mapping);
         }
 
@@ -47,9 +47,9 @@ fn resolve_runtime_mapping_for_context_with_command(
     }
 
     if let Some(work_item_id) = context.selected_work_item_id.as_deref() {
-        if let Some(mapping) = store.find_runtime_mapping_by_work_item_id(&WorkItemId::new(
-            work_item_id.to_owned(),
-        ))? {
+        if let Some(mapping) =
+            store.find_runtime_mapping_by_work_item_id(&WorkItemId::new(work_item_id.to_owned()))?
+        {
             return Ok(mapping);
         }
 
@@ -397,6 +397,10 @@ where
                 "merge_conflict": false,
                 "base_branch": serde_json::Value::Null,
                 "head_branch": serde_json::Value::Null,
+                "pr_state": serde_json::Value::Null,
+                "pr_is_draft": false,
+                "review_decision": serde_json::Value::Null,
+                "review_summary": serde_json::Value::Null,
                 "ci_statuses": [],
                 "ci_failures": [],
                 "ci_has_failures": false,
@@ -452,6 +456,10 @@ where
             "merge_conflict": merge_state.merge_conflict,
             "base_branch": merge_state.base_branch,
             "head_branch": merge_state.head_branch,
+            "pr_state": merge_state.state,
+            "pr_is_draft": merge_state.is_draft,
+            "review_decision": merge_state.review_decision,
+            "review_summary": merge_state.review_summary,
             "ci_statuses": ci_statuses,
             "ci_failures": ci_failures.clone(),
             "ci_has_failures": !ci_failures.is_empty(),
@@ -504,6 +512,10 @@ where
         "merge_conflict": merge_state.merge_conflict,
         "base_branch": merge_state.base_branch,
         "head_branch": merge_state.head_branch,
+        "pr_state": merge_state.state,
+        "pr_is_draft": merge_state.is_draft,
+        "review_decision": merge_state.review_decision,
+        "review_summary": merge_state.review_summary,
         "ci_statuses": ci_statuses,
         "ci_failures": ci_failures.clone(),
         "ci_has_failures": !ci_failures.is_empty(),

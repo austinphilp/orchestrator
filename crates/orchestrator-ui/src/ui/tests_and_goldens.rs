@@ -17,8 +17,8 @@ mod tests {
     use orchestrator_runtime::{
         BackendCapabilities, BackendEvent, BackendKind, BackendNeedsInputEvent,
         BackendNeedsInputOption, BackendNeedsInputQuestion, BackendOutputEvent,
-        BackendOutputStream, BackendTurnStateEvent, RuntimeResult, RuntimeSessionId,
-        SessionHandle, SessionLifecycle, WorkerEventStream,
+        BackendOutputStream, BackendTurnStateEvent, RuntimeResult, RuntimeSessionId, SessionHandle,
+        SessionLifecycle, WorkerEventStream,
     };
     use std::collections::VecDeque;
     use std::sync::{Arc, Mutex};
@@ -801,14 +801,16 @@ mod tests {
             work_item_id: Some(work_item_id.clone()),
             session_id: None,
             event_type: OrchestrationEventType::TicketSynced,
-            payload: OrchestrationEventPayload::TicketSynced(orchestrator_core::TicketSyncedPayload {
-                ticket_id: ticket_id.clone(),
-                identifier: "AP-244".to_owned(),
-                title: "Add right sidebar".to_owned(),
-                state: "In Progress".to_owned(),
-                assignee: None,
-                priority: None,
-            }),
+            payload: OrchestrationEventPayload::TicketSynced(
+                orchestrator_core::TicketSyncedPayload {
+                    ticket_id: ticket_id.clone(),
+                    identifier: "AP-244".to_owned(),
+                    title: "Add right sidebar".to_owned(),
+                    state: "In Progress".to_owned(),
+                    assignee: None,
+                    priority: None,
+                },
+            ),
             schema_version: 1,
         });
         projection.events.push(StoredEventEnvelope {
@@ -1208,7 +1210,8 @@ mod tests {
         let mut projection = ProjectionState::default();
         let work_item_id = WorkItemId::new("wi-repo-fallback");
         let session_id = WorkerSessionId::new("sess-repo-fallback");
-        let ticket_id = TicketId::from_provider_uuid(TicketProvider::Linear, "ticket-repo-fallback");
+        let ticket_id =
+            TicketId::from_provider_uuid(TicketProvider::Linear, "ticket-repo-fallback");
 
         projection.work_items.insert(
             work_item_id.clone(),
@@ -1275,11 +1278,11 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].session_id, session_id);
         assert_eq!(rows[0].project, "orchestrator");
+        assert_eq!(rows[0].ticket_label, "Repository label fallback".to_owned());
         assert_eq!(
-            rows[0].ticket_label,
-            "Repository label fallback".to_owned()
+            rows[0].group,
+            SessionStateGroup::Other("waiting".to_owned())
         );
-        assert_eq!(rows[0].group, SessionStateGroup::Other("waiting".to_owned()));
         assert_eq!(rows[0].badge, "waiting".to_owned());
     }
 
@@ -1317,7 +1320,10 @@ mod tests {
         assert_eq!(rows[0].session_id, session_id);
         assert_eq!(rows[0].project, "Orchestrator");
         assert_eq!(rows[0].ticket_label, "session sess-no-ticket");
-        assert_eq!(rows[0].group, SessionStateGroup::Other("waiting".to_owned()));
+        assert_eq!(
+            rows[0].group,
+            SessionStateGroup::Other("waiting".to_owned())
+        );
         assert_eq!(rows[0].badge, "waiting".to_owned());
     }
 
@@ -1527,14 +1533,16 @@ mod tests {
             work_item_id: Some(work_item_id),
             session_id: None,
             event_type: OrchestrationEventType::TicketSynced,
-            payload: OrchestrationEventPayload::TicketSynced(orchestrator_core::TicketSyncedPayload {
-                ticket_id,
-                identifier: "AP-405".to_owned(),
-                title: "Implementation only".to_owned(),
-                state: "In Progress".to_owned(),
-                assignee: None,
-                priority: None,
-            }),
+            payload: OrchestrationEventPayload::TicketSynced(
+                orchestrator_core::TicketSyncedPayload {
+                    ticket_id,
+                    identifier: "AP-405".to_owned(),
+                    title: "Implementation only".to_owned(),
+                    state: "In Progress".to_owned(),
+                    assignee: None,
+                    priority: None,
+                },
+            ),
             schema_version: 1,
         });
 
@@ -1581,14 +1589,16 @@ mod tests {
             work_item_id: Some(work_item_id),
             session_id: None,
             event_type: OrchestrationEventType::TicketSynced,
-            payload: OrchestrationEventPayload::TicketSynced(orchestrator_core::TicketSyncedPayload {
-                ticket_id,
-                identifier: "AP-406".to_owned(),
-                title: "Active implementing session".to_owned(),
-                state: "In Progress".to_owned(),
-                assignee: None,
-                priority: None,
-            }),
+            payload: OrchestrationEventPayload::TicketSynced(
+                orchestrator_core::TicketSyncedPayload {
+                    ticket_id,
+                    identifier: "AP-406".to_owned(),
+                    title: "Active implementing session".to_owned(),
+                    state: "In Progress".to_owned(),
+                    assignee: None,
+                    priority: None,
+                },
+            ),
             schema_version: 1,
         });
 
@@ -1602,11 +1612,9 @@ mod tests {
             .lines()
             .find(|line| line.contains("Active implementing session"))
             .expect("active session row");
-        assert!(
-            ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
-                .iter()
-                .any(|frame| active_line.contains(frame))
-        );
+        assert!(["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
+            .iter()
+            .any(|frame| active_line.contains(frame)));
         assert!(active_line.contains("[active]"));
         assert!(!active_line.contains("[implementation]"));
     }
@@ -1647,14 +1655,16 @@ mod tests {
             work_item_id: Some(work_item_id),
             session_id: None,
             event_type: OrchestrationEventType::TicketSynced,
-            payload: OrchestrationEventPayload::TicketSynced(orchestrator_core::TicketSyncedPayload {
-                ticket_id,
-                identifier: "AP-407".to_owned(),
-                title: "Running session without active turn".to_owned(),
-                state: "In Progress".to_owned(),
-                assignee: None,
-                priority: None,
-            }),
+            payload: OrchestrationEventPayload::TicketSynced(
+                orchestrator_core::TicketSyncedPayload {
+                    ticket_id,
+                    identifier: "AP-407".to_owned(),
+                    title: "Running session without active turn".to_owned(),
+                    state: "In Progress".to_owned(),
+                    assignee: None,
+                    priority: None,
+                },
+            ),
             schema_version: 1,
         });
 
@@ -1786,7 +1796,10 @@ mod tests {
 
         let mut shell_state = UiShellState::new("ready".to_owned(), projection);
         assert!(shell_state.move_to_first_session());
-        assert_eq!(shell_state.selected_session_id_for_panel(), Some(session_a.clone()));
+        assert_eq!(
+            shell_state.selected_session_id_for_panel(),
+            Some(session_a.clone())
+        );
         assert_eq!(
             shell_state.session_ids_for_navigation(),
             vec![session_a.clone(), session_b.clone()]
@@ -1987,7 +2000,10 @@ mod tests {
             Some(CenterView::TerminalView { session_id }) if session_id.as_str() == "sess-1"
         ));
         assert_eq!(
-            shell_state.selected_session_id_for_panel().as_ref().map(|id| id.as_str()),
+            shell_state
+                .selected_session_id_for_panel()
+                .as_ref()
+                .map(|id| id.as_str()),
             Some("sess-1")
         );
         tokio::task::yield_now().await;
@@ -2093,14 +2109,12 @@ mod tests {
 
         let _ = route_needs_input_modal_key(&mut shell_state, key(KeyCode::Enter));
 
-        assert!(
-            shell_state
-                .domain
-                .inbox_items
-                .get(&InboxItemId::new("inbox-1"))
-                .map(|item| item.resolved)
-                .unwrap_or(false)
-        );
+        assert!(shell_state
+            .domain
+            .inbox_items
+            .get(&InboxItemId::new("inbox-1"))
+            .map(|item| item.resolved)
+            .unwrap_or(false));
     }
 
     #[test]
@@ -3188,8 +3202,14 @@ mod tests {
                 latest_checkpoint: None,
             },
         );
-        let mut shell_state =
-            UiShellState::new_with_integrations("ready".to_owned(), projection, None, None, None, Some(backend));
+        let mut shell_state = UiShellState::new_with_integrations(
+            "ready".to_owned(),
+            projection,
+            None,
+            None,
+            None,
+            Some(backend),
+        );
         shell_state.open_terminal_and_enter_mode();
         assert!(matches!(
             shell_state.view_stack.active_center(),
@@ -3283,11 +3303,16 @@ mod tests {
             .get(&WorkerSessionId::new("sess-2"))
             .expect("offscreen state should exist");
         assert!(offscreen_before_focus.entries.is_empty());
-        assert_eq!(offscreen_before_focus.deferred_output, b"background line\n".to_vec());
+        assert_eq!(
+            offscreen_before_focus.deferred_output,
+            b"background line\n".to_vec()
+        );
 
-        shell_state.view_stack.replace_center(CenterView::TerminalView {
-            session_id: WorkerSessionId::new("sess-2"),
-        });
+        shell_state
+            .view_stack
+            .replace_center(CenterView::TerminalView {
+                session_id: WorkerSessionId::new("sess-2"),
+            });
         shell_state.tick_terminal_view_and_report();
 
         let offscreen_after_focus = shell_state
@@ -3299,9 +3324,7 @@ mod tests {
             .into_iter()
             .map(|line| line.text)
             .collect::<Vec<_>>();
-        assert!(rendered
-            .iter()
-            .any(|line| line.contains("background line")));
+        assert!(rendered.iter().any(|line| line.contains("background line")));
     }
 
     #[test]
@@ -3372,7 +3395,9 @@ mod tests {
             .into_iter()
             .map(|line| line.text)
             .collect::<Vec<_>>();
-        assert!(rendered.iter().any(|line| line.contains("deferred payload")));
+        assert!(rendered
+            .iter()
+            .any(|line| line.contains("deferred payload")));
     }
 
     #[test]
@@ -3557,8 +3582,7 @@ mod tests {
             &projection,
             &session_id,
             Some(&SessionInfoDiffCache {
-                content:
-                    "diff --git a/src/a.rs b/src/a.rs\n@@ -1 +1,2 @@\n+line\n".to_owned(),
+                content: "diff --git a/src/a.rs b/src/a.rs\n@@ -1 +1,2 @@\n+line\n".to_owned(),
                 loading: false,
                 error: None,
             }),
@@ -3587,15 +3611,32 @@ mod tests {
                 ],
                 error: None,
             }),
+            Some(&SessionPrMetadataCache {
+                state: Some("OPEN".to_owned()),
+                is_draft: false,
+                review_decision: Some("APPROVED".to_owned()),
+                review_summary: Some(SessionPrReviewSummary {
+                    total: 3,
+                    approved: 2,
+                    changes_requested: 0,
+                    commented: 1,
+                    pending: 0,
+                    dismissed: 0,
+                }),
+            }),
         );
 
-        assert!(rendered.contains("PR:"));
+        assert!(rendered.contains("PR status:"));
+        assert!(rendered.contains("Status: OPEN"));
+        assert!(rendered.contains("Decision: APPROVED"));
+        assert!(rendered.contains("Reviews: 3 (2 approved, 0 changes, 1 commented)"));
+        assert!(rendered.contains("Checks:"));
+        assert!(rendered.contains("Summary: PASS 1 | FAIL 0 | PENDING 1 | SKIP 0 | UNKNOWN 0"));
+        assert!(rendered.contains("[PASS] Build / build"));
         assert!(rendered.contains("File changes:"));
         assert!(rendered.contains("Ticket:"));
         assert!(rendered.contains("AP-244"));
         assert!(rendered.contains("Open inbox:"));
-        assert!(rendered.contains("CI status:"));
-        assert!(rendered.contains("[PASS] Build / build"));
         assert!(rendered.contains("Summary:"));
     }
 
@@ -3760,6 +3801,10 @@ mod tests {
                 merge_conflict: false,
                 base_branch: None,
                 head_branch: None,
+                pr_state: None,
+                pr_is_draft: false,
+                review_decision: None,
+                review_summary: None,
                 ci_checks: Vec::new(),
                 ci_failures: Vec::new(),
                 ci_has_failures: false,
@@ -3809,6 +3854,17 @@ mod tests {
                 merge_conflict: false,
                 base_branch: Some("main".to_owned()),
                 head_branch: Some("ap/AP-900-ci-fix".to_owned()),
+                pr_state: Some("OPEN".to_owned()),
+                pr_is_draft: false,
+                review_decision: Some("REVIEW_REQUIRED".to_owned()),
+                review_summary: Some(SessionPrReviewSummary {
+                    total: 1,
+                    approved: 0,
+                    changes_requested: 0,
+                    commented: 0,
+                    pending: 1,
+                    dismissed: 0,
+                }),
                 ci_checks: vec![
                     CiCheckStatus {
                         name: "build".to_owned(),
@@ -4298,7 +4354,10 @@ mod tests {
         }
         handle_key_press(&mut shell_state, key(KeyCode::Enter));
 
-        assert_eq!(shell_state.global_supervisor_chat_input.text(), "what changed?");
+        assert_eq!(
+            shell_state.global_supervisor_chat_input.text(),
+            "what changed?"
+        );
         assert_eq!(shell_state.global_supervisor_chat_last_query, None);
         let stream = shell_state
             .supervisor_chat_stream
@@ -4792,7 +4851,10 @@ mod tests {
             .selected_session_id_for_panel()
             .expect("selected session after move");
         assert_ne!(before_session, after_session);
-        assert_eq!(shell_state.ui_state().selected_inbox_index, initial_inbox_index);
+        assert_eq!(
+            shell_state.ui_state().selected_inbox_index,
+            initial_inbox_index
+        );
     }
 
     #[test]
@@ -4806,14 +4868,12 @@ mod tests {
             Some(CenterView::TerminalView { session_id }) if session_id.as_str() == "sess-1"
         ));
         assert_eq!(shell_state.mode, UiMode::Terminal);
-        assert!(
-            shell_state
-                .domain
-                .inbox_items
-                .get(&InboxItemId::new("inbox-1"))
-                .map(|item| item.resolved)
-                .unwrap_or(false)
-        );
+        assert!(shell_state
+            .domain
+            .inbox_items
+            .get(&InboxItemId::new("inbox-1"))
+            .map(|item| item.resolved)
+            .unwrap_or(false));
     }
 
     #[test]
@@ -4825,19 +4885,18 @@ mod tests {
         assert!(!shell_state.is_terminal_view_active());
         let status = shell_state.ui_state().status;
         assert!(status.contains("selected inbox item has no active session"));
-        assert!(
-            !shell_state
-                .domain
-                .inbox_items
-                .get(&InboxItemId::new("inbox-1"))
-                .map(|item| item.resolved)
-                .unwrap_or(false)
-        );
+        assert!(!shell_state
+            .domain
+            .inbox_items
+            .get(&InboxItemId::new("inbox-1"))
+            .map(|item| item.resolved)
+            .unwrap_or(false));
     }
 
     #[test]
     fn workflow_advance_event_auto_advances_to_next_inbox_session() {
-        let mut shell_state = UiShellState::new("ready".to_owned(), workflow_auto_advance_projection());
+        let mut shell_state =
+            UiShellState::new("ready".to_owned(), workflow_auto_advance_projection());
 
         shell_state.apply_ticket_picker_event(TicketPickerEvent::SessionWorkflowAdvanced {
             outcome: SessionWorkflowAdvanceOutcome {
@@ -4866,7 +4925,8 @@ mod tests {
 
     #[test]
     fn workflow_advance_event_skips_immediate_row_without_session() {
-        let mut shell_state = UiShellState::new("ready".to_owned(), workflow_auto_advance_projection());
+        let mut shell_state =
+            UiShellState::new("ready".to_owned(), workflow_auto_advance_projection());
 
         shell_state.apply_ticket_picker_event(TicketPickerEvent::SessionWorkflowAdvanced {
             outcome: SessionWorkflowAdvanceOutcome {
@@ -4892,7 +4952,8 @@ mod tests {
 
     #[test]
     fn workflow_advance_event_on_last_inbox_item_keeps_current_selection() {
-        let mut shell_state = UiShellState::new("ready".to_owned(), workflow_last_item_projection());
+        let mut shell_state =
+            UiShellState::new("ready".to_owned(), workflow_last_item_projection());
         let rows = shell_state.ui_state().inbox_rows;
         shell_state.set_selection(Some(rows.len() - 1), &rows);
 
@@ -4918,11 +4979,16 @@ mod tests {
 
     #[test]
     fn workflow_advance_event_with_no_later_session_rows_keeps_current_selection() {
-        let mut shell_state = UiShellState::new("ready".to_owned(), workflow_auto_advance_projection());
+        let mut shell_state =
+            UiShellState::new("ready".to_owned(), workflow_auto_advance_projection());
         let rows = shell_state.ui_state().inbox_rows;
         let session_row_index = rows
             .iter()
-            .position(|row| row.session_id.as_ref().is_some_and(|id| id.as_str() == "sess-3"))
+            .position(|row| {
+                row.session_id
+                    .as_ref()
+                    .is_some_and(|id| id.as_str() == "sess-3")
+            })
             .expect("session row should exist");
         shell_state.set_selection(Some(session_row_index), &rows);
 
@@ -5154,7 +5220,10 @@ mod tests {
         shell_state.ticket_picker_overlay.open();
         shell_state.ticket_picker_overlay.begin_new_ticket_mode();
         assert_eq!(
-            shell_state.ticket_picker_overlay.new_ticket_brief_editor.mode,
+            shell_state
+                .ticket_picker_overlay
+                .new_ticket_brief_editor
+                .mode,
             EditorMode::Insert
         );
 
@@ -5184,7 +5253,10 @@ mod tests {
         shell_state.ticket_picker_overlay.open();
         shell_state.ticket_picker_overlay.begin_new_ticket_mode();
         assert_eq!(
-            shell_state.ticket_picker_overlay.new_ticket_brief_editor.mode,
+            shell_state
+                .ticket_picker_overlay
+                .new_ticket_brief_editor
+                .mode,
             EditorMode::Insert
         );
 
@@ -5232,15 +5304,15 @@ mod tests {
         let mut shell_state = UiShellState::new("ready".to_owned(), triage_projection());
         shell_state.ticket_picker_overlay.open();
         shell_state.ticket_picker_overlay.begin_new_ticket_mode();
-        shell_state
-            .ticket_picker_overlay
-            .new_ticket_brief_editor = EditorState::new(Lines::from("draft"));
+        shell_state.ticket_picker_overlay.new_ticket_brief_editor =
+            EditorState::new(Lines::from("draft"));
 
         route_ticket_picker_key(&mut shell_state, key(KeyCode::Esc));
         assert!(shell_state.ticket_picker_overlay.visible);
         assert!(!shell_state.ticket_picker_overlay.new_ticket_mode);
         assert!(
-            editor_state_text(&shell_state.ticket_picker_overlay.new_ticket_brief_editor).is_empty()
+            editor_state_text(&shell_state.ticket_picker_overlay.new_ticket_brief_editor)
+                .is_empty()
         );
     }
 
@@ -5258,7 +5330,10 @@ mod tests {
 
         let routed = route_ticket_picker_key(&mut shell_state, key(KeyCode::Char('x')));
         assert!(matches!(routed, RoutedInput::Ignore));
-        assert!(shell_state.ticket_picker_overlay.archive_confirm_ticket.is_some());
+        assert!(shell_state
+            .ticket_picker_overlay
+            .archive_confirm_ticket
+            .is_some());
     }
 
     #[test]
@@ -5270,7 +5345,10 @@ mod tests {
 
         route_ticket_picker_key(&mut shell_state, key(KeyCode::Esc));
         assert!(shell_state.ticket_picker_overlay.visible);
-        assert!(shell_state.ticket_picker_overlay.archive_confirm_ticket.is_none());
+        assert!(shell_state
+            .ticket_picker_overlay
+            .archive_confirm_ticket
+            .is_none());
     }
 
     #[tokio::test]
@@ -6028,7 +6106,10 @@ mod tests {
         assert_eq!(shell_state.mode, UiMode::Terminal);
         assert_eq!(shell_state.terminal_compose_editor.mode, EditorMode::Insert);
         handle_key_press(&mut shell_state, key(KeyCode::Char('b')));
-        assert_eq!(editor_state_text(&shell_state.terminal_compose_editor), "ab");
+        assert_eq!(
+            editor_state_text(&shell_state.terminal_compose_editor),
+            "ab"
+        );
     }
 
     #[test]
@@ -6147,7 +6228,10 @@ mod tests {
         handle_key_press(&mut shell_state, key(KeyCode::Enter));
         handle_key_press(&mut shell_state, key(KeyCode::Char('!')));
 
-        assert_eq!(editor_state_text(&shell_state.terminal_compose_editor), "hi\n!");
+        assert_eq!(
+            editor_state_text(&shell_state.terminal_compose_editor),
+            "hi\n!"
+        );
     }
 
     #[tokio::test]
@@ -6167,7 +6251,10 @@ mod tests {
 
         handle_key_press(&mut shell_state, key(KeyCode::Char('h')));
         handle_key_press(&mut shell_state, key(KeyCode::Char('i')));
-        assert_eq!(editor_state_text(&shell_state.terminal_compose_editor), "hi");
+        assert_eq!(
+            editor_state_text(&shell_state.terminal_compose_editor),
+            "hi"
+        );
         handle_key_press(&mut shell_state, key(KeyCode::Esc));
 
         handle_key_press(&mut shell_state, key(KeyCode::Enter));
@@ -6193,7 +6280,10 @@ mod tests {
 
         handle_key_press(&mut shell_state, key(KeyCode::Char('o')));
         handle_key_press(&mut shell_state, key(KeyCode::Char('k')));
-        assert_eq!(editor_state_text(&shell_state.terminal_compose_editor), "ok");
+        assert_eq!(
+            editor_state_text(&shell_state.terminal_compose_editor),
+            "ok"
+        );
 
         handle_key_press(&mut shell_state, ctrl_key(KeyCode::Enter));
 
@@ -6521,7 +6611,10 @@ mod tests {
 
         let nav_pos = help.find("Navigate:").expect("navigation section");
         let views_pos = help.find("Views:").expect("views section");
-        assert!(nav_pos < views_pos, "navigation hints should appear before views");
+        assert!(
+            nav_pos < views_pos,
+            "navigation hints should appear before views"
+        );
     }
 
     #[test]

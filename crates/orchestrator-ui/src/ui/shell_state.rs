@@ -71,6 +71,7 @@ struct UiShellState {
     merge_finalizing_sessions: HashSet<WorkerSessionId>,
     review_sync_instructions_sent: HashSet<WorkerSessionId>,
     session_ci_status_cache: HashMap<WorkerSessionId, SessionCiStatusCache>,
+    session_pr_metadata_cache: HashMap<WorkerSessionId, SessionPrMetadataCache>,
     ci_failure_signatures_notified: HashMap<WorkerSessionId, String>,
     worktree_diff_modal: Option<WorktreeDiffModalState>,
     draw_cache_epoch: u64,
@@ -182,6 +183,7 @@ impl UiShellState {
             merge_finalizing_sessions: HashSet::new(),
             review_sync_instructions_sent: HashSet::new(),
             session_ci_status_cache: HashMap::new(),
+            session_pr_metadata_cache: HashMap::new(),
             ci_failure_signatures_notified: HashMap::new(),
             worktree_diff_modal: None,
             draw_cache_epoch: 0,
@@ -474,8 +476,9 @@ impl UiShellState {
             return false;
         };
         let Some(session_id) = selected_row.session_id.clone() else {
-            self.status_warning =
-                Some("session output unavailable: selected inbox item has no active session".to_owned());
+            self.status_warning = Some(
+                "session output unavailable: selected inbox item has no active session".to_owned(),
+            );
             return false;
         };
 
@@ -560,7 +563,8 @@ impl UiShellState {
             return;
         }
         let Some(session_id) = self.selected_session_id_for_terminal_action() else {
-            self.status_warning = Some("session archive unavailable: no session selected".to_owned());
+            self.status_warning =
+                Some("session archive unavailable: no session selected".to_owned());
             return;
         };
         self.archive_session_confirm_session = Some(session_id);
@@ -587,7 +591,8 @@ impl UiShellState {
     fn spawn_session_archive(&mut self, session_id: WorkerSessionId) {
         let Some(provider) = self.ticket_picker_provider.clone() else {
             self.archiving_session_id = None;
-            self.status_warning = Some("session archive unavailable: ticket provider not configured".to_owned());
+            self.status_warning =
+                Some("session archive unavailable: ticket provider not configured".to_owned());
             return;
         };
         let Some(sender) = self.ticket_picker_sender.clone() else {
@@ -604,9 +609,8 @@ impl UiShellState {
             }
             Err(_) => {
                 self.archiving_session_id = None;
-                self.status_warning = Some(
-                    "session archive unavailable: tokio runtime is not active".to_owned(),
-                );
+                self.status_warning =
+                    Some("session archive unavailable: tokio runtime is not active".to_owned());
             }
         }
     }
@@ -748,6 +752,13 @@ impl UiShellState {
         self.session_ci_status_cache.get(session_id)
     }
 
+    fn session_pr_metadata_cache_for(
+        &self,
+        session_id: &WorkerSessionId,
+    ) -> Option<&SessionPrMetadataCache> {
+        self.session_pr_metadata_cache.get(session_id)
+    }
+
     fn move_session_selection(&mut self, delta: isize) -> bool {
         self.sync_selected_session_panel_state();
         let session_ids = self.session_ids_for_navigation();
@@ -840,7 +851,10 @@ impl UiShellState {
     fn focus_and_stream_session(&mut self, session_id: WorkerSessionId) {
         self.selected_session_id = Some(session_id.clone());
         let session_ids = self.session_ids_for_navigation();
-        if let Some(index) = session_ids.iter().position(|candidate| candidate == &session_id) {
+        if let Some(index) = session_ids
+            .iter()
+            .position(|candidate| candidate == &session_id)
+        {
             self.selected_session_index = Some(index);
         }
 
@@ -906,9 +920,8 @@ impl UiShellState {
                 });
             }
             Err(_) => {
-                self.status_warning = Some(
-                    "inbox publish unavailable: tokio runtime is not active".to_owned(),
-                );
+                self.status_warning =
+                    Some("inbox publish unavailable: tokio runtime is not active".to_owned());
             }
         }
     }
@@ -928,18 +941,13 @@ impl UiShellState {
                 });
             }
             Err(_) => {
-                self.status_warning = Some(
-                    "inbox resolution unavailable: tokio runtime is not active".to_owned(),
-                );
+                self.status_warning =
+                    Some("inbox resolution unavailable: tokio runtime is not active".to_owned());
             }
         }
     }
 
-    fn spawn_set_session_working_state(
-        &mut self,
-        session_id: WorkerSessionId,
-        is_working: bool,
-    ) {
+    fn spawn_set_session_working_state(&mut self, session_id: WorkerSessionId, is_working: bool) {
         let Some(provider) = self.ticket_picker_provider.clone() else {
             return;
         };
@@ -1032,9 +1040,7 @@ impl UiShellState {
         "Approval needed to progress this ticket"
     }
 
-    fn expected_progression_approval_inbox_id(
-        session_id: &WorkerSessionId,
-    ) -> InboxItemId {
+    fn expected_progression_approval_inbox_id(session_id: &WorkerSessionId) -> InboxItemId {
         InboxItemId::new(format!(
             "inbox-{}-{}",
             session_id.as_str(),
@@ -1306,7 +1312,8 @@ impl UiShellState {
         }
 
         view.output_follow_tail = true;
-        view.output_scroll_line = rendered_line_count.saturating_sub(view.output_viewport_rows.max(1));
+        view.output_scroll_line =
+            rendered_line_count.saturating_sub(view.output_viewport_rows.max(1));
     }
 
     fn sync_terminal_output_viewport(&mut self, rendered_line_count: usize, viewport_rows: usize) {
@@ -1381,7 +1388,10 @@ impl UiShellState {
     fn open_inspector_for_selected(&mut self, inspector: ArtifactInspectorKind) {
         let ui_state = self.ui_state();
         if let Some(work_item_id) = ui_state.selected_work_item_id {
-            if matches!(self.view_stack.active_center(), Some(CenterView::InspectorView { .. })) {
+            if matches!(
+                self.view_stack.active_center(),
+                Some(CenterView::InspectorView { .. })
+            ) {
                 let _ = self.view_stack.pop_center();
             }
             let _ = self.view_stack.push_center(CenterView::InspectorView {
@@ -1565,7 +1575,11 @@ impl UiShellState {
         else {
             return;
         };
-        let repository_path = self.ticket_picker_overlay.repository_prompt_input.text().trim();
+        let repository_path = self
+            .ticket_picker_overlay
+            .repository_prompt_input
+            .text()
+            .trim();
         if repository_path.is_empty() {
             self.ticket_picker_overlay.error = Some("repository path cannot be empty".to_owned());
             return;
@@ -1583,7 +1597,9 @@ impl UiShellState {
     }
 
     fn append_repository_prompt_char(&mut self, ch: char) {
-        self.ticket_picker_overlay.repository_prompt_input.insert_char(ch);
+        self.ticket_picker_overlay
+            .repository_prompt_input
+            .insert_char(ch);
     }
 
     fn pop_repository_prompt_char(&mut self) {
@@ -1906,8 +1922,10 @@ impl UiShellState {
                         }
                         append_terminal_assistant_output(view, output.bytes);
                     } else {
-                        view.deferred_output.extend_from_slice(output.bytes.as_slice());
-                        if view.deferred_output.len() >= BACKGROUND_SESSION_DEFERRED_OUTPUT_MAX_BYTES
+                        view.deferred_output
+                            .extend_from_slice(output.bytes.as_slice());
+                        if view.deferred_output.len()
+                            >= BACKGROUND_SESSION_DEFERRED_OUTPUT_MAX_BYTES
                         {
                             let deferred = std::mem::take(&mut view.deferred_output);
                             append_terminal_assistant_output(view, deferred);
@@ -2046,12 +2064,25 @@ impl UiShellState {
                     merge_conflict,
                     base_branch,
                     head_branch,
+                    pr_state,
+                    pr_is_draft,
+                    review_decision,
+                    review_summary,
                     ci_checks,
                     ci_failures,
                     ci_has_failures,
                     ci_status_error,
                     error,
                 } => {
+                    self.session_pr_metadata_cache.insert(
+                        session_id.clone(),
+                        SessionPrMetadataCache {
+                            state: pr_state,
+                            is_draft: pr_is_draft,
+                            review_decision,
+                            review_summary,
+                        },
+                    );
                     self.session_ci_status_cache.insert(
                         session_id.clone(),
                         SessionCiStatusCache {
@@ -2291,6 +2322,10 @@ impl UiShellState {
         self.session_ci_status_cache
             .retain(|session_id, _| active_review_sessions.contains(session_id));
         changed |= self.session_ci_status_cache.len() != ci_cache_len_before;
+        let pr_cache_len_before = self.session_pr_metadata_cache.len();
+        self.session_pr_metadata_cache
+            .retain(|session_id, _| active_review_sessions.contains(session_id));
+        changed |= self.session_pr_metadata_cache.len() != pr_cache_len_before;
         let ci_notified_len_before = self.ci_failure_signatures_notified.len();
         self.ci_failure_signatures_notified
             .retain(|session_id, _| active_review_sessions.contains(session_id));
@@ -2299,7 +2334,8 @@ impl UiShellState {
         for session_id in session_ids {
             self.publish_review_idle_inbox_for_session(&session_id);
             changed |= self.ensure_review_sync_instruction(&session_id);
-            changed |= self.enqueue_merge_queue_request(session_id, MergeQueueCommandKind::Reconcile);
+            changed |=
+                self.enqueue_merge_queue_request(session_id, MergeQueueCommandKind::Reconcile);
         }
         changed
     }
@@ -2457,7 +2493,8 @@ impl UiShellState {
         };
         let labels = session_display_labels(&self.domain, session_id);
         let fallback = format!("session {}", session_id.as_str());
-        if !warning.contains(labels.compact_label.as_str()) && !warning.contains(fallback.as_str()) {
+        if !warning.contains(labels.compact_label.as_str()) && !warning.contains(fallback.as_str())
+        {
             return;
         }
         let is_merge_status = warning.starts_with("merge queued for review")
@@ -2696,8 +2733,11 @@ impl UiShellState {
                 self.ticket_picker_overlay.loading = false;
                 self.ticket_picker_overlay.error = None;
                 let tickets = self.filtered_ticket_picker_tickets(tickets);
-                self.ticket_picker_overlay
-                    .apply_tickets(tickets, projects, &self.ticket_picker_priority_states);
+                self.ticket_picker_overlay.apply_tickets(
+                    tickets,
+                    projects,
+                    &self.ticket_picker_priority_states,
+                );
             }
             TicketPickerEvent::TicketsLoadFailed { message } => {
                 self.ticket_picker_overlay.loading = false;
@@ -2713,7 +2753,8 @@ impl UiShellState {
             } => {
                 if let Some(projection) = projection {
                     self.domain = projection;
-                } else if let Some(work_item) = self.domain.work_items.get_mut(&outcome.work_item_id)
+                } else if let Some(work_item) =
+                    self.domain.work_items.get_mut(&outcome.work_item_id)
                 {
                     work_item.workflow_state = Some(outcome.to.clone());
                 }
@@ -2729,8 +2770,7 @@ impl UiShellState {
                         kind,
                         format!(
                             "{title_prefix}: {}",
-                            session_display_labels(&self.domain, &outcome.session_id)
-                                .compact_label
+                            session_display_labels(&self.domain, &outcome.session_id).compact_label
                         ),
                         coalesce_key,
                     );
@@ -2741,9 +2781,7 @@ impl UiShellState {
                 let labels = session_display_labels(&self.domain, &outcome.session_id);
                 self.status_warning = Some(format!(
                     "workflow advanced for {}: {:?} -> {:?}",
-                    labels.compact_label,
-                    outcome.from,
-                    outcome.to
+                    labels.compact_label, outcome.from, outcome.to
                 ));
                 self.session_info_diff_cache.remove(&outcome.session_id);
                 self.schedule_session_info_summary_refresh_for_active_session();
@@ -2775,8 +2813,11 @@ impl UiShellState {
                 if let Some(tickets) = tickets {
                     let tickets = self.filtered_ticket_picker_tickets(tickets);
                     let projects = self.ticket_picker_overlay.project_names();
-                    self.ticket_picker_overlay
-                        .apply_tickets(tickets, projects, &self.ticket_picker_priority_states);
+                    self.ticket_picker_overlay.apply_tickets(
+                        tickets,
+                        projects,
+                        &self.ticket_picker_priority_states,
+                    );
                 }
                 self.focus_and_stream_session(started_session_id);
                 if let Some(message) = warning {
@@ -2821,8 +2862,11 @@ impl UiShellState {
                 if let Some(tickets) = tickets {
                     let tickets = self.filtered_ticket_picker_tickets(tickets);
                     let projects = self.ticket_picker_overlay.project_names();
-                    self.ticket_picker_overlay
-                        .apply_tickets(tickets, projects, &self.ticket_picker_priority_states);
+                    self.ticket_picker_overlay.apply_tickets(
+                        tickets,
+                        projects,
+                        &self.ticket_picker_priority_states,
+                    );
                 }
                 let mut status = format!("archived {}", archived_ticket.identifier);
                 if let Some(message) = warning {
@@ -2842,8 +2886,11 @@ impl UiShellState {
                 if let Some(tickets) = tickets {
                     let tickets = self.filtered_ticket_picker_tickets(tickets);
                     let projects = self.ticket_picker_overlay.project_names();
-                    self.ticket_picker_overlay
-                        .apply_tickets(tickets, projects, &self.ticket_picker_priority_states);
+                    self.ticket_picker_overlay.apply_tickets(
+                        tickets,
+                        projects,
+                        &self.ticket_picker_priority_states,
+                    );
                 }
                 self.status_warning = Some(format!(
                     "ticket picker archive warning ({}): {}",
@@ -2864,8 +2911,8 @@ impl UiShellState {
                 if let Some(projection) = projection {
                     self.domain = projection;
                 }
-                let mut display_tickets = tickets
-                    .unwrap_or_else(|| self.ticket_picker_overlay.tickets_snapshot());
+                let mut display_tickets =
+                    tickets.unwrap_or_else(|| self.ticket_picker_overlay.tickets_snapshot());
                 display_tickets = self.filtered_ticket_picker_tickets(display_tickets);
                 if !display_tickets
                     .iter()
@@ -2903,8 +2950,11 @@ impl UiShellState {
                 if let Some(tickets) = tickets {
                     let tickets = self.filtered_ticket_picker_tickets(tickets);
                     let projects = self.ticket_picker_overlay.project_names();
-                    self.ticket_picker_overlay
-                        .apply_tickets(tickets, projects, &self.ticket_picker_priority_states);
+                    self.ticket_picker_overlay.apply_tickets(
+                        tickets,
+                        projects,
+                        &self.ticket_picker_priority_states,
+                    );
                 }
                 let mut warning_parts = vec![compact_focus_card_text(message.as_str())];
                 if let Some(extra) = warning {
@@ -2932,9 +2982,8 @@ impl UiShellState {
                         modal.selected_file_index = 0;
                         modal.selected_hunk_index = 0;
                         let files = parse_diff_file_summaries(modal.content.as_str());
-                        modal.cursor_line =
-                            files.first().map(|file| file.start_index).unwrap_or(0);
-                            modal.scroll =
+                        modal.cursor_line = files.first().map(|file| file.start_index).unwrap_or(0);
+                        modal.scroll =
                             modal.cursor_line.saturating_sub(3).min(u16::MAX as usize) as u16;
                     }
                 }
@@ -3661,7 +3710,10 @@ impl UiShellState {
         if let Some(message) = warning_message {
             let inspector_context = self.supervisor_chat_stream.as_ref().and_then(|stream| {
                 if let SupervisorStreamTarget::Inspector { work_item_id } = &stream.target {
-                    Some((work_item_id.clone(), self.session_id_for_work_item(work_item_id)))
+                    Some((
+                        work_item_id.clone(),
+                        self.session_id_for_work_item(work_item_id),
+                    ))
                 } else {
                     None
                 }
@@ -3691,19 +3743,19 @@ impl UiShellState {
     }
 
     fn animation_state(&mut self, now: Instant) -> AnimationState {
-        let has_active_terminal_turn = self
-            .terminal_session_states
-            .iter()
-            .any(|(session_id, state)| {
-                state.turn_active
-                    && matches!(
-                        self.domain
-                            .sessions
-                            .get(session_id)
-                            .and_then(|session| session.status.as_ref()),
-                        Some(WorkerSessionStatus::Running)
-                    )
-            });
+        let has_active_terminal_turn =
+            self.terminal_session_states
+                .iter()
+                .any(|(session_id, state)| {
+                    state.turn_active
+                        && matches!(
+                            self.domain
+                                .sessions
+                                .get(session_id)
+                                .and_then(|session| session.status.as_ref()),
+                            Some(WorkerSessionStatus::Running)
+                        )
+                });
         if has_active_terminal_turn {
             return AnimationState::ActiveTurn;
         }
@@ -3796,7 +3848,8 @@ impl UiShellState {
 
     fn enter_insert_mode_for_current_focus(&mut self) {
         if self.is_right_pane_focused() && self.is_terminal_view_active() {
-            if self.terminal_session_has_any_needs_input() && !self.terminal_session_has_active_needs_input()
+            if self.terminal_session_has_any_needs_input()
+                && !self.terminal_session_has_active_needs_input()
             {
                 let _ = self.activate_terminal_needs_input(true);
             } else {
@@ -3951,7 +4004,8 @@ impl UiShellState {
         } else {
             EditorMode::Normal
         };
-        prompt.select_state.focused = !enabled && prompt.current_question_requires_option_selection();
+        prompt.select_state.focused =
+            !enabled && prompt.current_question_requires_option_selection();
     }
 
     fn apply_terminal_needs_input_note_key(&mut self, key: KeyEvent) -> bool {
@@ -3975,7 +4029,9 @@ impl UiShellState {
                 EditorEventHandler::default().on_key_event(enter, &mut prompt.note_editor_state);
                 true
             }
-            KeyCode::Enter if key.modifiers.is_empty() || key.modifiers == KeyModifiers::CONTROL => {
+            KeyCode::Enter
+                if key.modifiers.is_empty() || key.modifiers == KeyModifiers::CONTROL =>
+            {
                 false
             }
             _ => {
@@ -3991,7 +4047,8 @@ impl UiShellState {
     fn submit_terminal_needs_input_response(&mut self) {
         let Some(backend) = self.worker_backend.clone() else {
             if let Some(prompt) = self.active_terminal_needs_input_mut() {
-                prompt.error = Some("input response unavailable: no worker backend configured".to_owned());
+                prompt.error =
+                    Some("input response unavailable: no worker backend configured".to_owned());
             }
             return;
         };
@@ -4009,7 +4066,8 @@ impl UiShellState {
         let answers = match active_prompt.build_runtime_answers() {
             Ok(answers) => answers,
             Err(error) => {
-                active_prompt.error = Some(sanitize_terminal_display_text(error.to_string().as_str()));
+                active_prompt.error =
+                    Some(sanitize_terminal_display_text(error.to_string().as_str()));
                 return;
             }
         };
@@ -4103,7 +4161,8 @@ impl UiShellState {
             }
             DiffPaneFocus::Diff => {
                 let files = parse_diff_file_summaries(modal.content.as_str());
-                let Some(file) = files.get(modal.selected_file_index.min(files.len().saturating_sub(1)))
+                let Some(file) =
+                    files.get(modal.selected_file_index.min(files.len().saturating_sub(1)))
                 else {
                     return;
                 };
@@ -4137,7 +4196,8 @@ impl UiShellState {
                     } else {
                         0
                     };
-                    modal.scroll = modal.cursor_line.saturating_sub(3).min(u16::MAX as usize) as u16;
+                    modal.scroll =
+                        modal.cursor_line.saturating_sub(3).min(u16::MAX as usize) as u16;
                     return;
                 }
                 modal.selected_file_index = if to_last {
@@ -4151,7 +4211,8 @@ impl UiShellState {
             }
             DiffPaneFocus::Diff => {
                 let files = parse_diff_file_summaries(modal.content.as_str());
-                let Some(file) = files.get(modal.selected_file_index.min(files.len().saturating_sub(1)))
+                let Some(file) =
+                    files.get(modal.selected_file_index.min(files.len().saturating_sub(1)))
                 else {
                     return;
                 };
@@ -4224,7 +4285,10 @@ impl UiShellState {
         }
         self.session_info_summary_deadline = Some(Instant::now() + Duration::from_millis(500));
         if let Some(session_id) = self.active_terminal_session_id().cloned() {
-            let cache = self.session_info_summary_cache.entry(session_id).or_default();
+            let cache = self
+                .session_info_summary_cache
+                .entry(session_id)
+                .or_default();
             cache.loading = true;
             cache.error = None;
         }
@@ -4253,7 +4317,10 @@ impl UiShellState {
                     summary,
                     context_fingerprint,
                 } => {
-                    let cache = self.session_info_summary_cache.entry(session_id).or_default();
+                    let cache = self
+                        .session_info_summary_cache
+                        .entry(session_id)
+                        .or_default();
                     if cache.context_fingerprint.as_deref() != Some(context_fingerprint.as_str()) {
                         continue;
                     }
@@ -4266,7 +4333,10 @@ impl UiShellState {
                     message,
                     context_fingerprint,
                 } => {
-                    let cache = self.session_info_summary_cache.entry(session_id).or_default();
+                    let cache = self
+                        .session_info_summary_cache
+                        .entry(session_id)
+                        .or_default();
                     if cache.context_fingerprint.as_deref() != Some(context_fingerprint.as_str()) {
                         continue;
                     }
@@ -4297,13 +4367,17 @@ impl UiShellState {
             return false;
         };
         let Some(provider) = self.supervisor_provider.clone() else {
-            let cache = self.session_info_summary_cache.entry(session_id).or_default();
+            let cache = self
+                .session_info_summary_cache
+                .entry(session_id)
+                .or_default();
             cache.loading = false;
             cache.error = Some("no LLM provider configured".to_owned());
             return true;
         };
         let diff_cache = self.session_info_diff_cache.get(&session_id);
-        let Some(context) = session_info_summary_prompt(&self.domain, &session_id, diff_cache) else {
+        let Some(context) = session_info_summary_prompt(&self.domain, &session_id, diff_cache)
+        else {
             return false;
         };
 
@@ -4477,9 +4551,8 @@ impl UiShellState {
             }
             Err(_) => {
                 self.merge_finalizing_sessions.remove(&session_id);
-                self.status_warning = Some(
-                    "merge finalization unavailable: tokio runtime is not active".to_owned(),
-                );
+                self.status_warning =
+                    Some("merge finalization unavailable: tokio runtime is not active".to_owned());
             }
         }
     }
@@ -4495,7 +4568,10 @@ impl UiShellState {
             return;
         }
 
-        if editor_state_text(&self.terminal_compose_editor).trim().is_empty() {
+        if editor_state_text(&self.terminal_compose_editor)
+            .trim()
+            .is_empty()
+        {
             self.status_warning = Some(
                 "terminal input unavailable: compose a non-empty message before sending".to_owned(),
             );
@@ -4592,16 +4668,19 @@ impl UiShellState {
             return;
         }
 
-        if matches!(current_state, WorkflowState::Done | WorkflowState::Abandoned) {
-            self.status_warning = Some("workflow advance ignored: session is already complete".to_owned());
+        if matches!(
+            current_state,
+            WorkflowState::Done | WorkflowState::Abandoned
+        ) {
+            self.status_warning =
+                Some("workflow advance ignored: session is already complete".to_owned());
             return;
         }
 
         let labels = session_display_labels(&self.domain, &session_id);
         self.status_warning = Some(format!(
             "advancing workflow for {} from {:?}",
-            labels.compact_label,
-            current_state
+            labels.compact_label, current_state
         ));
         self.spawn_session_workflow_advance(session_id);
     }
@@ -4624,10 +4703,7 @@ impl UiShellState {
         self.merge_pending_sessions.insert(session_id.clone());
         let _ = self.enqueue_merge_queue_request(session_id.clone(), MergeQueueCommandKind::Merge);
         let labels = session_display_labels(&self.domain, &session_id);
-        self.status_warning = Some(format!(
-            "merge queued for review {}",
-            labels.compact_label
-        ));
+        self.status_warning = Some(format!("merge queued for review {}", labels.compact_label));
     }
 
     fn refresh_which_key_overlay(&mut self) {

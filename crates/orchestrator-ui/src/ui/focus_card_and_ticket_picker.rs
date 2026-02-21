@@ -482,7 +482,10 @@ impl TicketPickerOverlayState {
     }
 
     fn can_submit_new_ticket(&self) -> bool {
-        !self.creating && !editor_state_text(&self.new_ticket_brief_editor).trim().is_empty()
+        !self.creating
+            && !editor_state_text(&self.new_ticket_brief_editor)
+                .trim()
+                .is_empty()
     }
 
     fn apply_tickets(
@@ -502,9 +505,10 @@ impl TicketPickerOverlayState {
         preferred_ticket_id: Option<&TicketId>,
     ) {
         let selected_project_index = self.selected_project_index();
-        let selected_ticket_id = preferred_ticket_id
-            .cloned()
-            .or_else(|| self.selected_ticket().map(|ticket| ticket.ticket_id.clone()));
+        let selected_ticket_id = preferred_ticket_id.cloned().or_else(|| {
+            self.selected_ticket()
+                .map(|ticket| ticket.ticket_id.clone())
+        });
         let collapsed_projects = self
             .project_groups
             .iter()
@@ -512,12 +516,7 @@ impl TicketPickerOverlayState {
             .map(|project_group| normalize_ticket_project(project_group.project.as_str()))
             .collect::<HashSet<_>>();
         self.project_groups =
-            group_tickets_by_project(
-                tickets,
-                project_names,
-                priority_states,
-                &collapsed_projects,
-            );
+            group_tickets_by_project(tickets, project_names, priority_states, &collapsed_projects);
         self.rebuild_ticket_rows(selected_ticket_id.as_ref(), selected_project_index);
     }
 
@@ -752,6 +751,10 @@ enum MergeQueueEvent {
         merge_conflict: bool,
         base_branch: Option<String>,
         head_branch: Option<String>,
+        pr_state: Option<String>,
+        pr_is_draft: bool,
+        review_decision: Option<String>,
+        review_summary: Option<SessionPrReviewSummary>,
         ci_checks: Vec<CiCheckStatus>,
         ci_failures: Vec<String>,
         ci_has_failures: bool,

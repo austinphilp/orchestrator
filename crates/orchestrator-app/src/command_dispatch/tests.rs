@@ -7,8 +7,8 @@ mod tests {
         CodeHostKind, NewEventEnvelope, OrchestrationEventPayload, PullRequestCiStatus,
         PullRequestMergeState, PullRequestRef, PullRequestSummary, RepositoryRef, ReviewerRequest,
         RuntimeMappingRecord, SessionRecord, TicketId, TicketProvider, TicketRecord, WorkItemId,
-        WorkerSessionId, WorkerSessionStatus, WorkflowState, WorkflowTransitionPayload,
-        WorktreeId, WorktreeRecord, DOMAIN_EVENT_SCHEMA_VERSION,
+        WorkerSessionId, WorkerSessionStatus, WorkflowState, WorkflowTransitionPayload, WorktreeId,
+        WorktreeRecord, DOMAIN_EVENT_SCHEMA_VERSION,
     };
     use serde_json::json;
     use std::sync::Mutex;
@@ -116,6 +116,9 @@ mod tests {
                 merge_state: PullRequestMergeState {
                     merged: false,
                     is_draft: true,
+                    state: None,
+                    review_decision: None,
+                    review_summary: None,
                     merge_conflict: false,
                     base_branch: None,
                     head_branch: None,
@@ -128,7 +131,10 @@ mod tests {
             }
         }
 
-        fn with_merge_state(fallback_pr: Option<PullRequestRef>, merge_state: PullRequestMergeState) -> Self {
+        fn with_merge_state(
+            fallback_pr: Option<PullRequestRef>,
+            merge_state: PullRequestMergeState,
+        ) -> Self {
             Self {
                 fallback_pr,
                 fallback_calls: Mutex::new(Vec::new()),
@@ -190,6 +196,9 @@ mod tests {
                 merge_state: PullRequestMergeState {
                     merged: false,
                     is_draft: false,
+                    state: None,
+                    review_decision: None,
+                    review_summary: None,
                     merge_conflict: false,
                     base_branch: None,
                     head_branch: None,
@@ -856,6 +865,10 @@ mod tests {
         assert_eq!(parsed["completed"], false);
         assert_eq!(parsed["merged"], false);
         assert_eq!(parsed["merge_conflict"], false);
+        assert_eq!(parsed["pr_state"], serde_json::Value::Null);
+        assert_eq!(parsed["pr_is_draft"], false);
+        assert_eq!(parsed["review_decision"], serde_json::Value::Null);
+        assert_eq!(parsed["review_summary"], serde_json::Value::Null);
     }
 
     #[tokio::test]
@@ -879,6 +892,9 @@ mod tests {
             PullRequestMergeState {
                 merged: false,
                 is_draft: false,
+                state: None,
+                review_decision: None,
+                review_summary: None,
                 merge_conflict: false,
                 base_branch: Some("main".to_owned()),
                 head_branch: Some("ap/AP-888-fix".to_owned()),
@@ -923,6 +939,8 @@ mod tests {
         assert_eq!(parsed["ci_has_failures"], true);
         assert_eq!(parsed["ci_statuses"].as_array().map(Vec::len), Some(2));
         assert_eq!(parsed["ci_failures"][0], "Tests / tests");
+        assert_eq!(parsed["pr_state"], serde_json::Value::Null);
+        assert_eq!(parsed["pr_is_draft"], false);
     }
 
     #[tokio::test]
@@ -961,6 +979,9 @@ mod tests {
             PullRequestMergeState {
                 merged: true,
                 is_draft: false,
+                state: None,
+                review_decision: None,
+                review_summary: None,
                 merge_conflict: false,
                 base_branch: Some("main".to_owned()),
                 head_branch: Some("ap/AP-445-fix".to_owned()),
@@ -1041,6 +1062,9 @@ mod tests {
             PullRequestMergeState {
                 merged: false,
                 is_draft: true,
+                state: None,
+                review_decision: None,
+                review_summary: None,
                 merge_conflict: false,
                 base_branch: Some("main".to_owned()),
                 head_branch: Some("ap/AP-611-fix".to_owned()),
@@ -1107,6 +1131,9 @@ mod tests {
             PullRequestMergeState {
                 merged: false,
                 is_draft: false,
+                state: None,
+                review_decision: None,
+                review_summary: None,
                 merge_conflict: false,
                 base_branch: Some("main".to_owned()),
                 head_branch: Some("ap/AP-612-fix".to_owned()),
@@ -1172,6 +1199,9 @@ mod tests {
             PullRequestMergeState {
                 merged: false,
                 is_draft: true,
+                state: None,
+                review_decision: None,
+                review_summary: None,
                 merge_conflict: false,
                 base_branch: Some("main".to_owned()),
                 head_branch: Some("ap/AP-613-fix".to_owned()),
@@ -1322,6 +1352,9 @@ mod tests {
             PullRequestMergeState {
                 merged: false,
                 is_draft: false,
+                state: None,
+                review_decision: None,
+                review_summary: None,
                 merge_conflict: false,
                 base_branch: Some("main".to_owned()),
                 head_branch: Some("ap/AP-446-fix".to_owned()),
@@ -1407,6 +1440,9 @@ mod tests {
             PullRequestMergeState {
                 merged: true,
                 is_draft: false,
+                state: None,
+                review_decision: None,
+                review_summary: None,
                 merge_conflict: false,
                 base_branch: Some("main".to_owned()),
                 head_branch: Some("ap/AP-447-fix".to_owned()),
@@ -1477,6 +1513,9 @@ mod tests {
             PullRequestMergeState {
                 merged: true,
                 is_draft: false,
+                state: None,
+                review_decision: None,
+                review_summary: None,
                 merge_conflict: false,
                 base_branch: Some("main".to_owned()),
                 head_branch: Some("ap/AP-446-fix".to_owned()),

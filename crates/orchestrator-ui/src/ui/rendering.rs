@@ -287,6 +287,7 @@ fn render_session_info_panel(
     diff_cache: Option<&SessionInfoDiffCache>,
     summary_cache: Option<&SessionInfoSummaryCache>,
     ci_cache: Option<&SessionCiStatusCache>,
+    pr_cache: Option<&SessionPrMetadataCache>,
 ) -> String {
     let mut lines = Vec::new();
     lines.push(format!("session: {}", session_id.as_str()));
@@ -297,21 +298,83 @@ fn render_session_info_panel(
         .and_then(|work_item_id| domain.work_items.get(work_item_id));
 
     lines.push(String::new());
-    lines.push("PR:".to_owned());
+    lines.push("PR status:".to_owned());
     if let Some(work_item_id) = work_item.map(|entry| &entry.id) {
         let pr = collect_work_item_artifacts(work_item_id, domain, 1, is_pr_artifact)
             .into_iter()
             .next();
         if let Some(pr_artifact) = pr {
-            lines.push(format!("- {}", compact_focus_card_text(pr_artifact.uri.as_str())));
-            if let Some(metadata) = pr_metadata_summary_line(pr_artifact) {
-                lines.push(format!("  {}", compact_focus_card_text(metadata.as_str())));
-            }
+            lines.push(format!(
+                "- {}",
+                compact_focus_card_text(pr_artifact.uri.as_str())
+            ));
+            let status_label =
+                session_pr_status_label(pr_cache, infer_draft_from_uri(pr_artifact.uri.as_str()));
+            lines.push(format!("- Status: {status_label}"));
+            match pr_cache.and_then(|cache| cache.review_summary.as_ref()) {
+                Some(summary) => {
+                    let decision = pr_cache
+                        .and_then(|cache| cache.review_decision.as_deref())
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty())
+                        .unwrap_or("UNKNOWN");
+                    lines.push(format!(
+                        "- Decision: {decision} | Reviews: {} ({} approved, {} changes, {} commented)",
+                        summary.total,
+                        summary.approved,
+                        summary.changes_requested,
+                        summary.commented
+                    ));
+                }
+                None => lines.push("- Reviews: unavailable.".to_owned()),
+            };
         } else {
             lines.push("- No PR artifact available.".to_owned());
         }
     } else {
         lines.push("- No work item context.".to_owned());
+    }
+
+    lines.push(String::new());
+    lines.push("Checks:".to_owned());
+    match ci_cache {
+        Some(cache) if cache.error.is_some() => lines.push(format!(
+            "- CI status unavailable: {}",
+            compact_focus_card_text(cache.error.as_deref().unwrap_or_default())
+        )),
+        Some(cache) if cache.checks.is_empty() => {
+            lines.push("- No required CI checks reported.".to_owned())
+        }
+        Some(cache) => {
+            let summary = summarize_ci_buckets(cache.checks.as_slice());
+            lines.push(format!(
+                "- Summary: PASS {} | FAIL {} | PENDING {} | SKIP {} | UNKNOWN {}",
+                summary.pass, summary.fail, summary.pending, summary.skip, summary.unknown
+            ));
+            for check in &cache.checks {
+                let workflow_prefix = check
+                    .workflow
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|workflow| !workflow.is_empty())
+                    .map(|workflow| format!("{workflow} / "))
+                    .unwrap_or_default();
+                let bucket = check.bucket.trim();
+                let status_label = if bucket.is_empty() {
+                    "unknown".to_owned()
+                } else {
+                    bucket.to_ascii_uppercase()
+                };
+                lines.push(format!(
+                    "- [{status_label}] {workflow_prefix}{}",
+                    compact_focus_card_text(check.name.as_str())
+                ));
+                if let Some(link) = check.link.as_deref() {
+                    lines.push(format!("  {}", compact_focus_card_text(link)));
+                }
+            }
+        }
+        None => lines.push("- No CI status polled yet.".to_owned()),
     }
 
     lines.push(String::new());
@@ -353,7 +416,10 @@ fn render_session_info_panel(
                     .description
                     .or_else(|| latest_ticket_description(domain, ticket_id))
                     .unwrap_or_else(|| "No description synced.".to_owned());
-                lines.push(format!("- {}", compact_focus_card_text(description.as_str())));
+                lines.push(format!(
+                    "- {}",
+                    compact_focus_card_text(description.as_str())
+                ));
             } else {
                 lines.push("- Ticket details unavailable.".to_owned());
             }
@@ -390,43 +456,6 @@ fn render_session_info_panel(
     }
 
     lines.push(String::new());
-    lines.push("CI status:".to_owned());
-    match ci_cache {
-        Some(cache) if cache.error.is_some() => lines.push(format!(
-            "- CI status unavailable: {}",
-            compact_focus_card_text(cache.error.as_deref().unwrap_or_default())
-        )),
-        Some(cache) if cache.checks.is_empty() => {
-            lines.push("- No required CI checks reported.".to_owned())
-        }
-        Some(cache) => {
-            for check in &cache.checks {
-                let workflow_prefix = check
-                    .workflow
-                    .as_deref()
-                    .map(str::trim)
-                    .filter(|workflow| !workflow.is_empty())
-                    .map(|workflow| format!("{workflow} / "))
-                    .unwrap_or_default();
-                let bucket = check.bucket.trim();
-                let status_label = if bucket.is_empty() {
-                    "unknown".to_owned()
-                } else {
-                    bucket.to_ascii_uppercase()
-                };
-                lines.push(format!(
-                    "- [{status_label}] {workflow_prefix}{}",
-                    compact_focus_card_text(check.name.as_str())
-                ));
-                if let Some(link) = check.link.as_deref() {
-                    lines.push(format!("  {}", compact_focus_card_text(link)));
-                }
-            }
-        }
-        None => lines.push("- No CI status polled yet.".to_owned()),
-    }
-
-    lines.push(String::new());
     lines.push("Summary:".to_owned());
     match summary_cache {
         Some(cache) if cache.loading => lines.push("- Updating...".to_owned()),
@@ -444,6 +473,70 @@ fn render_session_info_panel(
     lines.join("\n")
 }
 
+fn infer_draft_from_uri(uri: &str) -> bool {
+    let Some((_, query)) = uri.split_once('?') else {
+        return false;
+    };
+    for pair in query.split('&') {
+        let (raw_key, raw_value) = pair.split_once('=').unwrap_or((pair, ""));
+        if !raw_key.eq_ignore_ascii_case("draft") {
+            continue;
+        }
+        let value = raw_value.trim();
+        if value == "1" || value.eq_ignore_ascii_case("true") || value.eq_ignore_ascii_case("yes") {
+            return true;
+        }
+    }
+    false
+}
+
+fn session_pr_status_label(
+    pr_cache: Option<&SessionPrMetadataCache>,
+    fallback_is_draft: bool,
+) -> String {
+    if let Some(cache) = pr_cache {
+        if cache.is_draft {
+            return "DRAFT".to_owned();
+        }
+        if let Some(state) = cache
+            .state
+            .as_deref()
+            .map(str::trim)
+            .filter(|state| !state.is_empty())
+        {
+            return state.to_ascii_uppercase();
+        }
+    }
+    if fallback_is_draft {
+        "DRAFT".to_owned()
+    } else {
+        "UNKNOWN".to_owned()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+struct CiBucketSummary {
+    pass: usize,
+    fail: usize,
+    pending: usize,
+    skip: usize,
+    unknown: usize,
+}
+
+fn summarize_ci_buckets(checks: &[CiCheckStatus]) -> CiBucketSummary {
+    let mut summary = CiBucketSummary::default();
+    for check in checks {
+        match check.bucket.trim().to_ascii_lowercase().as_str() {
+            "pass" => summary.pass += 1,
+            "fail" => summary.fail += 1,
+            "pending" => summary.pending += 1,
+            "skip" => summary.skip += 1,
+            _ => summary.unknown += 1,
+        }
+    }
+    summary
+}
+
 fn render_terminal_top_bar(domain: &ProjectionState, session_id: &WorkerSessionId) -> String {
     let labels = session_display_labels(domain, session_id);
     let text = if let Some(session) = domain.sessions.get(session_id) {
@@ -459,9 +552,7 @@ fn render_terminal_top_bar(domain: &ProjectionState, session_id: &WorkerSessionI
             .unwrap_or_else(|| "none".to_owned());
         format!(
             "ticket: {} | status: {} | checkpoint: {}",
-            labels.compact_label,
-            status,
-            checkpoint
+            labels.compact_label, status, checkpoint
         )
     } else {
         format!(
@@ -505,9 +596,7 @@ fn render_terminal_transcript_entries(state: &TerminalViewState) -> Vec<Rendered
                         text: String::new(),
                     });
                 }
-                lines.push(RenderedTerminalLine {
-                    text: line.clone(),
-                });
+                lines.push(RenderedTerminalLine { text: line.clone() });
                 if is_user_outgoing_terminal_message(line) {
                     lines.push(RenderedTerminalLine {
                         text: String::new(),
@@ -955,10 +1044,26 @@ fn apply_nord_markdown_theme(skin: &mut RatSkin) {
 
 fn nord_editor_theme<'a>(block: Block<'a>) -> EditorTheme<'a> {
     EditorTheme::default()
-        .base(Style::default().bg(Color::Rgb(46, 52, 64)).fg(Color::Rgb(216, 222, 233)))
-        .cursor_style(Style::default().bg(Color::Rgb(236, 239, 244)).fg(Color::Rgb(46, 52, 64)))
-        .selection_style(Style::default().bg(Color::Rgb(94, 129, 172)).fg(Color::Rgb(236, 239, 244)))
-        .line_numbers_style(Style::default().bg(Color::Rgb(46, 52, 64)).fg(Color::Rgb(76, 86, 106)))
+        .base(
+            Style::default()
+                .bg(Color::Rgb(46, 52, 64))
+                .fg(Color::Rgb(216, 222, 233)),
+        )
+        .cursor_style(
+            Style::default()
+                .bg(Color::Rgb(236, 239, 244))
+                .fg(Color::Rgb(46, 52, 64)),
+        )
+        .selection_style(
+            Style::default()
+                .bg(Color::Rgb(94, 129, 172))
+                .fg(Color::Rgb(236, 239, 244)),
+        )
+        .line_numbers_style(
+            Style::default()
+                .bg(Color::Rgb(46, 52, 64))
+                .fg(Color::Rgb(76, 86, 106)),
+        )
         .block(block)
         .hide_status_line()
 }
@@ -1099,10 +1204,7 @@ fn session_status_label(status: Option<&WorkerSessionStatus>) -> &'static str {
     }
 }
 
-fn workflow_badge_for_session(
-    session: &SessionProjection,
-    domain: &ProjectionState,
-) -> String {
+fn workflow_badge_for_session(session: &SessionProjection, domain: &ProjectionState) -> String {
     session
         .work_item_id
         .as_ref()
@@ -1158,9 +1260,7 @@ fn session_turn_is_running(
 fn workflow_state_to_badge_label(state: &WorkflowState) -> String {
     match state {
         WorkflowState::New | WorkflowState::Planning => "planning",
-        WorkflowState::Implementing | WorkflowState::PRDrafted => {
-            "implementation"
-        }
+        WorkflowState::Implementing | WorkflowState::PRDrafted => "implementation",
         WorkflowState::AwaitingYourReview
         | WorkflowState::ReadyForReview
         | WorkflowState::InReview => "review",
@@ -1279,11 +1379,7 @@ fn expanded_needs_input_layout_active(prompt: &NeedsInputComposerState) -> bool 
         return true;
     }
 
-    if prompt
-        .prompt_id
-        .to_ascii_lowercase()
-        .contains("plan")
-    {
+    if prompt.prompt_id.to_ascii_lowercase().contains("plan") {
         return true;
     }
 
@@ -1319,7 +1415,11 @@ fn needs_input_choice_height(
     expanded_layout: bool,
 ) -> u16 {
     let content_width = panel_width.saturating_sub(10);
-    let Some(options) = question.options.as_ref().filter(|options| !options.is_empty()) else {
+    let Some(options) = question
+        .options
+        .as_ref()
+        .filter(|options| !options.is_empty())
+    else {
         return 3;
     };
 
@@ -1340,7 +1440,8 @@ fn needs_input_choice_height(
         NEEDS_INPUT_CHOICE_MAX_ROWS_DEFAULT
     };
     let clamped_rows = rows.clamp(NEEDS_INPUT_CHOICE_MIN_ROWS_DEFAULT, max_rows);
-    u16::try_from(clamped_rows).unwrap_or(NEEDS_INPUT_CHOICE_MAX_EXPANDED_HEIGHT_U16)
+    u16::try_from(clamped_rows)
+        .unwrap_or(NEEDS_INPUT_CHOICE_MAX_EXPANDED_HEIGHT_U16)
         .saturating_add(2)
 }
 
@@ -1351,11 +1452,7 @@ fn wrapped_row_count(text: &str, width: u16) -> u16 {
     let mut rows = 0usize;
     for segment in text.split('\n') {
         let chars = segment.chars().count();
-        let wrapped = if chars == 0 {
-            1
-        } else {
-            chars.div_ceil(width)
-        };
+        let wrapped = if chars == 0 { 1 } else { chars.div_ceil(width) };
         rows = rows.saturating_add(wrapped.max(1));
     }
     u16::try_from(rows).unwrap_or(u16::MAX)
@@ -1412,15 +1509,16 @@ fn render_terminal_needs_input_panel(
 
     let header = format!("{} | {}", question.header, question.question);
     frame.render_widget(
-        Paragraph::new(compact_focus_card_text(header.as_str())).block(
-            Block::default()
-                .title("question")
-                .borders(Borders::ALL),
-        ),
+        Paragraph::new(compact_focus_card_text(header.as_str()))
+            .block(Block::default().title("question").borders(Borders::ALL)),
         question_area,
     );
 
-    if let Some(options) = question.options.as_ref().filter(|options| !options.is_empty()) {
+    if let Some(options) = question
+        .options
+        .as_ref()
+        .filter(|options| !options.is_empty())
+    {
         let selected_index = prompt.select_state.selected_index;
         let highlighted_index = prompt
             .select_state
@@ -1545,8 +1643,7 @@ fn render_worktree_diff_modal(
     let labels = session_display_labels(domain, &modal.session_id);
     let title = format!(
         "diff | ticket: {} | base: {}",
-        labels.compact_label,
-        modal.base_branch
+        labels.compact_label, modal.base_branch
     );
     frame.render_widget(Clear, popup);
     if modal.loading {
@@ -1862,7 +1959,10 @@ fn parse_diff_file_summaries(content: &str) -> Vec<DiffFileSummary> {
     files
 }
 
-fn render_diff_file_list(modal: &WorktreeDiffModalState, files: &[DiffFileSummary]) -> Text<'static> {
+fn render_diff_file_list(
+    modal: &WorktreeDiffModalState,
+    files: &[DiffFileSummary],
+) -> Text<'static> {
     if files.is_empty() {
         return Text::from(Line::from(Span::styled(
             "(No changed files.)",
@@ -1906,7 +2006,10 @@ fn selected_file_and_hunk_range(
     Some((file.start_index, file.end_index, hunk))
 }
 
-fn render_selected_file_diff(modal: &WorktreeDiffModalState, files: &[DiffFileSummary]) -> Text<'static> {
+fn render_selected_file_diff(
+    modal: &WorktreeDiffModalState,
+    files: &[DiffFileSummary],
+) -> Text<'static> {
     let parsed = parse_rendered_diff_lines(modal.content.as_str());
     let Some((start, end, selected_hunk)) = selected_file_and_hunk_range(modal, files) else {
         return Text::from(Line::from(Span::styled(
@@ -1921,7 +2024,9 @@ fn render_selected_file_diff(modal: &WorktreeDiffModalState, files: &[DiffFileSu
         if let Some((hunk_start, hunk_end)) = selected_hunk {
             if global_index >= hunk_start && global_index <= hunk_end {
                 style = if modal.focus == DiffPaneFocus::Diff {
-                    style.bg(Color::Rgb(59, 66, 82)).add_modifier(Modifier::BOLD)
+                    style
+                        .bg(Color::Rgb(59, 66, 82))
+                        .add_modifier(Modifier::BOLD)
                 } else {
                     style.bg(Color::Rgb(47, 52, 63))
                 };
@@ -1937,7 +2042,8 @@ fn worktree_diff_modal_scroll(
     files: &[DiffFileSummary],
     viewport_rows: usize,
 ) -> u16 {
-    let Some((file_start, file_end, selected_hunk)) = selected_file_and_hunk_range(modal, files) else {
+    let Some((file_start, file_end, selected_hunk)) = selected_file_and_hunk_range(modal, files)
+    else {
         return 0;
     };
     let center = selected_hunk
@@ -2011,7 +2117,9 @@ fn worktree_diff_modal_line_count(modal: &WorktreeDiffModalState) -> usize {
     if let Some((start, end, _)) = selected_file_and_hunk_range(modal, files.as_slice()) {
         return end.saturating_sub(start).saturating_add(1).max(1);
     }
-    parse_rendered_diff_lines(modal.content.as_str()).len().max(1)
+    parse_rendered_diff_lines(modal.content.as_str())
+        .len()
+        .max(1)
 }
 
 fn collect_selected_worktree_diff_refs(
@@ -2122,8 +2230,11 @@ fn render_archive_session_confirm_overlay(
     };
     frame.render_widget(Clear, popup);
     frame.render_widget(
-        Paragraph::new(content)
-            .block(Block::default().title("archive session").borders(Borders::ALL)),
+        Paragraph::new(content).block(
+            Block::default()
+                .title("archive session")
+                .borders(Borders::ALL),
+        ),
         popup,
     );
 }
@@ -2143,8 +2254,11 @@ fn render_ticket_archive_confirm_overlay(
     };
     frame.render_widget(Clear, popup);
     frame.render_widget(
-        Paragraph::new(content)
-            .block(Block::default().title("archive ticket").borders(Borders::ALL)),
+        Paragraph::new(content).block(
+            Block::default()
+                .title("archive ticket")
+                .borders(Borders::ALL),
+        ),
         popup,
     );
 }

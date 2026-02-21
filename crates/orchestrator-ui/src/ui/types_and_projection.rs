@@ -17,10 +17,9 @@ use orchestrator_core::{
     AttentionEngineConfig, AttentionInboxSnapshot, AttentionPriorityBand, Command, CommandRegistry,
     CoreError, InboxItemId, InboxItemKind, LlmChatRequest, LlmFinishReason, LlmMessage,
     LlmProvider, LlmRateLimitState, LlmResponseStream, LlmRole, LlmTokenUsage,
-    OrchestrationEventPayload, ProjectId,
-    ProjectionState, SelectedTicketFlowResult, SessionProjection, SupervisorQueryArgs,
-    SupervisorQueryContextArgs, TicketId, TicketSummary, UntypedCommandInvocation, WorkItemId,
-    WorkerSessionId, WorkerSessionStatus, WorkflowState,
+    OrchestrationEventPayload, ProjectId, ProjectionState, SelectedTicketFlowResult,
+    SessionProjection, SupervisorQueryArgs, SupervisorQueryContextArgs, TicketId, TicketSummary,
+    UntypedCommandInvocation, WorkItemId, WorkerSessionId, WorkerSessionStatus, WorkflowState,
 };
 use orchestrator_runtime::{
     BackendEvent, BackendKind, BackendNeedsInputAnswer, BackendNeedsInputEvent,
@@ -127,11 +126,10 @@ pub fn set_ui_runtime_config(
                 trimmed.to_owned()
             }
         },
-        background_session_refresh_secs: background_session_refresh_secs
-            .clamp(
-                MIN_BACKGROUND_SESSION_REFRESH_SECS,
-                MAX_BACKGROUND_SESSION_REFRESH_SECS,
-            ),
+        background_session_refresh_secs: background_session_refresh_secs.clamp(
+            MIN_BACKGROUND_SESSION_REFRESH_SECS,
+            MAX_BACKGROUND_SESSION_REFRESH_SECS,
+        ),
     };
 
     if let Ok(mut guard) = ui_runtime_config_store().write() {
@@ -574,7 +572,10 @@ struct SessionDisplayLabels {
     compact_label: String,
 }
 
-fn session_display_labels(domain: &ProjectionState, session_id: &WorkerSessionId) -> SessionDisplayLabels {
+fn session_display_labels(
+    domain: &ProjectionState,
+    session_id: &WorkerSessionId,
+) -> SessionDisplayLabels {
     let fallback = format!("session {}", session_id.as_str());
     let Some(work_item_id) = domain
         .sessions
@@ -647,7 +648,10 @@ struct TicketDisplayMetadata {
     description: Option<String>,
 }
 
-fn latest_ticket_metadata(domain: &ProjectionState, ticket_id: &TicketId) -> Option<TicketDisplayMetadata> {
+fn latest_ticket_metadata(
+    domain: &ProjectionState,
+    ticket_id: &TicketId,
+) -> Option<TicketDisplayMetadata> {
     let mut latest_synced: Option<TicketDisplayMetadata> = None;
     let mut latest_description: Option<Option<String>> = None;
     for event in domain.events.iter().rev() {
@@ -722,6 +726,24 @@ struct SessionInfoSummaryCache {
 struct SessionCiStatusCache {
     checks: Vec<CiCheckStatus>,
     error: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+struct SessionPrMetadataCache {
+    state: Option<String>,
+    is_draft: bool,
+    review_decision: Option<String>,
+    review_summary: Option<SessionPrReviewSummary>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+struct SessionPrReviewSummary {
+    total: u32,
+    approved: u32,
+    changes_requested: u32,
+    commented: u32,
+    pending: u32,
+    dismissed: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -907,14 +929,7 @@ fn project_ui_state_with_attention(
     });
     let center_pane = active_center
         .as_ref()
-        .map(|center| {
-            project_center_pane(
-                center,
-                &inbox_rows,
-                domain,
-                terminal_view_state,
-            )
-        })
+        .map(|center| project_center_pane(center, &inbox_rows, domain, terminal_view_state))
         .unwrap_or_else(|| CenterPaneState {
             title: "Terminal".to_owned(),
             lines: vec!["No terminal output available yet.".to_owned()],
@@ -1269,11 +1284,17 @@ impl std::fmt::Debug for NeedsInputComposerState {
             .field("current_question_index", &self.current_question_index)
             .field("select_state", &self.select_state)
             .field("note_editor_mode", &self.note_editor_state.mode)
-            .field("note_editor_text", &editor_state_text(&self.note_editor_state))
+            .field(
+                "note_editor_text",
+                &editor_state_text(&self.note_editor_state),
+            )
             .field("interaction_active", &self.interaction_active)
             .field("note_insert_mode", &self.note_insert_mode)
             .field("error", &self.error)
-            .field("is_structured_plan_request", &self.is_structured_plan_request)
+            .field(
+                "is_structured_plan_request",
+                &self.is_structured_plan_request,
+            )
             .finish()
     }
 }
@@ -1330,17 +1351,19 @@ impl NeedsInputComposerState {
             .unwrap_or_default();
         self.select_state = SelectState::new(options_len);
         self.select_state.focused = self.interaction_active && options_len > 0;
-        if let Some(index) = draft.selected_option_index.filter(|index| *index < options_len) {
+        if let Some(index) = draft
+            .selected_option_index
+            .filter(|index| *index < options_len)
+        {
             self.select_state.selected_index = Some(index);
             self.select_state.highlighted_index = index;
         }
         set_editor_state_text(&mut self.note_editor_state, draft.note.as_str());
-        self.note_editor_state.mode =
-            if self.interaction_active && self.note_insert_mode {
-                EditorMode::Insert
-            } else {
-                EditorMode::Normal
-            };
+        self.note_editor_state.mode = if self.interaction_active && self.note_insert_mode {
+            EditorMode::Insert
+        } else {
+            EditorMode::Normal
+        };
     }
 
     fn move_to_question(&mut self, next_index: usize) {
@@ -1378,7 +1401,11 @@ impl NeedsInputComposerState {
         for (index, question) in self.questions.iter().enumerate() {
             let draft = self.answer_drafts.get(index).cloned().unwrap_or_default();
             let mut entries = Vec::new();
-            if let Some(options) = question.options.as_ref().filter(|options| !options.is_empty()) {
+            if let Some(options) = question
+                .options
+                .as_ref()
+                .filter(|options| !options.is_empty())
+            {
                 let Some(selected_index) = draft.selected_option_index else {
                     return Err(RuntimeError::Protocol(format!(
                         "select an option for '{}'",
