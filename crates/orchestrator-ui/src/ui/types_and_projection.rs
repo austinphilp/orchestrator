@@ -54,6 +54,7 @@ const TICKET_PICKER_PRIORITY_STATES_DEFAULT: &[&str] =
 const DEFAULT_UI_THEME: &str = "nord";
 const DEFAULT_SUPERVISOR_MODEL: &str = "openai/gpt-4o-mini";
 const DEFAULT_BACKGROUND_SESSION_REFRESH_SECS: u64 = 15;
+const DEFAULT_TRANSCRIPT_LINE_LIMIT: usize = 100;
 const MIN_BACKGROUND_SESSION_REFRESH_SECS: u64 = 2;
 const MAX_BACKGROUND_SESSION_REFRESH_SECS: u64 = 15;
 const DEFAULT_SESSION_INFO_BACKGROUND_REFRESH_SECS: u64 = 15;
@@ -71,6 +72,7 @@ struct UiRuntimeConfig {
     theme: String,
     ticket_picker_priority_states: Vec<String>,
     supervisor_model: String,
+    transcript_line_limit: usize,
     background_session_refresh_secs: u64,
     session_info_background_refresh_secs: u64,
 }
@@ -84,6 +86,7 @@ impl Default for UiRuntimeConfig {
                 .map(|value| (*value).to_owned())
                 .collect(),
             supervisor_model: DEFAULT_SUPERVISOR_MODEL.to_owned(),
+            transcript_line_limit: DEFAULT_TRANSCRIPT_LINE_LIMIT,
             background_session_refresh_secs: DEFAULT_BACKGROUND_SESSION_REFRESH_SECS,
             session_info_background_refresh_secs: DEFAULT_SESSION_INFO_BACKGROUND_REFRESH_SECS,
         }
@@ -100,6 +103,7 @@ pub fn set_ui_runtime_config(
     theme: String,
     ticket_picker_priority_states: Vec<String>,
     supervisor_model: String,
+    transcript_line_limit: usize,
     background_session_refresh_secs: u64,
     session_info_background_refresh_secs: u64,
 ) {
@@ -133,6 +137,7 @@ pub fn set_ui_runtime_config(
                 trimmed.to_owned()
             }
         },
+        transcript_line_limit: transcript_line_limit.max(1),
         background_session_refresh_secs: background_session_refresh_secs
             .clamp(
                 MIN_BACKGROUND_SESSION_REFRESH_SECS,
@@ -171,6 +176,14 @@ fn supervisor_model_config_value() -> String {
         .read()
         .map(|guard| guard.supervisor_model.clone())
         .unwrap_or_else(|_| DEFAULT_SUPERVISOR_MODEL.to_owned())
+}
+
+fn transcript_line_limit_config_value() -> usize {
+    ui_runtime_config_store()
+        .read()
+        .map(|guard| guard.transcript_line_limit)
+        .unwrap_or(DEFAULT_TRANSCRIPT_LINE_LIMIT)
+        .max(1)
 }
 
 fn background_session_refresh_interval_config_value() -> Duration {
@@ -1147,6 +1160,8 @@ impl SupervisorResponseState {
 #[derive(Debug, Clone)]
 struct TerminalViewState {
     entries: Vec<TerminalTranscriptEntry>,
+    transcript_truncated: bool,
+    transcript_truncated_line_count: usize,
     error: Option<String>,
     output_fragment: String,
     render_cache: TerminalRenderCache,
@@ -1166,6 +1181,8 @@ impl Default for TerminalViewState {
     fn default() -> Self {
         Self {
             entries: Vec::new(),
+            transcript_truncated: false,
+            transcript_truncated_line_count: 0,
             error: None,
             output_fragment: String::new(),
             render_cache: TerminalRenderCache::default(),

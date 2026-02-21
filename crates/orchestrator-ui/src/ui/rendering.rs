@@ -380,7 +380,10 @@ fn render_session_info_panel(
             .into_iter()
             .next();
         if let Some(pr_artifact) = pr {
-            lines.push(format!("- {}", compact_focus_card_text(pr_artifact.uri.as_str())));
+            lines.push(format!(
+                "- {}",
+                compact_focus_card_text(pr_artifact.uri.as_str())
+            ));
             if let Some(metadata) = pr_metadata_summary_line(pr_artifact) {
                 lines.push(format!("  {}", compact_focus_card_text(metadata.as_str())));
             }
@@ -430,7 +433,10 @@ fn render_session_info_panel(
                     .description
                     .or_else(|| latest_ticket_description(domain, ticket_id))
                     .unwrap_or_else(|| "No description synced.".to_owned());
-                lines.push(format!("- {}", compact_focus_card_text(description.as_str())));
+                lines.push(format!(
+                    "- {}",
+                    compact_focus_card_text(description.as_str())
+                ));
             } else {
                 lines.push("- Ticket details unavailable.".to_owned());
             }
@@ -521,9 +527,13 @@ fn render_session_info_panel(
     lines.join("\n")
 }
 
-fn render_terminal_top_bar(domain: &ProjectionState, session_id: &WorkerSessionId) -> String {
+fn render_terminal_top_bar(
+    domain: &ProjectionState,
+    session_id: &WorkerSessionId,
+    terminal_view_state: Option<&TerminalViewState>,
+) -> String {
     let labels = session_display_labels(domain, session_id);
-    let text = if let Some(session) = domain.sessions.get(session_id) {
+    let mut text = if let Some(session) = domain.sessions.get(session_id) {
         let status = session
             .status
             .as_ref()
@@ -536,9 +546,7 @@ fn render_terminal_top_bar(domain: &ProjectionState, session_id: &WorkerSessionI
             .unwrap_or_else(|| "none".to_owned());
         format!(
             "ticket: {} | status: {} | checkpoint: {}",
-            labels.compact_label,
-            status,
-            checkpoint
+            labels.compact_label, status, checkpoint
         )
     } else {
         format!(
@@ -546,6 +554,17 @@ fn render_terminal_top_bar(domain: &ProjectionState, session_id: &WorkerSessionI
             labels.compact_label
         )
     };
+    if let Some(view) = terminal_view_state {
+        if view.transcript_truncated {
+            text.push_str(
+                format!(
+                    " | history: truncated (-{} lines)",
+                    view.transcript_truncated_line_count
+                )
+                .as_str(),
+            );
+        }
+    }
     sanitize_terminal_display_text(text.as_str())
 }
 
@@ -625,7 +644,11 @@ fn render_terminal_transcript_lines_into(state: &TerminalViewState, lines: &mut 
                 {
                     lines.push(String::new());
                 }
+<<<<<<< HEAD
                 lines.push(line.clone());
+=======
+                lines.push(line.clone());
+>>>>>>> ceddd89 (AP-259: truncate in-memory transcript history to configurable limit)
                 if is_user_outgoing_terminal_message(line) {
                     lines.push(String::new());
                 }
@@ -1332,10 +1355,26 @@ fn apply_nord_markdown_theme(skin: &mut RatSkin) {
 
 fn nord_editor_theme<'a>(block: Block<'a>) -> EditorTheme<'a> {
     EditorTheme::default()
-        .base(Style::default().bg(Color::Rgb(46, 52, 64)).fg(Color::Rgb(216, 222, 233)))
-        .cursor_style(Style::default().bg(Color::Rgb(236, 239, 244)).fg(Color::Rgb(46, 52, 64)))
-        .selection_style(Style::default().bg(Color::Rgb(94, 129, 172)).fg(Color::Rgb(236, 239, 244)))
-        .line_numbers_style(Style::default().bg(Color::Rgb(46, 52, 64)).fg(Color::Rgb(76, 86, 106)))
+        .base(
+            Style::default()
+                .bg(Color::Rgb(46, 52, 64))
+                .fg(Color::Rgb(216, 222, 233)),
+        )
+        .cursor_style(
+            Style::default()
+                .bg(Color::Rgb(236, 239, 244))
+                .fg(Color::Rgb(46, 52, 64)),
+        )
+        .selection_style(
+            Style::default()
+                .bg(Color::Rgb(94, 129, 172))
+                .fg(Color::Rgb(236, 239, 244)),
+        )
+        .line_numbers_style(
+            Style::default()
+                .bg(Color::Rgb(46, 52, 64))
+                .fg(Color::Rgb(76, 86, 106)),
+        )
         .block(block)
         .hide_status_line()
 }
@@ -1467,10 +1506,7 @@ fn session_status_label(status: Option<&WorkerSessionStatus>) -> &'static str {
     }
 }
 
-fn workflow_badge_for_session(
-    session: &SessionProjection,
-    domain: &ProjectionState,
-) -> String {
+fn workflow_badge_for_session(session: &SessionProjection, domain: &ProjectionState) -> String {
     session
         .work_item_id
         .as_ref()
@@ -1526,9 +1562,7 @@ fn session_turn_is_running(
 fn workflow_state_to_badge_label(state: &WorkflowState) -> String {
     match state {
         WorkflowState::New | WorkflowState::Planning => "planning",
-        WorkflowState::Implementing | WorkflowState::PRDrafted => {
-            "implementation"
-        }
+        WorkflowState::Implementing | WorkflowState::PRDrafted => "implementation",
         WorkflowState::AwaitingYourReview
         | WorkflowState::ReadyForReview
         | WorkflowState::InReview => "review",
@@ -1647,11 +1681,7 @@ fn expanded_needs_input_layout_active(prompt: &NeedsInputComposerState) -> bool 
         return true;
     }
 
-    if prompt
-        .prompt_id
-        .to_ascii_lowercase()
-        .contains("plan")
-    {
+    if prompt.prompt_id.to_ascii_lowercase().contains("plan") {
         return true;
     }
 
@@ -1687,7 +1717,11 @@ fn needs_input_choice_height(
     expanded_layout: bool,
 ) -> u16 {
     let content_width = panel_width.saturating_sub(10);
-    let Some(options) = question.options.as_ref().filter(|options| !options.is_empty()) else {
+    let Some(options) = question
+        .options
+        .as_ref()
+        .filter(|options| !options.is_empty())
+    else {
         return 3;
     };
 
@@ -1708,7 +1742,8 @@ fn needs_input_choice_height(
         NEEDS_INPUT_CHOICE_MAX_ROWS_DEFAULT
     };
     let clamped_rows = rows.clamp(NEEDS_INPUT_CHOICE_MIN_ROWS_DEFAULT, max_rows);
-    u16::try_from(clamped_rows).unwrap_or(NEEDS_INPUT_CHOICE_MAX_EXPANDED_HEIGHT_U16)
+    u16::try_from(clamped_rows)
+        .unwrap_or(NEEDS_INPUT_CHOICE_MAX_EXPANDED_HEIGHT_U16)
         .saturating_add(2)
 }
 
@@ -1719,11 +1754,7 @@ fn wrapped_row_count(text: &str, width: u16) -> u16 {
     let mut rows = 0usize;
     for segment in text.split('\n') {
         let chars = segment.chars().count();
-        let wrapped = if chars == 0 {
-            1
-        } else {
-            chars.div_ceil(width)
-        };
+        let wrapped = if chars == 0 { 1 } else { chars.div_ceil(width) };
         rows = rows.saturating_add(wrapped.max(1));
     }
     u16::try_from(rows).unwrap_or(u16::MAX)
@@ -1780,15 +1811,16 @@ fn render_terminal_needs_input_panel(
 
     let header = format!("{} | {}", question.header, question.question);
     frame.render_widget(
-        Paragraph::new(compact_focus_card_text(header.as_str())).block(
-            Block::default()
-                .title("question")
-                .borders(Borders::ALL),
-        ),
+        Paragraph::new(compact_focus_card_text(header.as_str()))
+            .block(Block::default().title("question").borders(Borders::ALL)),
         question_area,
     );
 
-    if let Some(options) = question.options.as_ref().filter(|options| !options.is_empty()) {
+    if let Some(options) = question
+        .options
+        .as_ref()
+        .filter(|options| !options.is_empty())
+    {
         let selected_index = prompt.select_state.selected_index;
         let highlighted_index = prompt
             .select_state
@@ -1913,8 +1945,7 @@ fn render_worktree_diff_modal(
     let labels = session_display_labels(domain, &modal.session_id);
     let title = format!(
         "diff | ticket: {} | base: {}",
-        labels.compact_label,
-        modal.base_branch
+        labels.compact_label, modal.base_branch
     );
     frame.render_widget(Clear, popup);
     if modal.loading {
@@ -2230,7 +2261,10 @@ fn parse_diff_file_summaries(content: &str) -> Vec<DiffFileSummary> {
     files
 }
 
-fn render_diff_file_list(modal: &WorktreeDiffModalState, files: &[DiffFileSummary]) -> Text<'static> {
+fn render_diff_file_list(
+    modal: &WorktreeDiffModalState,
+    files: &[DiffFileSummary],
+) -> Text<'static> {
     if files.is_empty() {
         return Text::from(Line::from(Span::styled(
             "(No changed files.)",
@@ -2274,7 +2308,10 @@ fn selected_file_and_hunk_range(
     Some((file.start_index, file.end_index, hunk))
 }
 
-fn render_selected_file_diff(modal: &WorktreeDiffModalState, files: &[DiffFileSummary]) -> Text<'static> {
+fn render_selected_file_diff(
+    modal: &WorktreeDiffModalState,
+    files: &[DiffFileSummary],
+) -> Text<'static> {
     let parsed = parse_rendered_diff_lines(modal.content.as_str());
     let Some((start, end, selected_hunk)) = selected_file_and_hunk_range(modal, files) else {
         return Text::from(Line::from(Span::styled(
@@ -2289,7 +2326,9 @@ fn render_selected_file_diff(modal: &WorktreeDiffModalState, files: &[DiffFileSu
         if let Some((hunk_start, hunk_end)) = selected_hunk {
             if global_index >= hunk_start && global_index <= hunk_end {
                 style = if modal.focus == DiffPaneFocus::Diff {
-                    style.bg(Color::Rgb(59, 66, 82)).add_modifier(Modifier::BOLD)
+                    style
+                        .bg(Color::Rgb(59, 66, 82))
+                        .add_modifier(Modifier::BOLD)
                 } else {
                     style.bg(Color::Rgb(47, 52, 63))
                 };
@@ -2305,7 +2344,8 @@ fn worktree_diff_modal_scroll(
     files: &[DiffFileSummary],
     viewport_rows: usize,
 ) -> u16 {
-    let Some((file_start, file_end, selected_hunk)) = selected_file_and_hunk_range(modal, files) else {
+    let Some((file_start, file_end, selected_hunk)) = selected_file_and_hunk_range(modal, files)
+    else {
         return 0;
     };
     let center = selected_hunk
@@ -2379,7 +2419,9 @@ fn worktree_diff_modal_line_count(modal: &WorktreeDiffModalState) -> usize {
     if let Some((start, end, _)) = selected_file_and_hunk_range(modal, files.as_slice()) {
         return end.saturating_sub(start).saturating_add(1).max(1);
     }
-    parse_rendered_diff_lines(modal.content.as_str()).len().max(1)
+    parse_rendered_diff_lines(modal.content.as_str())
+        .len()
+        .max(1)
 }
 
 fn collect_selected_worktree_diff_refs(
@@ -2490,8 +2532,11 @@ fn render_archive_session_confirm_overlay(
     };
     frame.render_widget(Clear, popup);
     frame.render_widget(
-        Paragraph::new(content)
-            .block(Block::default().title("archive session").borders(Borders::ALL)),
+        Paragraph::new(content).block(
+            Block::default()
+                .title("archive session")
+                .borders(Borders::ALL),
+        ),
         popup,
     );
 }
@@ -2511,8 +2556,11 @@ fn render_ticket_archive_confirm_overlay(
     };
     frame.render_widget(Clear, popup);
     frame.render_widget(
-        Paragraph::new(content)
-            .block(Block::default().title("archive ticket").borders(Borders::ALL)),
+        Paragraph::new(content).block(
+            Block::default()
+                .title("archive ticket")
+                .borders(Borders::ALL),
+        ),
         popup,
     );
 }

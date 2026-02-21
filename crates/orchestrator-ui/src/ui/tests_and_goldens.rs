@@ -7554,6 +7554,41 @@ mod tests {
     }
 
     #[test]
+    fn terminal_transcript_truncates_to_default_line_limit() {
+        let mut state = TerminalViewState::default();
+        let payload = (1..=101)
+            .map(|line| format!("line {line}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n";
+        append_terminal_assistant_output(&mut state, payload.into_bytes());
+
+        assert_eq!(state.entries.len(), 100);
+        assert!(state.transcript_truncated);
+        assert_eq!(state.transcript_truncated_line_count, 1);
+        assert_eq!(
+            state.entries.first(),
+            Some(&TerminalTranscriptEntry::Message("line 2".to_owned()))
+        );
+        assert_eq!(
+            state.entries.last(),
+            Some(&TerminalTranscriptEntry::Message("line 101".to_owned()))
+        );
+    }
+
+    #[test]
+    fn terminal_top_bar_shows_transcript_truncation_indicator() {
+        let projection = sample_projection(true);
+        let session_id = WorkerSessionId::new("sess-1");
+        let mut view = TerminalViewState::default();
+        view.transcript_truncated = true;
+        view.transcript_truncated_line_count = 7;
+
+        let rendered = render_terminal_top_bar(&projection, &session_id, Some(&view));
+        assert!(rendered.contains("history: truncated (-7 lines)"));
+    }
+
+    #[test]
     fn normal_mode_router_maps_expected_commands() {
         let mut shell_state = UiShellState::new("ready".to_owned(), triage_projection());
         assert_eq!(
