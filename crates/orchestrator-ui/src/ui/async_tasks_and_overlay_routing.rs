@@ -905,6 +905,7 @@ fn route_needs_input_modal_key(shell_state: &mut UiShellState, key: KeyEvent) ->
         && shell_state.active_terminal_session_requires_manual_needs_input_activation()
     {
         let _ = shell_state.deactivate_terminal_needs_input_interaction();
+        shell_state.enter_normal_mode();
         return RoutedInput::Ignore;
     }
 

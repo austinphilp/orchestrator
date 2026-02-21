@@ -2557,6 +2557,7 @@ mod tests {
         assert_eq!(prompt.select_state.highlighted_index, 1);
 
         handle_key_press(&mut shell_state, key(KeyCode::Char('i')));
+        assert_eq!(shell_state.mode, UiMode::Insert);
         let prompt = shell_state
             .terminal_session_states
             .get(&WorkerSessionId::new("sess-1"))
@@ -2631,9 +2632,10 @@ mod tests {
             .expect("planning prompt should remain present");
         assert!(!prompt.interaction_active);
         assert!(!prompt.note_insert_mode);
-        assert_eq!(shell_state.mode, UiMode::Terminal);
+        assert_eq!(shell_state.mode, UiMode::Normal);
 
         handle_key_press(&mut shell_state, key(KeyCode::Char('i')));
+        assert_eq!(shell_state.mode, UiMode::Insert);
         let prompt = shell_state
             .terminal_session_states
             .get(&WorkerSessionId::new("sess-1"))
@@ -2682,6 +2684,7 @@ mod tests {
         shell_state.poll_terminal_session_events();
 
         handle_key_press(&mut shell_state, key(KeyCode::Char('i')));
+        assert_eq!(shell_state.mode, UiMode::Insert);
         assert!(shell_state.terminal_session_has_active_needs_input());
         handle_key_press(&mut shell_state, key(KeyCode::Esc));
 
@@ -2692,6 +2695,7 @@ mod tests {
             .expect("new-state prompt should remain present");
         assert!(!prompt.interaction_active);
         assert!(!prompt.note_insert_mode);
+        assert_eq!(shell_state.mode, UiMode::Normal);
     }
 
     #[test]
@@ -2733,6 +2737,7 @@ mod tests {
 
         assert!(shell_state.terminal_session_has_active_needs_input());
         handle_key_press(&mut shell_state, key(KeyCode::Char('i')));
+        assert_eq!(shell_state.mode, UiMode::Insert);
         handle_key_press(&mut shell_state, key(KeyCode::Esc));
 
         let prompt = shell_state
@@ -2742,6 +2747,7 @@ mod tests {
             .expect("implementing prompt should stay active");
         assert!(prompt.interaction_active);
         assert!(!prompt.note_insert_mode);
+        assert_eq!(shell_state.mode, UiMode::Normal);
     }
 
     #[test]
@@ -7010,10 +7016,8 @@ mod tests {
         assert!(shell_state.is_terminal_view_active());
 
         handle_key_press(&mut shell_state, key(KeyCode::Esc));
-        assert_eq!(shell_state.mode, UiMode::Terminal);
-        assert_eq!(shell_state.terminal_compose_editor.mode, EditorMode::Normal);
-        handle_key_press(&mut shell_state, key(KeyCode::Esc));
         assert_eq!(shell_state.mode, UiMode::Normal);
+        assert_eq!(shell_state.terminal_compose_editor.mode, EditorMode::Normal);
         assert!(shell_state.is_terminal_view_active());
 
         shell_state.enter_insert_mode();
@@ -7063,6 +7067,7 @@ mod tests {
 
         handle_key_press(&mut shell_state, key(KeyCode::Char('a')));
         handle_key_press(&mut shell_state, key(KeyCode::Esc));
+        assert_eq!(shell_state.mode, UiMode::Normal);
         assert_eq!(shell_state.terminal_compose_editor.mode, EditorMode::Normal);
 
         handle_key_press(&mut shell_state, key(KeyCode::Tab));
@@ -7216,9 +7221,7 @@ mod tests {
         handle_key_press(&mut shell_state, key(KeyCode::Char('h')));
         handle_key_press(&mut shell_state, key(KeyCode::Char('i')));
         assert_eq!(editor_state_text(&shell_state.terminal_compose_editor), "hi");
-        handle_key_press(&mut shell_state, key(KeyCode::Esc));
-
-        handle_key_press(&mut shell_state, key(KeyCode::Enter));
+        handle_key_press(&mut shell_state, ctrl_key(KeyCode::Enter));
 
         assert_eq!(editor_state_text(&shell_state.terminal_compose_editor), "");
         assert_eq!(shell_state.mode, UiMode::Normal);
@@ -7263,9 +7266,7 @@ mod tests {
         shell_state.open_terminal_and_enter_mode();
         assert_eq!(shell_state.mode, UiMode::Terminal);
 
-        handle_key_press(&mut shell_state, key(KeyCode::Enter));
-        handle_key_press(&mut shell_state, key(KeyCode::Esc));
-        handle_key_press(&mut shell_state, key(KeyCode::Enter));
+        handle_key_press(&mut shell_state, ctrl_key(KeyCode::Enter));
 
         assert_eq!(shell_state.mode, UiMode::Terminal);
         assert!(shell_state

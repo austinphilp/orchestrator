@@ -302,7 +302,7 @@ impl Ui {
                                 EditorView::new(&mut shell_state.terminal_compose_editor)
                                     .theme(nord_editor_theme(
                                         Block::default()
-                                            .title("input (Esc+Enter send | Ctrl+Enter send)")
+                                            .title("input (Ctrl+Enter send)")
                                             .borders(Borders::ALL),
                                     ))
                                     .wrap(true),
