@@ -1025,7 +1025,7 @@ mod tests {
                     group: SessionStateGroup::Other("waiting".to_owned()),
                     ticket_label: "Harden session lifecycle".to_owned(),
                     badge: "waiting".to_owned(),
-                    is_turn_active: false,
+                    activity: SessionRowActivity::Idle,
                 },
                 SessionPanelRow {
                     session_id: session_orchestrator,
@@ -1033,7 +1033,7 @@ mod tests {
                     group: SessionStateGroup::Other("waiting".to_owned()),
                     ticket_label: "Session list redesign".to_owned(),
                     badge: "waiting".to_owned(),
-                    is_turn_active: false,
+                    activity: SessionRowActivity::Idle,
                 },
             ]
         );
@@ -1321,10 +1321,10 @@ mod tests {
         assert!(planning_header < implementation_header);
         assert!(implementation_header < review_header);
         assert!(review_header < other_header);
-        assert!(rendered.contains("     Planning session row"));
-        assert!(rendered.contains("     Implementation session row"));
-        assert!(rendered.contains("     Review session row"));
-        assert!(rendered.contains("     [waiting] Other session row"));
+        assert!(rendered.contains("• [idle] Planning session row"));
+        assert!(rendered.contains("• [idle] Implementation session row"));
+        assert!(rendered.contains("• [idle] Review session row"));
+        assert!(rendered.contains("• [idle] [waiting] Other session row"));
     }
 
     #[test]
@@ -1441,9 +1441,65 @@ mod tests {
         assert!(
             ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
                 .iter()
-                .any(|frame| active_line.ends_with(frame))
+                .any(|frame| active_line.contains(frame))
         );
+        assert!(active_line.contains("[active]"));
         assert!(!active_line.contains("[implementation]"));
+    }
+
+    #[test]
+    fn session_panel_running_without_active_turn_renders_idle_status() {
+        let mut projection = ProjectionState::default();
+        let work_item_id = WorkItemId::new("wi-running-idle");
+        let session_id = WorkerSessionId::new("sess-running-idle");
+        let ticket_id = TicketId::from_provider_uuid(TicketProvider::Linear, "ticket-running-idle");
+
+        projection.work_items.insert(
+            work_item_id.clone(),
+            WorkItemProjection {
+                id: work_item_id.clone(),
+                ticket_id: Some(ticket_id.clone()),
+                project_id: Some(ProjectId::new("Orchestrator")),
+                workflow_state: Some(WorkflowState::Implementing),
+                session_id: Some(session_id.clone()),
+                worktree_id: None,
+                inbox_items: vec![],
+                artifacts: vec![],
+            },
+        );
+        projection.sessions.insert(
+            session_id,
+            SessionProjection {
+                id: WorkerSessionId::new("sess-running-idle"),
+                work_item_id: Some(work_item_id.clone()),
+                status: Some(WorkerSessionStatus::Running),
+                latest_checkpoint: None,
+            },
+        );
+        projection.events.push(StoredEventEnvelope {
+            event_id: "evt-ticket-running-idle".to_owned(),
+            sequence: 1,
+            occurred_at: "2026-02-19T00:00:00Z".to_owned(),
+            work_item_id: Some(work_item_id),
+            session_id: None,
+            event_type: OrchestrationEventType::TicketSynced,
+            payload: OrchestrationEventPayload::TicketSynced(orchestrator_core::TicketSyncedPayload {
+                ticket_id,
+                identifier: "AP-407".to_owned(),
+                title: "Running session without active turn".to_owned(),
+                state: "In Progress".to_owned(),
+                assignee: None,
+                priority: None,
+            }),
+            schema_version: 1,
+        });
+
+        let rendered = render_sessions_panel(&projection, &HashMap::new(), None);
+        let line = rendered
+            .lines()
+            .find(|entry| entry.contains("Running session without active turn"))
+            .expect("idle running row");
+        assert!(line.contains("• [idle]"));
     }
 
     #[test]
