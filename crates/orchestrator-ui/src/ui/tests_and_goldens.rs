@@ -212,6 +212,7 @@ mod tests {
     #[derive(Default)]
     struct RecordingTicketPickerProvider {
         published_inbox_requests: Arc<Mutex<Vec<InboxPublishRequest>>>,
+        resolved_inbox_requests: Arc<Mutex<Vec<InboxResolveRequest>>>,
     }
 
     impl RecordingTicketPickerProvider {
@@ -219,6 +220,13 @@ mod tests {
             self.published_inbox_requests
                 .lock()
                 .expect("published inbox requests lock")
+                .clone()
+        }
+
+        fn resolved_inbox_requests(&self) -> Vec<InboxResolveRequest> {
+            self.resolved_inbox_requests
+                .lock()
+                .expect("resolved inbox requests lock")
                 .clone()
         }
     }
@@ -259,6 +267,17 @@ mod tests {
             self.published_inbox_requests
                 .lock()
                 .expect("published inbox requests lock")
+                .push(request);
+            Ok(ProjectionState::default())
+        }
+
+        async fn resolve_inbox_item(
+            &self,
+            request: InboxResolveRequest,
+        ) -> Result<ProjectionState, CoreError> {
+            self.resolved_inbox_requests
+                .lock()
+                .expect("resolved inbox requests lock")
                 .push(request);
             Ok(ProjectionState::default())
         }
@@ -517,6 +536,87 @@ mod tests {
             SessionProjection {
                 id: WorkerSessionId::new("sess-review"),
                 work_item_id: Some(work_item_id),
+                status: Some(WorkerSessionStatus::Running),
+                latest_checkpoint: None,
+            },
+        );
+
+        projection
+    }
+
+    fn mixed_reconcile_projection() -> ProjectionState {
+        let mut projection = ProjectionState::default();
+        for (work_item_id, session_id, workflow_state, status) in [
+            (
+                WorkItemId::new("wi-planning"),
+                WorkerSessionId::new("sess-planning"),
+                WorkflowState::Planning,
+                WorkerSessionStatus::Running,
+            ),
+            (
+                WorkItemId::new("wi-implementing"),
+                WorkerSessionId::new("sess-implementing"),
+                WorkflowState::Implementing,
+                WorkerSessionStatus::Running,
+            ),
+            (
+                WorkItemId::new("wi-review"),
+                WorkerSessionId::new("sess-review"),
+                WorkflowState::InReview,
+                WorkerSessionStatus::Running,
+            ),
+            (
+                WorkItemId::new("wi-pending-merge"),
+                WorkerSessionId::new("sess-pending-merge"),
+                WorkflowState::PendingMerge,
+                WorkerSessionStatus::Running,
+            ),
+            (
+                WorkItemId::new("wi-pr-drafted"),
+                WorkerSessionId::new("sess-pr-drafted"),
+                WorkflowState::PRDrafted,
+                WorkerSessionStatus::Running,
+            ),
+            (
+                WorkItemId::new("wi-done"),
+                WorkerSessionId::new("sess-done"),
+                WorkflowState::Planning,
+                WorkerSessionStatus::Done,
+            ),
+        ] {
+            projection.work_items.insert(
+                work_item_id.clone(),
+                WorkItemProjection {
+                    id: work_item_id.clone(),
+                    ticket_id: None,
+                    project_id: None,
+                    workflow_state: Some(workflow_state),
+                    session_id: Some(session_id.clone()),
+                    worktree_id: None,
+                    inbox_items: Vec::new(),
+                    artifacts: Vec::new(),
+                },
+            );
+            projection.sessions.insert(
+                session_id.clone(),
+                SessionProjection {
+                    id: session_id.clone(),
+                    work_item_id: Some(work_item_id),
+                    status: Some(status),
+                    latest_checkpoint: None,
+                },
+            );
+            projection.session_runtime.insert(
+                session_id,
+                SessionRuntimeProjection { is_working: false },
+            );
+        }
+
+        projection.sessions.insert(
+            WorkerSessionId::new("sess-orphan"),
+            SessionProjection {
+                id: WorkerSessionId::new("sess-orphan"),
+                work_item_id: Some(WorkItemId::new("wi-orphan")),
                 status: Some(WorkerSessionStatus::Running),
                 latest_checkpoint: None,
             },
@@ -2902,6 +3002,59 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn progression_approval_poll_only_scans_progression_eligible_sessions() {
+        let mut projection = mixed_reconcile_projection();
+        let stale_review_inbox_id =
+            InboxItemId::new("sess-review-workflow-awaiting-progression");
+        let review_work_item_id = WorkItemId::new("wi-review");
+        projection
+            .work_items
+            .get_mut(&review_work_item_id)
+            .expect("review work item")
+            .inbox_items
+            .push(stale_review_inbox_id.clone());
+        projection.inbox_items.insert(
+            stale_review_inbox_id.clone(),
+            InboxItemProjection {
+                id: stale_review_inbox_id,
+                work_item_id: review_work_item_id,
+                kind: InboxItemKind::NeedsApproval,
+                title: "Stale progression approval in review stage".to_owned(),
+                resolved: false,
+            },
+        );
+
+        let provider = Arc::new(RecordingTicketPickerProvider::default());
+        let mut shell_state = UiShellState::new_with_integrations(
+            "ready".to_owned(),
+            projection,
+            None,
+            None,
+            Some(provider.clone()),
+            None,
+        );
+
+        shell_state.enqueue_progression_approval_reconcile_polls();
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        shell_state.poll_ticket_picker_events();
+
+        let mut published_session_ids = provider
+            .published_inbox_requests()
+            .into_iter()
+            .filter(|request| request.coalesce_key == "workflow-awaiting-progression")
+            .filter_map(|request| request.session_id.map(|id| id.as_str().to_owned()))
+            .collect::<Vec<_>>();
+        published_session_ids.sort();
+        assert_eq!(
+            published_session_ids,
+            vec!["sess-implementing".to_owned(), "sess-planning".to_owned()]
+        );
+
+        let resolved = provider.resolved_inbox_requests();
+        assert!(resolved.is_empty());
+    }
+
     #[test]
     fn workflow_transition_routing_maps_prdrafted_to_approvals_and_review_to_pr_lane() {
         assert_eq!(
@@ -4382,35 +4535,9 @@ mod tests {
     }
 
     #[test]
-    fn merge_reconcile_poll_queues_only_review_eligible_sessions() {
+    fn merge_reconcile_poll_only_scans_review_eligible_sessions() {
+        let projection = mixed_reconcile_projection();
         let dispatcher = Arc::new(TestSupervisorDispatcher::new(Vec::new()));
-        let mut projection = sample_projection(true);
-        let review_work_item_id = WorkItemId::new("wi-review");
-        let review_session_id = WorkerSessionId::new("sess-review");
-
-        projection.work_items.insert(
-            review_work_item_id.clone(),
-            WorkItemProjection {
-                id: review_work_item_id.clone(),
-                ticket_id: None,
-                project_id: None,
-                workflow_state: Some(WorkflowState::InReview),
-                session_id: Some(review_session_id.clone()),
-                worktree_id: None,
-                inbox_items: vec![],
-                artifacts: vec![],
-            },
-        );
-        projection.sessions.insert(
-            review_session_id.clone(),
-            SessionProjection {
-                id: review_session_id.clone(),
-                work_item_id: Some(review_work_item_id),
-                status: Some(WorkerSessionStatus::Running),
-                latest_checkpoint: None,
-            },
-        );
-
         let mut shell_state = UiShellState::new_with_integrations(
             "ready".to_owned(),
             projection,
@@ -4422,13 +4549,22 @@ mod tests {
 
         shell_state.enqueue_merge_reconcile_polls();
 
-        assert_eq!(shell_state.merge_queue.len(), 1);
-        let request = shell_state
+        let mut queued_session_ids = shell_state
             .merge_queue
-            .front()
-            .expect("merge reconcile request queued");
-        assert_eq!(request.session_id, review_session_id);
-        assert_eq!(request.kind, MergeQueueCommandKind::Reconcile);
+            .iter()
+            .map(|request| {
+                assert_eq!(request.kind, MergeQueueCommandKind::Reconcile);
+                request.session_id.as_str().to_owned()
+            })
+            .collect::<Vec<_>>();
+        queued_session_ids.sort();
+        assert_eq!(
+            queued_session_ids,
+            vec![
+                "sess-pending-merge".to_owned(),
+                "sess-review".to_owned()
+            ]
+        );
     }
 
     #[test]
