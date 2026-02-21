@@ -398,6 +398,7 @@ impl UiShellState {
             return;
         };
         self.set_selection(Some(next_index), &rows);
+        let _ = self.open_selected_inbox_output(false);
     }
 
     fn open_terminal_for_selected(&mut self) {
@@ -1870,6 +1871,46 @@ impl UiShellState {
         for session_id in pending_needs_input_sessions {
             changed |= self.autopilot_handle_needs_input_for_session(&session_id);
         }
+        changed |= self.autopilot_reconcile_session_actions();
+        changed
+    }
+
+    fn autopilot_reconcile_session_actions(&mut self) -> bool {
+        let mut changed = false;
+        let session_ids = self.domain.sessions.keys().cloned().collect::<Vec<_>>();
+
+        for session_id in session_ids {
+            if !is_open_session_status(
+                self.domain
+                    .sessions
+                    .get(&session_id)
+                    .and_then(|session| session.status.as_ref()),
+            ) {
+                continue;
+            }
+            if self.session_is_actively_working(&session_id) {
+                continue;
+            }
+
+            match self.workflow_state_for_session(&session_id) {
+                Some(WorkflowState::Done | WorkflowState::Abandoned) => {
+                    if self.autopilot_archiving_sessions.insert(session_id.clone()) {
+                        self.spawn_session_archive(session_id);
+                        changed = true;
+                    }
+                }
+                Some(WorkflowState::Implementing | WorkflowState::PRDrafted) => {
+                    if self.session_requires_progression_approval(&session_id)
+                        && self.autopilot_advancing_sessions.insert(session_id.clone())
+                    {
+                        self.spawn_session_workflow_advance(session_id);
+                        changed = true;
+                    }
+                }
+                _ => {}
+            }
+        }
+
         changed
     }
 
@@ -4162,7 +4203,30 @@ impl UiShellState {
         self.selected_inbox_item_id =
             valid_selected_index.map(|index| rows[index].inbox_item_id.clone());
         if self.selected_inbox_item_id.is_some() && self.selected_inbox_item_id != previous {
+            if let Some(index) = self.selected_inbox_index {
+                self.apply_selection_focus_policy(&rows[index]);
+            }
+        }
+    }
+
+    fn apply_selection_focus_policy(&mut self, selected_row: &UiInboxRow) {
+        if selected_row.kind == InboxItemKind::NeedsDecision {
             let _ = self.open_selected_inbox_output(false);
+            return;
+        }
+
+        self.enter_normal_mode();
+
+        let Some(session_id) = selected_row.session_id.clone() else {
+            return;
+        };
+        if let Some(index) = self
+            .session_ids_for_navigation()
+            .iter()
+            .position(|candidate| candidate == &session_id)
+        {
+            self.selected_session_index = Some(index);
+            self.selected_session_id = Some(session_id);
         }
     }
 
