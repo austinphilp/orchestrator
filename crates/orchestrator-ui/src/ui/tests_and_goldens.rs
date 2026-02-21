@@ -6463,6 +6463,60 @@ mod tests {
     }
 
     #[test]
+    fn terminal_viewport_rendering_is_bounded_by_viewport_plus_overscan() {
+        let mut state = TerminalViewState {
+            entries: (0..5_000)
+                .map(|index| TerminalTranscriptEntry::Message(format!("line {index}")))
+                .collect(),
+            ..TerminalViewState::default()
+        };
+        state.render_cache.invalidate_all();
+
+        let viewport_rows = 20usize;
+        let overscan_rows = 4usize;
+        let render = render_terminal_output_viewport(
+            &mut state,
+            TerminalViewportRequest {
+                width: 90,
+                scroll_top: 2_500,
+                viewport_rows,
+                overscan_rows,
+                indicator: TerminalActivityIndicator::None,
+            },
+        );
+
+        assert_eq!(render.text.lines.len(), viewport_rows + (overscan_rows * 2));
+        assert_eq!(terminal_total_rendered_rows(&mut state, 90, TerminalActivityIndicator::None), 5_000);
+        assert_eq!(render.local_scroll_top, overscan_rows as u16);
+    }
+
+    #[test]
+    fn terminal_viewport_total_rows_match_full_render_with_markdown() {
+        let mut state = TerminalViewState {
+            entries: vec![
+                TerminalTranscriptEntry::Message("# Heading".to_owned()),
+                TerminalTranscriptEntry::Message("plain text".to_owned()),
+                TerminalTranscriptEntry::Message("- list item".to_owned()),
+                TerminalTranscriptEntry::Message("`inline` code".to_owned()),
+                TerminalTranscriptEntry::Message("regular line".to_owned()),
+            ],
+            ..TerminalViewState::default()
+        };
+        state.render_cache.invalidate_all();
+
+        let width = 72u16;
+        let full_lines = render_terminal_transcript_lines(&state);
+        let full = render_terminal_output_with_accents(&full_lines, width);
+
+        let total = terminal_total_rendered_rows(&mut state, width, TerminalActivityIndicator::None);
+        assert_eq!(total, full.lines.len());
+
+        let total_with_indicator =
+            terminal_total_rendered_rows(&mut state, width, TerminalActivityIndicator::Working);
+        assert_eq!(total_with_indicator, full.lines.len() + 2);
+    }
+
+    #[test]
     fn normal_mode_router_maps_expected_commands() {
         let mut shell_state = UiShellState::new("ready".to_owned(), triage_projection());
         assert_eq!(

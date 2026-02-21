@@ -155,7 +155,6 @@ impl Ui {
                         inbox_area,
                     );
 
-                    let center_text = render_center_panel(&ui_state);
                     let center_focused_style = shell_state
                         .is_right_pane_focused()
                         .then_some(Style::default().fg(Color::LightBlue));
@@ -196,41 +195,52 @@ impl Ui {
                             terminal_meta_area,
                         );
 
-                        let output_text = render_terminal_output_panel(
-                            &ui_state,
-                            terminal_output_area.width.saturating_sub(2),
-                        );
-                        let output_text = append_terminal_loading_indicator(
-                            output_text,
-                            terminal_activity_indicator(
-                                &shell_state.domain,
-                                &shell_state.terminal_session_states,
-                                &session_id,
-                            ),
-                        );
-                        let content_height =
-                            estimate_wrapped_line_count(&output_text, terminal_output_area.width);
+                        const TERMINAL_VIEWPORT_OVERSCAN_ROWS: usize = 8;
+                        let output_width = terminal_output_area.width.saturating_sub(2).max(1);
                         let viewport_height = terminal_output_area.height.saturating_sub(2).max(1);
+                        let indicator = terminal_activity_indicator(
+                            &shell_state.domain,
+                            &shell_state.terminal_session_states,
+                            &session_id,
+                        );
+                        let total_rows = shell_state
+                            .terminal_total_rendered_rows_for_session(
+                                &session_id,
+                                output_width,
+                                indicator,
+                            )
+                            .max(1);
                         shell_state.sync_terminal_output_viewport(
-                            output_text.lines.len(),
+                            total_rows,
                             usize::from(viewport_height),
                         );
-                        let scroll_y = shell_state
-                            .terminal_session_states
-                            .get(&session_id)
-                            .map(|view| {
-                                let max_scroll = content_height.saturating_sub(viewport_height);
-                                (view.output_scroll_line as u16).min(max_scroll)
-                            })
-                            .unwrap_or(0);
+                        let output_render = shell_state
+                            .render_terminal_output_viewport_for_session(
+                                &session_id,
+                                TerminalViewportRequest {
+                                    width: output_width,
+                                    scroll_top: shell_state
+                                        .terminal_session_states
+                                        .get(&session_id)
+                                        .map(|view| view.output_scroll_line)
+                                        .unwrap_or(0),
+                                    viewport_rows: usize::from(viewport_height),
+                                    overscan_rows: TERMINAL_VIEWPORT_OVERSCAN_ROWS,
+                                    indicator,
+                                },
+                            )
+                            .unwrap_or_else(|| TerminalViewportRender {
+                                text: Text::raw("No terminal output available yet."),
+                                local_scroll_top: 0,
+                            });
                         let mut terminal_output_block = Block::default().title("output").borders(Borders::ALL);
                         if let Some(style) = center_focused_style {
                             terminal_output_block = terminal_output_block.border_style(style);
                         }
                         frame.render_widget(
-                            Paragraph::new(output_text)
+                            Paragraph::new(output_render.text)
                                 .wrap(Wrap { trim: false })
-                                .scroll((scroll_y, 0))
+                                .scroll((output_render.local_scroll_top, 0))
                                 .block(terminal_output_block),
                             terminal_output_area,
                         );
@@ -275,6 +285,7 @@ impl Ui {
                             );
                         }
                     } else {
+                        let center_text = render_center_panel(&ui_state);
                         if shell_state.is_global_supervisor_chat_active() {
                             let [chat_output_area, chat_input_area] = Layout::vertical([
                                 Constraint::Min(3),

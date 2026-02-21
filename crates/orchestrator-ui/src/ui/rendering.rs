@@ -561,13 +561,97 @@ fn summarize_folded_terminal_content(content: &str) -> String {
     }
 }
 
-fn render_terminal_output_panel(ui_state: &UiState, width: u16) -> Text<'static> {
-    if ui_state.center_pane.lines.is_empty() {
-        return Text::raw("No terminal output available yet.");
-    }
-    render_terminal_output_with_accents(&ui_state.center_pane.lines, width.max(1))
+#[derive(Debug, Clone)]
+struct TerminalViewportRequest {
+    width: u16,
+    scroll_top: usize,
+    viewport_rows: usize,
+    overscan_rows: usize,
+    indicator: TerminalActivityIndicator,
 }
 
+#[derive(Debug, Clone)]
+struct TerminalViewportRender {
+    text: Text<'static>,
+    local_scroll_top: u16,
+}
+
+fn terminal_total_rendered_rows(
+    state: &mut TerminalViewState,
+    width: u16,
+    indicator: TerminalActivityIndicator,
+) -> usize {
+    ensure_terminal_render_metrics(state, width.max(1));
+    let transcript_rows = state
+        .render_cache
+        .rendered_prefix_sums
+        .last()
+        .copied()
+        .unwrap_or(0);
+    transcript_rows + terminal_indicator_rows(transcript_rows > 0, indicator).len()
+}
+
+fn render_terminal_output_viewport(
+    state: &mut TerminalViewState,
+    request: TerminalViewportRequest,
+) -> TerminalViewportRender {
+    let width = request.width.max(1);
+    ensure_terminal_render_metrics(state, width);
+    let transcript_rows = state
+        .render_cache
+        .rendered_prefix_sums
+        .last()
+        .copied()
+        .unwrap_or(0);
+    let indicator_rows = terminal_indicator_rows(transcript_rows > 0, request.indicator);
+    let total_rows = transcript_rows + indicator_rows.len();
+
+    if total_rows == 0 {
+        return TerminalViewportRender {
+            text: Text::raw("No terminal output available yet."),
+            local_scroll_top: 0,
+        };
+    }
+
+    let max_scroll = total_rows.saturating_sub(request.viewport_rows.max(1));
+    let scroll_top = request.scroll_top.min(max_scroll);
+    let slice_start = scroll_top.saturating_sub(request.overscan_rows);
+    let slice_end = scroll_top
+        .saturating_add(request.viewport_rows.max(1))
+        .saturating_add(request.overscan_rows)
+        .min(total_rows);
+    let local_scroll_top = scroll_top.saturating_sub(slice_start).min(u16::MAX as usize) as u16;
+
+    let mut rendered = Vec::new();
+    if transcript_rows > 0 && slice_start < transcript_rows {
+        let transcript_slice_end = slice_end.min(transcript_rows);
+        rendered.extend(render_terminal_transcript_slice(
+            state,
+            width,
+            slice_start,
+            transcript_slice_end,
+        ));
+    }
+
+    if slice_end > transcript_rows && !indicator_rows.is_empty() {
+        let indicator_start = slice_start.saturating_sub(transcript_rows);
+        let indicator_end = slice_end.saturating_sub(transcript_rows).min(indicator_rows.len());
+        for row in indicator_rows
+            .iter()
+            .skip(indicator_start)
+            .take(indicator_end.saturating_sub(indicator_start))
+        {
+            rendered.push(Line::from(Span::styled(row.text.clone(), row.style)));
+        }
+    }
+
+    TerminalViewportRender {
+        text: Text::from(rendered),
+        local_scroll_top,
+    }
+}
+
+#[cfg(test)]
 fn render_terminal_output_with_accents(lines: &[String], width: u16) -> Text<'static> {
     let mut rendered = Vec::new();
     let mut active_fold_kind: Option<TerminalFoldKind> = None;
@@ -619,6 +703,214 @@ fn render_terminal_output_with_accents(lines: &[String], width: u16) -> Text<'st
     }
 
     Text::from(rendered)
+}
+
+fn ensure_terminal_render_metrics(state: &mut TerminalViewState, width: u16) {
+    ensure_terminal_transcript_cache(state);
+    if state.render_cache.width != width {
+        state.render_cache.metrics_stale = true;
+        state.render_cache.width = width;
+    }
+    if !state.render_cache.metrics_stale {
+        return;
+    }
+
+    let mut active_fold_kind: Option<TerminalFoldKind> = None;
+    state.render_cache.rendered_row_counts.clear();
+    state
+        .render_cache
+        .rendered_row_counts
+        .reserve(state.render_cache.transcript_lines.len());
+    for line in &state.render_cache.transcript_lines {
+        let row_count = terminal_rendered_row_count_for_line(line, width, &mut active_fold_kind);
+        state.render_cache.rendered_row_counts.push(row_count.max(1));
+    }
+
+    state.render_cache.rendered_prefix_sums.clear();
+    state
+        .render_cache
+        .rendered_prefix_sums
+        .reserve(state.render_cache.rendered_row_counts.len() + 1);
+    state.render_cache.rendered_prefix_sums.push(0);
+    for row_count in &state.render_cache.rendered_row_counts {
+        let next = state
+            .render_cache
+            .rendered_prefix_sums
+            .last()
+            .copied()
+            .unwrap_or(0)
+            .saturating_add(*row_count);
+        state.render_cache.rendered_prefix_sums.push(next);
+    }
+    state.render_cache.metrics_stale = false;
+}
+
+fn ensure_terminal_transcript_cache(state: &mut TerminalViewState) {
+    if !state.render_cache.transcript_stale {
+        return;
+    }
+    state.render_cache.transcript_lines = render_terminal_transcript_entries(state)
+        .into_iter()
+        .map(|line| line.text)
+        .collect();
+    state.render_cache.transcript_stale = false;
+    state.render_cache.metrics_stale = true;
+}
+
+fn terminal_rendered_row_count_for_line(
+    raw_line: &str,
+    width: u16,
+    active_fold_kind: &mut Option<TerminalFoldKind>,
+) -> usize {
+    let line = sanitize_terminal_display_text(raw_line);
+    if line.trim().is_empty() {
+        *active_fold_kind = None;
+        return 1;
+    }
+
+    if let Some((kind, folded)) = parse_fold_header_line(&line) {
+        *active_fold_kind = if folded { None } else { Some(kind) };
+        return 1;
+    }
+
+    if active_fold_kind.is_some() || line.starts_with("> ") || !line_looks_like_markdown(&line) {
+        return 1;
+    }
+
+    let markdown = render_markdown_for_terminal(line.as_str(), width);
+    markdown.lines.len().max(1)
+}
+
+fn render_terminal_transcript_slice(
+    state: &TerminalViewState,
+    width: u16,
+    start_row: usize,
+    end_row: usize,
+) -> Vec<Line<'static>> {
+    if start_row >= end_row || state.render_cache.transcript_lines.is_empty() {
+        return Vec::new();
+    }
+    let prefix = &state.render_cache.rendered_prefix_sums;
+    let max_row = prefix.last().copied().unwrap_or(0);
+    if start_row >= max_row {
+        return Vec::new();
+    }
+
+    let clamped_end = end_row.min(max_row);
+    let mut raw_start = prefix.partition_point(|&row| row <= start_row).saturating_sub(1);
+    raw_start = raw_start.min(state.render_cache.transcript_lines.len().saturating_sub(1));
+    let mut raw_end = prefix.partition_point(|&row| row < clamped_end);
+    raw_end = raw_end.min(state.render_cache.transcript_lines.len());
+
+    let mut active_fold_kind: Option<TerminalFoldKind> = None;
+    for line in state.render_cache.transcript_lines.iter().take(raw_start) {
+        let sanitized = sanitize_terminal_display_text(line);
+        if sanitized.trim().is_empty() {
+            active_fold_kind = None;
+            continue;
+        }
+        if let Some((kind, folded)) = parse_fold_header_line(&sanitized) {
+            active_fold_kind = if folded { None } else { Some(kind) };
+        }
+    }
+
+    let mut rendered = Vec::new();
+    for raw_index in raw_start..raw_end {
+        let line_start = prefix.get(raw_index).copied().unwrap_or(0);
+        let line_end = prefix.get(raw_index + 1).copied().unwrap_or(line_start);
+        if line_end <= start_row || line_start >= clamped_end {
+            continue;
+        }
+
+        let line = &state.render_cache.transcript_lines[raw_index];
+        let mut expanded = render_terminal_line_with_context(line, width, &mut active_fold_kind);
+        let local_start = start_row.saturating_sub(line_start);
+        let local_end = clamped_end.saturating_sub(line_start).min(expanded.len());
+        if local_start < local_end {
+            rendered.extend(expanded.drain(local_start..local_end));
+        }
+    }
+
+    rendered
+}
+
+fn render_terminal_line_with_context(
+    raw_line: &str,
+    width: u16,
+    active_fold_kind: &mut Option<TerminalFoldKind>,
+) -> Vec<Line<'static>> {
+    let line = sanitize_terminal_display_text(raw_line);
+    if line.trim().is_empty() {
+        *active_fold_kind = None;
+        return vec![Line::from(String::new())];
+    }
+
+    if let Some((kind, folded)) = parse_fold_header_line(&line) {
+        *active_fold_kind = if folded { None } else { Some(kind) };
+        return vec![Line::from(Span::styled(line, fold_accent_style(kind, true)))];
+    }
+
+    if let Some(kind) = *active_fold_kind {
+        return vec![Line::from(Span::styled(
+            line,
+            fold_accent_style(kind, false),
+        ))];
+    }
+
+    if line.starts_with("> ") {
+        return vec![Line::from(Span::styled(
+            line,
+            Style::default().fg(Color::LightBlue),
+        ))];
+    }
+
+    if !line_looks_like_markdown(line.as_str()) {
+        return vec![Line::from(line)];
+    }
+
+    let markdown = render_markdown_for_terminal(line.as_str(), width);
+    if markdown.lines.is_empty() {
+        vec![Line::from(String::new())]
+    } else {
+        markdown.lines
+    }
+}
+
+#[derive(Debug, Clone)]
+struct TerminalIndicatorRow {
+    text: String,
+    style: Style,
+}
+
+fn terminal_indicator_rows(
+    transcript_has_content: bool,
+    indicator: TerminalActivityIndicator,
+) -> Vec<TerminalIndicatorRow> {
+    if matches!(indicator, TerminalActivityIndicator::None) {
+        return Vec::new();
+    }
+
+    let mut rows = Vec::with_capacity(2);
+    if transcript_has_content {
+        rows.push(TerminalIndicatorRow {
+            text: String::new(),
+            style: Style::default(),
+        });
+    }
+    match indicator {
+        TerminalActivityIndicator::None => {}
+        TerminalActivityIndicator::Working => rows.push(TerminalIndicatorRow {
+            text: format!("{} agent working...", loading_spinner_frame()),
+            style: Style::default()
+                .fg(Color::LightCyan)
+                .add_modifier(Modifier::DIM),
+        }),
+        TerminalActivityIndicator::AwaitingInput => rows.push(TerminalIndicatorRow {
+            text: "󰥔 awaiting input".to_owned(),
+            style: Style::default().fg(Color::Yellow),
+        }),
+    }
+    rows
 }
 
 fn line_looks_like_markdown(line: &str) -> bool {
@@ -781,37 +1073,6 @@ fn session_turn_is_active(
         .unwrap_or(false)
 }
 
-fn append_terminal_loading_indicator(
-    mut text: Text<'static>,
-    indicator: TerminalActivityIndicator,
-) -> Text<'static> {
-    if matches!(indicator, TerminalActivityIndicator::None) {
-        return text;
-    }
-    if !text.lines.is_empty() {
-        text.lines.push(Line::from(String::new()));
-    }
-    match indicator {
-        TerminalActivityIndicator::None => {}
-        TerminalActivityIndicator::Working => {
-            let frame = loading_spinner_frame();
-            text.lines.push(Line::from(Span::styled(
-                format!("{frame} agent working..."),
-                Style::default()
-                    .fg(Color::LightCyan)
-                    .add_modifier(Modifier::DIM),
-            )));
-        }
-        TerminalActivityIndicator::AwaitingInput => {
-            text.lines.push(Line::from(Span::styled(
-                "󰥔 awaiting input",
-                Style::default().fg(Color::Yellow),
-            )));
-        }
-    }
-    text
-}
-
 fn loading_spinner_frame() -> &'static str {
     const FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
     let elapsed_ms = SystemTime::now()
@@ -961,15 +1222,6 @@ fn nord_editor_theme<'a>(block: Block<'a>) -> EditorTheme<'a> {
         .line_numbers_style(Style::default().bg(Color::Rgb(46, 52, 64)).fg(Color::Rgb(76, 86, 106)))
         .block(block)
         .hide_status_line()
-}
-
-fn estimate_wrapped_line_count(text: &Text<'_>, _area_width: u16) -> u16 {
-    let count = text.lines.len();
-    if count == 0 {
-        1
-    } else {
-        count.min(u16::MAX as usize) as u16
-    }
 }
 
 fn sanitize_terminal_display_text(input: &str) -> String {

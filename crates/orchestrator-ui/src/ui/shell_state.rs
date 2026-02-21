@@ -215,11 +215,8 @@ impl UiShellState {
 
     fn ui_state_for_draw(&mut self, now: Instant) -> UiState {
         let status = self.status_text();
-        let active_session_id = self.active_terminal_session_id().cloned();
         let attention_projection = self.attention_projection_for_draw(now).clone();
-        let terminal_view_state = active_session_id
-            .as_ref()
-            .and_then(|session_id| self.terminal_session_states.get(session_id));
+        let terminal_view_state = None;
         let mut ui_state = project_ui_state_with_attention(
             status.as_str(),
             &self.domain,
@@ -1293,6 +1290,27 @@ impl UiShellState {
         self.terminal_session_states.get_mut(&session_id)
     }
 
+    fn terminal_total_rendered_rows_for_session(
+        &mut self,
+        session_id: &WorkerSessionId,
+        width: u16,
+        indicator: TerminalActivityIndicator,
+    ) -> usize {
+        self.terminal_session_states
+            .get_mut(session_id)
+            .map(|view| terminal_total_rendered_rows(view, width, indicator))
+            .unwrap_or(0)
+    }
+
+    fn render_terminal_output_viewport_for_session(
+        &mut self,
+        session_id: &WorkerSessionId,
+        request: TerminalViewportRequest,
+    ) -> Option<TerminalViewportRender> {
+        let view = self.terminal_session_states.get_mut(session_id)?;
+        Some(render_terminal_output_viewport(view, request))
+    }
+
     fn snap_active_terminal_output_to_bottom(&mut self) {
         let Some(view) = self.active_terminal_view_state_mut() else {
             return;
@@ -1975,6 +1993,8 @@ impl UiShellState {
                     view.last_background_flush_at = None;
                     view.entries.clear();
                     view.output_fragment.clear();
+                    view.render_cache.invalidate_all();
+                    view.output_rendered_line_count = 0;
                     view.output_scroll_line = 0;
                     view.output_follow_tail = true;
                     view.turn_active = false;
