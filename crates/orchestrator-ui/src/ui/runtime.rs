@@ -161,38 +161,15 @@ impl Ui {
                         session_metrics.selected_line,
                         sessions_viewport_rows,
                     );
-                    let sessions_title = if shell_state.is_sessions_sidebar_focused() {
-                        "sessions *"
-                    } else {
-                        "sessions"
-                    };
-                    let mut sessions_block =
-                        Block::default().title(sessions_title).borders(Borders::ALL);
-                    if shell_state.is_sessions_sidebar_focused() {
-                        sessions_block =
-                            sessions_block.border_style(Style::default().fg(Color::LightBlue));
-                    }
+                    let sessions_block = Block::default().title("sessions").borders(Borders::ALL);
                     frame.render_widget(
                         Paragraph::new(sessions_text).block(sessions_block),
                         sessions_area,
                     );
 
                     let inbox_text = render_inbox_panel(&ui_state);
-                    let inbox_title = if shell_state.is_inbox_sidebar_focused() {
-                        "inbox *"
-                    } else {
-                        "inbox"
-                    };
-                    let mut inbox_block = Block::default().title(inbox_title).borders(Borders::ALL);
-                    if shell_state.is_inbox_sidebar_focused() {
-                        inbox_block =
-                            inbox_block.border_style(Style::default().fg(Color::LightBlue));
-                    }
+                    let inbox_block = Block::default().title("inbox").borders(Borders::ALL);
                     frame.render_widget(Paragraph::new(inbox_text).block(inbox_block), inbox_area);
-
-                    let center_focused_style = shell_state
-                        .is_right_pane_focused()
-                        .then_some(Style::default().fg(Color::LightBlue));
                     if let Some(session_id) = shell_state.active_terminal_session_id().cloned() {
                         let (terminal_area, session_info_area) = if shell_state
                             .should_show_session_info_sidebar()
@@ -228,11 +205,8 @@ impl Ui {
                             &session_id,
                             terminal_view_state,
                         );
-                        let mut terminal_meta_block =
+                        let terminal_meta_block =
                             Block::default().title("terminal").borders(Borders::ALL);
-                        if let Some(style) = center_focused_style {
-                            terminal_meta_block = terminal_meta_block.border_style(style);
-                        }
                         frame.render_widget(
                             Paragraph::new(meta_text).block(terminal_meta_block),
                             terminal_meta_area,
@@ -276,11 +250,8 @@ impl Ui {
                                 text: Text::raw("No terminal output available yet."),
                                 local_scroll_top: 0,
                             });
-                        let mut terminal_output_block =
+                        let terminal_output_block =
                             Block::default().title("output").borders(Borders::ALL);
-                        if let Some(style) = center_focused_style {
-                            terminal_output_block = terminal_output_block.border_style(style);
-                        }
                         frame.render_widget(
                             Paragraph::new(output_render.text)
                                 .wrap(Wrap { trim: false })
@@ -303,7 +274,7 @@ impl Ui {
                                 EditorView::new(&mut shell_state.terminal_compose_editor)
                                     .theme(nord_editor_theme(
                                         Block::default()
-                                            .title("input (Ctrl+Enter send)")
+                                            .title("input (Enter send, Shift+Enter newline)")
                                             .borders(Borders::ALL),
                                     ))
                                     .wrap(true),
@@ -338,13 +309,9 @@ impl Ui {
                                     .areas(center_area);
                             frame.render_widget(
                                 Paragraph::new(center_text).block({
-                                    let mut block = Block::default()
+                                    Block::default()
                                         .title(ui_state.center_pane.title.as_str())
-                                        .borders(Borders::ALL);
-                                    if let Some(style) = center_focused_style {
-                                        block = block.border_style(style);
-                                    }
-                                    block
+                                        .borders(Borders::ALL)
                                 }),
                                 chat_output_area,
                             );
@@ -357,13 +324,9 @@ impl Ui {
                         } else {
                             frame.render_widget(
                                 Paragraph::new(center_text).block({
-                                    let mut block = Block::default()
+                                    Block::default()
                                         .title(ui_state.center_pane.title.as_str())
-                                        .borders(Borders::ALL);
-                                    if let Some(style) = center_focused_style {
-                                        block = block.border_style(style);
-                                    }
-                                    block
+                                        .borders(Borders::ALL)
                                 }),
                                 center_area,
                             );

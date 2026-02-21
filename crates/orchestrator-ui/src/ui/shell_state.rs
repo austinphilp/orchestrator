@@ -1,16 +1,4 @@
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum SidebarFocus {
-    Sessions,
-    Inbox,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum PaneFocus {
-    Left,
-    Right,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum AnimationState {
     None,
     ActiveTurn,
@@ -52,8 +40,6 @@ struct UiShellState {
     worker_backend: Option<Arc<dyn WorkerBackend>>,
     selected_session_index: Option<usize>,
     selected_session_id: Option<WorkerSessionId>,
-    sidebar_focus: SidebarFocus,
-    pane_focus: PaneFocus,
     terminal_session_sender: Option<mpsc::Sender<TerminalSessionEvent>>,
     terminal_session_receiver: Option<mpsc::Receiver<TerminalSessionEvent>>,
     session_info_summary_sender: Option<mpsc::Sender<SessionInfoSummaryEvent>>,
@@ -77,9 +63,6 @@ struct UiShellState {
     review_merge_confirm_session: Option<WorkerSessionId>,
     merge_queue: VecDeque<MergeQueueRequest>,
     merge_last_dispatched_at: Option<Instant>,
-    review_fallback_last_sweep_at: Option<Instant>,
-    approval_fallback_last_sweep_at: Option<Instant>,
-    approval_reconcile_last_poll_at: Option<Instant>,
     merge_event_sender: Option<mpsc::Sender<MergeQueueEvent>>,
     merge_event_receiver: Option<mpsc::Receiver<MergeQueueEvent>>,
     review_reconcile_eligible_sessions: HashSet<WorkerSessionId>,
@@ -149,6 +132,9 @@ impl UiShellState {
         ticket_picker_provider: Option<Arc<dyn TicketPickerProvider>>,
         worker_backend: Option<Arc<dyn WorkerBackend>>,
     ) -> Self {
+        #[cfg(test)]
+        set_workflow_profiles_config(WorkflowInteractionProfilesConfig::default());
+
         let (ticket_picker_sender, ticket_picker_receiver) = if ticket_picker_provider.is_some() {
             let (sender, receiver) = mpsc::channel(TICKET_PICKER_EVENT_CHANNEL_CAPACITY);
             (Some(sender), Some(receiver))
@@ -204,8 +190,6 @@ impl UiShellState {
             worker_backend,
             selected_session_index: None,
             selected_session_id: None,
-            sidebar_focus: SidebarFocus::Inbox,
-            pane_focus: PaneFocus::Left,
             terminal_session_sender,
             terminal_session_receiver,
             session_info_summary_sender,
@@ -229,9 +213,6 @@ impl UiShellState {
             review_merge_confirm_session: None,
             merge_queue: VecDeque::new(),
             merge_last_dispatched_at: None,
-            review_fallback_last_sweep_at: None,
-            approval_fallback_last_sweep_at: None,
-            approval_reconcile_last_poll_at: None,
             merge_event_sender: merge_event_sender.clone(),
             merge_event_receiver,
             review_reconcile_eligible_sessions: HashSet::new(),
@@ -343,76 +324,15 @@ impl UiShellState {
     }
 
     fn move_selection(&mut self, delta: isize) {
-        if !self.is_left_pane_focused() {
-            return;
-        }
-        if matches!(self.sidebar_focus, SidebarFocus::Sessions) {
-            let _ = self.move_session_selection(delta);
-            return;
-        }
-        let ui_state = self.ui_state();
-        if ui_state.inbox_rows.is_empty() {
-            self.set_selection(None, &ui_state.inbox_rows);
-            return;
-        }
-
-        let current = ui_state.selected_inbox_index.unwrap_or(0) as isize;
-        let upper_bound = ui_state.inbox_rows.len() as isize - 1;
-        let next = (current + delta).clamp(0, upper_bound) as usize;
-        self.set_selection(Some(next), &ui_state.inbox_rows);
+        let _ = self.move_session_selection(delta);
     }
 
     fn jump_to_first_item(&mut self) {
-        if !self.is_left_pane_focused() {
-            return;
-        }
-        if matches!(self.sidebar_focus, SidebarFocus::Sessions) {
-            let _ = self.move_to_first_session();
-            return;
-        }
-        let ui_state = self.ui_state();
-        if ui_state.inbox_rows.is_empty() {
-            self.set_selection(None, &ui_state.inbox_rows);
-            return;
-        }
-        self.set_selection(Some(0), &ui_state.inbox_rows);
+        let _ = self.move_to_first_session();
     }
 
     fn jump_to_last_item(&mut self) {
-        if !self.is_left_pane_focused() {
-            return;
-        }
-        if matches!(self.sidebar_focus, SidebarFocus::Sessions) {
-            let _ = self.move_to_last_session();
-            return;
-        }
-        let ui_state = self.ui_state();
-        if ui_state.inbox_rows.is_empty() {
-            self.set_selection(None, &ui_state.inbox_rows);
-            return;
-        }
-        self.set_selection(Some(ui_state.inbox_rows.len() - 1), &ui_state.inbox_rows);
-    }
-
-    fn cycle_sidebar_focus(&mut self, delta: isize) {
-        if !self.is_left_pane_focused() {
-            return;
-        }
-        if delta.rem_euclid(2) == 0 {
-            return;
-        }
-        self.sidebar_focus = match self.sidebar_focus {
-            SidebarFocus::Sessions => SidebarFocus::Inbox,
-            SidebarFocus::Inbox => SidebarFocus::Sessions,
-        };
-    }
-
-    fn cycle_pane_focus(&mut self) {
-        self.pane_focus = match self.pane_focus {
-            PaneFocus::Left => PaneFocus::Right,
-            PaneFocus::Right => PaneFocus::Left,
-        };
-        self.enter_normal_mode();
+        let _ = self.move_to_last_session();
     }
 
     fn jump_to_batch(&mut self, target: InboxBatchKind) {
@@ -481,10 +401,11 @@ impl UiShellState {
             return;
         };
         self.set_selection(Some(next_index), &rows);
+        let _ = self.open_selected_inbox_output(false);
     }
 
     fn open_terminal_for_selected(&mut self) {
-        if self.open_selected_inbox_output(false, false) {
+        if self.open_selected_inbox_output(false) {
             return;
         }
 
@@ -521,17 +442,10 @@ impl UiShellState {
     }
 
     fn open_session_output_for_selected_inbox(&mut self) {
-        let _ = self.open_selected_inbox_output(true, true);
+        let _ = self.open_selected_inbox_output(true);
     }
 
-    fn open_selected_inbox_output(
-        &mut self,
-        acknowledge_selection: bool,
-        require_inbox_sidebar_focus: bool,
-    ) -> bool {
-        if require_inbox_sidebar_focus && !matches!(self.sidebar_focus, SidebarFocus::Inbox) {
-            return false;
-        }
+    fn open_selected_inbox_output(&mut self, acknowledge_selection: bool) -> bool {
         let ui_state = self.ui_state();
         let Some(selected_index) = ui_state.selected_inbox_index else {
             self.status_warning =
@@ -770,22 +684,6 @@ impl UiShellState {
         self.selected_session_id = session_ids.get(index).cloned();
     }
 
-    fn is_sessions_sidebar_focused(&self) -> bool {
-        self.is_left_pane_focused() && matches!(self.sidebar_focus, SidebarFocus::Sessions)
-    }
-
-    fn is_inbox_sidebar_focused(&self) -> bool {
-        self.is_left_pane_focused() && matches!(self.sidebar_focus, SidebarFocus::Inbox)
-    }
-
-    fn is_left_pane_focused(&self) -> bool {
-        matches!(self.pane_focus, PaneFocus::Left)
-    }
-
-    fn is_right_pane_focused(&self) -> bool {
-        matches!(self.pane_focus, PaneFocus::Right)
-    }
-
     fn should_show_session_info_sidebar(&self) -> bool {
         self.active_terminal_session_id().is_some()
     }
@@ -823,9 +721,7 @@ impl UiShellState {
     }
 
     fn session_info_is_foreground(&self) -> bool {
-        self.active_terminal_session_id().is_some()
-            && self.is_right_pane_focused()
-            && self.mode == UiMode::Terminal
+        self.active_terminal_session_id().is_some() && self.mode == UiMode::Terminal
     }
 
     fn session_info_diff_cache_for(
@@ -1065,6 +961,11 @@ impl UiShellState {
         session_id: WorkerSessionId,
         is_working: bool,
     ) {
+        self.domain.session_runtime.insert(
+            session_id.clone(),
+            orchestrator_core::SessionRuntimeProjection { is_working },
+        );
+
         if self.session_is_in_planning_stage(&session_id) {
             self.pending_session_working_state_persists.insert(
                 session_id,
@@ -1084,6 +985,10 @@ impl UiShellState {
         session_id: WorkerSessionId,
         is_working: bool,
     ) {
+        self.domain.session_runtime.insert(
+            session_id.clone(),
+            orchestrator_core::SessionRuntimeProjection { is_working },
+        );
         self.pending_session_working_state_persists
             .remove(&session_id);
         self.spawn_set_session_working_state(session_id, is_working);
@@ -1198,24 +1103,11 @@ impl UiShellState {
     }
 
     fn session_is_actively_working(&self, session_id: &WorkerSessionId) -> bool {
-        if self
-            .terminal_session_states
-            .get(session_id)
-            .map(|state| {
-                state.active_needs_input.is_some() || !state.pending_needs_input_prompts.is_empty()
-            })
-            .unwrap_or(false)
-        {
-            return false;
-        }
-
-        if self
-            .terminal_session_states
-            .get(session_id)
-            .map(|state| state.turn_active)
-            .unwrap_or(false)
-        {
-            return true;
+        if let Some(state) = self.terminal_session_states.get(session_id) {
+            if state.active_needs_input.is_some() || !state.pending_needs_input_prompts.is_empty() {
+                return false;
+            }
+            return state.turn_active;
         }
 
         self.domain
@@ -1233,6 +1125,14 @@ impl UiShellState {
             return false;
         }
 
+        let has_prompt = self
+            .terminal_session_states
+            .get(session_id)
+            .map(|state| {
+                state.active_needs_input.is_some() || !state.pending_needs_input_prompts.is_empty()
+            })
+            .unwrap_or(false);
+
         if matches!(
             self.domain
                 .sessions
@@ -1240,15 +1140,10 @@ impl UiShellState {
                 .and_then(|session| session.status.as_ref()),
             Some(WorkerSessionStatus::WaitingForUser)
         ) {
-            return true;
+            return has_prompt;
         }
 
-        self.terminal_session_states
-            .get(session_id)
-            .map(|state| {
-                state.active_needs_input.is_some() || !state.pending_needs_input_prompts.is_empty()
-            })
-            .unwrap_or(false)
+        has_prompt
     }
 
     fn session_requires_progression_approval(&self, session_id: &WorkerSessionId) -> bool {
@@ -1300,15 +1195,6 @@ impl UiShellState {
         }
 
         if self.session_requires_progression_approval(session_id) {
-            if matches!(
-                self.session_interaction_level(session_id),
-                Some(WorkflowInteractionLevel::Auto)
-            ) {
-                if self.autopilot_advancing_sessions.insert(session_id.clone()) {
-                    self.spawn_session_workflow_advance(session_id.clone());
-                }
-                return true;
-            }
             self.publish_inbox_for_session(
                 session_id,
                 InboxItemKind::NeedsApproval,
@@ -1391,25 +1277,6 @@ impl UiShellState {
                 "Ticket is idle in review stage",
             )),
             _ => None,
-        }
-    }
-
-    fn publish_review_idle_inbox_for_session(&mut self, session_id: &WorkerSessionId) {
-        if let Some((kind, coalesce_key, title_prefix)) = self
-            .workflow_state_for_session(session_id)
-            .as_ref()
-            .and_then(Self::workflow_transition_inbox_for_state)
-            .filter(|(kind, _, _)| *kind == InboxItemKind::ReadyForReview)
-        {
-            self.publish_inbox_for_session(
-                session_id,
-                kind,
-                format!(
-                    "{title_prefix}: {}",
-                    session_display_labels(&self.domain, session_id).compact_label
-                ),
-                coalesce_key,
-            );
         }
     }
 
@@ -1544,23 +1411,6 @@ impl UiShellState {
         view.output_scroll_line = next;
         view.output_follow_tail = next == max_scroll;
         next != current
-    }
-
-    fn scroll_terminal_output_to_bottom(&mut self) -> bool {
-        let Some(view) = self.active_terminal_view_state_mut() else {
-            return false;
-        };
-        let rendered_line_count = terminal_output_line_count_for_scroll(view);
-        if rendered_line_count == 0 {
-            view.output_scroll_line = 0;
-            view.output_follow_tail = true;
-            return false;
-        }
-        let max_scroll = rendered_line_count.saturating_sub(view.output_viewport_rows.max(1));
-        let previous = view.output_scroll_line.min(max_scroll);
-        view.output_scroll_line = max_scroll;
-        view.output_follow_tail = true;
-        view.output_scroll_line != previous
     }
 
     fn terminal_session_handle(&self, session_id: &WorkerSessionId) -> Option<SessionHandle> {
@@ -2336,7 +2186,12 @@ impl UiShellState {
         for session_id in pending_needs_input_sessions {
             changed |= self.autopilot_handle_needs_input_for_session(&session_id);
         }
+        changed |= self.autopilot_reconcile_session_actions();
         changed
+    }
+
+    fn autopilot_reconcile_session_actions(&mut self) -> bool {
+        false
     }
 
     fn autopilot_handle_needs_input_for_session(&mut self, session_id: &WorkerSessionId) -> bool {
@@ -2513,8 +2368,8 @@ impl UiShellState {
                         if self.active_terminal_session_id() == Some(&session_id) {
                             self.schedule_session_info_summary_refresh_for_active_session();
                         }
+                        changed |= self.mark_reconcile_dirty_for_session(&session_id);
                     }
-                    changed |= self.mark_reconcile_dirty_for_session(&session_id);
                 }
                 TerminalSessionEvent::NeedsInput {
                     session_id,
@@ -2956,7 +2811,6 @@ impl UiShellState {
         changed |= self.ci_failure_signatures_notified.len() != ci_notified_len_before;
 
         for session_id in session_ids {
-            self.publish_review_idle_inbox_for_session(&session_id);
             changed |= self.ensure_review_sync_instruction(&session_id);
         }
         changed
@@ -3112,20 +2966,10 @@ impl UiShellState {
     }
 
     fn enqueue_merge_reconcile_polls_at(&mut self, _now: Instant) -> bool {
-        self.mark_all_eligible_reconcile_dirty();
         self.enqueue_event_driven_reconciles()
     }
 
-    fn enqueue_progression_approval_reconcile_polls_at(&mut self, now: Instant) -> bool {
-        if self
-            .approval_reconcile_last_poll_at
-            .map(|previous| now.duration_since(previous) < APPROVAL_RECONCILE_POLL_INTERVAL)
-            .unwrap_or(false)
-        {
-            return false;
-        }
-        self.approval_reconcile_last_poll_at = Some(now);
-        self.mark_all_eligible_reconcile_dirty();
+    fn enqueue_progression_approval_reconcile_polls_at(&mut self, _now: Instant) -> bool {
         self.enqueue_event_driven_reconciles()
     }
 
@@ -3173,97 +3017,24 @@ impl UiShellState {
             .retain(|session_id, _| active_review_sessions.contains(session_id));
         changed |= self.ci_failure_signatures_notified.len() != ci_notified_len_before;
         let queue_len_before = self.merge_queue.len();
-        self.merge_queue
-            .retain(|request| active_review_sessions.contains(&request.session_id));
+        self.merge_queue.retain(|request| {
+            request.kind == MergeQueueCommandKind::Merge
+                && active_review_sessions.contains(&request.session_id)
+        });
         changed |= self.merge_queue.len() != queue_len_before;
 
         let review_dirty = self.dirty_review_reconcile_sessions.drain().collect::<Vec<_>>();
-        let now = Instant::now();
         for session_id in review_dirty {
             if !self.review_reconcile_eligible_sessions.contains(&session_id) {
                 continue;
             }
-            self.publish_review_idle_inbox_for_session(&session_id);
             changed |= self.ensure_review_sync_instruction(&session_id);
-            if !self.merge_pending_sessions.contains(&session_id) {
-                continue;
-            }
-            if self.session_is_actively_working(&session_id) {
-                tracing::debug!(
-                    session_id = session_id.as_str(),
-                    "skipping merge reconcile poll because session is actively working"
-                );
-                continue;
-            }
-            let state = self
-                .merge_poll_states
-                .entry(session_id.clone())
-                .or_insert_with(|| MergeReconcilePollState::new(now));
-            if now < state.next_poll_at {
-                tracing::debug!(
-                    session_id = session_id.as_str(),
-                    "skipping merge reconcile poll due to backoff window"
-                );
-                continue;
-            }
-            state.last_poll_started_at = Some(now);
-            state.next_poll_at = now + merge_poll_base_interval_config_value();
-            changed |=
-                self.enqueue_merge_queue_request(session_id, MergeQueueCommandKind::Reconcile);
         }
         changed
     }
 
     fn run_sparse_reconcile_fallbacks(&mut self) -> bool {
-        let now = Instant::now();
-        let mut changed = false;
-
-        let approval_due = self
-            .approval_fallback_last_sweep_at
-            .map(|previous| now.duration_since(previous) >= RECONCILE_SPARSE_FALLBACK_INTERVAL)
-            .unwrap_or(true);
-        let review_due = self
-            .review_fallback_last_sweep_at
-            .map(|previous| now.duration_since(previous) >= RECONCILE_SPARSE_FALLBACK_INTERVAL)
-            .unwrap_or(true);
-
-        if !approval_due && !review_due {
-            return false;
-        }
-
-        self.rebuild_reconcile_eligibility_indexes();
-
-        if approval_due {
-            self.approval_fallback_last_sweep_at = Some(now);
-            changed = true;
-            for session_id in self
-                .approval_reconcile_candidate_sessions
-                .iter()
-                .cloned()
-                .collect::<Vec<_>>()
-            {
-                changed |= self.reconcile_progression_approval_inbox_for_session(&session_id);
-            }
-        }
-
-        if review_due {
-            self.review_fallback_last_sweep_at = Some(now);
-            changed = true;
-            if self.supervisor_command_dispatcher.is_some() {
-                for session_id in self
-                    .merge_pending_sessions
-                    .iter()
-                    .cloned()
-                    .collect::<Vec<_>>()
-                {
-                    if self.review_reconcile_eligible_sessions.contains(&session_id) {
-                        changed |= self.mark_reconcile_dirty_for_session(&session_id);
-                    }
-                }
-            }
-        }
-
-        changed
+        false
     }
 
     fn ensure_review_sync_instruction(&mut self, session_id: &WorkerSessionId) -> bool {
@@ -3404,10 +3175,14 @@ impl UiShellState {
     }
 
     fn session_requires_manual_needs_input_activation(&self, session_id: &WorkerSessionId) -> bool {
-        matches!(
-            self.session_interaction_level(session_id),
-            Some(WorkflowInteractionLevel::Manual)
-        )
+        self.domain
+            .sessions
+            .get(session_id)
+            .and_then(|session| session.work_item_id.as_ref())
+            .and_then(|work_item_id| self.domain.work_items.get(work_item_id))
+            .and_then(|work_item| work_item.workflow_state.as_ref())
+            .map(|state| matches!(state, WorkflowState::New | WorkflowState::Planning))
+            .unwrap_or(false)
     }
 
     fn send_terminal_instruction_to_session(
@@ -4131,15 +3906,12 @@ impl UiShellState {
                 self.enter_normal_mode();
                 true
             }
-            KeyCode::Enter if key.modifiers == KeyModifiers::CONTROL => {
+            KeyCode::Enter if key.modifiers.is_empty() => {
                 self.submit_terminal_compose_input();
                 true
             }
-            KeyCode::Enter if key.modifiers.is_empty() => {
-                let enter = edtui_key_input(KeyCode::Enter, KeyModifiers::NONE)
-                    .expect("enter key conversion");
-                self.terminal_compose_event_handler
-                    .on_key_event(enter, &mut self.terminal_compose_editor);
+            KeyCode::Enter if key.modifiers == KeyModifiers::CONTROL => {
+                self.submit_terminal_compose_input();
                 true
             }
             KeyCode::Enter if key.modifiers == KeyModifiers::SHIFT => {
@@ -4775,7 +4547,30 @@ impl UiShellState {
         self.selected_inbox_item_id =
             valid_selected_index.map(|index| rows[index].inbox_item_id.clone());
         if self.selected_inbox_item_id.is_some() && self.selected_inbox_item_id != previous {
-            let _ = self.open_selected_inbox_output(false, false);
+            if let Some(index) = self.selected_inbox_index {
+                self.apply_selection_focus_policy(&rows[index]);
+            }
+        }
+    }
+
+    fn apply_selection_focus_policy(&mut self, selected_row: &UiInboxRow) {
+        if selected_row.kind == InboxItemKind::NeedsDecision {
+            let _ = self.open_selected_inbox_output(false);
+            return;
+        }
+
+        self.enter_normal_mode();
+
+        let Some(session_id) = selected_row.session_id.clone() else {
+            return;
+        };
+        if let Some(index) = self
+            .session_ids_for_navigation()
+            .iter()
+            .position(|candidate| candidate == &session_id)
+        {
+            self.selected_session_index = Some(index);
+            self.selected_session_id = Some(session_id);
         }
     }
 
@@ -4790,7 +4585,7 @@ impl UiShellState {
     }
 
     fn enter_insert_mode_for_current_focus(&mut self) {
-        if self.is_right_pane_focused() && self.is_terminal_view_active() {
+        if self.is_terminal_view_active() {
             if self.terminal_session_has_any_needs_input() && !self.terminal_session_has_active_needs_input()
             {
                 let _ = self.activate_terminal_needs_input(true);
@@ -4799,12 +4594,22 @@ impl UiShellState {
             }
             return;
         }
+
+        if self.is_global_supervisor_chat_active() {
+            self.enter_insert_mode();
+            return;
+        }
+
+        if self.selected_session_id_for_panel().is_some() {
+            self.open_terminal_and_enter_mode();
+            return;
+        }
+
         self.enter_insert_mode();
     }
 
     fn enter_terminal_mode(&mut self) {
         if self.is_terminal_view_active() {
-            self.pane_focus = PaneFocus::Right;
             self.snap_active_terminal_output_to_bottom();
             self.apply_ui_mode(UiMode::Terminal);
             self.schedule_session_info_summary_refresh_for_active_session();
@@ -5506,7 +5311,6 @@ impl UiShellState {
                 .values()
                 .any(|view| view.turn_active || !view.deferred_output.is_empty());
         let merge_busy = !self.merge_queue.is_empty()
-            || !self.merge_pending_sessions.is_empty()
             || !self.merge_finalizing_sessions.is_empty();
         let summary_busy = self
             .session_info_summary_cache
@@ -5532,15 +5336,6 @@ impl UiShellState {
             .filter(|_| !self.ticket_picker_overlay.loading);
         let summary_deadline = self.session_info_summary_deadline;
         let background_flush_deadline = self.background_terminal_flush_deadline;
-        let reconcile_sweep_deadline = [
-            self.approval_fallback_last_sweep_at
-                .map(|previous| previous + RECONCILE_SPARSE_FALLBACK_INTERVAL),
-            self.review_fallback_last_sweep_at
-                .map(|previous| previous + RECONCILE_SPARSE_FALLBACK_INTERVAL),
-        ]
-        .into_iter()
-        .flatten()
-        .min();
         let merge_dispatch_deadline = if self.merge_queue.is_empty() {
             None
         } else {
@@ -5555,7 +5350,6 @@ impl UiShellState {
             ticket_refresh_deadline,
             summary_deadline,
             background_flush_deadline,
-            reconcile_sweep_deadline,
             merge_dispatch_deadline,
         ]
         .into_iter()

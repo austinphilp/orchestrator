@@ -133,6 +133,22 @@ impl<S: Supervisor, G: GithubClient> App<S, G> {
         let inbox_item_id = InboxItemId::new(format!("inbox-{coalesce_scope}-{coalesce_key}"));
 
         let mut store = open_event_store(&self.config.event_store_path)?;
+        let existing_events = store.read_ordered()?;
+        let projection = rebuild_projection(&existing_events);
+        if let Some(existing) = projection.inbox_items.get(&inbox_item_id) {
+            let same_item = existing.work_item_id == request.work_item_id
+                && existing.kind == request.kind
+                && existing.title == title
+                && !existing.resolved;
+            if same_item {
+                if let Some(event) =
+                    latest_inbox_created_event_for_id(existing_events.as_slice(), &inbox_item_id)
+                {
+                    return Ok(event);
+                }
+            }
+        }
+
         let event = store.append(NewEventEnvelope {
             event_id: format!("evt-inbox-fanout-{}", now_nanos()),
             occurred_at: now_timestamp(),
@@ -882,6 +898,23 @@ fn normalize_inbox_coalesce_key(raw: &str) -> String {
         key.push(mapped);
     }
     key.trim_matches('-').to_owned()
+}
+
+fn latest_inbox_created_event_for_id(
+    events: &[StoredEventEnvelope],
+    inbox_item_id: &InboxItemId,
+) -> Option<StoredEventEnvelope> {
+    events
+        .iter()
+        .rev()
+        .find_map(|event| match &event.payload {
+            OrchestrationEventPayload::InboxItemCreated(payload)
+                if &payload.inbox_item_id == inbox_item_id =>
+            {
+                Some(event.clone())
+            }
+            _ => None,
+        })
 }
 
 fn cleanup_worktree_after_merge(worktree_path_raw: &str, branch: &str) -> Result<(), CoreError> {
