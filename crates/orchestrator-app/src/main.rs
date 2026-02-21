@@ -48,6 +48,9 @@ async fn main() -> Result<()> {
         config.ui.transcript_line_limit,
         config.ui.background_session_refresh_secs,
         config.ui.session_info_background_refresh_secs,
+        config.ui.merge_poll_base_interval_secs,
+        config.ui.merge_poll_max_backoff_secs,
+        config.ui.merge_poll_backoff_multiplier,
     );
 
     let openrouter_api_key = required_env(ENV_OPENROUTER_API_KEY)?;

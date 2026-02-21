@@ -5232,7 +5232,7 @@ mod tests {
     }
 
     #[test]
-    fn merge_reconcile_event_trigger_runs_for_review_session_without_pr_artifact() {
+    fn merge_reconcile_event_trigger_runs_for_queued_idle_review_session_without_pr_artifact() {
         let projection = review_projection_without_pr_artifact();
         let dispatcher = Arc::new(TestSupervisorDispatcher::new(Vec::new()));
         let mut shell_state = UiShellState::new_with_integrations(
@@ -5243,8 +5243,24 @@ mod tests {
             None,
             None,
         );
-
         let session_id = WorkerSessionId::new("sess-review");
+        shell_state.domain.session_runtime.insert(
+            session_id.clone(),
+            SessionRuntimeProjection { is_working: false },
+        );
+        let now = Instant::now();
+        shell_state.merge_pending_sessions.insert(session_id.clone());
+        shell_state.merge_poll_states.insert(
+            session_id.clone(),
+            MergeReconcilePollState {
+                next_poll_at: now - Duration::from_millis(1),
+                backoff: Duration::from_secs(15),
+                consecutive_failures: 0,
+                last_poll_started_at: None,
+                last_api_error_signature: None,
+            },
+        );
+
         let _ = shell_state.mark_reconcile_dirty_for_session(&session_id);
         assert!(shell_state.enqueue_event_driven_reconciles());
 
@@ -5375,6 +5391,88 @@ mod tests {
                 "sess-review".to_owned()
             ]
         );
+    }
+
+    #[test]
+    fn merge_reconcile_poll_skips_queued_session_when_active() {
+        let projection = review_projection_without_pr_artifact();
+        let dispatcher = Arc::new(TestSupervisorDispatcher::new(Vec::new()));
+        let mut shell_state = UiShellState::new_with_integrations(
+            "ready".to_owned(),
+            projection,
+            None,
+            Some(dispatcher),
+            None,
+            None,
+        );
+        let session_id = WorkerSessionId::new("sess-review");
+        let now = Instant::now();
+        shell_state.merge_pending_sessions.insert(session_id.clone());
+        shell_state
+            .terminal_session_states
+            .entry(session_id.clone())
+            .or_default()
+            .turn_active = true;
+        shell_state.merge_poll_states.insert(
+            session_id,
+            MergeReconcilePollState {
+                next_poll_at: now - Duration::from_millis(1),
+                backoff: Duration::from_secs(15),
+                consecutive_failures: 0,
+                last_poll_started_at: None,
+                last_api_error_signature: None,
+            },
+        );
+
+        shell_state.enqueue_merge_reconcile_polls_at(Instant::now());
+
+        assert!(shell_state.merge_queue.is_empty());
+    }
+
+    #[tokio::test]
+    async fn merge_reconcile_ci_status_error_notification_is_deduplicated() {
+        let mut projection = sample_projection(true);
+        projection
+            .work_items
+            .get_mut(&WorkItemId::new("wi-1"))
+            .expect("work item")
+            .workflow_state = Some(WorkflowState::InReview);
+        let provider = Arc::new(RecordingTicketPickerProvider::default());
+        let mut shell_state = UiShellState::new_with_integrations(
+            "ready".to_owned(),
+            projection,
+            None,
+            None,
+            Some(provider.clone()),
+            None,
+        );
+        let session_id = WorkerSessionId::new("sess-1");
+        let (sender, receiver) = mpsc::channel(4);
+        shell_state.merge_event_receiver = Some(receiver);
+
+        for _ in 0..2 {
+            sender
+                .try_send(MergeQueueEvent::Completed {
+                    session_id: session_id.clone(),
+                    kind: MergeQueueCommandKind::Reconcile,
+                    completed: false,
+                    merge_conflict: false,
+                    base_branch: Some("main".to_owned()),
+                    head_branch: Some("ap/AP-281-reconcile".to_owned()),
+                    ci_checks: Vec::new(),
+                    ci_failures: Vec::new(),
+                    ci_has_failures: false,
+                    ci_status_error: Some("github timeout".to_owned()),
+                    error: None,
+                })
+                .expect("send merge event");
+            shell_state.poll_merge_queue_events();
+        }
+
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        let published = provider.published_inbox_requests();
+        assert_eq!(published.len(), 1);
+        assert_eq!(published[0].coalesce_key, "error-merge-reconcile-api-error");
     }
 
     #[test]
@@ -6748,6 +6846,7 @@ mod tests {
         let mut prompt = NeedsInputComposerState::new(
             "prompt-1".to_owned(),
             vec![question],
+            vec![None],
             true,
             false,
         );
