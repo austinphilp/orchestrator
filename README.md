@@ -57,7 +57,6 @@ workflow_comment_summaries = false
 workflow_attach_pr_links = true
 workflow_state_map = [
   { workflow_state = "Implementing", linear_state = "In Progress" },
-  { workflow_state = "Testing", linear_state = "In Progress" },
   { workflow_state = "PRDrafted", linear_state = "In Review" },
   { workflow_state = "AwaitingYourReview", linear_state = "In Review" },
   { workflow_state = "ReadyForReview", linear_state = "In Review" },

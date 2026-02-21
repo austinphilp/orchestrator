@@ -7,7 +7,6 @@ const NO_GUARDS: &[WorkflowGuard] = &[];
 const REQUIRES_ACTIVE_SESSION: &[WorkflowGuard] = &[WorkflowGuard::ActiveSession];
 const REQUIRES_PLAN_AND_ACTIVE_SESSION: &[WorkflowGuard] =
     &[WorkflowGuard::ActiveSession, WorkflowGuard::PlanReady];
-const REQUIRES_CODE_CHANGES: &[WorkflowGuard] = &[WorkflowGuard::CodeChangesPresent];
 const REQUIRES_PASSING_TESTS_AND_PR: &[WorkflowGuard] = &[
     WorkflowGuard::PassingTests,
     WorkflowGuard::DraftPullRequestExists,
@@ -154,29 +153,9 @@ fn transition_guards(
         ) => Some(REQUIRES_ACTIVE_SESSION),
         (
             WorkflowState::Implementing,
-            WorkflowState::Testing,
-            WorkflowTransitionReason::TestsStarted,
-        ) => Some(REQUIRES_CODE_CHANGES),
-        (
-            WorkflowState::Testing,
-            WorkflowState::Implementing,
-            WorkflowTransitionReason::TestsFailed,
-        ) => Some(REQUIRES_ACTIVE_SESSION),
-        (
-            WorkflowState::Testing,
-            WorkflowState::Implementing,
-            WorkflowTransitionReason::ImplementationResumed,
-        ) => Some(REQUIRES_ACTIVE_SESSION),
-        (
-            WorkflowState::Testing,
             WorkflowState::PRDrafted,
             WorkflowTransitionReason::DraftPullRequestCreated,
         ) => Some(REQUIRES_PASSING_TESTS_AND_PR),
-        (
-            WorkflowState::Implementing,
-            WorkflowState::PRDrafted,
-            WorkflowTransitionReason::DraftPullRequestCreated,
-        ) => Some(REQUIRES_PR),
         (
             WorkflowState::PRDrafted,
             WorkflowState::AwaitingYourReview,
@@ -236,7 +215,6 @@ fn transition_guards(
             WorkflowState::New
             | WorkflowState::Planning
             | WorkflowState::Implementing
-            | WorkflowState::Testing
             | WorkflowState::PRDrafted
             | WorkflowState::AwaitingYourReview
             | WorkflowState::ReadyForReview
@@ -253,7 +231,6 @@ fn transition_guards(
             WorkflowState::New
             | WorkflowState::Planning
             | WorkflowState::Implementing
-            | WorkflowState::Testing
             | WorkflowState::PRDrafted
             | WorkflowState::AwaitingYourReview
             | WorkflowState::ReadyForReview
@@ -327,9 +304,9 @@ mod tests {
     }
 
     #[test]
-    fn testing_to_pr_drafted_requires_passing_tests_and_pr() {
+    fn implementing_to_pr_drafted_requires_passing_tests_and_pr() {
         let missing_guards = validate_workflow_transition(
-            &WorkflowState::Testing,
+            &WorkflowState::Implementing,
             &WorkflowState::PRDrafted,
             &WorkflowTransitionReason::DraftPullRequestCreated,
             &WorkflowGuardContext::default(),
@@ -344,41 +321,12 @@ mod tests {
         ));
 
         let success = validate_workflow_transition(
-            &WorkflowState::Testing,
+            &WorkflowState::Implementing,
             &WorkflowState::PRDrafted,
             &WorkflowTransitionReason::DraftPullRequestCreated,
             &WorkflowGuardContext {
                 tests_passed: true,
                 has_draft_pr: true,
-                ..WorkflowGuardContext::default()
-            },
-        );
-        assert!(success.is_ok());
-    }
-
-    #[test]
-    fn testing_to_implementing_accepts_resume_reason_with_active_session() {
-        let missing_session = validate_workflow_transition(
-            &WorkflowState::Testing,
-            &WorkflowState::Implementing,
-            &WorkflowTransitionReason::ImplementationResumed,
-            &WorkflowGuardContext::default(),
-        )
-        .expect_err("active session guard should fail");
-        assert!(matches!(
-            missing_session,
-            WorkflowTransitionError::GuardFailed {
-                guard: WorkflowGuard::ActiveSession,
-                ..
-            }
-        ));
-
-        let success = validate_workflow_transition(
-            &WorkflowState::Testing,
-            &WorkflowState::Implementing,
-            &WorkflowTransitionReason::ImplementationResumed,
-            &WorkflowGuardContext {
-                has_active_session: true,
                 ..WorkflowGuardContext::default()
             },
         );
@@ -645,8 +593,8 @@ mod tests {
                 expect_invalid: false,
             },
             Case {
-                name: "testing to pr drafted requires passing tests and draft pr",
-                from: WorkflowState::Testing,
+                name: "implementing to pr drafted requires passing tests and draft pr",
+                from: WorkflowState::Implementing,
                 to: WorkflowState::PRDrafted,
                 reason: WorkflowTransitionReason::DraftPullRequestCreated,
                 guards: WorkflowGuardContext {
@@ -658,8 +606,8 @@ mod tests {
                 expect_invalid: false,
             },
             Case {
-                name: "testing to pr drafted without tests fails first guard",
-                from: WorkflowState::Testing,
+                name: "implementing to pr drafted without tests fails first guard",
+                from: WorkflowState::Implementing,
                 to: WorkflowState::PRDrafted,
                 reason: WorkflowTransitionReason::DraftPullRequestCreated,
                 guards: WorkflowGuardContext {
@@ -670,8 +618,8 @@ mod tests {
                 expect_invalid: false,
             },
             Case {
-                name: "testing to pr drafted without draft pr fails second guard",
-                from: WorkflowState::Testing,
+                name: "implementing to pr drafted without draft pr fails second guard",
+                from: WorkflowState::Implementing,
                 to: WorkflowState::PRDrafted,
                 reason: WorkflowTransitionReason::DraftPullRequestCreated,
                 guards: WorkflowGuardContext {
@@ -725,11 +673,10 @@ mod tests {
             },
             Case {
                 name: "valid state pair with wrong reason is rejected",
-                from: WorkflowState::Testing,
-                to: WorkflowState::Implementing,
+                from: WorkflowState::Implementing,
+                to: WorkflowState::PRDrafted,
                 reason: WorkflowTransitionReason::PlanCommitted,
                 guards: WorkflowGuardContext {
-                    has_active_session: true,
                     plan_ready: true,
                     ..WorkflowGuardContext::default()
                 },
@@ -777,7 +724,6 @@ mod tests {
             WorkflowState::New,
             WorkflowState::Planning,
             WorkflowState::Implementing,
-            WorkflowState::Testing,
             WorkflowState::PRDrafted,
             WorkflowState::AwaitingYourReview,
             WorkflowState::ReadyForReview,

@@ -830,7 +830,6 @@ fn workflow_state_label(state: &WorkflowState) -> &'static str {
         WorkflowState::New => "New",
         WorkflowState::Planning => "Planning",
         WorkflowState::Implementing => "Implementing",
-        WorkflowState::Testing => "Testing",
         WorkflowState::PRDrafted => "PRDrafted",
         WorkflowState::AwaitingYourReview => "AwaitingYourReview",
         WorkflowState::ReadyForReview => "ReadyForReview",

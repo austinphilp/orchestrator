@@ -130,7 +130,6 @@ impl Default for WorkflowAutomationPolicy {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum WorkflowAutomationStep {
     BeginImplementation,
-    RunVerification,
     CreateDraftPullRequest,
     ProgressReviewReadiness,
 }
@@ -188,13 +187,6 @@ pub fn plan_workflow_automation_with_policy(
         }
         (
             WorkflowState::Implementing,
-            WorkflowState::Testing,
-            WorkflowTransitionReason::TestsStarted,
-        ) => {
-            plan.steps.push(WorkflowAutomationStep::RunVerification);
-        }
-        (
-            WorkflowState::Implementing | WorkflowState::Testing,
             WorkflowState::PRDrafted,
             WorkflowTransitionReason::DraftPullRequestCreated,
         ) => {
@@ -207,9 +199,7 @@ pub fn plan_workflow_automation_with_policy(
                 DRAFT_PULL_REQUEST_INBOX_TITLE,
             );
 
-            if matches!(from, WorkflowState::Testing) {
-                append_review_readiness_actions(&mut plan, guards, policy)?;
-            }
+            append_review_readiness_actions(&mut plan, guards, policy)?;
         }
         _ => {}
     }
@@ -310,27 +300,9 @@ mod tests {
     }
 
     #[test]
-    fn implementing_to_testing_triggers_run_verification_step() {
-        let plan = plan_workflow_automation(
-            &WorkflowState::Implementing,
-            &WorkflowState::Testing,
-            &WorkflowTransitionReason::TestsStarted,
-            &WorkflowGuardContext {
-                has_code_changes: true,
-                ..WorkflowGuardContext::default()
-            },
-        )
-        .expect("transition should be valid");
-
-        assert_eq!(plan.steps, vec![WorkflowAutomationStep::RunVerification]);
-        assert!(plan.follow_up_transitions.is_empty());
-        assert!(plan.inbox_items.is_empty());
-    }
-
-    #[test]
     fn pr_drafted_with_passing_tests_progresses_to_review_readiness() {
         let plan = plan_workflow_automation(
-            &WorkflowState::Testing,
+            &WorkflowState::Implementing,
             &WorkflowState::PRDrafted,
             &WorkflowTransitionReason::DraftPullRequestCreated,
             &WorkflowGuardContext {
@@ -368,8 +340,8 @@ mod tests {
     }
 
     #[test]
-    fn pr_drafted_without_passing_tests_defers_review_readiness() {
-        let plan = plan_workflow_automation(
+    fn pr_drafted_without_passing_tests_fails_transition_validation() {
+        let err = plan_workflow_automation(
             &WorkflowState::Implementing,
             &WorkflowState::PRDrafted,
             &WorkflowTransitionReason::DraftPullRequestCreated,
@@ -379,18 +351,18 @@ mod tests {
                 ..WorkflowGuardContext::default()
             },
         )
-        .expect("transition should be valid");
-
-        assert_eq!(
-            plan.steps,
-            vec![WorkflowAutomationStep::CreateDraftPullRequest]
-        );
-        assert!(plan.follow_up_transitions.is_empty());
-        assert!(plan.inbox_items.is_empty());
+        .expect_err("transition should fail without passing tests");
+        assert!(matches!(
+            err,
+            WorkflowTransitionError::GuardFailed {
+                guard: crate::workflow::WorkflowGuard::PassingTests,
+                ..
+            }
+        ));
     }
 
     #[test]
-    fn implementing_to_pr_drafted_with_stale_tests_does_not_progress_review_readiness() {
+    fn implementing_to_pr_drafted_with_passing_tests_progresses_review_readiness() {
         let plan = plan_workflow_automation(
             &WorkflowState::Implementing,
             &WorkflowState::PRDrafted,
@@ -405,16 +377,20 @@ mod tests {
 
         assert_eq!(
             plan.steps,
-            vec![WorkflowAutomationStep::CreateDraftPullRequest]
+            vec![
+                WorkflowAutomationStep::CreateDraftPullRequest,
+                WorkflowAutomationStep::ProgressReviewReadiness,
+            ]
         );
-        assert!(plan.follow_up_transitions.is_empty());
-        assert!(plan.inbox_items.is_empty());
+        assert_eq!(plan.follow_up_transitions.len(), 1);
+        assert_eq!(plan.inbox_items.len(), 1);
+        assert_eq!(plan.inbox_items[0].kind, InboxItemKind::NeedsApproval);
     }
 
     #[test]
     fn policy_can_auto_approve_gate_and_route_ready_for_review_to_digest() {
         let plan = plan_workflow_automation_with_policy(
-            &WorkflowState::Testing,
+            &WorkflowState::Implementing,
             &WorkflowState::PRDrafted,
             &WorkflowTransitionReason::DraftPullRequestCreated,
             &WorkflowGuardContext {
@@ -454,6 +430,7 @@ mod tests {
             &WorkflowTransitionReason::DraftPullRequestCreated,
             &WorkflowGuardContext {
                 has_draft_pr: true,
+                tests_passed: true,
                 ..WorkflowGuardContext::default()
             },
             &WorkflowAutomationPolicy {
@@ -469,9 +446,12 @@ mod tests {
 
         assert_eq!(
             plan.steps,
-            vec![WorkflowAutomationStep::CreateDraftPullRequest]
+            vec![
+                WorkflowAutomationStep::CreateDraftPullRequest,
+                WorkflowAutomationStep::ProgressReviewReadiness,
+            ]
         );
-        assert!(plan.follow_up_transitions.is_empty());
+        assert_eq!(plan.follow_up_transitions.len(), 1);
         assert_eq!(plan.inbox_items.len(), 1);
         assert_eq!(plan.inbox_items[0].kind, InboxItemKind::FYI);
         assert_eq!(plan.inbox_items[0].title, DRAFT_PULL_REQUEST_INBOX_TITLE);
@@ -500,8 +480,8 @@ mod tests {
     fn invalid_transition_returns_validation_error() {
         let err = plan_workflow_automation(
             &WorkflowState::New,
-            &WorkflowState::Testing,
-            &WorkflowTransitionReason::TestsStarted,
+            &WorkflowState::PRDrafted,
+            &WorkflowTransitionReason::DraftPullRequestCreated,
             &WorkflowGuardContext::default(),
         )
         .expect_err("invalid transition should fail");

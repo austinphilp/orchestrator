@@ -4,8 +4,8 @@ use serde::{Deserialize, Serialize};
 pub enum WorkflowState {
     New,
     Planning,
+    #[serde(alias = "Testing")]
     Implementing,
-    Testing,
     PRDrafted,
     AwaitingYourReview,
     ReadyForReview,

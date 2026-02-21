@@ -49,9 +49,9 @@ impl<S: Supervisor, G: GithubClient> App<S, G> {
                     plan_ready: true,
                     ..WorkflowGuardContext::default()
                 },
-                Some("Workflow transition approved: Planning -> Implementing. End planning mode and begin implementation in this worktree now. Before moving out of implementation, run the full test suite for this repository and verify it passes."),
+                Some("Workflow transition approved: Planning -> Implementing. End planning mode and begin implementation in this worktree now. During implementation, run the build and fix all errors and warnings, run the full test suite and verify it passes, and validate that your changes work as expected."),
             )),
-            WorkflowState::Implementing | WorkflowState::Testing => Ok((
+            WorkflowState::Implementing => Ok((
                 WorkflowState::PRDrafted,
                 WorkflowTransitionReason::DraftPullRequestCreated,
                 WorkflowGuardContext {
@@ -59,7 +59,7 @@ impl<S: Supervisor, G: GithubClient> App<S, G> {
                     has_draft_pr: true,
                     ..WorkflowGuardContext::default()
                 },
-                Some("Workflow transition approved: Implementation/Testing -> PR Drafted. Pause implementation, run the build and fix all errors and warnings, run the full test suite and verify it passes, then open a GitHub PR using the gh CLI and provide a review-ready summary with PR link, evidence, tests, and open risks."),
+                Some("Workflow transition approved: Implementing -> PR Drafted. Open a GitHub PR using the gh CLI and provide a review-ready summary with PR link, evidence, tests, and open risks."),
             )),
             WorkflowState::PRDrafted => Ok((
                 WorkflowState::AwaitingYourReview,

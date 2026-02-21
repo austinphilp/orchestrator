@@ -1038,8 +1038,7 @@ impl UiShellState {
                 "Review input request",
             )),
             Some(WorkflowState::Done | WorkflowState::Abandoned) => None,
-            Some(WorkflowState::Implementing | WorkflowState::Testing | WorkflowState::PRDrafted)
-            | None => Some((
+            Some(WorkflowState::Implementing | WorkflowState::PRDrafted) | None => Some((
                 InboxItemKind::NeedsApproval,
                 Self::progression_approval_coalesce_key(),
                 "Worker waiting for progression",

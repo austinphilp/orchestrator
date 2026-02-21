@@ -502,7 +502,7 @@ mod tests {
                 id: work_item_id.clone(),
                 ticket_id: None,
                 project_id: None,
-                workflow_state: Some(WorkflowState::Testing),
+                workflow_state: Some(WorkflowState::Implementing),
                 session_id: Some(session_id.clone()),
                 worktree_id: None,
                 inbox_items: vec![inbox_item_id.clone()],

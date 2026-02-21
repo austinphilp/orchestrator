@@ -80,7 +80,7 @@
         "type": "WorkflowTransition",
         "data": {
           "work_item_id": "wi-approval",
-          "from": "Testing",
+          "from": "Implementing",
           "to": "AwaitingYourReview"
         }
       }
@@ -94,7 +94,7 @@
         "type": "WorkflowTransition",
         "data": {
           "work_item_id": "wi-review",
-          "from": "Testing",
+          "from": "Implementing",
           "to": "ReadyForReview"
         }
       }
@@ -109,7 +109,7 @@
         "data": {
           "work_item_id": "wi-fyi",
           "from": "Implementing",
-          "to": "Testing"
+          "to": "PRDrafted"
         }
       }
     },

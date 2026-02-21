@@ -768,7 +768,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn resume_flow_from_testing_does_not_force_implementation_transition() {
+    async fn resume_flow_from_pr_drafted_does_not_force_implementation_transition() {
         let mut store = SqliteEventStore::in_memory().expect("in-memory store");
         let mapping = seeded_runtime_mapping(
             &mut store,
@@ -779,8 +779,8 @@ mod tests {
             &mut store,
             &mapping,
             WorkflowState::Implementing,
-            WorkflowState::Testing,
-            WorkflowTransitionReason::TestsStarted,
+            WorkflowState::PRDrafted,
+            WorkflowTransitionReason::DraftPullRequestCreated,
         );
         let vcs = StubVcsProvider::with_single_repository("/workspace/repo");
         let backend = StubWorkerBackend::new(BackendKind::OpenCode);
