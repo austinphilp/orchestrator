@@ -89,6 +89,10 @@ struct UiShellState {
     attention_projection_cache: Option<AttentionProjectionCache>,
     session_panel_rows_cache: Option<SessionPanelRowsCache>,
     event_derived_label_cache: EventDerivedLabelCache,
+    full_projection_replacements: u64,
+    incremental_domain_event_applies: u64,
+    attention_projection_recomputes: u64,
+    last_projection_perf_log_at: Option<Instant>,
 }
 
 impl UiShellState {
@@ -206,6 +210,10 @@ impl UiShellState {
             attention_projection_cache: None,
             session_panel_rows_cache: None,
             event_derived_label_cache: EventDerivedLabelCache::default(),
+            full_projection_replacements: 0,
+            incremental_domain_event_applies: 0,
+            attention_projection_recomputes: 0,
+            last_projection_perf_log_at: None,
         };
         state.rebuild_reconcile_eligibility_indexes();
         state
@@ -264,6 +272,8 @@ impl UiShellState {
             })
             .unwrap_or(true);
         if should_refresh {
+            self.attention_projection_recomputes =
+                self.attention_projection_recomputes.saturating_add(1);
             self.attention_projection_cache = Some(AttentionProjectionCache {
                 projection: build_ui_attention_projection(&self.domain),
                 refreshed_at: now,
@@ -2351,11 +2361,9 @@ impl UiShellState {
                 }
                 MergeQueueEvent::SessionFinalized {
                     session_id,
-                    projection,
+                    event,
                 } => {
-                    if let Some(projection) = projection {
-                        self.replace_domain_projection(projection);
-                    }
+                    self.apply_domain_event(event);
                     self.merge_finalizing_sessions.remove(&session_id);
                 }
                 MergeQueueEvent::SessionFinalizeFailed {
@@ -2572,9 +2580,55 @@ impl UiShellState {
         }
     }
 
-    fn replace_domain_projection(&mut self, projection: ProjectionState) {
+    fn apply_domain_event(&mut self, event: StoredEventEnvelope) {
+        self.incremental_domain_event_applies =
+            self.incremental_domain_event_applies.saturating_add(1);
+        let event_session_id = event.session_id.clone();
+        let event_work_item_id = event.work_item_id.clone();
+        apply_event(&mut self.domain, event);
+        if let Some(session_id) = event_session_id {
+            self.refresh_reconcile_eligibility_for_session(&session_id);
+        } else if let Some(work_item_id) = event_work_item_id {
+            if let Some(session_id) = self
+                .domain
+                .work_items
+                .get(&work_item_id)
+                .and_then(|work_item| work_item.session_id.clone())
+            {
+                self.refresh_reconcile_eligibility_for_session(&session_id);
+            }
+        }
+    }
+
+    fn replace_domain_projection(&mut self, projection: ProjectionState, reason: &'static str) {
+        self.full_projection_replacements = self.full_projection_replacements.saturating_add(1);
         self.domain = projection;
         self.rebuild_reconcile_eligibility_indexes();
+        tracing::debug!(
+            reason,
+            full_projection_replacements = self.full_projection_replacements,
+            incremental_domain_event_applies = self.incremental_domain_event_applies,
+            attention_projection_recomputes = self.attention_projection_recomputes,
+            "ui full projection replacement applied"
+        );
+    }
+
+    fn maybe_emit_projection_perf_log(&mut self, now: Instant) {
+        if self
+            .last_projection_perf_log_at
+            .map(|previous| now.duration_since(previous) < PROJECTION_PERF_LOG_INTERVAL)
+            .unwrap_or(false)
+        {
+            return;
+        }
+        self.last_projection_perf_log_at = Some(now);
+        tracing::debug!(
+            full_projection_replacements = self.full_projection_replacements,
+            incremental_domain_event_applies = self.incremental_domain_event_applies,
+            attention_projection_recomputes = self.attention_projection_recomputes,
+            domain_event_count = self.domain.events.len(),
+            "ui projection perf counters"
+        );
     }
 
     fn session_requires_manual_needs_input_activation(&self, session_id: &WorkerSessionId) -> bool {
@@ -2878,15 +2932,8 @@ impl UiShellState {
             }
             TicketPickerEvent::SessionWorkflowAdvanced {
                 outcome,
-                projection,
             } => {
-                if let Some(projection) = projection {
-                    self.replace_domain_projection(projection);
-                } else if let Some(work_item) = self.domain.work_items.get_mut(&outcome.work_item_id)
-                {
-                    work_item.workflow_state = Some(outcome.to.clone());
-                    self.refresh_reconcile_eligibility_for_session(&outcome.session_id);
-                }
+                self.apply_domain_event(outcome.event.clone());
 
                 if let Some(instruction) = outcome.instruction.as_deref() {
                     self.send_terminal_instruction_to_session(&outcome.session_id, instruction);
@@ -2940,7 +2987,8 @@ impl UiShellState {
                 self.ticket_picker_overlay.cancel_repository_prompt();
                 self.ticket_picker_overlay.error = None;
                 if let Some(projection) = projection {
-                    self.replace_domain_projection(projection);
+                    // Full replacement remains only for ticket-start authoritative reloads.
+                    self.replace_domain_projection(projection, "ticket-start");
                 }
                 if let Some(tickets) = tickets {
                     let tickets = self.filtered_ticket_picker_tickets(tickets);
@@ -3024,16 +3072,12 @@ impl UiShellState {
             TicketPickerEvent::TicketCreated {
                 created_ticket,
                 submit_mode,
-                projection,
                 tickets,
                 warning,
             } => {
                 self.ticket_picker_overlay.creating = false;
                 self.ticket_picker_create_refresh_deadline = None;
                 self.ticket_picker_overlay.error = None;
-                if let Some(projection) = projection {
-                    self.replace_domain_projection(projection);
-                }
                 let mut display_tickets = tickets
                     .unwrap_or_else(|| self.ticket_picker_overlay.tickets_snapshot());
                 display_tickets = self.filtered_ticket_picker_tickets(display_tickets);
@@ -3140,16 +3184,11 @@ impl UiShellState {
             TicketPickerEvent::SessionArchived {
                 session_id,
                 warning,
-                projection,
+                event,
             } => {
                 self.archiving_session_id = None;
                 self.archive_session_confirm_session = None;
-                if let Some(projection) = projection {
-                    self.replace_domain_projection(projection);
-                } else if let Some(session) = self.domain.sessions.get_mut(&session_id) {
-                    session.status = Some(WorkerSessionStatus::Done);
-                    self.refresh_reconcile_eligibility_for_session(&session_id);
-                }
+                self.apply_domain_event(event);
                 self.terminal_session_states.remove(&session_id);
                 self.session_info_diff_cache.remove(&session_id);
                 self.session_info_summary_cache.remove(&session_id);
@@ -3183,8 +3222,8 @@ impl UiShellState {
                     compact_focus_card_text(message.as_str())
                 ));
             }
-            TicketPickerEvent::InboxItemPublished { projection } => {
-                self.replace_domain_projection(projection);
+            TicketPickerEvent::InboxItemPublished { event } => {
+                self.apply_domain_event(event);
                 self.schedule_session_info_summary_refresh_for_active_session();
             }
             TicketPickerEvent::InboxItemPublishFailed { message } => {
@@ -3193,8 +3232,10 @@ impl UiShellState {
                     compact_focus_card_text(message.as_str())
                 ));
             }
-            TicketPickerEvent::InboxItemResolved { projection } => {
-                self.replace_domain_projection(projection);
+            TicketPickerEvent::InboxItemResolved { event } => {
+                if let Some(event) = event {
+                    self.apply_domain_event(event);
+                }
                 self.schedule_session_info_summary_refresh_for_active_session();
             }
             TicketPickerEvent::InboxItemResolveFailed { message } => {

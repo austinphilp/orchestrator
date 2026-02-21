@@ -66,6 +66,12 @@ The repository is a Rust workspace with a layered design:
 - Normalization:
   - Backend event normalization in `orchestrator-core/src/normalization.rs` makes backend-specific output consumable by core/UI.
 
+## Projection replacement and recompute policy
+
+- Default policy is incremental domain event application in the UI shell (`apply_event`) for workflow advance, inbox publish/resolve, session archive, and merge finalization.
+- Full projection replacement remains an explicit fallback for ticket start/resume refresh when the system needs an authoritative reload (`provider.reload_projection()` in the ticket-start path).
+- UI runtime emits periodic projection perf counters (full replacements, incremental event applies, attention recomputes) via debug logs for load validation.
+
 ## Major functionality inventory
 
 ## Ticket orchestration

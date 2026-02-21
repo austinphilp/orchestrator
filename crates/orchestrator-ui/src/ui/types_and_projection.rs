@@ -13,14 +13,14 @@ use crossterm::terminal::{
 use crossterm::ExecutableCommand;
 use edtui::{EditorEventHandler, EditorMode, EditorState, EditorTheme, EditorView, Lines};
 use orchestrator_core::{
-    attention_inbox_snapshot, command_ids, ArtifactKind, ArtifactProjection, AttentionBatchKind,
-    AttentionEngineConfig, AttentionInboxSnapshot, AttentionPriorityBand, Command, CommandRegistry,
-    CoreError, InboxItemId, InboxItemKind, LlmChatRequest, LlmFinishReason, LlmMessage,
-    LlmProvider, LlmRateLimitState, LlmResponseStream, LlmRole, LlmTokenUsage,
-    OrchestrationEventPayload, ProjectId,
+    apply_event, attention_inbox_snapshot, command_ids, ArtifactKind, ArtifactProjection,
+    AttentionBatchKind, AttentionEngineConfig, AttentionInboxSnapshot, AttentionPriorityBand,
+    Command, CommandRegistry, CoreError, InboxItemId, InboxItemKind, LlmChatRequest,
+    LlmFinishReason, LlmMessage, LlmProvider, LlmRateLimitState, LlmResponseStream, LlmRole,
+    LlmTokenUsage, OrchestrationEventPayload, ProjectId,
     ProjectionState, SelectedTicketFlowResult, SessionProjection, SupervisorQueryArgs,
-    SupervisorQueryContextArgs, TicketId, TicketSummary, UntypedCommandInvocation, WorkItemId,
-    WorkerSessionId, WorkerSessionStatus, WorkflowState,
+    StoredEventEnvelope, SupervisorQueryContextArgs, TicketId, TicketSummary,
+    UntypedCommandInvocation, WorkItemId, WorkerSessionId, WorkerSessionStatus, WorkflowState,
 };
 use orchestrator_runtime::{
     BackendEvent, BackendKind, BackendNeedsInputAnswer, BackendNeedsInputEvent,
@@ -63,6 +63,7 @@ const TICKET_PICKER_CREATE_REFRESH_INTERVAL: Duration = Duration::from_secs(1);
 const BACKGROUND_SESSION_DEFERRED_OUTPUT_MAX_BYTES: usize = 64 * 1024;
 const RESOLVED_ANIMATION_REFRESH_INTERVAL: Duration = Duration::from_secs(1);
 const PLANNING_WORKING_STATE_PERSIST_DEBOUNCE: Duration = Duration::from_millis(500);
+const PROJECTION_PERF_LOG_INTERVAL: Duration = Duration::from_secs(15);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct UiRuntimeConfig {
@@ -191,6 +192,17 @@ pub struct CreateTicketFromPickerRequest {
     pub submit_mode: TicketCreateSubmitMode,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionArchiveOutcome {
+    pub warning: Option<String>,
+    pub event: StoredEventEnvelope,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionMergeFinalizeOutcome {
+    pub event: StoredEventEnvelope,
+}
+
 #[async_trait]
 pub trait TicketPickerProvider: Send + Sync {
     async fn list_unfinished_tickets(&self) -> Result<Vec<TicketSummary>, CoreError>;
@@ -214,7 +226,7 @@ pub trait TicketPickerProvider: Send + Sync {
     async fn archive_session(
         &self,
         _session_id: WorkerSessionId,
-    ) -> Result<Option<String>, CoreError> {
+    ) -> Result<SessionArchiveOutcome, CoreError> {
         Err(CoreError::DependencyUnavailable(
             "session archiving is not supported by this ticket provider".to_owned(),
         ))
@@ -253,13 +265,15 @@ pub trait TicketPickerProvider: Send + Sync {
     async fn complete_session_after_merge(
         &self,
         _session_id: WorkerSessionId,
-    ) -> Result<(), CoreError> {
-        Ok(())
+    ) -> Result<SessionMergeFinalizeOutcome, CoreError> {
+        Err(CoreError::DependencyUnavailable(
+            "session merge finalization is not supported by this ticket provider".to_owned(),
+        ))
     }
     async fn publish_inbox_item(
         &self,
         _request: InboxPublishRequest,
-    ) -> Result<ProjectionState, CoreError> {
+    ) -> Result<StoredEventEnvelope, CoreError> {
         Err(CoreError::DependencyUnavailable(
             "inbox publishing is not supported by this ticket provider".to_owned(),
         ))
@@ -267,7 +281,7 @@ pub trait TicketPickerProvider: Send + Sync {
     async fn resolve_inbox_item(
         &self,
         _request: InboxResolveRequest,
-    ) -> Result<ProjectionState, CoreError> {
+    ) -> Result<Option<StoredEventEnvelope>, CoreError> {
         Err(CoreError::DependencyUnavailable(
             "inbox resolution is not supported by this ticket provider".to_owned(),
         ))
@@ -303,6 +317,7 @@ pub struct SessionWorkflowAdvanceOutcome {
     pub from: WorkflowState,
     pub to: WorkflowState,
     pub instruction: Option<String>,
+    pub event: StoredEventEnvelope,
 }
 
 pub type SupervisorCommandContext = SupervisorQueryContextArgs;

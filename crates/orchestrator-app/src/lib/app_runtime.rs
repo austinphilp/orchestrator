@@ -108,7 +108,7 @@ impl<S: Supervisor, G: GithubClient> App<S, G> {
     pub fn publish_inbox_item(
         &self,
         request: &InboxPublishRequest,
-    ) -> Result<ProjectionState, CoreError> {
+    ) -> Result<StoredEventEnvelope, CoreError> {
         let title = request.title.trim();
         if title.is_empty() {
             return Err(CoreError::InvalidCommandArgs {
@@ -133,7 +133,7 @@ impl<S: Supervisor, G: GithubClient> App<S, G> {
         let inbox_item_id = InboxItemId::new(format!("inbox-{coalesce_scope}-{coalesce_key}"));
 
         let mut store = open_event_store(&self.config.event_store_path)?;
-        store.append(NewEventEnvelope {
+        let event = store.append(NewEventEnvelope {
             event_id: format!("evt-inbox-fanout-{}", now_nanos()),
             occurred_at: now_timestamp(),
             work_item_id: Some(request.work_item_id.clone()),
@@ -146,15 +146,13 @@ impl<S: Supervisor, G: GithubClient> App<S, G> {
             }),
             schema_version: DOMAIN_EVENT_SCHEMA_VERSION,
         })?;
-
-        let events = store.read_ordered()?;
-        Ok(rebuild_projection(&events))
+        Ok(event)
     }
 
     pub fn resolve_inbox_item(
         &self,
         request: &InboxResolveRequest,
-    ) -> Result<ProjectionState, CoreError> {
+    ) -> Result<Option<StoredEventEnvelope>, CoreError> {
         let mut store = open_event_store(&self.config.event_store_path)?;
         let projection = rebuild_projection(&store.read_ordered()?);
         let Some(inbox_item) = projection.inbox_items.get(&request.inbox_item_id) else {
@@ -177,14 +175,14 @@ impl<S: Supervisor, G: GithubClient> App<S, G> {
             });
         }
         if inbox_item.resolved {
-            return Ok(projection);
+            return Ok(None);
         }
 
         let session_id = projection
             .work_items
             .get(&request.work_item_id)
             .and_then(|work_item| work_item.session_id.clone());
-        store.append(NewEventEnvelope {
+        let event = store.append(NewEventEnvelope {
             event_id: format!("evt-inbox-resolved-{}", now_nanos()),
             occurred_at: now_timestamp(),
             work_item_id: Some(request.work_item_id.clone()),
@@ -195,9 +193,7 @@ impl<S: Supervisor, G: GithubClient> App<S, G> {
             }),
             schema_version: DOMAIN_EVENT_SCHEMA_VERSION,
         })?;
-
-        let events = store.read_ordered()?;
-        Ok(rebuild_projection(&events))
+        Ok(Some(event))
     }
 
     pub async fn start_linear_polling(
@@ -336,8 +332,8 @@ impl<S: Supervisor, G: GithubClient> App<S, G> {
         &self,
         session_id: &WorkerSessionId,
         worker_backend: &dyn WorkerBackend,
-    ) -> Result<(), CoreError> {
-        let cleanup_warnings = self
+    ) -> Result<SessionMergeFinalizeOutcome, CoreError> {
+        let (event, cleanup_warnings) = self
             .archive_session_internal(
                 session_id,
                 worker_backend,
@@ -352,26 +348,23 @@ impl<S: Supervisor, G: GithubClient> App<S, G> {
                 "merged session finalized with cleanup warnings"
             );
         }
-        Ok(())
+        Ok(SessionMergeFinalizeOutcome { event })
     }
 
     pub async fn archive_session(
         &self,
         session_id: &WorkerSessionId,
         worker_backend: &dyn WorkerBackend,
-    ) -> Result<Option<String>, CoreError> {
-        let cleanup_warnings = self
+    ) -> Result<SessionArchiveOutcome, CoreError> {
+        let (event, cleanup_warnings) = self
             .archive_session_internal(
                 session_id,
                 worker_backend,
                 "Session archived from terminal session panel.",
             )
             .await?;
-        if cleanup_warnings.is_empty() {
-            Ok(None)
-        } else {
-            Ok(Some(cleanup_warnings.join("; ")))
-        }
+        let warning = (!cleanup_warnings.is_empty()).then(|| cleanup_warnings.join("; "));
+        Ok(SessionArchiveOutcome { warning, event })
     }
 
     pub fn session_worktree_diff(
@@ -550,7 +543,7 @@ impl<S: Supervisor, G: GithubClient> App<S, G> {
             ))
         })?;
 
-        store.append(NewEventEnvelope {
+        let event = store.append(NewEventEnvelope {
             event_id: format!("evt-workflow-transition-{}", now_nanos()),
             occurred_at: now_timestamp(),
             work_item_id: Some(mapping.work_item_id.clone()),
@@ -570,6 +563,7 @@ impl<S: Supervisor, G: GithubClient> App<S, G> {
             from,
             to: next,
             instruction: instruction.map(str::to_owned),
+            event,
         })
     }
 }
@@ -580,7 +574,7 @@ impl<S: Supervisor, G: GithubClient> App<S, G> {
         session_id: &WorkerSessionId,
         worker_backend: &dyn WorkerBackend,
         summary: &str,
-    ) -> Result<Vec<String>, CoreError> {
+    ) -> Result<(StoredEventEnvelope, Vec<String>), CoreError> {
         let existing_mapping = {
             let store = open_event_store(&self.config.event_store_path)?;
             store
@@ -630,7 +624,7 @@ impl<S: Supervisor, G: GithubClient> App<S, G> {
             &mapping.session.session_id,
             &mapping.session.backend_kind,
         )?;
-        store.append(NewEventEnvelope {
+        let event = store.append(NewEventEnvelope {
             event_id: format!("evt-session-completed-{}", now_nanos()),
             occurred_at: now_timestamp(),
             work_item_id: Some(mapping.work_item_id.clone()),
@@ -669,8 +663,7 @@ impl<S: Supervisor, G: GithubClient> App<S, G> {
                 }
             }
         }
-
-        Ok(cleanup_warnings)
+        Ok((event, cleanup_warnings))
     }
 }
 

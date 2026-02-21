@@ -80,6 +80,7 @@ impl Ui {
             }
 
             let now = Instant::now();
+            shell_state.maybe_emit_projection_perf_log(now);
             let animation_state = shell_state.animation_state(now);
             let animation_frame_interval = match animation_state {
                 AnimationState::ActiveTurn => Some(Duration::from_millis(200)),
