@@ -553,7 +553,7 @@ struct UiAttentionProjection {
 
 #[derive(Debug, Clone)]
 struct AttentionProjectionCache {
-    projection: UiAttentionProjection,
+    projection: Arc<UiAttentionProjection>,
     refreshed_at: Instant,
     epoch: u64,
 }
@@ -1270,6 +1270,7 @@ struct TerminalFoldSection {
     folded: bool,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct RenderedTerminalLine {
     text: String,

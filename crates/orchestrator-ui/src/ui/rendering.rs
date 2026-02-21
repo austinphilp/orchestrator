@@ -222,14 +222,14 @@ fn render_sessions_panel_text_virtualized_from_rows(
 
     let viewport_start = scroll_line;
     let viewport_end = viewport_start.saturating_add(viewport_rows.max(1));
-    let mut lines = Vec::new();
+    let mut lines = Vec::with_capacity(viewport_rows.max(1));
     let mut line_index = 0usize;
-    let mut previous_project: Option<String> = None;
-    let mut previous_group: Option<SessionStateGroup> = None;
+    let mut previous_project: Option<&str> = None;
+    let mut previous_group: Option<&SessionStateGroup> = None;
     for row in session_rows {
         let is_selected = selected_session_id == Some(&row.session_id);
         let marker = if is_selected { ">" } else { " " };
-        if previous_project.as_deref() != Some(row.project.as_str()) {
+        if previous_project != Some(row.project.as_str()) {
             if previous_project.is_some() {
                 if (viewport_start..viewport_end).contains(&line_index) {
                     lines.push(Line::from(String::new()));
@@ -240,15 +240,15 @@ fn render_sessions_panel_text_virtualized_from_rows(
                 lines.push(Line::from(format!("{}:", row.project)));
             }
             line_index += 1;
-            previous_project = Some(row.project.clone());
+            previous_project = Some(row.project.as_str());
             previous_group = None;
         }
-        if previous_group.as_ref() != Some(&row.group) {
+        if previous_group != Some(&row.group) {
             if (viewport_start..viewport_end).contains(&line_index) {
                 lines.push(Line::from(format!("  {}:", row.group.display_label())));
             }
             line_index += 1;
-            previous_group = Some(row.group.clone());
+            previous_group = Some(&row.group);
         }
         let indicator = if row.activity == SessionRowActivity::Active {
             loading_spinner_frame()
@@ -258,8 +258,8 @@ fn render_sessions_panel_text_virtualized_from_rows(
         let status_chip = row.activity.status_chip();
         let status_style = row.activity.style();
         let mut spans = vec![
-            Span::raw(marker.to_owned()),
-            Span::raw("    ".to_owned()),
+            Span::raw(marker),
+            Span::raw("    "),
             Span::styled(format!("{indicator} "), status_style),
             Span::styled(format!("{status_chip} "), status_style),
         ];
@@ -550,73 +550,107 @@ fn render_terminal_top_bar(domain: &ProjectionState, session_id: &WorkerSessionI
 }
 
 fn render_terminal_transcript_lines(state: &TerminalViewState) -> Vec<String> {
-    render_terminal_transcript_entries(state)
+    let mut lines = Vec::with_capacity(
+        state.entries.len().saturating_mul(2) + usize::from(!state.output_fragment.is_empty()),
+    );
+    render_terminal_transcript_lines_into(state, &mut lines);
+    lines
+}
+
+fn render_terminal_transcript_line_count(state: &TerminalViewState) -> usize {
+    let mut count = 0usize;
+    let mut previous_is_foldable = false;
+    let mut previous_rendered_non_empty = false;
+    for entry in &state.entries {
+        let current_is_foldable = matches!(entry, TerminalTranscriptEntry::Foldable(_));
+        if count > 0 && (previous_is_foldable || current_is_foldable) {
+            count += 1;
+            previous_rendered_non_empty = false;
+        }
+        match entry {
+            TerminalTranscriptEntry::Message(line) => {
+                let is_outgoing = is_user_outgoing_terminal_message(line);
+                if is_outgoing && previous_rendered_non_empty {
+                    count += 1;
+                }
+                count += 1;
+                if is_outgoing {
+                    count += 1;
+                    previous_rendered_non_empty = false;
+                } else {
+                    previous_rendered_non_empty = !line.trim().is_empty();
+                }
+            }
+            TerminalTranscriptEntry::Foldable(section) => {
+                count += 1;
+                if !section.folded {
+                    count += section
+                        .content
+                        .lines()
+                        .filter(|line| !line.trim().is_empty())
+                        .count();
+                }
+                previous_rendered_non_empty = true;
+            }
+        }
+        previous_is_foldable = current_is_foldable;
+    }
+    if !state.output_fragment.is_empty() {
+        count += 1;
+    }
+    count
+}
+
+#[cfg(test)]
+fn render_terminal_transcript_entries(state: &TerminalViewState) -> Vec<RenderedTerminalLine> {
+    render_terminal_transcript_lines(state)
         .into_iter()
-        .map(|line| line.text)
+        .map(|text| RenderedTerminalLine { text })
         .collect()
 }
 
-fn render_terminal_transcript_entries(state: &TerminalViewState) -> Vec<RenderedTerminalLine> {
-    let mut lines = Vec::new();
+fn render_terminal_transcript_lines_into(state: &TerminalViewState, lines: &mut Vec<String>) {
+    let mut previous_is_foldable = false;
     for (index, entry) in state.entries.iter().enumerate() {
-        let previous_is_foldable = index
-            .checked_sub(1)
-            .and_then(|previous| state.entries.get(previous))
-            .map(|previous| matches!(previous, TerminalTranscriptEntry::Foldable(_)))
-            .unwrap_or(false);
         let current_is_foldable = matches!(entry, TerminalTranscriptEntry::Foldable(_));
         if index > 0 && (previous_is_foldable || current_is_foldable) {
-            lines.push(RenderedTerminalLine {
-                text: String::new(),
-            });
+            lines.push(String::new());
         }
         match entry {
             TerminalTranscriptEntry::Message(line) => {
                 if is_user_outgoing_terminal_message(line)
                     && lines
                         .last()
-                        .map(|previous| !previous.text.trim().is_empty())
+                        .map(|previous| !previous.trim().is_empty())
                         .unwrap_or(false)
                 {
-                    lines.push(RenderedTerminalLine {
-                        text: String::new(),
-                    });
+                    lines.push(String::new());
                 }
-                lines.push(RenderedTerminalLine {
-                    text: line.clone(),
-                });
+                lines.push(line.clone());
                 if is_user_outgoing_terminal_message(line) {
-                    lines.push(RenderedTerminalLine {
-                        text: String::new(),
-                    });
+                    lines.push(String::new());
                 }
             }
             TerminalTranscriptEntry::Foldable(section) => {
                 let fold_marker = if section.folded { "[+]" } else { "[-]" };
                 let summary = summarize_folded_terminal_content(section.content.as_str());
-                lines.push(RenderedTerminalLine {
-                    text: format!("  {fold_marker} {}: {summary}", section.kind.label()),
-                });
+                lines.push(format!("  {fold_marker} {}: {summary}", section.kind.label()));
                 if !section.folded {
                     for content_line in section.content.lines() {
                         let trimmed = content_line.trim();
                         if trimmed.is_empty() {
                             continue;
                         }
-                        lines.push(RenderedTerminalLine {
-                            text: format!("  {trimmed}"),
-                        });
+                        lines.push(format!("  {trimmed}"));
                     }
                 }
             }
         }
+        previous_is_foldable = current_is_foldable;
     }
     if !state.output_fragment.is_empty() {
-        lines.push(RenderedTerminalLine {
-            text: state.output_fragment.clone(),
-        });
+        lines.push(state.output_fragment.clone());
     }
-    lines
 }
 
 fn is_user_outgoing_terminal_message(line: &str) -> bool {
@@ -625,7 +659,13 @@ fn is_user_outgoing_terminal_message(line: &str) -> bool {
 }
 
 fn summarize_folded_terminal_content(content: &str) -> String {
-    let compact = content.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut compact = String::with_capacity(content.len());
+    for segment in content.split_whitespace() {
+        if !compact.is_empty() {
+            compact.push(' ');
+        }
+        compact.push_str(segment);
+    }
     if compact.is_empty() {
         return "(no details)".to_owned();
     }
@@ -730,7 +770,7 @@ fn render_terminal_output_viewport(
 
 #[cfg(test)]
 fn render_terminal_output_with_accents(lines: &[String], width: u16) -> Text<'static> {
-    let mut rendered = Vec::new();
+    let mut rendered = Vec::with_capacity(lines.len().saturating_mul(2));
     let mut active_fold_kind: Option<TerminalFoldKind> = None;
 
     for raw_line in lines {
