@@ -92,4 +92,5 @@ codex_binary = "codex"
 theme = "nord"
 ticket_picker_priority_states = ["In Progress", "Final Approval", "Todo", "Backlog"]
 background_session_refresh_secs = 15
+session_info_background_refresh_secs = 15
 ```
