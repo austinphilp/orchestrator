@@ -4115,6 +4115,93 @@ mod tests {
     }
 
     #[test]
+    fn session_info_background_summary_refresh_is_throttled() {
+        let mut shell_state = UiShellState::new("ready".to_owned(), sample_projection(true));
+        shell_state.open_terminal_and_enter_mode();
+        shell_state.cycle_pane_focus();
+        assert!(!shell_state.session_info_is_foreground());
+        let session_id = shell_state
+            .active_terminal_session_id()
+            .cloned()
+            .expect("active session");
+        let previous = Instant::now() - Duration::from_secs(1);
+        shell_state
+            .session_info_summary_last_refresh_at
+            .insert(session_id.clone(), previous);
+        shell_state.schedule_session_info_summary_refresh_for_active_session();
+        shell_state.session_info_summary_deadline = Some(Instant::now() - Duration::from_millis(1));
+
+        assert!(!shell_state.tick_session_info_summary_refresh());
+        let deadline = shell_state
+            .session_info_summary_deadline
+            .expect("deadline should be deferred");
+        assert!(deadline >= previous + Duration::from_secs(15));
+    }
+
+    #[test]
+    fn session_info_foreground_refresh_stays_responsive() {
+        let mut shell_state = UiShellState::new("ready".to_owned(), sample_projection(true));
+        shell_state.open_terminal_and_enter_mode();
+        assert!(shell_state.session_info_is_foreground());
+        let session_id = shell_state
+            .active_terminal_session_id()
+            .cloned()
+            .expect("active session");
+        shell_state
+            .session_info_summary_last_refresh_at
+            .insert(session_id, Instant::now() - Duration::from_secs(1));
+        shell_state.schedule_session_info_summary_refresh_for_active_session();
+        shell_state.session_info_summary_deadline = Some(Instant::now() - Duration::from_millis(1));
+
+        assert!(shell_state.tick_session_info_summary_refresh());
+        assert!(shell_state.session_info_summary_deadline.is_none());
+    }
+
+    #[test]
+    fn session_info_background_diff_load_is_throttled() {
+        let mut shell_state = UiShellState::new("ready".to_owned(), sample_projection(true));
+        shell_state.open_terminal_and_enter_mode();
+        shell_state.cycle_pane_focus();
+        assert!(!shell_state.session_info_is_foreground());
+        let session_id = shell_state
+            .active_terminal_session_id()
+            .cloned()
+            .expect("active session");
+
+        assert!(!shell_state.ensure_session_info_diff_loaded_for_active_session());
+        assert!(
+            shell_state
+                .session_info_diff_last_refresh_at
+                .contains_key(&session_id)
+        );
+
+        assert!(!shell_state.ensure_session_info_diff_loaded_for_active_session());
+        shell_state
+            .session_info_diff_last_refresh_at
+            .insert(session_id, Instant::now() - Duration::from_secs(16));
+        assert!(shell_state.ensure_session_info_diff_loaded_for_active_session());
+    }
+
+    #[test]
+    fn entering_terminal_mode_reschedules_session_info_summary_refresh() {
+        let mut shell_state = UiShellState::new("ready".to_owned(), sample_projection(true));
+        shell_state.open_terminal_and_enter_mode();
+        shell_state.cycle_pane_focus();
+        shell_state.session_info_summary_deadline = None;
+        shell_state.schedule_session_info_summary_refresh_for_active_session();
+        let background_deadline = shell_state
+            .session_info_summary_deadline
+            .expect("background deadline");
+        assert!(background_deadline >= Instant::now() + Duration::from_secs(14));
+
+        shell_state.enter_terminal_mode();
+        let foreground_deadline = shell_state
+            .session_info_summary_deadline
+            .expect("foreground deadline");
+        assert!(foreground_deadline <= Instant::now() + Duration::from_secs(1));
+    }
+
+    #[test]
     fn chat_stream_coalesces_chunks_and_renders_incrementally() {
         let mut shell_state = UiShellState::new("ready".to_owned(), inspector_projection());
         shell_state.open_inspector_for_selected(ArtifactInspectorKind::Chat);

@@ -56,6 +56,8 @@ const DEFAULT_SUPERVISOR_MODEL: &str = "openai/gpt-4o-mini";
 const DEFAULT_BACKGROUND_SESSION_REFRESH_SECS: u64 = 15;
 const MIN_BACKGROUND_SESSION_REFRESH_SECS: u64 = 2;
 const MAX_BACKGROUND_SESSION_REFRESH_SECS: u64 = 15;
+const DEFAULT_SESSION_INFO_BACKGROUND_REFRESH_SECS: u64 = 15;
+const MIN_SESSION_INFO_BACKGROUND_REFRESH_SECS: u64 = 15;
 const MERGE_POLL_INTERVAL: Duration = Duration::from_secs(15);
 const APPROVAL_RECONCILE_POLL_INTERVAL: Duration = Duration::from_secs(15);
 const MERGE_REQUEST_RATE_LIMIT: Duration = Duration::from_secs(1);
@@ -70,6 +72,7 @@ struct UiRuntimeConfig {
     ticket_picker_priority_states: Vec<String>,
     supervisor_model: String,
     background_session_refresh_secs: u64,
+    session_info_background_refresh_secs: u64,
 }
 
 impl Default for UiRuntimeConfig {
@@ -82,6 +85,7 @@ impl Default for UiRuntimeConfig {
                 .collect(),
             supervisor_model: DEFAULT_SUPERVISOR_MODEL.to_owned(),
             background_session_refresh_secs: DEFAULT_BACKGROUND_SESSION_REFRESH_SECS,
+            session_info_background_refresh_secs: DEFAULT_SESSION_INFO_BACKGROUND_REFRESH_SECS,
         }
     }
 }
@@ -97,6 +101,7 @@ pub fn set_ui_runtime_config(
     ticket_picker_priority_states: Vec<String>,
     supervisor_model: String,
     background_session_refresh_secs: u64,
+    session_info_background_refresh_secs: u64,
 ) {
     let mut parsed_states = ticket_picker_priority_states
         .into_iter()
@@ -133,6 +138,8 @@ pub fn set_ui_runtime_config(
                 MIN_BACKGROUND_SESSION_REFRESH_SECS,
                 MAX_BACKGROUND_SESSION_REFRESH_SECS,
             ),
+        session_info_background_refresh_secs: session_info_background_refresh_secs
+            .max(MIN_SESSION_INFO_BACKGROUND_REFRESH_SECS),
     };
 
     if let Ok(mut guard) = ui_runtime_config_store().write() {
@@ -175,6 +182,15 @@ fn background_session_refresh_interval_config_value() -> Duration {
             MIN_BACKGROUND_SESSION_REFRESH_SECS,
             MAX_BACKGROUND_SESSION_REFRESH_SECS,
         );
+    Duration::from_secs(secs)
+}
+
+fn session_info_background_refresh_interval_config_value() -> Duration {
+    let secs = ui_runtime_config_store()
+        .read()
+        .map(|guard| guard.session_info_background_refresh_secs)
+        .unwrap_or(DEFAULT_SESSION_INFO_BACKGROUND_REFRESH_SECS)
+        .max(MIN_SESSION_INFO_BACKGROUND_REFRESH_SECS);
     Duration::from_secs(secs)
 }
 

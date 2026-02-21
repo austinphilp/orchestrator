@@ -529,6 +529,7 @@ mod tests {
                     expected_event_store.to_string_lossy()
                 );
                 assert_eq!(config.ui.background_session_refresh_secs, 15);
+                assert_eq!(config.ui.session_info_background_refresh_secs, 15);
                 assert!(Path::new(&config.workspace).is_absolute());
                 assert!(Path::new(&config.event_store_path).is_absolute());
                 assert_eq!(
@@ -544,6 +545,7 @@ mod tests {
                     expected_event_store.to_string_lossy()
                 );
                 assert_eq!(parsed.ui.background_session_refresh_secs, 15);
+                assert_eq!(parsed.ui.session_info_background_refresh_secs, 15);
             },
         );
 
@@ -577,6 +579,7 @@ mod tests {
                     expected_event_store.to_string_lossy()
                 );
                 assert_eq!(config.ui.background_session_refresh_secs, 15);
+                assert_eq!(config.ui.session_info_background_refresh_secs, 15);
                 assert!(expected.exists());
                 let contents = std::fs::read_to_string(expected.clone()).unwrap();
                 let parsed: AppConfig = toml::from_str(&contents).unwrap();
@@ -586,6 +589,7 @@ mod tests {
                     expected_event_store.to_string_lossy()
                 );
                 assert_eq!(parsed.ui.background_session_refresh_secs, 15);
+                assert_eq!(parsed.ui.session_info_background_refresh_secs, 15);
             },
         );
 
@@ -609,6 +613,7 @@ mod tests {
                 assert_eq!(config.workspace, "/tmp/work");
                 assert_eq!(config.event_store_path, "/tmp/events.db");
                 assert_eq!(config.ui.background_session_refresh_secs, 15);
+                assert_eq!(config.ui.session_info_background_refresh_secs, 15);
             },
         );
 
@@ -736,12 +741,12 @@ mod tests {
     }
 
     #[test]
-    fn config_clamps_background_session_refresh_secs_to_supported_bounds() {
+    fn config_clamps_background_refresh_settings_to_supported_bounds() {
         let home = unique_temp_dir("ui-refresh-clamp");
         let config_path = home.join("config.toml");
         write_config_file(
             &config_path,
-            "workspace = '/tmp/work'\nevent_store_path = '/tmp/events.db'\n[ui]\nbackground_session_refresh_secs = 99\n",
+            "workspace = '/tmp/work'\nevent_store_path = '/tmp/events.db'\n[ui]\nbackground_session_refresh_secs = 99\nsession_info_background_refresh_secs = 3\n",
         );
 
         with_env_var(
@@ -750,12 +755,13 @@ mod tests {
             || {
                 let config = AppConfig::from_env().expect("parse and normalize config");
                 assert_eq!(config.ui.background_session_refresh_secs, 15);
+                assert_eq!(config.ui.session_info_background_refresh_secs, 15);
             },
         );
 
         write_config_file(
             &config_path,
-            "workspace = '/tmp/work'\nevent_store_path = '/tmp/events.db'\n[ui]\nbackground_session_refresh_secs = 1\n",
+            "workspace = '/tmp/work'\nevent_store_path = '/tmp/events.db'\n[ui]\nbackground_session_refresh_secs = 1\nsession_info_background_refresh_secs = 30\n",
         );
 
         with_env_var(
@@ -764,6 +770,7 @@ mod tests {
             || {
                 let config = AppConfig::from_env().expect("parse and normalize low config");
                 assert_eq!(config.ui.background_session_refresh_secs, 2);
+                assert_eq!(config.ui.session_info_background_refresh_secs, 30);
             },
         );
 

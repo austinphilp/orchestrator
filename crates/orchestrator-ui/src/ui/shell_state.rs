@@ -62,6 +62,8 @@ struct UiShellState {
     session_info_summary_cache: HashMap<WorkerSessionId, SessionInfoSummaryCache>,
     session_info_summary_deadline: Option<Instant>,
     pending_session_working_state_persists: HashMap<WorkerSessionId, PendingWorkingStatePersist>,
+    session_info_summary_last_refresh_at: HashMap<WorkerSessionId, Instant>,
+    session_info_diff_last_refresh_at: HashMap<WorkerSessionId, Instant>,
     terminal_session_streamed: HashSet<WorkerSessionId>,
     terminal_compose_editor: EditorState,
     terminal_compose_event_handler: EditorEventHandler,
@@ -178,6 +180,9 @@ impl UiShellState {
             session_info_diff_cache: HashMap::new(),
             session_info_summary_cache: HashMap::new(),
             session_info_summary_deadline: None,
+            pending_session_working_state_persists: HashMap::new(),
+            session_info_summary_last_refresh_at: HashMap::new(),
+            session_info_diff_last_refresh_at: HashMap::new(),
             pending_session_working_state_persists: HashMap::new(),
             terminal_session_streamed: HashSet::new(),
             terminal_compose_editor: insert_mode_editor_state(),
@@ -774,6 +779,12 @@ impl UiShellState {
 
     fn session_panel_scroll_line(&self) -> usize {
         self.session_panel_scroll_line
+    }
+
+    fn session_info_is_foreground(&self) -> bool {
+        self.active_terminal_session_id().is_some()
+            && self.is_right_pane_focused()
+            && self.mode == UiMode::Terminal
     }
 
     fn session_info_diff_cache_for(
@@ -3153,6 +3164,8 @@ impl UiShellState {
                 self.terminal_session_states.remove(&session_id);
                 self.session_info_diff_cache.remove(&session_id);
                 self.session_info_summary_cache.remove(&session_id);
+                self.session_info_diff_last_refresh_at.remove(&session_id);
+                self.session_info_summary_last_refresh_at.remove(&session_id);
                 self.terminal_session_streamed.remove(&session_id);
                 self.merge_pending_sessions.remove(&session_id);
                 self.merge_finalizing_sessions.remove(&session_id);
@@ -3987,6 +4000,7 @@ impl UiShellState {
             self.mode_key_buffer.clear();
             self.which_key_overlay = None;
             self.terminal_escape_pending = false;
+            self.schedule_session_info_summary_refresh_for_active_session();
         }
     }
 
@@ -4393,8 +4407,22 @@ impl UiShellState {
             self.session_info_summary_deadline = None;
             return;
         }
-        self.session_info_summary_deadline = Some(Instant::now() + Duration::from_millis(500));
         if let Some(session_id) = self.active_terminal_session_id().cloned() {
+            let now = Instant::now();
+            let deadline = if self.session_info_is_foreground() {
+                now + Duration::from_millis(500)
+            } else {
+                let interval = session_info_background_refresh_interval_config_value();
+                self.session_info_summary_last_refresh_at
+                    .get(&session_id)
+                    .map(|previous| (*previous + interval).max(now))
+                    .unwrap_or(now + interval)
+            };
+            self.session_info_summary_deadline = Some(
+                self.session_info_summary_deadline
+                    .map(|existing| existing.min(deadline))
+                    .unwrap_or(deadline),
+            );
             let cache = self.session_info_summary_cache.entry(session_id).or_default();
             cache.loading = true;
             cache.error = None;
@@ -4456,8 +4484,22 @@ impl UiShellState {
         let Some(deadline) = self.session_info_summary_deadline else {
             return false;
         };
-        if Instant::now() < deadline {
+        let now = Instant::now();
+        if now < deadline {
             return false;
+        }
+        if !self.session_info_is_foreground() {
+            let Some(session_id) = self.active_terminal_session_id().cloned() else {
+                self.session_info_summary_deadline = None;
+                return false;
+            };
+            let interval = session_info_background_refresh_interval_config_value();
+            if let Some(previous) = self.session_info_summary_last_refresh_at.get(&session_id) {
+                if now.duration_since(*previous) < interval {
+                    self.session_info_summary_deadline = Some(*previous + interval);
+                    return false;
+                }
+            }
         }
         self.session_info_summary_deadline = None;
         self.spawn_active_session_summary_refresh()
@@ -4501,6 +4543,8 @@ impl UiShellState {
 
         match TokioHandle::try_current() {
             Ok(handle) => {
+                self.session_info_summary_last_refresh_at
+                    .insert(context.session_id.clone(), Instant::now());
                 handle.spawn(async move {
                     run_session_info_summary_task(provider, context, sender).await;
                 });
@@ -4524,6 +4568,22 @@ impl UiShellState {
             .unwrap_or(true);
         if !needs_load {
             return false;
+        }
+        if !self.session_info_is_foreground() {
+            let now = Instant::now();
+            let interval = session_info_background_refresh_interval_config_value();
+            match self.session_info_diff_last_refresh_at.get(&session_id).copied() {
+                Some(previous) => {
+                    if now.duration_since(previous) < interval {
+                        return false;
+                    }
+                }
+                None => {
+                    self.session_info_diff_last_refresh_at
+                        .insert(session_id.clone(), now);
+                    return false;
+                }
+            }
         }
         self.spawn_session_info_diff_load(session_id)
     }
@@ -4551,6 +4611,8 @@ impl UiShellState {
 
         match TokioHandle::try_current() {
             Ok(handle) => {
+                self.session_info_diff_last_refresh_at
+                    .insert(session_id.clone(), Instant::now());
                 handle.spawn(async move {
                     run_session_diff_load_task(provider, session_id, sender).await;
                 });
