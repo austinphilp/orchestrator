@@ -2942,7 +2942,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn autopilot_controls_all_open_sessions_for_advance_and_archive() {
+    async fn autopilot_tick_does_not_auto_advance_or_archive_sessions() {
         let provider = Arc::new(AutopilotRecordingProvider::default());
         let mut projection = ProjectionState::default();
 
@@ -3036,8 +3036,8 @@ mod tests {
 
         let advanced = provider.advanced_sessions();
         let archived = provider.archived_sessions();
-        assert!(advanced.iter().any(|session_id| session_id.as_str() == "sess-1"));
-        assert!(archived.iter().any(|session_id| session_id.as_str() == "sess-2"));
+        assert!(advanced.is_empty());
+        assert!(archived.is_empty());
     }
 
     #[test]
@@ -3109,7 +3109,7 @@ mod tests {
     }
 
     #[test]
-    fn progression_approval_not_required_when_planning_is_waiting_for_input() {
+    fn progression_approval_required_when_planning_is_waiting_without_prompt() {
         let mut projection = sample_projection(true);
         let work_item_id = WorkItemId::new("wi-1");
         let session_id = WorkerSessionId::new("sess-1");
@@ -3129,6 +3129,57 @@ mod tests {
         );
 
         let shell_state = UiShellState::new("ready".to_owned(), projection);
+        assert!(shell_state.session_requires_progression_approval(&session_id));
+    }
+
+    #[test]
+    fn progression_approval_not_required_when_planning_waiting_has_prompt() {
+        let backend = Arc::new(ManualTerminalBackend::default());
+        let mut projection = sample_projection(true);
+        let work_item_id = WorkItemId::new("wi-1");
+        let session_id = WorkerSessionId::new("sess-1");
+        projection
+            .work_items
+            .get_mut(&work_item_id)
+            .expect("work item")
+            .workflow_state = Some(WorkflowState::Planning);
+        projection
+            .sessions
+            .get_mut(&session_id)
+            .expect("session")
+            .status = Some(WorkerSessionStatus::WaitingForUser);
+        projection.session_runtime.insert(
+            session_id.clone(),
+            SessionRuntimeProjection { is_working: false },
+        );
+
+        let mut shell_state = UiShellState::new_with_integrations(
+            "ready".to_owned(),
+            projection,
+            None,
+            None,
+            None,
+            Some(backend),
+        );
+        shell_state.open_terminal_and_enter_mode();
+        let sender = shell_state
+            .terminal_session_sender
+            .clone()
+            .expect("terminal sender");
+        sender
+            .try_send(TerminalSessionEvent::NeedsInput {
+                session_id: session_id.clone(),
+                needs_input: BackendNeedsInputEvent {
+                    prompt_id: "prompt-plan-input".to_owned(),
+                    question: "Provide planning input".to_owned(),
+                    options: vec!["continue".to_owned()],
+                    default_option: Some("continue".to_owned()),
+                    questions: Vec::new(),
+                },
+            })
+            .expect("queue needs-input event");
+        shell_state.poll_terminal_session_events();
+
         assert!(!shell_state.session_requires_progression_approval(&session_id));
     }
 
@@ -3143,6 +3194,31 @@ mod tests {
 
         let shell_state = UiShellState::new("ready".to_owned(), projection);
         assert!(!shell_state.session_requires_progression_approval(&session_id));
+    }
+
+    #[test]
+    fn progression_approval_required_when_live_terminal_idle_overrides_stale_runtime_busy() {
+        let mut projection = sample_projection(true);
+        let work_item_id = WorkItemId::new("wi-1");
+        let session_id = WorkerSessionId::new("sess-1");
+        projection
+            .work_items
+            .get_mut(&work_item_id)
+            .expect("work item")
+            .workflow_state = Some(WorkflowState::Planning);
+        projection.session_runtime.insert(
+            session_id.clone(),
+            SessionRuntimeProjection { is_working: true },
+        );
+
+        let mut shell_state = UiShellState::new("ready".to_owned(), projection);
+        shell_state
+            .terminal_session_states
+            .entry(session_id.clone())
+            .or_default()
+            .turn_active = false;
+
+        assert!(shell_state.session_requires_progression_approval(&session_id));
     }
 
     #[test]
