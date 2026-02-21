@@ -10,7 +10,8 @@ pub enum WorkflowState {
     AwaitingYourReview,
     ReadyForReview,
     InReview,
-    Merging,
+    #[serde(alias = "Merging")]
+    PendingMerge,
     Done,
     Abandoned,
 }

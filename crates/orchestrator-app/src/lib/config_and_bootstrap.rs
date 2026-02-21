@@ -110,7 +110,7 @@ fn default_linear_workflow_state_map() -> Vec<WorkflowStateMapEntry> {
         WorkflowStateMapEntry::new("AwaitingYourReview", "In Review"),
         WorkflowStateMapEntry::new("ReadyForReview", "In Review"),
         WorkflowStateMapEntry::new("InReview", "In Review"),
-        WorkflowStateMapEntry::new("Merging", "In Review"),
+        WorkflowStateMapEntry::new("PendingMerge", "In Review"),
         WorkflowStateMapEntry::new("Done", "Done"),
         WorkflowStateMapEntry::new("Abandoned", "Canceled"),
     ]
