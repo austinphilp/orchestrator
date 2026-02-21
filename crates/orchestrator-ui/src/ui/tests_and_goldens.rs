@@ -4867,6 +4867,28 @@ mod tests {
     }
 
     #[test]
+    fn session_info_sidebar_title_prefers_ticket_title() {
+        let projection = session_info_projection();
+        let session_id = WorkerSessionId::new("sess-inspector");
+
+        assert_eq!(
+            session_info_sidebar_title(&projection, &session_id),
+            "Add right sidebar"
+        );
+    }
+
+    #[test]
+    fn session_info_sidebar_title_falls_back_without_ticket_metadata() {
+        let projection = inspector_projection();
+        let session_id = WorkerSessionId::new("sess-inspector");
+
+        assert_eq!(
+            session_info_sidebar_title(&projection, &session_id),
+            "session info"
+        );
+    }
+
+    #[test]
     fn session_info_open_inbox_strips_status_prefixes_from_title_display() {
         let mut projection = session_info_projection();
         projection
