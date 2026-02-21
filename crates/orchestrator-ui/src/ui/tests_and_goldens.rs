@@ -17,8 +17,8 @@ mod tests {
     use orchestrator_runtime::{
         BackendCapabilities, BackendEvent, BackendKind, BackendNeedsInputEvent,
         BackendNeedsInputOption, BackendNeedsInputQuestion, BackendOutputEvent,
-        BackendOutputStream, RuntimeResult, RuntimeSessionId, SessionHandle, SessionLifecycle,
-        WorkerEventStream,
+        BackendOutputStream, BackendTurnStateEvent, RuntimeResult, RuntimeSessionId,
+        SessionHandle, SessionLifecycle, WorkerEventStream,
     };
     use std::collections::VecDeque;
     use std::sync::{Arc, Mutex};
@@ -2142,6 +2142,54 @@ mod tests {
 
         let shell_state = UiShellState::new("ready".to_owned(), projection);
         assert!(!shell_state.session_requires_progression_approval(&session_id));
+    }
+
+    #[test]
+    fn progression_approval_required_when_implementing_has_active_needs_input_prompt() {
+        let backend = Arc::new(ManualTerminalBackend::default());
+        let mut projection = sample_projection(true);
+        let session_id = WorkerSessionId::new("sess-1");
+        projection.session_runtime.insert(
+            session_id.clone(),
+            SessionRuntimeProjection { is_working: true },
+        );
+
+        let mut shell_state = UiShellState::new_with_integrations(
+            "ready".to_owned(),
+            projection,
+            None,
+            None,
+            None,
+            Some(backend),
+        );
+        shell_state.open_terminal_and_enter_mode();
+
+        let sender = shell_state
+            .terminal_session_sender
+            .clone()
+            .expect("terminal sender");
+        sender
+            .try_send(TerminalSessionEvent::TurnState {
+                session_id: session_id.clone(),
+                turn_state: BackendTurnStateEvent { active: true },
+            })
+            .expect("queue turn state");
+        sender
+            .try_send(TerminalSessionEvent::NeedsInput {
+                session_id: session_id.clone(),
+                needs_input: BackendNeedsInputEvent {
+                    prompt_id: "prompt-approval-needed".to_owned(),
+                    question: "Approve progression".to_owned(),
+                    options: vec!["approve".to_owned(), "revise".to_owned()],
+                    default_option: Some("approve".to_owned()),
+                    questions: Vec::new(),
+                },
+            })
+            .expect("queue needs-input event");
+
+        shell_state.poll_terminal_session_events();
+
+        assert!(shell_state.session_requires_progression_approval(&session_id));
     }
 
     #[test]
