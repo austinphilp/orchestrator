@@ -427,6 +427,54 @@ async fn run_session_diff_load_task(
     }
 }
 
+async fn run_session_info_summary_task(
+    provider: Arc<dyn LlmProvider>,
+    context: SessionInfoContext,
+    sender: mpsc::Sender<SessionInfoSummaryEvent>,
+) {
+    let request = summarize_text_output_request(context.prompt.as_str());
+    let (_, mut stream) = match provider.stream_chat(request).await {
+        Ok(response) => response,
+        Err(error) => {
+            let _ = sender
+                .send(SessionInfoSummaryEvent::Failed {
+                    session_id: context.session_id,
+                    message: sanitize_terminal_display_text(error.to_string().as_str()),
+                    context_fingerprint: context.context_fingerprint,
+                })
+                .await;
+            return;
+        }
+    };
+
+    let mut output = String::new();
+    loop {
+        match stream.next_chunk().await {
+            Ok(Some(chunk)) => output.push_str(chunk.delta.as_str()),
+            Ok(None) => break,
+            Err(error) => {
+                let _ = sender
+                    .send(SessionInfoSummaryEvent::Failed {
+                        session_id: context.session_id,
+                        message: sanitize_terminal_display_text(error.to_string().as_str()),
+                        context_fingerprint: context.context_fingerprint,
+                    })
+                    .await;
+                return;
+            }
+        }
+    }
+
+    let summary = clamp_summary_text(output.as_str(), 200);
+    let _ = sender
+        .send(SessionInfoSummaryEvent::Completed {
+            session_id: context.session_id,
+            summary,
+            context_fingerprint: context.context_fingerprint,
+        })
+        .await;
+}
+
 async fn run_ticket_picker_start_task(
     provider: Arc<dyn TicketPickerProvider>,
     ticket: TicketSummary,

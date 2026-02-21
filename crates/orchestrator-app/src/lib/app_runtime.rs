@@ -222,10 +222,19 @@ impl<S: Supervisor, G: GithubClient> App<S, G> {
     ) -> Result<SelectedTicketFlowResult, CoreError> {
         let mut store = open_event_store(&self.config.event_store_path)?;
         let flow_config = SelectedTicketFlowConfig::from_workspace_root(&self.config.workspace);
+        let selected_ticket_description = self
+            .ticketing
+            .get_ticket(GetTicketRequest {
+                ticket_id: selected_ticket.ticket_id.clone(),
+            })
+            .await
+            .ok()
+            .and_then(|details| details.description);
 
         orchestrator_core::start_or_resume_selected_ticket(
             &mut store,
             selected_ticket,
+            selected_ticket_description.as_deref(),
             &flow_config,
             repository_override,
             vcs,

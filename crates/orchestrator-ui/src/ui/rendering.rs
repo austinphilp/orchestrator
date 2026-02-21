@@ -195,6 +195,131 @@ fn render_center_panel(ui_state: &UiState) -> String {
     lines.join("\n")
 }
 
+fn render_session_info_panel(
+    domain: &ProjectionState,
+    session_id: &WorkerSessionId,
+    diff_cache: Option<&SessionInfoDiffCache>,
+    summary_cache: Option<&SessionInfoSummaryCache>,
+) -> String {
+    let mut lines = Vec::new();
+    lines.push(format!("session: {}", session_id.as_str()));
+
+    let session = domain.sessions.get(session_id);
+    let work_item = session
+        .and_then(|entry| entry.work_item_id.as_ref())
+        .and_then(|work_item_id| domain.work_items.get(work_item_id));
+
+    lines.push(String::new());
+    lines.push("PR:".to_owned());
+    if let Some(work_item_id) = work_item.map(|entry| &entry.id) {
+        let pr = collect_work_item_artifacts(work_item_id, domain, 1, is_pr_artifact)
+            .into_iter()
+            .next();
+        if let Some(pr_artifact) = pr {
+            lines.push(format!("- {}", compact_focus_card_text(pr_artifact.uri.as_str())));
+            if let Some(metadata) = pr_metadata_summary_line(pr_artifact) {
+                lines.push(format!("  {}", compact_focus_card_text(metadata.as_str())));
+            }
+        } else {
+            lines.push("- No PR artifact available.".to_owned());
+        }
+    } else {
+        lines.push("- No work item context.".to_owned());
+    }
+
+    lines.push(String::new());
+    lines.push("File changes:".to_owned());
+    match diff_cache {
+        Some(cache) if cache.loading => {
+            lines.push("- Loading diff...".to_owned());
+        }
+        Some(cache) if cache.error.is_some() => {
+            lines.push(format!(
+                "- Diff unavailable: {}",
+                compact_focus_card_text(cache.error.as_deref().unwrap_or_default())
+            ));
+        }
+        Some(cache) => {
+            let files = parse_diff_file_summaries(cache.content.as_str());
+            if files.is_empty() {
+                lines.push("- No changed files.".to_owned());
+            } else {
+                for file in files {
+                    lines.push(format!("- {} +{} -{}", file.path, file.added, file.removed));
+                }
+            }
+        }
+        None => lines.push("- Diff not requested yet.".to_owned()),
+    }
+
+    lines.push(String::new());
+    lines.push("Ticket:".to_owned());
+    if let Some(work_item) = work_item {
+        if let Some(ticket_id) = work_item.ticket_id.as_ref() {
+            if let Some(metadata) = latest_ticket_metadata(domain, ticket_id) {
+                lines.push(format!(
+                    "- {} {}",
+                    metadata.identifier,
+                    compact_focus_card_text(metadata.title.as_str())
+                ));
+                let description = metadata
+                    .description
+                    .or_else(|| latest_ticket_description(domain, ticket_id))
+                    .unwrap_or_else(|| "No description synced.".to_owned());
+                lines.push(format!("- {}", compact_focus_card_text(description.as_str())));
+            } else {
+                lines.push("- Ticket details unavailable.".to_owned());
+            }
+        } else {
+            lines.push("- No ticket mapped.".to_owned());
+        }
+    } else {
+        lines.push("- No work item context.".to_owned());
+    }
+
+    lines.push(String::new());
+    lines.push("Open inbox:".to_owned());
+    if let Some(work_item) = work_item {
+        let mut has_open = false;
+        for inbox_item_id in &work_item.inbox_items {
+            let Some(item) = domain.inbox_items.get(inbox_item_id) else {
+                continue;
+            };
+            if item.resolved {
+                continue;
+            }
+            has_open = true;
+            lines.push(format!(
+                "- {:?}: {}",
+                item.kind,
+                compact_focus_card_text(item.title.as_str())
+            ));
+        }
+        if !has_open {
+            lines.push("- None.".to_owned());
+        }
+    } else {
+        lines.push("- No work item context.".to_owned());
+    }
+
+    lines.push(String::new());
+    lines.push("Summary:".to_owned());
+    match summary_cache {
+        Some(cache) if cache.loading => lines.push("- Updating...".to_owned()),
+        Some(cache) if cache.error.is_some() => lines.push(format!(
+            "- {}",
+            compact_focus_card_text(cache.error.as_deref().unwrap_or_default())
+        )),
+        Some(cache) => lines.push(format!(
+            "- {}",
+            compact_focus_card_text(cache.text.as_deref().unwrap_or("No summary yet."))
+        )),
+        None => lines.push("- No summary yet.".to_owned()),
+    }
+
+    lines.join("\n")
+}
+
 fn render_terminal_top_bar(domain: &ProjectionState, session_id: &WorkerSessionId) -> String {
     let labels = session_display_labels(domain, session_id);
     let text = if let Some(session) = domain.sessions.get(session_id) {

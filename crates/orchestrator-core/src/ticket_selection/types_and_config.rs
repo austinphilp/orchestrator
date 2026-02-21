@@ -62,6 +62,7 @@ pub struct SelectedTicketFlowResult {
 pub async fn start_or_resume_selected_ticket(
     store: &mut SqliteEventStore,
     selected_ticket: &TicketSummary,
+    selected_ticket_description: Option<&str>,
     config: &SelectedTicketFlowConfig,
     repository_override: Option<PathBuf>,
     vcs: &dyn VcsProvider,
@@ -88,6 +89,7 @@ pub async fn start_or_resume_selected_ticket(
             return start_new_mapping(
                 store,
                 selected_ticket,
+                selected_ticket_description,
                 config,
                 project_id,
                 repository_override,
@@ -100,6 +102,7 @@ pub async fn start_or_resume_selected_ticket(
         return resume_existing_mapping(
             store,
             selected_ticket,
+            selected_ticket_description,
             project_id,
             config,
             worker_backend,
@@ -111,6 +114,7 @@ pub async fn start_or_resume_selected_ticket(
     start_new_mapping(
         store,
         selected_ticket,
+        selected_ticket_description,
         config,
         project_id,
         repository_override,
@@ -119,4 +123,3 @@ pub async fn start_or_resume_selected_ticket(
     )
     .await
 }
-

@@ -145,10 +145,23 @@ impl Ui {
                         .is_right_pane_focused()
                         .then_some(Style::default().fg(Color::LightBlue));
                     if let Some(session_id) = shell_state.active_terminal_session_id().cloned() {
+                        let (terminal_area, session_info_area) = if shell_state
+                            .should_show_session_info_sidebar()
+                            && center_area.width >= 80
+                        {
+                            let [terminal_area, sidebar_area] = Layout::horizontal([
+                                Constraint::Percentage(68),
+                                Constraint::Percentage(32),
+                            ])
+                            .areas(center_area);
+                            (terminal_area, Some(sidebar_area))
+                        } else {
+                            (center_area, None)
+                        };
                         let active_needs_input = shell_state.active_terminal_needs_input().cloned();
                         let terminal_input_height = terminal_input_pane_height(
-                            center_area.height,
-                            center_area.width,
+                            terminal_area.height,
+                            terminal_area.width,
                             active_needs_input.as_ref(),
                         );
                         let center_layout = Layout::vertical([
@@ -157,7 +170,7 @@ impl Ui {
                             Constraint::Length(terminal_input_height),
                         ]);
                         let [terminal_meta_area, terminal_output_area, terminal_input_area] =
-                            center_layout.areas(center_area);
+                            center_layout.areas(terminal_area);
                         let meta_text = render_terminal_top_bar(&shell_state.domain, &session_id);
                         let mut terminal_meta_block = Block::default().title("terminal").borders(Borders::ALL);
                         if let Some(style) = center_focused_style {
@@ -226,6 +239,23 @@ impl Ui {
                                             ))
                                     .wrap(true),
                                 terminal_input_area,
+                            );
+                        }
+
+                        if let Some(sidebar_area) = session_info_area {
+                            let sidebar_text = render_session_info_panel(
+                                &shell_state.domain,
+                                &session_id,
+                                shell_state.session_info_diff_cache_for(&session_id),
+                                shell_state.session_info_summary_cache_for(&session_id),
+                            );
+                            frame.render_widget(
+                                Paragraph::new(sidebar_text).block(
+                                    Block::default()
+                                        .title("session info")
+                                        .borders(Borders::ALL),
+                                ),
+                                sidebar_area,
                             );
                         }
                     } else {

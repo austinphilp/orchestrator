@@ -190,6 +190,7 @@ pub fn apply_event(state: &mut ProjectionState, event: StoredEventEnvelope) {
             }
         }
         OrchestrationEventPayload::TicketSynced(_)
+        | OrchestrationEventPayload::TicketDetailsSynced(_)
         | OrchestrationEventPayload::UserResponded(_)
         | OrchestrationEventPayload::SupervisorQueryStarted(_)
         | OrchestrationEventPayload::SupervisorQueryChunk(_)

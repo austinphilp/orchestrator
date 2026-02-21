@@ -250,6 +250,7 @@ mod tests {
         let result = start_or_resume_selected_ticket(
             &mut store,
             &selected_ticket(),
+            None,
             &config(),
             Some(PathBuf::from("/workspace/repo")),
             &vcs,
@@ -290,6 +291,12 @@ mod tests {
             matches!(event.payload, OrchestrationEventPayload::WorkItemCreated(_))
         }));
         assert!(events.iter().any(|event| {
+            matches!(
+                event.payload,
+                OrchestrationEventPayload::TicketDetailsSynced(_)
+            )
+        }));
+        assert!(events.iter().any(|event| {
             matches!(event.payload, OrchestrationEventPayload::WorktreeCreated(_))
         }));
         assert!(events.iter().any(|event| {
@@ -327,6 +334,7 @@ mod tests {
         let result = start_or_resume_selected_ticket(
             &mut store,
             &selected_ticket(),
+            None,
             &config(),
             Some(PathBuf::from("/workspace/repo")),
             &vcs,
@@ -356,6 +364,7 @@ mod tests {
         let result = start_or_resume_selected_ticket(
             &mut store,
             &selected_ticket(),
+            None,
             &config(),
             Some(PathBuf::from("/workspace/repo")),
             &vcs,
@@ -387,6 +396,7 @@ mod tests {
         let err = start_or_resume_selected_ticket(
             &mut store,
             &selected_ticket(),
+            None,
             &config(),
             Some(PathBuf::from("/workspace/repo")),
             &vcs,
@@ -421,6 +431,7 @@ mod tests {
         let err = start_or_resume_selected_ticket(
             &mut store,
             &selected_ticket(),
+            None,
             &config(),
             None,
             &vcs,
@@ -454,6 +465,7 @@ mod tests {
         let result = start_or_resume_selected_ticket(
             &mut store,
             &selected_ticket(),
+            None,
             &config(),
             None,
             &vcs,
@@ -552,6 +564,7 @@ mod tests {
         let result = start_or_resume_selected_ticket(
             &mut store,
             &selected_ticket(),
+            None,
             &config(),
             None,
             &vcs,
@@ -594,6 +607,7 @@ mod tests {
         let result = start_or_resume_selected_ticket(
             &mut store,
             &selected_ticket(),
+            None,
             &config(),
             None,
             &vcs,
@@ -674,6 +688,7 @@ mod tests {
         start_or_resume_selected_ticket(
             &mut store,
             &selected_ticket(),
+            None,
             &config(),
             None,
             &vcs,
@@ -704,6 +719,7 @@ mod tests {
         let result = start_or_resume_selected_ticket(
             &mut store,
             &selected_ticket(),
+            None,
             &resume_config,
             None,
             &vcs,
@@ -734,6 +750,7 @@ mod tests {
         let err = start_or_resume_selected_ticket(
             &mut store,
             &selected_ticket(),
+            None,
             &config(),
             None,
             &vcs,
@@ -771,6 +788,7 @@ mod tests {
         start_or_resume_selected_ticket(
             &mut store,
             &selected_ticket(),
+            None,
             &config(),
             None,
             &vcs,
@@ -812,6 +830,7 @@ mod tests {
         start_or_resume_selected_ticket(
             &mut store,
             &selected_ticket(),
+            None,
             &config(),
             None,
             &vcs,

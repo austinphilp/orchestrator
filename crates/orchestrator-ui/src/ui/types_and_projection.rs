@@ -585,22 +585,201 @@ fn session_display_with_status(
 struct TicketDisplayMetadata {
     identifier: String,
     title: String,
+    description: Option<String>,
 }
 
 fn latest_ticket_metadata(domain: &ProjectionState, ticket_id: &TicketId) -> Option<TicketDisplayMetadata> {
+    let mut latest_synced: Option<TicketDisplayMetadata> = None;
+    let mut latest_description: Option<Option<String>> = None;
     for event in domain.events.iter().rev() {
-        let OrchestrationEventPayload::TicketSynced(payload) = &event.payload else {
-            continue;
-        };
-        if payload.ticket_id != *ticket_id {
-            continue;
+        match &event.payload {
+            OrchestrationEventPayload::TicketSynced(payload) => {
+                if payload.ticket_id != *ticket_id {
+                    continue;
+                }
+                latest_synced = Some(TicketDisplayMetadata {
+                    identifier: payload.identifier.trim().to_owned(),
+                    title: payload.title.trim().to_owned(),
+                    description: None,
+                });
+                break;
+            }
+            OrchestrationEventPayload::TicketDetailsSynced(payload) => {
+                if payload.ticket_id != *ticket_id {
+                    continue;
+                }
+                if latest_description.is_none() {
+                    latest_description = Some(
+                        payload
+                            .description
+                            .as_deref()
+                            .map(str::trim)
+                            .filter(|value| !value.is_empty())
+                            .map(ToOwned::to_owned),
+                    );
+                }
+            }
+            _ => {}
         }
-        return Some(TicketDisplayMetadata {
-            identifier: payload.identifier.trim().to_owned(),
-            title: payload.title.trim().to_owned(),
-        });
     }
-    None
+    latest_synced.map(|mut metadata| {
+        if let Some(description) = latest_description {
+            metadata.description = description;
+        }
+        metadata
+    })
+}
+
+fn latest_ticket_description(domain: &ProjectionState, ticket_id: &TicketId) -> Option<String> {
+    latest_ticket_metadata(domain, ticket_id).and_then(|metadata| metadata.description)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SessionInfoDiffCache {
+    content: String,
+    loading: bool,
+    error: Option<String>,
+}
+
+impl Default for SessionInfoDiffCache {
+    fn default() -> Self {
+        Self {
+            content: String::new(),
+            loading: false,
+            error: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+struct SessionInfoSummaryCache {
+    text: Option<String>,
+    loading: bool,
+    error: Option<String>,
+    context_fingerprint: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum SessionInfoSummaryEvent {
+    Completed {
+        session_id: WorkerSessionId,
+        summary: String,
+        context_fingerprint: String,
+    },
+    Failed {
+        session_id: WorkerSessionId,
+        message: String,
+        context_fingerprint: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SessionInfoContext {
+    session_id: WorkerSessionId,
+    context_fingerprint: String,
+    prompt: String,
+}
+
+fn clamp_summary_text(input: &str, max_chars: usize) -> String {
+    let compact = compact_focus_card_text(input);
+    let clamped = compact.chars().take(max_chars).collect::<String>();
+    clamped.trim().to_owned()
+}
+
+fn summarize_text_output_request(prompt: &str) -> LlmChatRequest {
+    LlmChatRequest {
+        model: supervisor_model_from_env(),
+        messages: vec![
+            LlmMessage {
+                role: LlmRole::System,
+                content: "Provide a concise status summary under 200 characters.".to_owned(),
+                name: None,
+                tool_calls: Vec::new(),
+                tool_call_id: None,
+            },
+            LlmMessage {
+                role: LlmRole::User,
+                content: prompt.to_owned(),
+                name: None,
+                tool_calls: Vec::new(),
+                tool_call_id: None,
+            },
+        ],
+        tools: Vec::new(),
+        temperature: Some(0.1),
+        tool_choice: None,
+        max_output_tokens: Some(120),
+    }
+}
+
+fn session_info_summary_prompt(
+    domain: &ProjectionState,
+    session_id: &WorkerSessionId,
+    diff: Option<&SessionInfoDiffCache>,
+) -> Option<SessionInfoContext> {
+    let session = domain.sessions.get(session_id)?;
+    let work_item_id = session.work_item_id.as_ref()?;
+    let work_item = domain.work_items.get(work_item_id)?;
+    let ticket_details = work_item
+        .ticket_id
+        .as_ref()
+        .and_then(|ticket_id| latest_ticket_metadata(domain, ticket_id));
+    let pr_artifact = collect_work_item_artifacts(work_item_id, domain, 1, is_pr_artifact)
+        .into_iter()
+        .next();
+    let open_inbox_count = work_item
+        .inbox_items
+        .iter()
+        .filter_map(|inbox_item_id| domain.inbox_items.get(inbox_item_id))
+        .filter(|item| !item.resolved)
+        .count();
+    let diffstats = diff
+        .map(|entry| parse_diff_file_summaries(entry.content.as_str()))
+        .unwrap_or_default();
+    let files_changed = diffstats.len();
+    let additions = diffstats.iter().map(|file| file.added).sum::<usize>();
+    let deletions = diffstats.iter().map(|file| file.removed).sum::<usize>();
+    let pr_text = pr_artifact
+        .map(|artifact| compact_focus_card_text(artifact.uri.as_str()))
+        .unwrap_or_else(|| "none".to_owned());
+    let ticket_id = ticket_details
+        .as_ref()
+        .map(|ticket| ticket.identifier.clone())
+        .unwrap_or_else(|| "unknown".to_owned());
+    let ticket_title = ticket_details
+        .as_ref()
+        .map(|ticket| ticket.title.clone())
+        .unwrap_or_else(|| "unknown".to_owned());
+    let ticket_description = work_item
+        .ticket_id
+        .as_ref()
+        .and_then(|ticket_id| latest_ticket_description(domain, ticket_id))
+        .unwrap_or_default();
+    let workflow = work_item
+        .workflow_state
+        .as_ref()
+        .map(|state| format!("{state:?}"))
+        .unwrap_or_else(|| "Unknown".to_owned());
+    let session_status = session
+        .status
+        .as_ref()
+        .map(|status| format!("{status:?}"))
+        .unwrap_or_else(|| "Unknown".to_owned());
+
+    let context_fingerprint = format!(
+        "{}|{workflow}|{session_status}|{ticket_id}|{ticket_title}|{ticket_description}|{pr_text}|{files_changed}|{additions}|{deletions}|{open_inbox_count}",
+        session_id.as_str()
+    );
+    let prompt = format!(
+        "Session: {}\nWorkflow: {workflow}\nSession status: {session_status}\nTicket: {ticket_id} - {ticket_title}\nTicket description: {ticket_description}\nPR: {pr_text}\nDiff summary: {files_changed} files, +{additions}/-{deletions}\nOpen inbox items: {open_inbox_count}\nRespond with a single-line status update under 200 characters.",
+        session_id.as_str()
+    );
+
+    Some(SessionInfoContext {
+        session_id: session_id.clone(),
+        context_fingerprint,
+        prompt,
+    })
 }
 
 pub(crate) fn project_ui_state(

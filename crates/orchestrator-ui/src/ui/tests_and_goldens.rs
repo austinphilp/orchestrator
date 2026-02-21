@@ -621,6 +621,53 @@ mod tests {
         projection
     }
 
+    fn session_info_projection() -> ProjectionState {
+        let mut projection = inspector_projection();
+        let work_item_id = WorkItemId::new("wi-inspector");
+        let ticket_id = TicketId::from_provider_uuid(TicketProvider::Linear, "ticket-session-info");
+        projection
+            .work_items
+            .get_mut(&work_item_id)
+            .expect("work item")
+            .ticket_id = Some(ticket_id.clone());
+        projection.events.push(StoredEventEnvelope {
+            event_id: "evt-session-info-ticket".to_owned(),
+            sequence: 10,
+            occurred_at: "2026-02-20T00:00:00Z".to_owned(),
+            work_item_id: Some(work_item_id.clone()),
+            session_id: None,
+            event_type: OrchestrationEventType::TicketSynced,
+            payload: OrchestrationEventPayload::TicketSynced(orchestrator_core::TicketSyncedPayload {
+                ticket_id: ticket_id.clone(),
+                identifier: "AP-244".to_owned(),
+                title: "Add right sidebar".to_owned(),
+                state: "In Progress".to_owned(),
+                assignee: None,
+                priority: None,
+            }),
+            schema_version: 1,
+        });
+        projection.events.push(StoredEventEnvelope {
+            event_id: "evt-session-info-ticket-details".to_owned(),
+            sequence: 11,
+            occurred_at: "2026-02-20T00:00:01Z".to_owned(),
+            work_item_id: Some(work_item_id),
+            session_id: None,
+            event_type: OrchestrationEventType::TicketDetailsSynced,
+            payload: OrchestrationEventPayload::TicketDetailsSynced(
+                orchestrator_core::TicketDetailsSyncedPayload {
+                    ticket_id,
+                    description: Some(
+                        "Render PR status, diff stats, ticket details, and open inbox in sidebar."
+                            .to_owned(),
+                    ),
+                },
+            ),
+            schema_version: 1,
+        });
+        projection
+    }
+
     fn focus_card_projection_with_evidence() -> ProjectionState {
         let work_item_id = WorkItemId::new("wi-focus");
         let session_id = WorkerSessionId::new("sess-focus");
@@ -2995,6 +3042,47 @@ mod tests {
         assert!(rendered.contains("Latest query metrics: id=supq-1"));
         assert!(rendered.contains("duration=2010ms"));
         assert!(rendered.contains("usage(input=144 output=41 total=185)"));
+    }
+
+    #[test]
+    fn session_info_panel_renders_pr_diff_ticket_inbox_and_summary() {
+        let projection = session_info_projection();
+        let session_id = WorkerSessionId::new("sess-inspector");
+        let rendered = render_session_info_panel(
+            &projection,
+            &session_id,
+            Some(&SessionInfoDiffCache {
+                content:
+                    "diff --git a/src/a.rs b/src/a.rs\n@@ -1 +1,2 @@\n+line\n".to_owned(),
+                loading: false,
+                error: None,
+            }),
+            Some(&SessionInfoSummaryCache {
+                text: Some("AP-244 is in progress with sidebar rendering wired.".to_owned()),
+                loading: false,
+                error: None,
+                context_fingerprint: Some("fp".to_owned()),
+            }),
+        );
+
+        assert!(rendered.contains("PR:"));
+        assert!(rendered.contains("File changes:"));
+        assert!(rendered.contains("Ticket:"));
+        assert!(rendered.contains("AP-244"));
+        assert!(rendered.contains("Open inbox:"));
+        assert!(rendered.contains("Summary:"));
+    }
+
+    #[test]
+    fn session_info_sidebar_visibility_follows_terminal_view() {
+        let mut shell_state = UiShellState::new("ready".to_owned(), sample_projection(true));
+        assert!(!shell_state.should_show_session_info_sidebar());
+
+        shell_state.open_terminal_for_selected();
+        assert!(shell_state.should_show_session_info_sidebar());
+
+        shell_state.minimize_center_view();
+        assert!(!shell_state.should_show_session_info_sidebar());
     }
 
     #[test]

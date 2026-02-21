@@ -42,7 +42,12 @@ struct UiShellState {
     pane_focus: PaneFocus,
     terminal_session_sender: Option<mpsc::Sender<TerminalSessionEvent>>,
     terminal_session_receiver: Option<mpsc::Receiver<TerminalSessionEvent>>,
+    session_info_summary_sender: Option<mpsc::Sender<SessionInfoSummaryEvent>>,
+    session_info_summary_receiver: Option<mpsc::Receiver<SessionInfoSummaryEvent>>,
     terminal_session_states: HashMap<WorkerSessionId, TerminalViewState>,
+    session_info_diff_cache: HashMap<WorkerSessionId, SessionInfoDiffCache>,
+    session_info_summary_cache: HashMap<WorkerSessionId, SessionInfoSummaryCache>,
+    session_info_summary_deadline: Option<Instant>,
     terminal_session_streamed: HashSet<WorkerSessionId>,
     terminal_compose_editor: EditorState,
     terminal_compose_event_handler: EditorEventHandler,
@@ -94,6 +99,13 @@ impl UiShellState {
         } else {
             (None, None)
         };
+        let (session_info_summary_sender, session_info_summary_receiver) =
+            if supervisor_provider.is_some() {
+                let (sender, receiver) = mpsc::channel(TERMINAL_STREAM_EVENT_CHANNEL_CAPACITY);
+                (Some(sender), Some(receiver))
+            } else {
+                (None, None)
+            };
         let (merge_event_sender, merge_event_receiver) = if supervisor_command_dispatcher.is_some()
         {
             let (sender, receiver) = mpsc::channel(TERMINAL_STREAM_EVENT_CHANNEL_CAPACITY);
@@ -134,7 +146,12 @@ impl UiShellState {
             pane_focus: PaneFocus::Left,
             terminal_session_sender,
             terminal_session_receiver,
+            session_info_summary_sender,
+            session_info_summary_receiver,
             terminal_session_states: HashMap::new(),
+            session_info_diff_cache: HashMap::new(),
+            session_info_summary_cache: HashMap::new(),
+            session_info_summary_deadline: None,
             terminal_session_streamed: HashSet::new(),
             terminal_compose_editor: insert_mode_editor_state(),
             terminal_compose_event_handler: EditorEventHandler::default(),
@@ -328,6 +345,7 @@ impl UiShellState {
             self.ensure_terminal_stream(session_id.clone());
             let _ = self.flush_deferred_terminal_output_for_session(&session_id);
             self.enter_terminal_mode();
+            self.schedule_session_info_summary_refresh_for_active_session();
         }
     }
 
@@ -565,6 +583,24 @@ impl UiShellState {
         matches!(self.pane_focus, PaneFocus::Right)
     }
 
+    fn should_show_session_info_sidebar(&self) -> bool {
+        self.active_terminal_session_id().is_some()
+    }
+
+    fn session_info_diff_cache_for(
+        &self,
+        session_id: &WorkerSessionId,
+    ) -> Option<&SessionInfoDiffCache> {
+        self.session_info_diff_cache.get(session_id)
+    }
+
+    fn session_info_summary_cache_for(
+        &self,
+        session_id: &WorkerSessionId,
+    ) -> Option<&SessionInfoSummaryCache> {
+        self.session_info_summary_cache.get(session_id)
+    }
+
     fn move_session_selection(&mut self, delta: isize) -> bool {
         self.sync_selected_session_panel_state();
         let session_ids = self.session_ids_for_navigation();
@@ -633,6 +669,7 @@ impl UiShellState {
         }
         self.ensure_terminal_stream(session_id.clone());
         let _ = self.flush_deferred_terminal_output_for_session(&session_id);
+        self.schedule_session_info_summary_refresh_for_active_session();
     }
 
     fn ensure_startup_session_feed_opened_and_report(&mut self) -> bool {
@@ -667,6 +704,7 @@ impl UiShellState {
         self.ensure_terminal_stream(session_id.clone());
         let _ = self.flush_deferred_terminal_output_for_session(&session_id);
         self.enter_terminal_mode();
+        self.schedule_session_info_summary_refresh_for_active_session();
     }
 
     fn inbox_item_id_for_session(&self, session_id: &WorkerSessionId) -> Option<InboxItemId> {
@@ -1486,8 +1524,11 @@ impl UiShellState {
         changed |= self.poll_terminal_session_events();
         changed |= self.flush_background_terminal_output_and_report();
         changed |= self.poll_merge_queue_events();
+        changed |= self.poll_session_info_summary_events();
+        changed |= self.tick_session_info_summary_refresh();
         changed |= self.enqueue_merge_reconcile_polls();
         changed |= self.dispatch_merge_queue_requests();
+        changed |= self.ensure_session_info_diff_loaded_for_active_session();
         if let Some(session_id) = self.active_terminal_session_id().cloned() {
             changed |= self.flush_deferred_terminal_output_for_session(&session_id);
             changed |= self.ensure_terminal_stream_and_report(session_id);
@@ -1602,7 +1643,10 @@ impl UiShellState {
                     turn_state,
                 } => {
                     let persisted_session_id = session_id.clone();
-                    let view = self.terminal_session_states.entry(session_id).or_default();
+                    let view = self
+                        .terminal_session_states
+                        .entry(session_id.clone())
+                        .or_default();
                     let previous_turn_active = view.turn_active;
                     view.turn_active = turn_state.active;
                     if previous_turn_active != turn_state.active {
@@ -1610,6 +1654,9 @@ impl UiShellState {
                             persisted_session_id,
                             turn_state.active,
                         );
+                        if self.active_terminal_session_id() == Some(&session_id) {
+                            self.schedule_session_info_summary_refresh_for_active_session();
+                        }
                     }
                 }
                 TerminalSessionEvent::NeedsInput {
@@ -1630,6 +1677,7 @@ impl UiShellState {
                     let prompt = self.needs_input_prompt_from_event(&session_id, needs_input);
                     let view = self.terminal_session_states.entry(session_id).or_default();
                     view.enqueue_needs_input_prompt(prompt);
+                    self.schedule_session_info_summary_refresh_for_active_session();
                 }
                 TerminalSessionEvent::StreamFailed { session_id, error } => {
                     self.terminal_session_streamed.remove(&session_id);
@@ -1654,11 +1702,17 @@ impl UiShellState {
                     if let RuntimeError::SessionNotFound(_) = error {
                         self.recover_terminal_session_on_not_found(&session_id);
                     }
+                    if self.active_terminal_session_id() == Some(&session_id) {
+                        self.schedule_session_info_summary_refresh_for_active_session();
+                    }
                 }
                 TerminalSessionEvent::StreamEnded { session_id } => {
                     self.terminal_session_streamed.remove(&session_id);
                     let persisted_session_id = session_id.clone();
-                    let view = self.terminal_session_states.entry(session_id).or_default();
+                    let view = self
+                        .terminal_session_states
+                        .entry(session_id.clone())
+                        .or_default();
                     if !view.deferred_output.is_empty() {
                         let deferred = std::mem::take(&mut view.deferred_output);
                         append_terminal_assistant_output(view, deferred);
@@ -1667,6 +1721,9 @@ impl UiShellState {
                     flush_terminal_output_fragment(view);
                     view.turn_active = false;
                     self.spawn_set_session_working_state(persisted_session_id, false);
+                    if self.active_terminal_session_id() == Some(&session_id) {
+                        self.schedule_session_info_summary_refresh_for_active_session();
+                    }
                 }
             }
         }
@@ -2284,6 +2341,8 @@ fn apply_ticket_picker_event(&mut self, event: TicketPickerEvent) {
                     outcome.from,
                     outcome.to
                 ));
+                self.session_info_diff_cache.remove(&outcome.session_id);
+                self.schedule_session_info_summary_refresh_for_active_session();
             }
             TicketPickerEvent::SessionWorkflowAdvanceFailed {
                 session_id,
@@ -2322,6 +2381,7 @@ fn apply_ticket_picker_event(&mut self, event: TicketPickerEvent) {
                         compact_focus_card_text(message.as_str())
                     ));
                 }
+                self.schedule_session_info_summary_refresh_for_active_session();
             }
             TicketPickerEvent::TicketStartRequiresRepository {
                 ticket,
@@ -2426,6 +2486,7 @@ fn apply_ticket_picker_event(&mut self, event: TicketPickerEvent) {
                 if submit_mode == TicketCreateSubmitMode::CreateAndStart {
                     self.start_selected_ticket_from_picker_with_override(created_ticket, None);
                 }
+                self.schedule_session_info_summary_refresh_for_active_session();
             }
             TicketPickerEvent::TicketCreateFailed {
                 message,
@@ -2451,6 +2512,13 @@ fn apply_ticket_picker_event(&mut self, event: TicketPickerEvent) {
                 ));
             }
             TicketPickerEvent::SessionDiffLoaded { diff } => {
+                let cache = self
+                    .session_info_diff_cache
+                    .entry(diff.session_id.clone())
+                    .or_default();
+                cache.loading = false;
+                cache.error = None;
+                cache.content = diff.diff.clone();
                 if let Some(modal) = self.worktree_diff_modal.as_mut() {
                     if modal.session_id == diff.session_id {
                         modal.loading = false;
@@ -2462,15 +2530,24 @@ fn apply_ticket_picker_event(&mut self, event: TicketPickerEvent) {
                         let files = parse_diff_file_summaries(modal.content.as_str());
                         modal.cursor_line =
                             files.first().map(|file| file.start_index).unwrap_or(0);
-                        modal.scroll =
+                            modal.scroll =
                             modal.cursor_line.saturating_sub(3).min(u16::MAX as usize) as u16;
                     }
+                }
+                if self.active_terminal_session_id() == Some(&diff.session_id) {
+                    self.schedule_session_info_summary_refresh_for_active_session();
                 }
             }
             TicketPickerEvent::SessionDiffFailed {
                 session_id,
                 message,
             } => {
+                let cache = self
+                    .session_info_diff_cache
+                    .entry(session_id.clone())
+                    .or_default();
+                cache.loading = false;
+                cache.error = Some(message.clone());
                 if let Some(modal) = self.worktree_diff_modal.as_mut() {
                     if modal.session_id == session_id {
                         modal.loading = false;
@@ -2482,6 +2559,9 @@ fn apply_ticket_picker_event(&mut self, event: TicketPickerEvent) {
                     "diff load warning: {}",
                     compact_focus_card_text(message.as_str())
                 ));
+                if self.active_terminal_session_id() == Some(&session_id) {
+                    self.schedule_session_info_summary_refresh_for_active_session();
+                }
             }
             TicketPickerEvent::SessionArchived {
                 session_id,
@@ -2496,6 +2576,8 @@ fn apply_ticket_picker_event(&mut self, event: TicketPickerEvent) {
                     session.status = Some(WorkerSessionStatus::Done);
                 }
                 self.terminal_session_states.remove(&session_id);
+                self.session_info_diff_cache.remove(&session_id);
+                self.session_info_summary_cache.remove(&session_id);
                 self.terminal_session_streamed.remove(&session_id);
                 self.merge_pending_sessions.remove(&session_id);
                 self.merge_finalizing_sessions.remove(&session_id);
@@ -2510,6 +2592,7 @@ fn apply_ticket_picker_event(&mut self, event: TicketPickerEvent) {
                     status.push_str(compact_focus_card_text(message.as_str()).as_str());
                 }
                 self.status_warning = Some(status);
+                self.schedule_session_info_summary_refresh_for_active_session();
             }
             TicketPickerEvent::SessionArchiveFailed {
                 session_id,
@@ -2527,6 +2610,7 @@ fn apply_ticket_picker_event(&mut self, event: TicketPickerEvent) {
             }
             TicketPickerEvent::InboxItemPublished { projection } => {
                 self.domain = projection;
+                self.schedule_session_info_summary_refresh_for_active_session();
             }
             TicketPickerEvent::InboxItemPublishFailed { message } => {
                 self.status_warning = Some(format!(
@@ -2536,6 +2620,7 @@ fn apply_ticket_picker_event(&mut self, event: TicketPickerEvent) {
             }
             TicketPickerEvent::InboxItemResolved { projection } => {
                 self.domain = projection;
+                self.schedule_session_info_summary_refresh_for_active_session();
             }
             TicketPickerEvent::InboxItemResolveFailed { message } => {
                 self.status_warning = Some(format!(
@@ -3701,6 +3786,181 @@ fn apply_ticket_picker_event(&mut self, event: TicketPickerEvent) {
             refs.len(),
             if refs.len() == 1 { "" } else { "s" }
         ));
+    }
+
+    fn schedule_session_info_summary_refresh_for_active_session(&mut self) {
+        if !self.should_show_session_info_sidebar() {
+            self.session_info_summary_deadline = None;
+            return;
+        }
+        self.session_info_summary_deadline = Some(Instant::now() + Duration::from_millis(500));
+        if let Some(session_id) = self.active_terminal_session_id().cloned() {
+            let cache = self.session_info_summary_cache.entry(session_id).or_default();
+            cache.loading = true;
+            cache.error = None;
+        }
+    }
+
+    fn poll_session_info_summary_events(&mut self) -> bool {
+        let mut events = Vec::new();
+        {
+            let Some(receiver) = self.session_info_summary_receiver.as_mut() else {
+                return false;
+            };
+            loop {
+                match receiver.try_recv() {
+                    Ok(event) => events.push(event),
+                    Err(TryRecvError::Empty) => break,
+                    Err(TryRecvError::Disconnected) => break,
+                }
+            }
+        }
+
+        let changed = !events.is_empty();
+        for event in events {
+            match event {
+                SessionInfoSummaryEvent::Completed {
+                    session_id,
+                    summary,
+                    context_fingerprint,
+                } => {
+                    let cache = self.session_info_summary_cache.entry(session_id).or_default();
+                    if cache.context_fingerprint.as_deref() != Some(context_fingerprint.as_str()) {
+                        continue;
+                    }
+                    cache.loading = false;
+                    cache.error = None;
+                    cache.text = Some(summary);
+                }
+                SessionInfoSummaryEvent::Failed {
+                    session_id,
+                    message,
+                    context_fingerprint,
+                } => {
+                    let cache = self.session_info_summary_cache.entry(session_id).or_default();
+                    if cache.context_fingerprint.as_deref() != Some(context_fingerprint.as_str()) {
+                        continue;
+                    }
+                    cache.loading = false;
+                    cache.error = Some(message);
+                    if cache.text.is_none() {
+                        cache.text = None;
+                    }
+                }
+            }
+        }
+        changed
+    }
+
+    fn tick_session_info_summary_refresh(&mut self) -> bool {
+        let Some(deadline) = self.session_info_summary_deadline else {
+            return false;
+        };
+        if Instant::now() < deadline {
+            return false;
+        }
+        self.session_info_summary_deadline = None;
+        self.spawn_active_session_summary_refresh()
+    }
+
+    fn spawn_active_session_summary_refresh(&mut self) -> bool {
+        let Some(session_id) = self.active_terminal_session_id().cloned() else {
+            return false;
+        };
+        let Some(provider) = self.supervisor_provider.clone() else {
+            let cache = self.session_info_summary_cache.entry(session_id).or_default();
+            cache.loading = false;
+            cache.error = Some("no LLM provider configured".to_owned());
+            return true;
+        };
+        let diff_cache = self.session_info_diff_cache.get(&session_id);
+        let Some(context) = session_info_summary_prompt(&self.domain, &session_id, diff_cache) else {
+            return false;
+        };
+
+        let cache = self
+            .session_info_summary_cache
+            .entry(context.session_id.clone())
+            .or_default();
+        if cache.context_fingerprint.as_deref() == Some(context.context_fingerprint.as_str())
+            && cache.text.is_some()
+            && cache.error.is_none()
+        {
+            cache.loading = false;
+            return false;
+        }
+        cache.context_fingerprint = Some(context.context_fingerprint.clone());
+        cache.loading = true;
+        cache.error = None;
+
+        let Some(sender) = self.session_info_summary_sender.clone() else {
+            cache.loading = false;
+            cache.error = Some("summary channel unavailable".to_owned());
+            return true;
+        };
+
+        match TokioHandle::try_current() {
+            Ok(handle) => {
+                handle.spawn(async move {
+                    run_session_info_summary_task(provider, context, sender).await;
+                });
+            }
+            Err(_) => {
+                cache.loading = false;
+                cache.error = Some("tokio runtime unavailable".to_owned());
+            }
+        }
+        true
+    }
+
+    fn ensure_session_info_diff_loaded_for_active_session(&mut self) -> bool {
+        let Some(session_id) = self.active_terminal_session_id().cloned() else {
+            return false;
+        };
+        let needs_load = self
+            .session_info_diff_cache
+            .get(&session_id)
+            .map(|entry| entry.content.is_empty() && !entry.loading)
+            .unwrap_or(true);
+        if !needs_load {
+            return false;
+        }
+        self.spawn_session_info_diff_load(session_id)
+    }
+
+    fn spawn_session_info_diff_load(&mut self, session_id: WorkerSessionId) -> bool {
+        let cache = self
+            .session_info_diff_cache
+            .entry(session_id.clone())
+            .or_default();
+        cache.loading = true;
+        cache.error = None;
+        if cache.content.is_empty() {
+            cache.content = String::new();
+        }
+        let Some(provider) = self.ticket_picker_provider.clone() else {
+            cache.loading = false;
+            cache.error = Some("ticket provider unavailable".to_owned());
+            return true;
+        };
+        let Some(sender) = self.ticket_picker_sender.clone() else {
+            cache.loading = false;
+            cache.error = Some("ticket event channel unavailable".to_owned());
+            return true;
+        };
+
+        match TokioHandle::try_current() {
+            Ok(handle) => {
+                handle.spawn(async move {
+                    run_session_diff_load_task(provider, session_id, sender).await;
+                });
+            }
+            Err(_) => {
+                cache.loading = false;
+                cache.error = Some("tokio runtime unavailable".to_owned());
+            }
+        }
+        true
     }
 
     fn spawn_session_diff_load(&mut self, session_id: WorkerSessionId) {
