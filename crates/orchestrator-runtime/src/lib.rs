@@ -7,6 +7,7 @@ use std::path::PathBuf;
 pub use worker_manager::{
     ManagedSessionStatus, ManagedSessionSummary, SessionEventSubscription, SessionVisibility,
     WorkerManager, WorkerManagerConfig, WorkerManagerEvent, WorkerManagerEventSubscription,
+    WorkerManagerPerfSessionSnapshot, WorkerManagerPerfSnapshot, WorkerManagerPerfTotals,
 };
 
 macro_rules! runtime_string_id {

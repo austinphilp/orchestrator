@@ -17,6 +17,12 @@ enum AnimationState {
     ResolvedOnly,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PendingWorkingStatePersist {
+    is_working: bool,
+    deadline: Instant,
+}
+
 struct UiShellState {
     base_status: String,
     status_warning: Option<String>,
@@ -55,21 +61,32 @@ struct UiShellState {
     session_info_diff_cache: HashMap<WorkerSessionId, SessionInfoDiffCache>,
     session_info_summary_cache: HashMap<WorkerSessionId, SessionInfoSummaryCache>,
     session_info_summary_deadline: Option<Instant>,
+    pending_session_working_state_persists: HashMap<WorkerSessionId, PendingWorkingStatePersist>,
+    session_info_summary_last_refresh_at: HashMap<WorkerSessionId, Instant>,
+    session_info_diff_last_refresh_at: HashMap<WorkerSessionId, Instant>,
+    background_terminal_flush_deadline: Option<Instant>,
     terminal_session_streamed: HashSet<WorkerSessionId>,
     terminal_compose_editor: EditorState,
     terminal_compose_event_handler: EditorEventHandler,
+    session_panel_scroll_line: usize,
+    session_panel_viewport_rows: usize,
+    session_panel_rendered_line_count: usize,
     archive_session_confirm_session: Option<WorkerSessionId>,
     archiving_session_id: Option<WorkerSessionId>,
     review_merge_confirm_session: Option<WorkerSessionId>,
     merge_queue: VecDeque<MergeQueueRequest>,
     merge_last_dispatched_at: Option<Instant>,
-    merge_last_poll_at: Option<Instant>,
-    approval_reconcile_last_poll_at: Option<Instant>,
+    review_fallback_last_sweep_at: Option<Instant>,
+    approval_fallback_last_sweep_at: Option<Instant>,
     merge_event_sender: Option<mpsc::Sender<MergeQueueEvent>>,
     merge_event_receiver: Option<mpsc::Receiver<MergeQueueEvent>>,
+    review_reconcile_eligible_sessions: HashSet<WorkerSessionId>,
+    approval_reconcile_candidate_sessions: HashSet<WorkerSessionId>,
     merge_pending_sessions: HashSet<WorkerSessionId>,
     merge_finalizing_sessions: HashSet<WorkerSessionId>,
     review_sync_instructions_sent: HashSet<WorkerSessionId>,
+    dirty_review_reconcile_sessions: HashSet<WorkerSessionId>,
+    dirty_approval_reconcile_sessions: HashSet<WorkerSessionId>,
     session_ci_status_cache: HashMap<WorkerSessionId, SessionCiStatusCache>,
     ci_failure_signatures_notified: HashMap<WorkerSessionId, String>,
     worktree_diff_modal: Option<WorktreeDiffModalState>,
@@ -77,6 +94,10 @@ struct UiShellState {
     attention_projection_cache: Option<AttentionProjectionCache>,
     session_panel_rows_cache: Option<SessionPanelRowsCache>,
     event_derived_label_cache: EventDerivedLabelCache,
+    full_projection_replacements: u64,
+    incremental_domain_event_applies: u64,
+    attention_projection_recomputes: u64,
+    last_projection_perf_log_at: Option<Instant>,
 }
 
 impl UiShellState {
@@ -128,7 +149,7 @@ impl UiShellState {
             (None, None)
         };
 
-        Self {
+        let mut state = Self {
             base_status: status,
             status_warning: None,
             domain,
@@ -166,21 +187,32 @@ impl UiShellState {
             session_info_diff_cache: HashMap::new(),
             session_info_summary_cache: HashMap::new(),
             session_info_summary_deadline: None,
+            pending_session_working_state_persists: HashMap::new(),
+            session_info_summary_last_refresh_at: HashMap::new(),
+            session_info_diff_last_refresh_at: HashMap::new(),
+            background_terminal_flush_deadline: None,
             terminal_session_streamed: HashSet::new(),
             terminal_compose_editor: insert_mode_editor_state(),
             terminal_compose_event_handler: EditorEventHandler::default(),
+            session_panel_scroll_line: 0,
+            session_panel_viewport_rows: 1,
+            session_panel_rendered_line_count: 0,
             archive_session_confirm_session: None,
             archiving_session_id: None,
             review_merge_confirm_session: None,
             merge_queue: VecDeque::new(),
             merge_last_dispatched_at: None,
-            merge_last_poll_at: None,
-            approval_reconcile_last_poll_at: None,
+            review_fallback_last_sweep_at: None,
+            approval_fallback_last_sweep_at: None,
             merge_event_sender,
             merge_event_receiver,
+            review_reconcile_eligible_sessions: HashSet::new(),
+            approval_reconcile_candidate_sessions: HashSet::new(),
             merge_pending_sessions: HashSet::new(),
             merge_finalizing_sessions: HashSet::new(),
             review_sync_instructions_sent: HashSet::new(),
+            dirty_review_reconcile_sessions: HashSet::new(),
+            dirty_approval_reconcile_sessions: HashSet::new(),
             session_ci_status_cache: HashMap::new(),
             ci_failure_signatures_notified: HashMap::new(),
             worktree_diff_modal: None,
@@ -188,7 +220,14 @@ impl UiShellState {
             attention_projection_cache: None,
             session_panel_rows_cache: None,
             event_derived_label_cache: EventDerivedLabelCache::default(),
-        }
+            full_projection_replacements: 0,
+            incremental_domain_event_applies: 0,
+            attention_projection_recomputes: 0,
+            last_projection_perf_log_at: None,
+        };
+        state.refresh_reconcile_eligibility_for_all_sessions();
+        state.mark_all_eligible_reconcile_dirty();
+        state
     }
 
     fn invalidate_draw_caches(&mut self) {
@@ -215,11 +254,8 @@ impl UiShellState {
 
     fn ui_state_for_draw(&mut self, now: Instant) -> UiState {
         let status = self.status_text();
-        let active_session_id = self.active_terminal_session_id().cloned();
-        let attention_projection = self.attention_projection_for_draw(now).clone();
-        let terminal_view_state = active_session_id
-            .as_ref()
-            .and_then(|session_id| self.terminal_session_states.get(session_id));
+        let attention_projection = self.attention_projection_for_draw(now);
+        let terminal_view_state = None;
         let mut ui_state = project_ui_state_with_attention(
             status.as_str(),
             &self.domain,
@@ -227,14 +263,14 @@ impl UiShellState {
             self.selected_inbox_index,
             self.selected_inbox_item_id.as_ref(),
             terminal_view_state,
-            &attention_projection,
+            attention_projection.as_ref(),
         );
         self.append_global_supervisor_chat_state(&mut ui_state);
         self.append_live_supervisor_chat(&mut ui_state);
         ui_state
     }
 
-    fn attention_projection_for_draw(&mut self, now: Instant) -> &UiAttentionProjection {
+    fn attention_projection_for_draw(&mut self, now: Instant) -> Arc<UiAttentionProjection> {
         let should_refresh = self
             .attention_projection_cache
             .as_ref()
@@ -247,17 +283,19 @@ impl UiShellState {
             })
             .unwrap_or(true);
         if should_refresh {
+            self.attention_projection_recomputes =
+                self.attention_projection_recomputes.saturating_add(1);
             self.attention_projection_cache = Some(AttentionProjectionCache {
-                projection: build_ui_attention_projection(&self.domain),
+                projection: Arc::new(build_ui_attention_projection(&self.domain)),
                 refreshed_at: now,
                 epoch: self.draw_cache_epoch,
             });
         }
-        &self
-            .attention_projection_cache
+        self.attention_projection_cache
             .as_ref()
             .expect("attention projection cache should be present")
             .projection
+            .clone()
     }
 
     fn status_text(&self) -> String {
@@ -615,25 +653,29 @@ impl UiShellState {
         session_panel_rows(&self.domain, &self.terminal_session_states)
     }
 
-    fn session_panel_rows_for_draw(&mut self) -> Vec<SessionPanelRow> {
-        if let Some(cache) = self.session_panel_rows_cache.as_ref() {
-            if cache.epoch == self.draw_cache_epoch {
-                return cache.rows.clone();
-            }
+    fn session_panel_rows_for_draw(&mut self) -> &[SessionPanelRow] {
+        let cache_is_fresh = self
+            .session_panel_rows_cache
+            .as_ref()
+            .map(|cache| cache.epoch == self.draw_cache_epoch)
+            .unwrap_or(false);
+        if !cache_is_fresh {
+            self.event_derived_label_cache.refresh(&self.domain);
+            self.session_panel_rows_cache = Some(SessionPanelRowsCache {
+                rows: session_panel_rows_with_labels(
+                    &self.domain,
+                    &self.terminal_session_states,
+                    &self.event_derived_label_cache.work_item_repo,
+                    &self.event_derived_label_cache.ticket_labels,
+                ),
+                epoch: self.draw_cache_epoch,
+            });
         }
-
-        self.event_derived_label_cache.refresh(&self.domain);
-        let rows = session_panel_rows_with_labels(
-            &self.domain,
-            &self.terminal_session_states,
-            &self.event_derived_label_cache.work_item_repo,
-            &self.event_derived_label_cache.ticket_labels,
-        );
-        self.session_panel_rows_cache = Some(SessionPanelRowsCache {
-            rows: rows.clone(),
-            epoch: self.draw_cache_epoch,
-        });
-        rows
+        self.session_panel_rows_cache
+            .as_ref()
+            .expect("session panel rows cache should be present")
+            .rows
+            .as_slice()
     }
 
     fn session_ids_for_navigation(&self) -> Vec<WorkerSessionId> {
@@ -645,17 +687,6 @@ impl UiShellState {
 
     fn selected_session_id_for_panel(&self) -> Option<WorkerSessionId> {
         let session_ids = self.session_ids_for_navigation();
-        self.selected_session_id_for_panel_from_ids(session_ids.as_slice())
-    }
-
-    fn selected_session_id_for_panel_from_rows(
-        &self,
-        rows: &[SessionPanelRow],
-    ) -> Option<WorkerSessionId> {
-        let session_ids = rows
-            .iter()
-            .map(|row| row.session_id.clone())
-            .collect::<Vec<_>>();
         self.selected_session_id_for_panel_from_ids(session_ids.as_slice())
     }
 
@@ -725,6 +756,44 @@ impl UiShellState {
 
     fn should_show_session_info_sidebar(&self) -> bool {
         self.active_terminal_session_id().is_some()
+    }
+
+    fn sync_session_panel_viewport(
+        &mut self,
+        rendered_line_count: usize,
+        selected_line: Option<usize>,
+        viewport_rows: usize,
+    ) {
+        self.session_panel_rendered_line_count = rendered_line_count;
+        self.session_panel_viewport_rows = viewport_rows.max(1);
+        if rendered_line_count == 0 {
+            self.session_panel_scroll_line = 0;
+            return;
+        }
+
+        let max_scroll = rendered_line_count.saturating_sub(self.session_panel_viewport_rows);
+        let mut next_scroll = self.session_panel_scroll_line.min(max_scroll);
+        if let Some(selected_line) = selected_line {
+            if selected_line < next_scroll {
+                next_scroll = selected_line;
+            } else if selected_line >= next_scroll + self.session_panel_viewport_rows {
+                next_scroll = selected_line
+                    .saturating_add(1)
+                    .saturating_sub(self.session_panel_viewport_rows)
+                    .min(max_scroll);
+            }
+        }
+        self.session_panel_scroll_line = next_scroll;
+    }
+
+    fn session_panel_scroll_line(&self) -> usize {
+        self.session_panel_scroll_line
+    }
+
+    fn session_info_is_foreground(&self) -> bool {
+        self.active_terminal_session_id().is_some()
+            && self.is_right_pane_focused()
+            && self.mode == UiMode::Terminal
     }
 
     fn session_info_diff_cache_for(
@@ -959,6 +1028,60 @@ impl UiShellState {
         }
     }
 
+    fn enqueue_or_persist_session_working_state(
+        &mut self,
+        session_id: WorkerSessionId,
+        is_working: bool,
+    ) {
+        if self.session_is_in_planning_stage(&session_id) {
+            self.pending_session_working_state_persists.insert(
+                session_id,
+                PendingWorkingStatePersist {
+                    is_working,
+                    deadline: Instant::now() + PLANNING_WORKING_STATE_PERSIST_DEBOUNCE,
+                },
+            );
+            return;
+        }
+
+        self.persist_session_working_state_immediately(session_id, is_working);
+    }
+
+    fn persist_session_working_state_immediately(
+        &mut self,
+        session_id: WorkerSessionId,
+        is_working: bool,
+    ) {
+        self.pending_session_working_state_persists
+            .remove(&session_id);
+        self.spawn_set_session_working_state(session_id, is_working);
+    }
+
+    fn flush_due_session_working_state_persists(&mut self) -> bool {
+        if self.pending_session_working_state_persists.is_empty() {
+            return false;
+        }
+
+        let now = Instant::now();
+        let due_persists = self
+            .pending_session_working_state_persists
+            .iter()
+            .filter_map(|(session_id, pending)| {
+                if now >= pending.deadline || !self.session_is_in_planning_stage(session_id) {
+                    Some((session_id.clone(), pending.is_working))
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>();
+
+        for (session_id, is_working) in due_persists.iter() {
+            self.persist_session_working_state_immediately(session_id.clone(), *is_working);
+        }
+
+        !due_persists.is_empty()
+    }
+
     fn acknowledge_inbox_item(&mut self, inbox_item_id: InboxItemId, work_item_id: WorkItemId) {
         if let Some(item) = self.domain.inbox_items.get_mut(&inbox_item_id) {
             item.resolved = true;
@@ -1109,6 +1232,13 @@ impl UiShellState {
         }
 
         !self.session_waiting_for_plan_input(session_id)
+    }
+
+    fn session_is_in_planning_stage(&self, session_id: &WorkerSessionId) -> bool {
+        matches!(
+            self.workflow_state_for_session(session_id),
+            Some(WorkflowState::Planning)
+        )
     }
 
     fn find_progression_approval_inbox_for_session(
@@ -1291,6 +1421,27 @@ impl UiShellState {
     fn active_terminal_view_state_mut(&mut self) -> Option<&mut TerminalViewState> {
         let session_id = self.active_terminal_session_id()?.clone();
         self.terminal_session_states.get_mut(&session_id)
+    }
+
+    fn terminal_total_rendered_rows_for_session(
+        &mut self,
+        session_id: &WorkerSessionId,
+        width: u16,
+        indicator: TerminalActivityIndicator,
+    ) -> usize {
+        self.terminal_session_states
+            .get_mut(session_id)
+            .map(|view| terminal_total_rendered_rows(view, width, indicator))
+            .unwrap_or(0)
+    }
+
+    fn render_terminal_output_viewport_for_session(
+        &mut self,
+        session_id: &WorkerSessionId,
+        request: TerminalViewportRequest,
+    ) -> Option<TerminalViewportRender> {
+        let view = self.terminal_session_states.get_mut(session_id)?;
+        Some(render_terminal_output_viewport(view, request))
     }
 
     fn snap_active_terminal_output_to_bottom(&mut self) {
@@ -1745,13 +1896,7 @@ impl UiShellState {
         }
     }
 
-    fn tick_ticket_picker_and_report(&mut self) -> bool {
-        let mut changed = self.poll_ticket_picker_events();
-        changed |= self.tick_ticket_picker_create_refresh();
-        changed
-    }
-
-    fn tick_ticket_picker_create_refresh(&mut self) -> bool {
+    fn tick_ticket_picker_create_refresh_at(&mut self, now: Instant) -> bool {
         if !self.ticket_picker_overlay.visible || !self.ticket_picker_overlay.creating {
             self.ticket_picker_create_refresh_deadline = None;
             return false;
@@ -1759,7 +1904,6 @@ impl UiShellState {
         if self.ticket_picker_overlay.loading {
             return false;
         }
-        let now = Instant::now();
         let deadline = self.ticket_picker_create_refresh_deadline.unwrap_or(now);
         if now < deadline {
             return false;
@@ -1798,21 +1942,11 @@ impl UiShellState {
             .collect::<Vec<_>>()
     }
 
+    #[cfg(test)]
     fn tick_terminal_view_and_report(&mut self) -> bool {
-        let mut changed = false;
-        changed |= self.poll_terminal_session_events();
-        changed |= self.flush_background_terminal_output_and_report();
-        changed |= self.enqueue_progression_approval_reconcile_polls();
-        changed |= self.poll_merge_queue_events();
-        changed |= self.poll_session_info_summary_events();
-        changed |= self.tick_session_info_summary_refresh();
-        changed |= self.enqueue_merge_reconcile_polls();
-        changed |= self.dispatch_merge_queue_requests();
-        changed |= self.ensure_session_info_diff_loaded_for_active_session();
-        if let Some(session_id) = self.active_terminal_session_id().cloned() {
-            changed |= self.flush_deferred_terminal_output_for_session(&session_id);
-            changed |= self.ensure_terminal_stream_and_report(session_id);
-        }
+        let mut changed = self.drain_async_events_and_report();
+        changed |= self.run_due_periodic_tasks_and_report(Instant::now());
+        changed |= self.maintain_active_terminal_view_and_report();
         changed
     }
 
@@ -1825,13 +1959,28 @@ impl UiShellState {
         }
         let bytes = std::mem::take(&mut view.deferred_output);
         append_terminal_assistant_output(view, bytes);
-        view.last_background_flush_at = Some(Instant::now());
+        view.last_background_flush_at = None;
+        self.recompute_background_terminal_flush_deadline();
         true
     }
 
+    #[cfg(test)]
     fn flush_background_terminal_output_and_report(&mut self) -> bool {
+        self.flush_background_terminal_output_and_report_at(Instant::now())
+    }
+
+    fn flush_background_terminal_output_and_report_at(&mut self, now: Instant) -> bool {
+        if self.background_terminal_flush_deadline.is_none() {
+            self.recompute_background_terminal_flush_deadline();
+        }
+        if self
+            .background_terminal_flush_deadline
+            .map(|deadline| now < deadline)
+            .unwrap_or(true)
+        {
+            return false;
+        }
         let active_session_id = self.active_terminal_session_id().cloned();
-        let now = Instant::now();
         let interval = background_session_refresh_interval_config_value();
         let mut flushed_any = false;
 
@@ -1868,7 +2017,26 @@ impl UiShellState {
             flushed_any = true;
         }
 
+        self.recompute_background_terminal_flush_deadline();
         flushed_any
+    }
+
+    fn recompute_background_terminal_flush_deadline(&mut self) {
+        let now = Instant::now();
+        let interval = background_session_refresh_interval_config_value();
+        let active_session_id = self.active_terminal_session_id().cloned();
+        self.background_terminal_flush_deadline = self
+            .terminal_session_states
+            .iter()
+            .filter(|(session_id, view)| {
+                active_session_id.as_ref() != Some(*session_id) && !view.deferred_output.is_empty()
+            })
+            .map(|(_, view)| {
+                view.last_background_flush_at
+                    .map(|previous| previous + interval)
+                    .unwrap_or(now)
+            })
+            .min();
     }
 
     fn poll_terminal_session_events(&mut self) -> bool {
@@ -1893,6 +2061,7 @@ impl UiShellState {
         }
 
         let had_events = !events.is_empty();
+        let mut changed = false;
         for event in events {
             match event {
                 TerminalSessionEvent::Output { session_id, output } => {
@@ -1922,7 +2091,6 @@ impl UiShellState {
                     session_id,
                     turn_state,
                 } => {
-                    let persisted_session_id = session_id.clone();
                     let view = self
                         .terminal_session_states
                         .entry(session_id.clone())
@@ -1930,15 +2098,15 @@ impl UiShellState {
                     let previous_turn_active = view.turn_active;
                     view.turn_active = turn_state.active;
                     if previous_turn_active != turn_state.active {
-                        self.spawn_set_session_working_state(
-                            persisted_session_id,
+                        self.enqueue_or_persist_session_working_state(
+                            session_id.clone(),
                             turn_state.active,
                         );
                         if self.active_terminal_session_id() == Some(&session_id) {
                             self.schedule_session_info_summary_refresh_for_active_session();
                         }
                     }
-                    self.reconcile_progression_approval_inbox_for_session(&session_id);
+                    changed |= self.mark_reconcile_dirty_for_session(&session_id);
                 }
                 TerminalSessionEvent::NeedsInput {
                     session_id,
@@ -1962,7 +2130,7 @@ impl UiShellState {
                         .or_default();
                     view.enqueue_needs_input_prompt(prompt);
                     self.schedule_session_info_summary_refresh_for_active_session();
-                    self.reconcile_progression_approval_inbox_for_session(&session_id);
+                    changed |= self.mark_reconcile_dirty_for_session(&session_id);
                 }
                 TerminalSessionEvent::StreamFailed { session_id, error } => {
                     self.terminal_session_streamed.remove(&session_id);
@@ -1974,17 +2142,21 @@ impl UiShellState {
                     view.deferred_output.clear();
                     view.last_background_flush_at = None;
                     view.entries.clear();
+                    view.transcript_truncated = false;
+                    view.transcript_truncated_line_count = 0;
                     view.output_fragment.clear();
+                    view.render_cache.invalidate_all();
+                    view.output_rendered_line_count = 0;
                     view.output_scroll_line = 0;
                     view.output_follow_tail = true;
                     view.turn_active = false;
-                    self.spawn_set_session_working_state(session_id.clone(), false);
+                    self.persist_session_working_state_immediately(session_id.clone(), false);
                     self.publish_error_for_session(
                         &session_id,
                         "terminal-stream",
                         error.to_string().as_str(),
                     );
-                    self.reconcile_progression_approval_inbox_for_session(&session_id);
+                    changed |= self.mark_reconcile_dirty_for_session(&session_id);
                     if let RuntimeError::SessionNotFound(_) = error {
                         self.recover_terminal_session_on_not_found(&session_id);
                     }
@@ -1994,7 +2166,6 @@ impl UiShellState {
                 }
                 TerminalSessionEvent::StreamEnded { session_id } => {
                     self.terminal_session_streamed.remove(&session_id);
-                    let persisted_session_id = session_id.clone();
                     let view = self
                         .terminal_session_states
                         .entry(session_id.clone())
@@ -2006,15 +2177,18 @@ impl UiShellState {
                     view.last_background_flush_at = None;
                     flush_terminal_output_fragment(view);
                     view.turn_active = false;
-                    self.spawn_set_session_working_state(persisted_session_id, false);
+                    self.persist_session_working_state_immediately(session_id.clone(), false);
                     if self.active_terminal_session_id() == Some(&session_id) {
                         self.schedule_session_info_summary_refresh_for_active_session();
                     }
-                    self.reconcile_progression_approval_inbox_for_session(&session_id);
+                    changed |= self.mark_reconcile_dirty_for_session(&session_id);
                 }
             }
         }
-        had_events
+        if had_events {
+            self.recompute_background_terminal_flush_deadline();
+        }
+        had_events || changed
     }
 
     fn poll_merge_queue_events(&mut self) -> bool {
@@ -2202,6 +2376,7 @@ impl UiShellState {
                                 work_item.workflow_state = Some(WorkflowState::Done);
                             }
                         }
+                        self.refresh_reconcile_eligibility_for_session(&session_id);
                         let labels = session_display_labels(&self.domain, &session_id);
                         self.status_warning = Some(format!(
                             "merge completed for review {}",
@@ -2215,15 +2390,15 @@ impl UiShellState {
                             labels.compact_label
                         ));
                     }
+                    let _ = self.mark_reconcile_dirty_for_session(&session_id);
                 }
                 MergeQueueEvent::SessionFinalized {
                     session_id,
-                    projection,
+                    event,
                 } => {
-                    if let Some(projection) = projection {
-                        self.domain = projection;
-                    }
+                    self.apply_domain_event(event);
                     self.merge_finalizing_sessions.remove(&session_id);
+                    let _ = self.mark_reconcile_dirty_for_session(&session_id);
                 }
                 MergeQueueEvent::SessionFinalizeFailed {
                     session_id,
@@ -2237,85 +2412,22 @@ impl UiShellState {
                         labels.compact_label,
                         compact_focus_card_text(message.as_str())
                     ));
+                    let _ = self.mark_reconcile_dirty_for_session(&session_id);
                 }
             }
         }
         had_events
     }
 
-    fn enqueue_merge_reconcile_polls(&mut self) -> bool {
-        if self.supervisor_command_dispatcher.is_none() {
-            return false;
-        }
-        let now = Instant::now();
-        if self
-            .merge_last_poll_at
-            .map(|previous| now.duration_since(previous) < MERGE_POLL_INTERVAL)
-            .unwrap_or(false)
-        {
-            return false;
-        }
-        let mut changed = false;
-        self.merge_last_poll_at = Some(now);
-
-        let session_ids = self
-            .domain
-            .sessions
-            .iter()
-            .filter_map(|(session_id, session)| {
-                if !is_open_session_status(session.status.as_ref()) {
-                    return None;
-                }
-                if self.session_is_in_review_stage(session_id) {
-                    Some(session_id.clone())
-                } else {
-                    None
-                }
-            })
-            .collect::<Vec<_>>();
-
-        let active_review_sessions = session_ids.iter().cloned().collect::<HashSet<_>>();
-        let review_len_before = self.review_sync_instructions_sent.len();
-        self.review_sync_instructions_sent
-            .retain(|session_id| active_review_sessions.contains(session_id));
-        changed |= self.review_sync_instructions_sent.len() != review_len_before;
-        let pending_len_before = self.merge_pending_sessions.len();
-        self.merge_pending_sessions
-            .retain(|session_id| active_review_sessions.contains(session_id));
-        changed |= self.merge_pending_sessions.len() != pending_len_before;
-        let finalizing_len_before = self.merge_finalizing_sessions.len();
-        self.merge_finalizing_sessions
-            .retain(|session_id| active_review_sessions.contains(session_id));
-        changed |= self.merge_finalizing_sessions.len() != finalizing_len_before;
-        let ci_cache_len_before = self.session_ci_status_cache.len();
-        self.session_ci_status_cache
-            .retain(|session_id, _| active_review_sessions.contains(session_id));
-        changed |= self.session_ci_status_cache.len() != ci_cache_len_before;
-        let ci_notified_len_before = self.ci_failure_signatures_notified.len();
-        self.ci_failure_signatures_notified
-            .retain(|session_id, _| active_review_sessions.contains(session_id));
-        changed |= self.ci_failure_signatures_notified.len() != ci_notified_len_before;
-
-        for session_id in session_ids {
-            self.publish_review_idle_inbox_for_session(&session_id);
-            changed |= self.ensure_review_sync_instruction(&session_id);
-            changed |= self.enqueue_merge_queue_request(session_id, MergeQueueCommandKind::Reconcile);
-        }
-        changed
+    fn mark_all_eligible_reconcile_dirty(&mut self) {
+        self.dirty_approval_reconcile_sessions
+            .extend(self.approval_reconcile_candidate_sessions.iter().cloned());
+        self.dirty_review_reconcile_sessions
+            .extend(self.review_reconcile_eligible_sessions.iter().cloned());
     }
 
-    fn enqueue_progression_approval_reconcile_polls(&mut self) -> bool {
-        let now = Instant::now();
-        if self
-            .approval_reconcile_last_poll_at
-            .map(|previous| now.duration_since(previous) < APPROVAL_RECONCILE_POLL_INTERVAL)
-            .unwrap_or(false)
-        {
-            return false;
-        }
-        self.approval_reconcile_last_poll_at = Some(now);
-
-        let session_ids = self
+    fn refresh_reconcile_eligibility_for_all_sessions(&mut self) -> bool {
+        let open_sessions = self
             .domain
             .sessions
             .iter()
@@ -2326,12 +2438,194 @@ impl UiShellState {
                     None
                 }
             })
-            .collect::<Vec<_>>();
+            .collect::<HashSet<_>>();
 
         let mut changed = false;
-        for session_id in session_ids {
-            changed |= self.reconcile_progression_approval_inbox_for_session(&session_id);
+        let stale_review = self
+            .review_reconcile_eligible_sessions
+            .iter()
+            .filter(|session_id| !open_sessions.contains(*session_id))
+            .cloned()
+            .collect::<Vec<_>>();
+        for session_id in stale_review {
+            changed |= self.set_review_eligible(session_id, false);
         }
+        let stale_approval = self
+            .approval_reconcile_candidate_sessions
+            .iter()
+            .filter(|session_id| !open_sessions.contains(*session_id))
+            .cloned()
+            .collect::<Vec<_>>();
+        for session_id in stale_approval {
+            changed |= self.set_approval_eligible(session_id, false);
+        }
+
+        for session_id in open_sessions {
+            changed |= self.refresh_reconcile_eligibility_for_session(&session_id);
+        }
+        changed
+    }
+
+    fn refresh_reconcile_eligibility_for_session(&mut self, session_id: &WorkerSessionId) -> bool {
+        let session_is_open = self
+            .domain
+            .sessions
+            .get(session_id)
+            .map(|session| is_open_session_status(session.status.as_ref()))
+            .unwrap_or(false);
+        if !session_is_open {
+            let mut changed = false;
+            changed |= self.set_approval_eligible(session_id.clone(), false);
+            changed |= self.set_review_eligible(session_id.clone(), false);
+            return changed;
+        }
+
+        let is_approval_eligible = matches!(
+            self.workflow_state_for_session(session_id),
+            Some(WorkflowState::Planning | WorkflowState::Implementing)
+        );
+        let is_review_eligible = self.session_is_in_review_stage(session_id);
+
+        let mut changed = false;
+        changed |= self.set_approval_eligible(session_id.clone(), is_approval_eligible);
+        changed |= self.set_review_eligible(session_id.clone(), is_review_eligible);
+        changed
+    }
+
+    fn set_approval_eligible(&mut self, session_id: WorkerSessionId, eligible: bool) -> bool {
+        if eligible {
+            self.approval_reconcile_candidate_sessions.insert(session_id)
+        } else {
+            let mut changed = self.approval_reconcile_candidate_sessions.remove(&session_id);
+            changed |= self.dirty_approval_reconcile_sessions.remove(&session_id);
+            changed
+        }
+    }
+
+    fn set_review_eligible(&mut self, session_id: WorkerSessionId, eligible: bool) -> bool {
+        if eligible {
+            self.review_reconcile_eligible_sessions.insert(session_id)
+        } else {
+            let mut changed = self.review_reconcile_eligible_sessions.remove(&session_id);
+            changed |= self.dirty_review_reconcile_sessions.remove(&session_id);
+            changed |= self.review_sync_instructions_sent.remove(&session_id);
+            changed |= self.merge_pending_sessions.remove(&session_id);
+            changed |= self.merge_finalizing_sessions.remove(&session_id);
+            changed |= self.session_ci_status_cache.remove(&session_id).is_some();
+            changed |= self.ci_failure_signatures_notified.remove(&session_id).is_some();
+            if let Some(view) = self.terminal_session_states.get_mut(&session_id) {
+                if view.last_merge_conflict_signature.take().is_some() {
+                    changed = true;
+                }
+            }
+            changed
+        }
+    }
+    fn mark_reconcile_dirty_for_session(&mut self, session_id: &WorkerSessionId) -> bool {
+        self.refresh_reconcile_eligibility_for_session(session_id);
+        let mut changed = false;
+        if self.approval_reconcile_candidate_sessions.contains(session_id) {
+            changed |= self
+                .dirty_approval_reconcile_sessions
+                .insert(session_id.clone());
+        }
+        if self.review_reconcile_eligible_sessions.contains(session_id) {
+            changed |= self.dirty_review_reconcile_sessions.insert(session_id.clone());
+        }
+        changed
+    }
+
+    fn enqueue_merge_reconcile_polls_at(&mut self, _now: Instant) -> bool {
+        self.mark_all_eligible_reconcile_dirty();
+        self.enqueue_event_driven_reconciles()
+    }
+
+    fn enqueue_progression_approval_reconcile_polls_at(&mut self, _now: Instant) -> bool {
+        self.mark_all_eligible_reconcile_dirty();
+        self.enqueue_event_driven_reconciles()
+    }
+
+    fn enqueue_event_driven_reconciles(&mut self) -> bool {
+        let mut changed = false;
+
+        let approval_dirty = self
+            .dirty_approval_reconcile_sessions
+            .drain()
+            .collect::<Vec<_>>();
+        for session_id in approval_dirty {
+            if self.approval_reconcile_candidate_sessions.contains(&session_id) {
+                changed |= self.reconcile_progression_approval_inbox_for_session(&session_id);
+            }
+        }
+
+        if self.supervisor_command_dispatcher.is_none() {
+            self.dirty_review_reconcile_sessions.clear();
+            return changed;
+        }
+
+        let review_dirty = self.dirty_review_reconcile_sessions.drain().collect::<Vec<_>>();
+        for session_id in review_dirty {
+            if !self.review_reconcile_eligible_sessions.contains(&session_id) {
+                continue;
+            }
+            self.publish_review_idle_inbox_for_session(&session_id);
+            changed |= self.ensure_review_sync_instruction(&session_id);
+            changed |=
+                self.enqueue_merge_queue_request(session_id, MergeQueueCommandKind::Reconcile);
+        }
+        changed
+    }
+
+    fn run_sparse_reconcile_fallbacks(&mut self) -> bool {
+        let now = Instant::now();
+        let mut changed = false;
+
+        let approval_due = self
+            .approval_fallback_last_sweep_at
+            .map(|previous| now.duration_since(previous) >= RECONCILE_SPARSE_FALLBACK_INTERVAL)
+            .unwrap_or(true);
+        let review_due = self
+            .review_fallback_last_sweep_at
+            .map(|previous| now.duration_since(previous) >= RECONCILE_SPARSE_FALLBACK_INTERVAL)
+            .unwrap_or(true);
+
+        if !approval_due && !review_due {
+            return false;
+        }
+
+        self.rebuild_reconcile_eligibility_indexes();
+
+        if approval_due {
+            self.approval_fallback_last_sweep_at = Some(now);
+            changed = true;
+            for session_id in self
+                .approval_reconcile_candidate_sessions
+                .iter()
+                .cloned()
+                .collect::<Vec<_>>()
+            {
+                changed |= self.reconcile_progression_approval_inbox_for_session(&session_id);
+            }
+        }
+
+        if review_due {
+            self.review_fallback_last_sweep_at = Some(now);
+            changed = true;
+            if self.supervisor_command_dispatcher.is_some() {
+                for session_id in self
+                    .review_reconcile_eligible_sessions
+                    .iter()
+                    .cloned()
+                    .collect::<Vec<_>>()
+                {
+                    self.publish_review_idle_inbox_for_session(&session_id);
+                    changed |= self.ensure_review_sync_instruction(&session_id);
+                    changed |= self
+                        .enqueue_merge_queue_request(session_id, MergeQueueCommandKind::Reconcile);
+                }
+            }
+        }
+
         changed
     }
 
@@ -2348,14 +2642,13 @@ impl UiShellState {
         true
     }
 
-    fn dispatch_merge_queue_requests(&mut self) -> bool {
+    fn dispatch_merge_queue_requests_at(&mut self, now: Instant) -> bool {
         if self.supervisor_command_dispatcher.is_none() {
             return false;
         }
         if self.merge_queue.is_empty() {
             return false;
         }
-        let now = Instant::now();
         if self
             .merge_last_dispatched_at
             .map(|previous| now.duration_since(previous) < MERGE_REQUEST_RATE_LIMIT)
@@ -2390,6 +2683,18 @@ impl UiShellState {
     }
 
     fn session_is_in_review_stage(&self, session_id: &WorkerSessionId) -> bool {
+        self.session_is_merge_reconcile_eligible(session_id)
+    }
+
+    fn session_is_merge_reconcile_eligible(&self, session_id: &WorkerSessionId) -> bool {
+        if !is_open_session_status(
+            self.domain
+                .sessions
+                .get(session_id)
+                .and_then(|session| session.status.as_ref()),
+        ) {
+            return false;
+        }
         self.domain
             .sessions
             .get(session_id)
@@ -2408,6 +2713,66 @@ impl UiShellState {
             .unwrap_or(false)
     }
 
+    fn rebuild_reconcile_eligibility_indexes(&mut self) {
+        self.review_reconcile_eligible_sessions.clear();
+        self.approval_reconcile_candidate_sessions.clear();
+
+        let session_ids = self.domain.sessions.keys().cloned().collect::<Vec<_>>();
+        for session_id in session_ids {
+            self.refresh_reconcile_eligibility_for_session(&session_id);
+        }
+    }
+
+    fn apply_domain_event(&mut self, event: StoredEventEnvelope) {
+        self.incremental_domain_event_applies =
+            self.incremental_domain_event_applies.saturating_add(1);
+        let event_session_id = event.session_id.clone();
+        let event_work_item_id = event.work_item_id.clone();
+        apply_event(&mut self.domain, event);
+        if let Some(session_id) = event_session_id {
+            self.refresh_reconcile_eligibility_for_session(&session_id);
+        } else if let Some(work_item_id) = event_work_item_id {
+            if let Some(session_id) = self
+                .domain
+                .work_items
+                .get(&work_item_id)
+                .and_then(|work_item| work_item.session_id.clone())
+            {
+                self.refresh_reconcile_eligibility_for_session(&session_id);
+            }
+        }
+    }
+
+    fn replace_domain_projection(&mut self, projection: ProjectionState, reason: &'static str) {
+        self.full_projection_replacements = self.full_projection_replacements.saturating_add(1);
+        self.domain = projection;
+        self.rebuild_reconcile_eligibility_indexes();
+        tracing::debug!(
+            reason,
+            full_projection_replacements = self.full_projection_replacements,
+            incremental_domain_event_applies = self.incremental_domain_event_applies,
+            attention_projection_recomputes = self.attention_projection_recomputes,
+            "ui full projection replacement applied"
+        );
+    }
+
+    fn maybe_emit_projection_perf_log(&mut self, now: Instant) {
+        if self
+            .last_projection_perf_log_at
+            .map(|previous| now.duration_since(previous) < PROJECTION_PERF_LOG_INTERVAL)
+            .unwrap_or(false)
+        {
+            return;
+        }
+        self.last_projection_perf_log_at = Some(now);
+        tracing::debug!(
+            full_projection_replacements = self.full_projection_replacements,
+            incremental_domain_event_applies = self.incremental_domain_event_applies,
+            attention_projection_recomputes = self.attention_projection_recomputes,
+            domain_event_count = self.domain.events.len(),
+            "ui projection perf counters"
+        );
+    }
     fn session_requires_manual_needs_input_activation(&self, session_id: &WorkerSessionId) -> bool {
         self.domain
             .sessions
@@ -2709,14 +3074,8 @@ impl UiShellState {
             }
             TicketPickerEvent::SessionWorkflowAdvanced {
                 outcome,
-                projection,
             } => {
-                if let Some(projection) = projection {
-                    self.domain = projection;
-                } else if let Some(work_item) = self.domain.work_items.get_mut(&outcome.work_item_id)
-                {
-                    work_item.workflow_state = Some(outcome.to.clone());
-                }
+                self.apply_domain_event(outcome.event.clone());
 
                 if let Some(instruction) = outcome.instruction.as_deref() {
                     self.send_terminal_instruction_to_session(&outcome.session_id, instruction);
@@ -2735,7 +3094,7 @@ impl UiShellState {
                         coalesce_key,
                     );
                 }
-                self.reconcile_progression_approval_inbox_for_session(&outcome.session_id);
+                let _ = self.mark_reconcile_dirty_for_session(&outcome.session_id);
                 self.auto_advance_inbox_selection_after_workflow_progression(&outcome.session_id);
 
                 let labels = session_display_labels(&self.domain, &outcome.session_id);
@@ -2770,7 +3129,8 @@ impl UiShellState {
                 self.ticket_picker_overlay.cancel_repository_prompt();
                 self.ticket_picker_overlay.error = None;
                 if let Some(projection) = projection {
-                    self.domain = projection;
+                    // Full replacement remains only for ticket-start authoritative reloads.
+                    self.replace_domain_projection(projection, "ticket-start");
                 }
                 if let Some(tickets) = tickets {
                     let tickets = self.filtered_ticket_picker_tickets(tickets);
@@ -2854,16 +3214,12 @@ impl UiShellState {
             TicketPickerEvent::TicketCreated {
                 created_ticket,
                 submit_mode,
-                projection,
                 tickets,
                 warning,
             } => {
                 self.ticket_picker_overlay.creating = false;
                 self.ticket_picker_create_refresh_deadline = None;
                 self.ticket_picker_overlay.error = None;
-                if let Some(projection) = projection {
-                    self.domain = projection;
-                }
                 let mut display_tickets = tickets
                     .unwrap_or_else(|| self.ticket_picker_overlay.tickets_snapshot());
                 display_tickets = self.filtered_ticket_picker_tickets(display_tickets);
@@ -2970,18 +3326,16 @@ impl UiShellState {
             TicketPickerEvent::SessionArchived {
                 session_id,
                 warning,
-                projection,
+                event,
             } => {
                 self.archiving_session_id = None;
                 self.archive_session_confirm_session = None;
-                if let Some(projection) = projection {
-                    self.domain = projection;
-                } else if let Some(session) = self.domain.sessions.get_mut(&session_id) {
-                    session.status = Some(WorkerSessionStatus::Done);
-                }
+                self.apply_domain_event(event);
                 self.terminal_session_states.remove(&session_id);
                 self.session_info_diff_cache.remove(&session_id);
                 self.session_info_summary_cache.remove(&session_id);
+                self.session_info_diff_last_refresh_at.remove(&session_id);
+                self.session_info_summary_last_refresh_at.remove(&session_id);
                 self.terminal_session_streamed.remove(&session_id);
                 self.merge_pending_sessions.remove(&session_id);
                 self.merge_finalizing_sessions.remove(&session_id);
@@ -3012,8 +3366,8 @@ impl UiShellState {
                     compact_focus_card_text(message.as_str())
                 ));
             }
-            TicketPickerEvent::InboxItemPublished { projection } => {
-                self.domain = projection;
+            TicketPickerEvent::InboxItemPublished { event } => {
+                self.apply_domain_event(event);
                 self.schedule_session_info_summary_refresh_for_active_session();
             }
             TicketPickerEvent::InboxItemPublishFailed { message } => {
@@ -3022,8 +3376,10 @@ impl UiShellState {
                     compact_focus_card_text(message.as_str())
                 ));
             }
-            TicketPickerEvent::InboxItemResolved { projection } => {
-                self.domain = projection;
+            TicketPickerEvent::InboxItemResolved { event } => {
+                if let Some(event) = event {
+                    self.apply_domain_event(event);
+                }
                 self.schedule_session_info_summary_refresh_for_active_session();
             }
             TicketPickerEvent::InboxItemResolveFailed { message } => {
@@ -3816,6 +4172,7 @@ impl UiShellState {
             self.mode_key_buffer.clear();
             self.which_key_overlay = None;
             self.terminal_escape_pending = false;
+            self.schedule_session_info_summary_refresh_for_active_session();
         }
     }
 
@@ -4052,7 +4409,7 @@ impl UiShellState {
                 if let Some(work_item_id) = self.work_item_id_for_session(&session_id) {
                     self.acknowledge_needs_decision_for_work_item(&work_item_id);
                 }
-                self.reconcile_progression_approval_inbox_for_session(&session_id);
+                let _ = self.mark_reconcile_dirty_for_session(&session_id);
             }
             Err(_) => {
                 if let Some(prompt) = self.active_terminal_needs_input_mut() {
@@ -4239,8 +4596,22 @@ impl UiShellState {
             self.session_info_summary_deadline = None;
             return;
         }
-        self.session_info_summary_deadline = Some(Instant::now() + Duration::from_millis(500));
         if let Some(session_id) = self.active_terminal_session_id().cloned() {
+            let now = Instant::now();
+            let deadline = if self.session_info_is_foreground() {
+                now + Duration::from_millis(500)
+            } else {
+                let interval = session_info_background_refresh_interval_config_value();
+                self.session_info_summary_last_refresh_at
+                    .get(&session_id)
+                    .map(|previous| (*previous + interval).max(now))
+                    .unwrap_or(now + interval)
+            };
+            self.session_info_summary_deadline = Some(
+                self.session_info_summary_deadline
+                    .map(|existing| existing.min(deadline))
+                    .unwrap_or(deadline),
+            );
             let cache = self.session_info_summary_cache.entry(session_id).or_default();
             cache.loading = true;
             cache.error = None;
@@ -4298,15 +4669,142 @@ impl UiShellState {
         changed
     }
 
-    fn tick_session_info_summary_refresh(&mut self) -> bool {
+    fn tick_session_info_summary_refresh_at(&mut self, now: Instant) -> bool {
         let Some(deadline) = self.session_info_summary_deadline else {
             return false;
         };
-        if Instant::now() < deadline {
+        if now < deadline {
             return false;
+        }
+        if !self.session_info_is_foreground() {
+            let Some(session_id) = self.active_terminal_session_id().cloned() else {
+                self.session_info_summary_deadline = None;
+                return false;
+            };
+            let interval = session_info_background_refresh_interval_config_value();
+            if let Some(previous) = self.session_info_summary_last_refresh_at.get(&session_id) {
+                if now.duration_since(*previous) < interval {
+                    self.session_info_summary_deadline = Some(*previous + interval);
+                    return false;
+                }
+            }
         }
         self.session_info_summary_deadline = None;
         self.spawn_active_session_summary_refresh()
+    }
+
+    #[cfg(test)]
+    fn tick_session_info_summary_refresh(&mut self) -> bool {
+        self.tick_session_info_summary_refresh_at(Instant::now())
+    }
+
+    fn drain_async_events_and_report(&mut self) -> bool {
+        let mut changed = false;
+        changed |= self.tick_supervisor_stream_and_report();
+        changed |= self.poll_ticket_picker_events();
+        changed |= self.poll_terminal_session_events();
+        changed |= self.poll_merge_queue_events();
+        changed |= self.poll_session_info_summary_events();
+        changed
+    }
+
+    fn run_due_periodic_tasks_and_report(&mut self, now: Instant) -> bool {
+        let mut changed = false;
+        changed |= self.flush_due_session_working_state_persists();
+        changed |= self.tick_ticket_picker_create_refresh_at(now);
+        changed |= self.flush_background_terminal_output_and_report_at(now);
+        changed |= self.enqueue_progression_approval_reconcile_polls_at(now);
+        changed |= self.tick_session_info_summary_refresh_at(now);
+        changed |= self.enqueue_merge_reconcile_polls_at(now);
+        changed |= self.run_sparse_reconcile_fallbacks();
+        changed |= self.dispatch_merge_queue_requests_at(now);
+        changed
+    }
+
+    fn maintain_active_terminal_view_and_report(&mut self) -> bool {
+        let mut changed = self.ensure_session_info_diff_loaded_for_active_session();
+        if let Some(session_id) = self.active_terminal_session_id().cloned() {
+            changed |= self.flush_deferred_terminal_output_for_session(&session_id);
+            changed |= self.ensure_terminal_stream_and_report(session_id);
+        }
+        changed
+    }
+
+    fn has_pending_async_activity(&self) -> bool {
+        let supervisor_busy = self.supervisor_chat_stream.as_ref().is_some_and(|stream| {
+            !stream.pending_delta.is_empty()
+                || matches!(
+                    stream.lifecycle,
+                    SupervisorStreamLifecycle::Connecting
+                        | SupervisorStreamLifecycle::Streaming
+                        | SupervisorStreamLifecycle::Cancelling
+                )
+        });
+        let ticket_picker_busy = self.ticket_picker_overlay.loading
+            || self.ticket_picker_overlay.creating
+            || self.ticket_picker_overlay.starting_ticket_id.is_some()
+            || self.ticket_picker_overlay.archiving_ticket_id.is_some();
+        let terminal_busy = !self.terminal_session_streamed.is_empty()
+            || self
+                .terminal_session_states
+                .values()
+                .any(|view| view.turn_active || !view.deferred_output.is_empty());
+        let merge_busy = !self.merge_queue.is_empty()
+            || !self.merge_pending_sessions.is_empty()
+            || !self.merge_finalizing_sessions.is_empty();
+        let summary_busy = self
+            .session_info_summary_cache
+            .values()
+            .any(|cache| cache.loading);
+        supervisor_busy || ticket_picker_busy || terminal_busy || merge_busy || summary_busy
+    }
+
+    fn next_wake_deadline(
+        &self,
+        now: Instant,
+        animation_state: AnimationState,
+        last_animation_frame: Instant,
+    ) -> Option<Instant> {
+        let animation_deadline = match animation_state {
+            AnimationState::ActiveTurn => Some(last_animation_frame + Duration::from_millis(200)),
+            AnimationState::ResolvedOnly => Some(last_animation_frame + Duration::from_millis(1_000)),
+            AnimationState::None => None,
+        };
+        let ticket_refresh_deadline = self
+            .ticket_picker_create_refresh_deadline
+            .filter(|_| self.ticket_picker_overlay.visible && self.ticket_picker_overlay.creating)
+            .filter(|_| !self.ticket_picker_overlay.loading);
+        let summary_deadline = self.session_info_summary_deadline;
+        let background_flush_deadline = self.background_terminal_flush_deadline;
+        let reconcile_sweep_deadline = [
+            self.approval_fallback_last_sweep_at
+                .map(|previous| previous + RECONCILE_SPARSE_FALLBACK_INTERVAL),
+            self.review_fallback_last_sweep_at
+                .map(|previous| previous + RECONCILE_SPARSE_FALLBACK_INTERVAL),
+        ]
+        .into_iter()
+        .flatten()
+        .min();
+        let merge_dispatch_deadline = if self.merge_queue.is_empty() {
+            None
+        } else {
+            Some(
+                self.merge_last_dispatched_at
+                    .map(|previous| previous + MERGE_REQUEST_RATE_LIMIT)
+                    .unwrap_or(now),
+            )
+        };
+        [
+            animation_deadline,
+            ticket_refresh_deadline,
+            summary_deadline,
+            background_flush_deadline,
+            reconcile_sweep_deadline,
+            merge_dispatch_deadline,
+        ]
+        .into_iter()
+        .flatten()
+        .min()
     }
 
     fn spawn_active_session_summary_refresh(&mut self) -> bool {
@@ -4347,6 +4845,8 @@ impl UiShellState {
 
         match TokioHandle::try_current() {
             Ok(handle) => {
+                self.session_info_summary_last_refresh_at
+                    .insert(context.session_id.clone(), Instant::now());
                 handle.spawn(async move {
                     run_session_info_summary_task(provider, context, sender).await;
                 });
@@ -4370,6 +4870,22 @@ impl UiShellState {
             .unwrap_or(true);
         if !needs_load {
             return false;
+        }
+        if !self.session_info_is_foreground() {
+            let now = Instant::now();
+            let interval = session_info_background_refresh_interval_config_value();
+            match self.session_info_diff_last_refresh_at.get(&session_id).copied() {
+                Some(previous) => {
+                    if now.duration_since(previous) < interval {
+                        return false;
+                    }
+                }
+                None => {
+                    self.session_info_diff_last_refresh_at
+                        .insert(session_id.clone(), now);
+                    return false;
+                }
+            }
         }
         self.spawn_session_info_diff_load(session_id)
     }
@@ -4397,6 +4913,8 @@ impl UiShellState {
 
         match TokioHandle::try_current() {
             Ok(handle) => {
+                self.session_info_diff_last_refresh_at
+                    .insert(session_id.clone(), Instant::now());
                 handle.spawn(async move {
                     run_session_diff_load_task(provider, session_id, sender).await;
                 });
@@ -4682,7 +5200,7 @@ fn terminal_output_line_count_for_scroll(view: &TerminalViewState) -> usize {
     if view.output_rendered_line_count > 0 {
         return view.output_rendered_line_count;
     }
-    render_terminal_transcript_entries(view).len()
+    render_terminal_transcript_line_count(view)
 }
 
 fn editor_state_text(state: &EditorState) -> String {

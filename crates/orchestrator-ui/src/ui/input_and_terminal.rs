@@ -106,9 +106,7 @@ impl UiCommand {
             Self::ToggleWorktreeDiffModal => "ui.worktree.diff.toggle",
             Self::AdvanceTerminalWorkflowStage => "ui.terminal.workflow.advance",
             Self::ArchiveSelectedSession => "ui.terminal.archive_selected_session",
-            Self::OpenSessionOutputForSelectedInbox => {
-                "ui.open_session_output_for_selected_inbox"
-            }
+            Self::OpenSessionOutputForSelectedInbox => "ui.open_session_output_for_selected_inbox",
         }
     }
 
@@ -327,6 +325,7 @@ fn append_terminal_output(state: &mut TerminalViewState, bytes: Vec<u8>) {
     if chunk.is_empty() {
         return;
     }
+    invalidate_terminal_render_cache(state);
 
     let mut combined = String::new();
     combined.push_str(state.output_fragment.as_str());
@@ -351,28 +350,36 @@ fn append_terminal_output(state: &mut TerminalViewState, bytes: Vec<u8>) {
             let before = before.trim();
             if !before.is_empty() {
                 if is_outgoing_transcript_line(before) {
-                    state.entries.push(TerminalTranscriptEntry::Message(format!(
-                        "> {}",
-                        normalize_outgoing_user_line(before)
-                    )));
+                    append_terminal_transcript_entry(
+                        state,
+                        TerminalTranscriptEntry::Message(format!(
+                            "> {}",
+                            normalize_outgoing_user_line(before)
+                        )),
+                    );
                 } else {
-                    state
-                        .entries
-                        .push(TerminalTranscriptEntry::Message(before.to_owned()));
+                    append_terminal_transcript_entry(
+                        state,
+                        TerminalTranscriptEntry::Message(before.to_owned()),
+                    );
                 }
             }
             append_terminal_foldable_content(state, kind, content.as_str());
             continue;
         }
         if is_outgoing_transcript_line(line) {
-            state.entries.push(TerminalTranscriptEntry::Message(format!(
-                "> {}",
-                normalize_outgoing_user_line(line)
-            )));
+            append_terminal_transcript_entry(
+                state,
+                TerminalTranscriptEntry::Message(format!(
+                    "> {}",
+                    normalize_outgoing_user_line(line)
+                )),
+            );
         } else {
-            state
-                .entries
-                .push(TerminalTranscriptEntry::Message(line.to_owned()));
+            append_terminal_transcript_entry(
+                state,
+                TerminalTranscriptEntry::Message(line.to_owned()),
+            );
         }
     }
 }
@@ -387,15 +394,17 @@ fn append_terminal_user_message(state: &mut TerminalViewState, message: &str) {
     if text.trim().is_empty() {
         return;
     }
+    invalidate_terminal_render_cache(state);
 
     for (index, line) in text.lines().enumerate() {
         if line.is_empty() {
             continue;
         }
         let _ = index;
-        state
-            .entries
-            .push(TerminalTranscriptEntry::Message(format!("> {line}")));
+        append_terminal_transcript_entry(
+            state,
+            TerminalTranscriptEntry::Message(format!("> {line}")),
+        );
     }
 }
 
@@ -405,19 +414,22 @@ fn append_terminal_system_message(state: &mut TerminalViewState, message: &str) 
     if text.trim().is_empty() {
         return;
     }
+    invalidate_terminal_render_cache(state);
 
     for (index, line) in text.lines().enumerate() {
         if line.is_empty() {
             continue;
         }
         if index == 0 {
-            state.entries.push(TerminalTranscriptEntry::Message(format!(
-                "> system: {line}"
-            )));
+            append_terminal_transcript_entry(
+                state,
+                TerminalTranscriptEntry::Message(format!("> system: {line}")),
+            );
         } else {
-            state.entries.push(TerminalTranscriptEntry::Message(format!(
-                "> system: {line}"
-            )));
+            append_terminal_transcript_entry(
+                state,
+                TerminalTranscriptEntry::Message(format!("> system: {line}")),
+            );
         }
     }
 }
@@ -444,6 +456,7 @@ fn append_terminal_foldable_content(
     kind: TerminalFoldKind,
     content: &str,
 ) {
+    invalidate_terminal_render_cache(state);
     let entry_content = if content.trim().is_empty() {
         "(no details)"
     } else {
@@ -460,13 +473,14 @@ fn append_terminal_foldable_content(
         }
     }
 
-    state
-        .entries
-        .push(TerminalTranscriptEntry::Foldable(TerminalFoldSection {
+    append_terminal_transcript_entry(
+        state,
+        TerminalTranscriptEntry::Foldable(TerminalFoldSection {
             kind,
             content: entry_content.to_owned(),
             folded: true,
-        }));
+        }),
+    );
 }
 
 fn is_outgoing_transcript_line(line: &str) -> bool {
@@ -482,19 +496,24 @@ fn flush_terminal_output_fragment(state: &mut TerminalViewState) {
     if line.trim().is_empty() {
         return;
     }
+    invalidate_terminal_render_cache(state);
 
     if let Some((before, kind, content)) = parse_terminal_meta_line_embedded(line) {
         let before = before.trim();
         if !before.is_empty() {
             if is_outgoing_transcript_line(before) {
-                state.entries.push(TerminalTranscriptEntry::Message(format!(
-                    "> {}",
-                    normalize_outgoing_user_line(before)
-                )));
+                append_terminal_transcript_entry(
+                    state,
+                    TerminalTranscriptEntry::Message(format!(
+                        "> {}",
+                        normalize_outgoing_user_line(before)
+                    )),
+                );
             } else {
-                state
-                    .entries
-                    .push(TerminalTranscriptEntry::Message(before.to_owned()));
+                append_terminal_transcript_entry(
+                    state,
+                    TerminalTranscriptEntry::Message(before.to_owned()),
+                );
             }
         }
         append_terminal_foldable_content(state, kind, content.as_str());
@@ -502,21 +521,39 @@ fn flush_terminal_output_fragment(state: &mut TerminalViewState) {
     }
 
     if is_outgoing_transcript_line(line) {
-        state.entries.push(TerminalTranscriptEntry::Message(format!(
-            "> {}",
-            normalize_outgoing_user_line(line)
-        )));
+        append_terminal_transcript_entry(
+            state,
+            TerminalTranscriptEntry::Message(format!("> {}", normalize_outgoing_user_line(line))),
+        );
     } else {
-        state
-            .entries
-            .push(TerminalTranscriptEntry::Message(line.to_owned()));
+        append_terminal_transcript_entry(state, TerminalTranscriptEntry::Message(line.to_owned()));
     }
+}
+
+fn append_terminal_transcript_entry(state: &mut TerminalViewState, entry: TerminalTranscriptEntry) {
+    state.entries.push(entry);
+    let transcript_line_limit = transcript_line_limit_config_value();
+    if state.entries.len() <= transcript_line_limit {
+        return;
+    }
+
+    let dropped = state.entries.len() - transcript_line_limit;
+    state.entries.drain(0..dropped);
+    state.transcript_truncated = true;
+    state.transcript_truncated_line_count = state
+        .transcript_truncated_line_count
+        .saturating_add(dropped);
 }
 
 fn normalize_outgoing_user_line(line: &str) -> &str {
     line.strip_prefix("you: ")
         .or_else(|| line.strip_prefix("user: "))
         .unwrap_or(line)
+}
+
+fn invalidate_terminal_render_cache(state: &mut TerminalViewState) {
+    state.render_cache.invalidate_all();
+    state.output_rendered_line_count = 0;
 }
 
 fn handle_key_press(shell_state: &mut UiShellState, key: KeyEvent) -> bool {
@@ -548,7 +585,8 @@ fn route_key_press(shell_state: &mut UiShellState, key: KeyEvent) -> RoutedInput
         return route_review_merge_confirm_key(shell_state, key);
     }
 
-    if shell_state.terminal_session_has_active_needs_input() && shell_state.is_right_pane_focused() {
+    if shell_state.terminal_session_has_active_needs_input() && shell_state.is_right_pane_focused()
+    {
         return route_needs_input_modal_key(shell_state, key);
     }
     if shell_state.terminal_session_has_any_needs_input()

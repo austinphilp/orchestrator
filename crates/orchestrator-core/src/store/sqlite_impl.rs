@@ -85,6 +85,117 @@ impl SqliteEventStore {
         })
     }
 
+    pub fn prune_completed_session_events(
+        &mut self,
+        policy: EventPrunePolicy,
+        now_unix_seconds: u64,
+    ) -> Result<EventPruneReport, CoreError> {
+        if policy.retention_days == 0 {
+            return Err(CoreError::Configuration(
+                "event prune retention_days must be greater than zero".to_owned(),
+            ));
+        }
+
+        let retention_window_seconds = policy.retention_days.saturating_mul(86_400);
+        let cutoff_unix_seconds = now_unix_seconds.saturating_sub(retention_window_seconds);
+        let done = session_status_to_json(&WorkerSessionStatus::Done)?;
+        let crashed = session_status_to_json(&WorkerSessionStatus::Crashed)?;
+
+        let tx = self
+            .conn
+            .transaction()
+            .map_err(|err| CoreError::Persistence(err.to_string()))?;
+
+        let mut report = EventPruneReport {
+            cutoff_unix_seconds,
+            ..EventPruneReport::default()
+        };
+
+        let mut stmt = tx
+            .prepare(
+                "
+                SELECT session_id, work_item_id, updated_at
+                FROM sessions
+                WHERE status IN (?1, ?2)
+                ",
+            )
+            .map_err(|err| CoreError::Persistence(err.to_string()))?;
+
+        let rows = stmt
+            .query_map(params![done, crashed], |row| {
+                let session_id: String = row.get(0)?;
+                let work_item_id: String = row.get(1)?;
+                let updated_at: String = row.get(2)?;
+                Ok((session_id, work_item_id, updated_at))
+            })
+            .map_err(|err| CoreError::Persistence(err.to_string()))?;
+
+        let mut eligible = Vec::new();
+        for row in rows {
+            let (session_id, work_item_id, updated_at) =
+                row.map_err(|err| CoreError::Persistence(err.to_string()))?;
+            report.candidate_sessions = report.candidate_sessions.saturating_add(1);
+
+            let Some(updated_at_unix_seconds) = parse_unix_seconds(updated_at.as_str()) else {
+                report.skipped_invalid_timestamps =
+                    report.skipped_invalid_timestamps.saturating_add(1);
+                continue;
+            };
+
+            if updated_at_unix_seconds <= cutoff_unix_seconds {
+                eligible.push((session_id, work_item_id));
+            }
+        }
+        drop(stmt);
+
+        report.eligible_sessions = u64::try_from(eligible.len()).map_err(|_| {
+            CoreError::Persistence("eligible session count exceeds u64".to_owned())
+        })?;
+
+        for (session_id, work_item_id) in eligible {
+            let deleted_event_artifact_refs = tx
+                .execute(
+                    "
+                    DELETE FROM event_artifact_refs
+                    WHERE event_id IN (
+                        SELECT event_id
+                        FROM events
+                        WHERE work_item_id = ?1 OR session_id = ?2
+                    )
+                    ",
+                    params![work_item_id.as_str(), session_id.as_str()],
+                )
+                .map_err(|err| CoreError::Persistence(err.to_string()))?;
+            report.deleted_event_artifact_refs = report
+                .deleted_event_artifact_refs
+                .saturating_add(u64::try_from(deleted_event_artifact_refs).map_err(|_| {
+                    CoreError::Persistence(
+                        "deleted event-artifact reference count exceeds u64".to_owned(),
+                    )
+                })?);
+
+            let deleted_events = tx
+                .execute(
+                    "DELETE FROM events WHERE work_item_id = ?1 OR session_id = ?2",
+                    params![work_item_id.as_str(), session_id.as_str()],
+                )
+                .map_err(|err| CoreError::Persistence(err.to_string()))?;
+            report.deleted_events = report
+                .deleted_events
+                .saturating_add(u64::try_from(deleted_events).map_err(|_| {
+                    CoreError::Persistence("deleted event count exceeds u64".to_owned())
+                })?);
+            if deleted_events > 0 {
+                report.pruned_work_items = report.pruned_work_items.saturating_add(1);
+            }
+        }
+
+        tx.commit()
+            .map_err(|err| CoreError::Persistence(err.to_string()))?;
+
+        Ok(report)
+    }
+
     pub fn read_event_with_artifacts(
         &self,
         work_item_id: &WorkItemId,
@@ -1117,6 +1228,7 @@ impl SqliteEventStore {
                 CREATE INDEX IF NOT EXISTS idx_sessions_work_item_lookup ON sessions(work_item_id);
                 CREATE UNIQUE INDEX IF NOT EXISTS idx_sessions_workdir_unique ON sessions(workdir);
                 CREATE INDEX IF NOT EXISTS idx_sessions_status_lookup ON sessions(status);
+                CREATE INDEX IF NOT EXISTS idx_sessions_status_updated_lookup ON sessions(status, updated_at);
                 ",
             )
             .map_err(|err| CoreError::Persistence(err.to_string()))?;
@@ -1311,6 +1423,13 @@ impl SqliteEventStore {
                     INSERT OR IGNORE INTO session_runtime_flags (session_id, is_working, updated_at)
                     SELECT session_id, 0, strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
                     FROM sessions;
+                    ",
+                )
+                .map_err(|err| CoreError::Persistence(err.to_string())),
+            9 => tx
+                .execute_batch(
+                    "
+                    CREATE INDEX IF NOT EXISTS idx_sessions_status_updated_lookup ON sessions(status, updated_at);
                     ",
                 )
                 .map_err(|err| CoreError::Persistence(err.to_string())),
@@ -1859,6 +1978,12 @@ impl SqliteEventStore {
             .map_err(|err| CoreError::Persistence(err.to_string()))
     }
 
+    fn map_rfc3339_unix_seconds(value: &str) -> Option<u64> {
+        let timestamp = OffsetDateTime::parse(value, &Rfc3339).ok()?;
+        let unix = timestamp.unix_timestamp();
+        (unix >= 0).then_some(unix as u64)
+    }
+
     fn map_row(row: &rusqlite::Row<'_>) -> Result<StoredEventEnvelope, CoreError> {
         let payload_json: String = row
             .get(6)
@@ -1895,4 +2020,22 @@ impl SqliteEventStore {
                 .map_err(|err| CoreError::Persistence(err.to_string()))?,
         })
     }
+}
+
+fn parse_unix_seconds(value: &str) -> Option<u64> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    if let Some(rfc3339) = SqliteEventStore::map_rfc3339_unix_seconds(trimmed) {
+        return Some(rfc3339);
+    }
+
+    let without_z = trimmed.strip_suffix('Z').unwrap_or(trimmed);
+    let whole_seconds = without_z
+        .split_once('.')
+        .map(|(left, _)| left)
+        .unwrap_or(without_z);
+    whole_seconds.parse::<u64>().ok()
 }

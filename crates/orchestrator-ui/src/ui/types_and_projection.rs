@@ -13,14 +13,14 @@ use crossterm::terminal::{
 use crossterm::ExecutableCommand;
 use edtui::{EditorEventHandler, EditorMode, EditorState, EditorTheme, EditorView, Lines};
 use orchestrator_core::{
-    attention_inbox_snapshot, command_ids, ArtifactKind, ArtifactProjection, AttentionBatchKind,
-    AttentionEngineConfig, AttentionInboxSnapshot, AttentionPriorityBand, Command, CommandRegistry,
-    CoreError, InboxItemId, InboxItemKind, LlmChatRequest, LlmFinishReason, LlmMessage,
-    LlmProvider, LlmRateLimitState, LlmResponseStream, LlmRole, LlmTokenUsage,
-    OrchestrationEventPayload, ProjectId,
+    apply_event, attention_inbox_snapshot, command_ids, ArtifactKind, ArtifactProjection,
+    AttentionBatchKind, AttentionEngineConfig, AttentionInboxSnapshot, AttentionPriorityBand,
+    Command, CommandRegistry, CoreError, InboxItemId, InboxItemKind, LlmChatRequest,
+    LlmFinishReason, LlmMessage, LlmProvider, LlmRateLimitState, LlmResponseStream, LlmRole,
+    LlmTokenUsage, OrchestrationEventPayload, ProjectId,
     ProjectionState, SelectedTicketFlowResult, SessionProjection, SupervisorQueryArgs,
-    SupervisorQueryContextArgs, TicketId, TicketSummary, UntypedCommandInvocation, WorkItemId,
-    WorkerSessionId, WorkerSessionStatus, WorkflowState,
+    StoredEventEnvelope, SupervisorQueryContextArgs, TicketId, TicketSummary,
+    UntypedCommandInvocation, WorkItemId, WorkerSessionId, WorkerSessionStatus, WorkflowState,
 };
 use orchestrator_runtime::{
     BackendEvent, BackendKind, BackendNeedsInputAnswer, BackendNeedsInputEvent,
@@ -54,21 +54,27 @@ const TICKET_PICKER_PRIORITY_STATES_DEFAULT: &[&str] =
 const DEFAULT_UI_THEME: &str = "nord";
 const DEFAULT_SUPERVISOR_MODEL: &str = "openai/gpt-4o-mini";
 const DEFAULT_BACKGROUND_SESSION_REFRESH_SECS: u64 = 15;
+const DEFAULT_TRANSCRIPT_LINE_LIMIT: usize = 100;
 const MIN_BACKGROUND_SESSION_REFRESH_SECS: u64 = 2;
 const MAX_BACKGROUND_SESSION_REFRESH_SECS: u64 = 15;
-const MERGE_POLL_INTERVAL: Duration = Duration::from_secs(15);
-const APPROVAL_RECONCILE_POLL_INTERVAL: Duration = Duration::from_secs(15);
+const DEFAULT_SESSION_INFO_BACKGROUND_REFRESH_SECS: u64 = 15;
+const MIN_SESSION_INFO_BACKGROUND_REFRESH_SECS: u64 = 15;
+const RECONCILE_SPARSE_FALLBACK_INTERVAL: Duration = Duration::from_secs(120);
 const MERGE_REQUEST_RATE_LIMIT: Duration = Duration::from_secs(1);
 const TICKET_PICKER_CREATE_REFRESH_INTERVAL: Duration = Duration::from_secs(1);
 const BACKGROUND_SESSION_DEFERRED_OUTPUT_MAX_BYTES: usize = 64 * 1024;
 const RESOLVED_ANIMATION_REFRESH_INTERVAL: Duration = Duration::from_secs(1);
+const PLANNING_WORKING_STATE_PERSIST_DEBOUNCE: Duration = Duration::from_millis(500);
+const PROJECTION_PERF_LOG_INTERVAL: Duration = Duration::from_secs(15);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct UiRuntimeConfig {
     theme: String,
     ticket_picker_priority_states: Vec<String>,
     supervisor_model: String,
+    transcript_line_limit: usize,
     background_session_refresh_secs: u64,
+    session_info_background_refresh_secs: u64,
 }
 
 impl Default for UiRuntimeConfig {
@@ -80,7 +86,9 @@ impl Default for UiRuntimeConfig {
                 .map(|value| (*value).to_owned())
                 .collect(),
             supervisor_model: DEFAULT_SUPERVISOR_MODEL.to_owned(),
+            transcript_line_limit: DEFAULT_TRANSCRIPT_LINE_LIMIT,
             background_session_refresh_secs: DEFAULT_BACKGROUND_SESSION_REFRESH_SECS,
+            session_info_background_refresh_secs: DEFAULT_SESSION_INFO_BACKGROUND_REFRESH_SECS,
         }
     }
 }
@@ -95,7 +103,9 @@ pub fn set_ui_runtime_config(
     theme: String,
     ticket_picker_priority_states: Vec<String>,
     supervisor_model: String,
+    transcript_line_limit: usize,
     background_session_refresh_secs: u64,
+    session_info_background_refresh_secs: u64,
 ) {
     let mut parsed_states = ticket_picker_priority_states
         .into_iter()
@@ -127,11 +137,14 @@ pub fn set_ui_runtime_config(
                 trimmed.to_owned()
             }
         },
+        transcript_line_limit: transcript_line_limit.max(1),
         background_session_refresh_secs: background_session_refresh_secs
             .clamp(
                 MIN_BACKGROUND_SESSION_REFRESH_SECS,
                 MAX_BACKGROUND_SESSION_REFRESH_SECS,
             ),
+        session_info_background_refresh_secs: session_info_background_refresh_secs
+            .max(MIN_SESSION_INFO_BACKGROUND_REFRESH_SECS),
     };
 
     if let Ok(mut guard) = ui_runtime_config_store().write() {
@@ -165,6 +178,14 @@ fn supervisor_model_config_value() -> String {
         .unwrap_or_else(|_| DEFAULT_SUPERVISOR_MODEL.to_owned())
 }
 
+fn transcript_line_limit_config_value() -> usize {
+    ui_runtime_config_store()
+        .read()
+        .map(|guard| guard.transcript_line_limit)
+        .unwrap_or(DEFAULT_TRANSCRIPT_LINE_LIMIT)
+        .max(1)
+}
+
 fn background_session_refresh_interval_config_value() -> Duration {
     let secs = ui_runtime_config_store()
         .read()
@@ -174,6 +195,15 @@ fn background_session_refresh_interval_config_value() -> Duration {
             MIN_BACKGROUND_SESSION_REFRESH_SECS,
             MAX_BACKGROUND_SESSION_REFRESH_SECS,
         );
+    Duration::from_secs(secs)
+}
+
+fn session_info_background_refresh_interval_config_value() -> Duration {
+    let secs = ui_runtime_config_store()
+        .read()
+        .map(|guard| guard.session_info_background_refresh_secs)
+        .unwrap_or(DEFAULT_SESSION_INFO_BACKGROUND_REFRESH_SECS)
+        .max(MIN_SESSION_INFO_BACKGROUND_REFRESH_SECS);
     Duration::from_secs(secs)
 }
 
@@ -188,6 +218,17 @@ pub struct CreateTicketFromPickerRequest {
     pub brief: String,
     pub selected_project: Option<String>,
     pub submit_mode: TicketCreateSubmitMode,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionArchiveOutcome {
+    pub warning: Option<String>,
+    pub event: StoredEventEnvelope,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionMergeFinalizeOutcome {
+    pub event: StoredEventEnvelope,
 }
 
 #[async_trait]
@@ -213,7 +254,7 @@ pub trait TicketPickerProvider: Send + Sync {
     async fn archive_session(
         &self,
         _session_id: WorkerSessionId,
-    ) -> Result<Option<String>, CoreError> {
+    ) -> Result<SessionArchiveOutcome, CoreError> {
         Err(CoreError::DependencyUnavailable(
             "session archiving is not supported by this ticket provider".to_owned(),
         ))
@@ -252,13 +293,15 @@ pub trait TicketPickerProvider: Send + Sync {
     async fn complete_session_after_merge(
         &self,
         _session_id: WorkerSessionId,
-    ) -> Result<(), CoreError> {
-        Ok(())
+    ) -> Result<SessionMergeFinalizeOutcome, CoreError> {
+        Err(CoreError::DependencyUnavailable(
+            "session merge finalization is not supported by this ticket provider".to_owned(),
+        ))
     }
     async fn publish_inbox_item(
         &self,
         _request: InboxPublishRequest,
-    ) -> Result<ProjectionState, CoreError> {
+    ) -> Result<StoredEventEnvelope, CoreError> {
         Err(CoreError::DependencyUnavailable(
             "inbox publishing is not supported by this ticket provider".to_owned(),
         ))
@@ -266,7 +309,7 @@ pub trait TicketPickerProvider: Send + Sync {
     async fn resolve_inbox_item(
         &self,
         _request: InboxResolveRequest,
-    ) -> Result<ProjectionState, CoreError> {
+    ) -> Result<Option<StoredEventEnvelope>, CoreError> {
         Err(CoreError::DependencyUnavailable(
             "inbox resolution is not supported by this ticket provider".to_owned(),
         ))
@@ -302,6 +345,7 @@ pub struct SessionWorkflowAdvanceOutcome {
     pub from: WorkflowState,
     pub to: WorkflowState,
     pub instruction: Option<String>,
+    pub event: StoredEventEnvelope,
 }
 
 pub type SupervisorCommandContext = SupervisorQueryContextArgs;
@@ -521,7 +565,7 @@ struct UiAttentionProjection {
 
 #[derive(Debug, Clone)]
 struct AttentionProjectionCache {
-    projection: UiAttentionProjection,
+    projection: Arc<UiAttentionProjection>,
     refreshed_at: Instant,
     epoch: u64,
 }
@@ -1116,8 +1160,11 @@ impl SupervisorResponseState {
 #[derive(Debug, Clone)]
 struct TerminalViewState {
     entries: Vec<TerminalTranscriptEntry>,
+    transcript_truncated: bool,
+    transcript_truncated_line_count: usize,
     error: Option<String>,
     output_fragment: String,
+    render_cache: TerminalRenderCache,
     deferred_output: Vec<u8>,
     last_background_flush_at: Option<Instant>,
     output_rendered_line_count: usize,
@@ -1134,8 +1181,11 @@ impl Default for TerminalViewState {
     fn default() -> Self {
         Self {
             entries: Vec::new(),
+            transcript_truncated: false,
+            transcript_truncated_line_count: 0,
             error: None,
             output_fragment: String::new(),
+            render_cache: TerminalRenderCache::default(),
             deferred_output: Vec::new(),
             last_background_flush_at: None,
             output_rendered_line_count: 0,
@@ -1147,6 +1197,36 @@ impl Default for TerminalViewState {
             active_needs_input: None,
             last_merge_conflict_signature: None,
         }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct TerminalRenderCache {
+    transcript_lines: Vec<String>,
+    rendered_row_counts: Vec<usize>,
+    rendered_prefix_sums: Vec<usize>,
+    width: u16,
+    transcript_stale: bool,
+    metrics_stale: bool,
+}
+
+impl Default for TerminalRenderCache {
+    fn default() -> Self {
+        Self {
+            transcript_lines: Vec::new(),
+            rendered_row_counts: Vec::new(),
+            rendered_prefix_sums: Vec::new(),
+            width: 0,
+            transcript_stale: true,
+            metrics_stale: true,
+        }
+    }
+}
+
+impl TerminalRenderCache {
+    fn invalidate_all(&mut self) {
+        self.transcript_stale = true;
+        self.metrics_stale = true;
     }
 }
 

@@ -150,31 +150,105 @@ fn render_sessions_panel_text(
     render_sessions_panel_text_from_rows(&session_rows, selected_session_id)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SessionPanelLineMetrics {
+    total_lines: usize,
+    selected_line: Option<usize>,
+}
+
+fn session_panel_line_metrics_from_rows(
+    session_rows: &[SessionPanelRow],
+    selected_session_id: Option<&WorkerSessionId>,
+) -> SessionPanelLineMetrics {
+    if session_rows.is_empty() {
+        return SessionPanelLineMetrics {
+            total_lines: 1,
+            selected_line: None,
+        };
+    }
+
+    let mut total_lines = 0usize;
+    let mut selected_line = None;
+    let mut previous_project: Option<String> = None;
+    let mut previous_group: Option<SessionStateGroup> = None;
+    for row in session_rows {
+        if previous_project.as_deref() != Some(row.project.as_str()) {
+            if previous_project.is_some() {
+                total_lines += 1;
+            }
+            total_lines += 1;
+            previous_project = Some(row.project.clone());
+            previous_group = None;
+        }
+        if previous_group.as_ref() != Some(&row.group) {
+            total_lines += 1;
+            previous_group = Some(row.group.clone());
+        }
+        if selected_session_id == Some(&row.session_id) {
+            selected_line = Some(total_lines);
+        }
+        total_lines += 1;
+    }
+
+    SessionPanelLineMetrics {
+        total_lines,
+        selected_line,
+    }
+}
+
+#[cfg(test)]
 fn render_sessions_panel_text_from_rows(
     session_rows: &[SessionPanelRow],
     selected_session_id: Option<&WorkerSessionId>,
+) -> Text<'static> {
+    let metrics = session_panel_line_metrics_from_rows(session_rows, selected_session_id);
+    render_sessions_panel_text_virtualized_from_rows(
+        session_rows,
+        selected_session_id,
+        0,
+        metrics.total_lines.max(1),
+    )
+}
+
+fn render_sessions_panel_text_virtualized_from_rows(
+    session_rows: &[SessionPanelRow],
+    selected_session_id: Option<&WorkerSessionId>,
+    scroll_line: usize,
+    viewport_rows: usize,
 ) -> Text<'static> {
     if session_rows.is_empty() {
         return Text::from("No open sessions.");
     }
 
-    let mut lines = Vec::new();
-    let mut previous_project: Option<String> = None;
-    let mut previous_group: Option<SessionStateGroup> = None;
+    let viewport_start = scroll_line;
+    let viewport_end = viewport_start.saturating_add(viewport_rows.max(1));
+    let mut lines = Vec::with_capacity(viewport_rows.max(1));
+    let mut line_index = 0usize;
+    let mut previous_project: Option<&str> = None;
+    let mut previous_group: Option<&SessionStateGroup> = None;
     for row in session_rows {
         let is_selected = selected_session_id == Some(&row.session_id);
         let marker = if is_selected { ">" } else { " " };
-        if previous_project.as_deref() != Some(row.project.as_str()) {
+        if previous_project != Some(row.project.as_str()) {
             if previous_project.is_some() {
-                lines.push(Line::from(String::new()));
+                if (viewport_start..viewport_end).contains(&line_index) {
+                    lines.push(Line::from(String::new()));
+                }
+                line_index += 1;
             }
-            lines.push(Line::from(format!("{}:", row.project)));
-            previous_project = Some(row.project.clone());
+            if (viewport_start..viewport_end).contains(&line_index) {
+                lines.push(Line::from(format!("{}:", row.project)));
+            }
+            line_index += 1;
+            previous_project = Some(row.project.as_str());
             previous_group = None;
         }
-        if previous_group.as_ref() != Some(&row.group) {
-            lines.push(Line::from(format!("  {}:", row.group.display_label())));
-            previous_group = Some(row.group.clone());
+        if previous_group != Some(&row.group) {
+            if (viewport_start..viewport_end).contains(&line_index) {
+                lines.push(Line::from(format!("  {}:", row.group.display_label())));
+            }
+            line_index += 1;
+            previous_group = Some(&row.group);
         }
         let indicator = if row.activity == SessionRowActivity::Active {
             loading_spinner_frame()
@@ -184,8 +258,8 @@ fn render_sessions_panel_text_from_rows(
         let status_chip = row.activity.status_chip();
         let status_style = row.activity.style();
         let mut spans = vec![
-            Span::raw(marker.to_owned()),
-            Span::raw("    ".to_owned()),
+            Span::raw(marker),
+            Span::raw("    "),
             Span::styled(format!("{indicator} "), status_style),
             Span::styled(format!("{status_chip} "), status_style),
         ];
@@ -193,7 +267,10 @@ fn render_sessions_panel_text_from_rows(
             spans.push(Span::raw(format!("[{}] ", row.badge)));
         }
         spans.push(Span::raw(row.ticket_label.clone()));
-        lines.push(Line::from(spans));
+        if (viewport_start..viewport_end).contains(&line_index) {
+            lines.push(Line::from(spans));
+        }
+        line_index += 1;
     }
 
     Text::from(lines)
@@ -303,7 +380,10 @@ fn render_session_info_panel(
             .into_iter()
             .next();
         if let Some(pr_artifact) = pr {
-            lines.push(format!("- {}", compact_focus_card_text(pr_artifact.uri.as_str())));
+            lines.push(format!(
+                "- {}",
+                compact_focus_card_text(pr_artifact.uri.as_str())
+            ));
             if let Some(metadata) = pr_metadata_summary_line(pr_artifact) {
                 lines.push(format!("  {}", compact_focus_card_text(metadata.as_str())));
             }
@@ -353,7 +433,10 @@ fn render_session_info_panel(
                     .description
                     .or_else(|| latest_ticket_description(domain, ticket_id))
                     .unwrap_or_else(|| "No description synced.".to_owned());
-                lines.push(format!("- {}", compact_focus_card_text(description.as_str())));
+                lines.push(format!(
+                    "- {}",
+                    compact_focus_card_text(description.as_str())
+                ));
             } else {
                 lines.push("- Ticket details unavailable.".to_owned());
             }
@@ -444,9 +527,13 @@ fn render_session_info_panel(
     lines.join("\n")
 }
 
-fn render_terminal_top_bar(domain: &ProjectionState, session_id: &WorkerSessionId) -> String {
+fn render_terminal_top_bar(
+    domain: &ProjectionState,
+    session_id: &WorkerSessionId,
+    terminal_view_state: Option<&TerminalViewState>,
+) -> String {
     let labels = session_display_labels(domain, session_id);
-    let text = if let Some(session) = domain.sessions.get(session_id) {
+    let mut text = if let Some(session) = domain.sessions.get(session_id) {
         let status = session
             .status
             .as_ref()
@@ -459,9 +546,7 @@ fn render_terminal_top_bar(domain: &ProjectionState, session_id: &WorkerSessionI
             .unwrap_or_else(|| "none".to_owned());
         format!(
             "ticket: {} | status: {} | checkpoint: {}",
-            labels.compact_label,
-            status,
-            checkpoint
+            labels.compact_label, status, checkpoint
         )
     } else {
         format!(
@@ -469,77 +554,121 @@ fn render_terminal_top_bar(domain: &ProjectionState, session_id: &WorkerSessionI
             labels.compact_label
         )
     };
+    if let Some(view) = terminal_view_state {
+        if view.transcript_truncated {
+            text.push_str(
+                format!(
+                    " | history: truncated (-{} lines)",
+                    view.transcript_truncated_line_count
+                )
+                .as_str(),
+            );
+        }
+    }
     sanitize_terminal_display_text(text.as_str())
 }
 
 fn render_terminal_transcript_lines(state: &TerminalViewState) -> Vec<String> {
-    render_terminal_transcript_entries(state)
-        .into_iter()
-        .map(|line| line.text)
-        .collect()
+    let mut lines = Vec::with_capacity(
+        state.entries.len().saturating_mul(2) + usize::from(!state.output_fragment.is_empty()),
+    );
+    render_terminal_transcript_lines_into(state, &mut lines);
+    lines
+}
+
+fn render_terminal_transcript_line_count(state: &TerminalViewState) -> usize {
+    let mut count = 0usize;
+    let mut previous_is_foldable = false;
+    let mut previous_rendered_non_empty = false;
+    for entry in &state.entries {
+        let current_is_foldable = matches!(entry, TerminalTranscriptEntry::Foldable(_));
+        if count > 0 && (previous_is_foldable || current_is_foldable) {
+            count += 1;
+            previous_rendered_non_empty = false;
+        }
+        match entry {
+            TerminalTranscriptEntry::Message(line) => {
+                let is_outgoing = is_user_outgoing_terminal_message(line);
+                if is_outgoing && previous_rendered_non_empty {
+                    count += 1;
+                }
+                count += 1;
+                if is_outgoing {
+                    count += 1;
+                    previous_rendered_non_empty = false;
+                } else {
+                    previous_rendered_non_empty = !line.trim().is_empty();
+                }
+            }
+            TerminalTranscriptEntry::Foldable(section) => {
+                count += 1;
+                if !section.folded {
+                    count += section
+                        .content
+                        .lines()
+                        .filter(|line| !line.trim().is_empty())
+                        .count();
+                }
+                previous_rendered_non_empty = true;
+            }
+        }
+        previous_is_foldable = current_is_foldable;
+    }
+    if !state.output_fragment.is_empty() {
+        count += 1;
+    }
+    count
 }
 
 fn render_terminal_transcript_entries(state: &TerminalViewState) -> Vec<RenderedTerminalLine> {
-    let mut lines = Vec::new();
+    render_terminal_transcript_lines(state)
+        .into_iter()
+        .map(|text| RenderedTerminalLine { text })
+        .collect()
+}
+
+fn render_terminal_transcript_lines_into(state: &TerminalViewState, lines: &mut Vec<String>) {
+    let mut previous_is_foldable = false;
     for (index, entry) in state.entries.iter().enumerate() {
-        let previous_is_foldable = index
-            .checked_sub(1)
-            .and_then(|previous| state.entries.get(previous))
-            .map(|previous| matches!(previous, TerminalTranscriptEntry::Foldable(_)))
-            .unwrap_or(false);
         let current_is_foldable = matches!(entry, TerminalTranscriptEntry::Foldable(_));
         if index > 0 && (previous_is_foldable || current_is_foldable) {
-            lines.push(RenderedTerminalLine {
-                text: String::new(),
-            });
+            lines.push(String::new());
         }
         match entry {
             TerminalTranscriptEntry::Message(line) => {
                 if is_user_outgoing_terminal_message(line)
                     && lines
                         .last()
-                        .map(|previous| !previous.text.trim().is_empty())
+                        .map(|previous| !previous.trim().is_empty())
                         .unwrap_or(false)
                 {
-                    lines.push(RenderedTerminalLine {
-                        text: String::new(),
-                    });
+                    lines.push(String::new());
                 }
-                lines.push(RenderedTerminalLine {
-                    text: line.clone(),
-                });
+                lines.push(line.clone());
                 if is_user_outgoing_terminal_message(line) {
-                    lines.push(RenderedTerminalLine {
-                        text: String::new(),
-                    });
+                    lines.push(String::new());
                 }
             }
             TerminalTranscriptEntry::Foldable(section) => {
                 let fold_marker = if section.folded { "[+]" } else { "[-]" };
                 let summary = summarize_folded_terminal_content(section.content.as_str());
-                lines.push(RenderedTerminalLine {
-                    text: format!("  {fold_marker} {}: {summary}", section.kind.label()),
-                });
+                lines.push(format!("  {fold_marker} {}: {summary}", section.kind.label()));
                 if !section.folded {
                     for content_line in section.content.lines() {
                         let trimmed = content_line.trim();
                         if trimmed.is_empty() {
                             continue;
                         }
-                        lines.push(RenderedTerminalLine {
-                            text: format!("  {trimmed}"),
-                        });
+                        lines.push(format!("  {trimmed}"));
                     }
                 }
             }
         }
+        previous_is_foldable = current_is_foldable;
     }
     if !state.output_fragment.is_empty() {
-        lines.push(RenderedTerminalLine {
-            text: state.output_fragment.clone(),
-        });
+        lines.push(state.output_fragment.clone());
     }
-    lines
 }
 
 fn is_user_outgoing_terminal_message(line: &str) -> bool {
@@ -548,7 +677,13 @@ fn is_user_outgoing_terminal_message(line: &str) -> bool {
 }
 
 fn summarize_folded_terminal_content(content: &str) -> String {
-    let compact = content.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut compact = String::with_capacity(content.len());
+    for segment in content.split_whitespace() {
+        if !compact.is_empty() {
+            compact.push(' ');
+        }
+        compact.push_str(segment);
+    }
     if compact.is_empty() {
         return "(no details)".to_owned();
     }
@@ -561,15 +696,99 @@ fn summarize_folded_terminal_content(content: &str) -> String {
     }
 }
 
-fn render_terminal_output_panel(ui_state: &UiState, width: u16) -> Text<'static> {
-    if ui_state.center_pane.lines.is_empty() {
-        return Text::raw("No terminal output available yet.");
-    }
-    render_terminal_output_with_accents(&ui_state.center_pane.lines, width.max(1))
+#[derive(Debug, Clone)]
+struct TerminalViewportRequest {
+    width: u16,
+    scroll_top: usize,
+    viewport_rows: usize,
+    overscan_rows: usize,
+    indicator: TerminalActivityIndicator,
 }
 
-fn render_terminal_output_with_accents(lines: &[String], width: u16) -> Text<'static> {
+#[derive(Debug, Clone)]
+struct TerminalViewportRender {
+    text: Text<'static>,
+    local_scroll_top: u16,
+}
+
+fn terminal_total_rendered_rows(
+    state: &mut TerminalViewState,
+    width: u16,
+    indicator: TerminalActivityIndicator,
+) -> usize {
+    ensure_terminal_render_metrics(state, width.max(1));
+    let transcript_rows = state
+        .render_cache
+        .rendered_prefix_sums
+        .last()
+        .copied()
+        .unwrap_or(0);
+    transcript_rows + terminal_indicator_rows(transcript_rows > 0, indicator).len()
+}
+
+fn render_terminal_output_viewport(
+    state: &mut TerminalViewState,
+    request: TerminalViewportRequest,
+) -> TerminalViewportRender {
+    let width = request.width.max(1);
+    ensure_terminal_render_metrics(state, width);
+    let transcript_rows = state
+        .render_cache
+        .rendered_prefix_sums
+        .last()
+        .copied()
+        .unwrap_or(0);
+    let indicator_rows = terminal_indicator_rows(transcript_rows > 0, request.indicator);
+    let total_rows = transcript_rows + indicator_rows.len();
+
+    if total_rows == 0 {
+        return TerminalViewportRender {
+            text: Text::raw("No terminal output available yet."),
+            local_scroll_top: 0,
+        };
+    }
+
+    let max_scroll = total_rows.saturating_sub(request.viewport_rows.max(1));
+    let scroll_top = request.scroll_top.min(max_scroll);
+    let slice_start = scroll_top.saturating_sub(request.overscan_rows);
+    let slice_end = scroll_top
+        .saturating_add(request.viewport_rows.max(1))
+        .saturating_add(request.overscan_rows)
+        .min(total_rows);
+    let local_scroll_top = scroll_top.saturating_sub(slice_start).min(u16::MAX as usize) as u16;
+
     let mut rendered = Vec::new();
+    if transcript_rows > 0 && slice_start < transcript_rows {
+        let transcript_slice_end = slice_end.min(transcript_rows);
+        rendered.extend(render_terminal_transcript_slice(
+            state,
+            width,
+            slice_start,
+            transcript_slice_end,
+        ));
+    }
+
+    if slice_end > transcript_rows && !indicator_rows.is_empty() {
+        let indicator_start = slice_start.saturating_sub(transcript_rows);
+        let indicator_end = slice_end.saturating_sub(transcript_rows).min(indicator_rows.len());
+        for row in indicator_rows
+            .iter()
+            .skip(indicator_start)
+            .take(indicator_end.saturating_sub(indicator_start))
+        {
+            rendered.push(Line::from(Span::styled(row.text.clone(), row.style)));
+        }
+    }
+
+    TerminalViewportRender {
+        text: Text::from(rendered),
+        local_scroll_top,
+    }
+}
+
+#[cfg(test)]
+fn render_terminal_output_with_accents(lines: &[String], width: u16) -> Text<'static> {
+    let mut rendered = Vec::with_capacity(lines.len().saturating_mul(2));
     let mut active_fold_kind: Option<TerminalFoldKind> = None;
 
     for raw_line in lines {
@@ -619,6 +838,214 @@ fn render_terminal_output_with_accents(lines: &[String], width: u16) -> Text<'st
     }
 
     Text::from(rendered)
+}
+
+fn ensure_terminal_render_metrics(state: &mut TerminalViewState, width: u16) {
+    ensure_terminal_transcript_cache(state);
+    if state.render_cache.width != width {
+        state.render_cache.metrics_stale = true;
+        state.render_cache.width = width;
+    }
+    if !state.render_cache.metrics_stale {
+        return;
+    }
+
+    let mut active_fold_kind: Option<TerminalFoldKind> = None;
+    state.render_cache.rendered_row_counts.clear();
+    state
+        .render_cache
+        .rendered_row_counts
+        .reserve(state.render_cache.transcript_lines.len());
+    for line in &state.render_cache.transcript_lines {
+        let row_count = terminal_rendered_row_count_for_line(line, width, &mut active_fold_kind);
+        state.render_cache.rendered_row_counts.push(row_count.max(1));
+    }
+
+    state.render_cache.rendered_prefix_sums.clear();
+    state
+        .render_cache
+        .rendered_prefix_sums
+        .reserve(state.render_cache.rendered_row_counts.len() + 1);
+    state.render_cache.rendered_prefix_sums.push(0);
+    for row_count in &state.render_cache.rendered_row_counts {
+        let next = state
+            .render_cache
+            .rendered_prefix_sums
+            .last()
+            .copied()
+            .unwrap_or(0)
+            .saturating_add(*row_count);
+        state.render_cache.rendered_prefix_sums.push(next);
+    }
+    state.render_cache.metrics_stale = false;
+}
+
+fn ensure_terminal_transcript_cache(state: &mut TerminalViewState) {
+    if !state.render_cache.transcript_stale {
+        return;
+    }
+    state.render_cache.transcript_lines = render_terminal_transcript_entries(state)
+        .into_iter()
+        .map(|line| line.text)
+        .collect();
+    state.render_cache.transcript_stale = false;
+    state.render_cache.metrics_stale = true;
+}
+
+fn terminal_rendered_row_count_for_line(
+    raw_line: &str,
+    width: u16,
+    active_fold_kind: &mut Option<TerminalFoldKind>,
+) -> usize {
+    let line = sanitize_terminal_display_text(raw_line);
+    if line.trim().is_empty() {
+        *active_fold_kind = None;
+        return 1;
+    }
+
+    if let Some((kind, folded)) = parse_fold_header_line(&line) {
+        *active_fold_kind = if folded { None } else { Some(kind) };
+        return 1;
+    }
+
+    if active_fold_kind.is_some() || line.starts_with("> ") || !line_looks_like_markdown(&line) {
+        return 1;
+    }
+
+    let markdown = render_markdown_for_terminal(line.as_str(), width);
+    markdown.lines.len().max(1)
+}
+
+fn render_terminal_transcript_slice(
+    state: &TerminalViewState,
+    width: u16,
+    start_row: usize,
+    end_row: usize,
+) -> Vec<Line<'static>> {
+    if start_row >= end_row || state.render_cache.transcript_lines.is_empty() {
+        return Vec::new();
+    }
+    let prefix = &state.render_cache.rendered_prefix_sums;
+    let max_row = prefix.last().copied().unwrap_or(0);
+    if start_row >= max_row {
+        return Vec::new();
+    }
+
+    let clamped_end = end_row.min(max_row);
+    let mut raw_start = prefix.partition_point(|&row| row <= start_row).saturating_sub(1);
+    raw_start = raw_start.min(state.render_cache.transcript_lines.len().saturating_sub(1));
+    let mut raw_end = prefix.partition_point(|&row| row < clamped_end);
+    raw_end = raw_end.min(state.render_cache.transcript_lines.len());
+
+    let mut active_fold_kind: Option<TerminalFoldKind> = None;
+    for line in state.render_cache.transcript_lines.iter().take(raw_start) {
+        let sanitized = sanitize_terminal_display_text(line);
+        if sanitized.trim().is_empty() {
+            active_fold_kind = None;
+            continue;
+        }
+        if let Some((kind, folded)) = parse_fold_header_line(&sanitized) {
+            active_fold_kind = if folded { None } else { Some(kind) };
+        }
+    }
+
+    let mut rendered = Vec::new();
+    for raw_index in raw_start..raw_end {
+        let line_start = prefix.get(raw_index).copied().unwrap_or(0);
+        let line_end = prefix.get(raw_index + 1).copied().unwrap_or(line_start);
+        if line_end <= start_row || line_start >= clamped_end {
+            continue;
+        }
+
+        let line = &state.render_cache.transcript_lines[raw_index];
+        let mut expanded = render_terminal_line_with_context(line, width, &mut active_fold_kind);
+        let local_start = start_row.saturating_sub(line_start);
+        let local_end = clamped_end.saturating_sub(line_start).min(expanded.len());
+        if local_start < local_end {
+            rendered.extend(expanded.drain(local_start..local_end));
+        }
+    }
+
+    rendered
+}
+
+fn render_terminal_line_with_context(
+    raw_line: &str,
+    width: u16,
+    active_fold_kind: &mut Option<TerminalFoldKind>,
+) -> Vec<Line<'static>> {
+    let line = sanitize_terminal_display_text(raw_line);
+    if line.trim().is_empty() {
+        *active_fold_kind = None;
+        return vec![Line::from(String::new())];
+    }
+
+    if let Some((kind, folded)) = parse_fold_header_line(&line) {
+        *active_fold_kind = if folded { None } else { Some(kind) };
+        return vec![Line::from(Span::styled(line, fold_accent_style(kind, true)))];
+    }
+
+    if let Some(kind) = *active_fold_kind {
+        return vec![Line::from(Span::styled(
+            line,
+            fold_accent_style(kind, false),
+        ))];
+    }
+
+    if line.starts_with("> ") {
+        return vec![Line::from(Span::styled(
+            line,
+            Style::default().fg(Color::LightBlue),
+        ))];
+    }
+
+    if !line_looks_like_markdown(line.as_str()) {
+        return vec![Line::from(line)];
+    }
+
+    let markdown = render_markdown_for_terminal(line.as_str(), width);
+    if markdown.lines.is_empty() {
+        vec![Line::from(String::new())]
+    } else {
+        markdown.lines
+    }
+}
+
+#[derive(Debug, Clone)]
+struct TerminalIndicatorRow {
+    text: String,
+    style: Style,
+}
+
+fn terminal_indicator_rows(
+    transcript_has_content: bool,
+    indicator: TerminalActivityIndicator,
+) -> Vec<TerminalIndicatorRow> {
+    if matches!(indicator, TerminalActivityIndicator::None) {
+        return Vec::new();
+    }
+
+    let mut rows = Vec::with_capacity(2);
+    if transcript_has_content {
+        rows.push(TerminalIndicatorRow {
+            text: String::new(),
+            style: Style::default(),
+        });
+    }
+    match indicator {
+        TerminalActivityIndicator::None => {}
+        TerminalActivityIndicator::Working => rows.push(TerminalIndicatorRow {
+            text: format!("{} agent working...", loading_spinner_frame()),
+            style: Style::default()
+                .fg(Color::LightCyan)
+                .add_modifier(Modifier::DIM),
+        }),
+        TerminalActivityIndicator::AwaitingInput => rows.push(TerminalIndicatorRow {
+            text: "󰥔 awaiting input".to_owned(),
+            style: Style::default().fg(Color::Yellow),
+        }),
+    }
+    rows
 }
 
 fn line_looks_like_markdown(line: &str) -> bool {
@@ -781,37 +1208,6 @@ fn session_turn_is_active(
         .unwrap_or(false)
 }
 
-fn append_terminal_loading_indicator(
-    mut text: Text<'static>,
-    indicator: TerminalActivityIndicator,
-) -> Text<'static> {
-    if matches!(indicator, TerminalActivityIndicator::None) {
-        return text;
-    }
-    if !text.lines.is_empty() {
-        text.lines.push(Line::from(String::new()));
-    }
-    match indicator {
-        TerminalActivityIndicator::None => {}
-        TerminalActivityIndicator::Working => {
-            let frame = loading_spinner_frame();
-            text.lines.push(Line::from(Span::styled(
-                format!("{frame} agent working..."),
-                Style::default()
-                    .fg(Color::LightCyan)
-                    .add_modifier(Modifier::DIM),
-            )));
-        }
-        TerminalActivityIndicator::AwaitingInput => {
-            text.lines.push(Line::from(Span::styled(
-                "󰥔 awaiting input",
-                Style::default().fg(Color::Yellow),
-            )));
-        }
-    }
-    text
-}
-
 fn loading_spinner_frame() -> &'static str {
     const FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
     let elapsed_ms = SystemTime::now()
@@ -955,21 +1351,28 @@ fn apply_nord_markdown_theme(skin: &mut RatSkin) {
 
 fn nord_editor_theme<'a>(block: Block<'a>) -> EditorTheme<'a> {
     EditorTheme::default()
-        .base(Style::default().bg(Color::Rgb(46, 52, 64)).fg(Color::Rgb(216, 222, 233)))
-        .cursor_style(Style::default().bg(Color::Rgb(236, 239, 244)).fg(Color::Rgb(46, 52, 64)))
-        .selection_style(Style::default().bg(Color::Rgb(94, 129, 172)).fg(Color::Rgb(236, 239, 244)))
-        .line_numbers_style(Style::default().bg(Color::Rgb(46, 52, 64)).fg(Color::Rgb(76, 86, 106)))
+        .base(
+            Style::default()
+                .bg(Color::Rgb(46, 52, 64))
+                .fg(Color::Rgb(216, 222, 233)),
+        )
+        .cursor_style(
+            Style::default()
+                .bg(Color::Rgb(236, 239, 244))
+                .fg(Color::Rgb(46, 52, 64)),
+        )
+        .selection_style(
+            Style::default()
+                .bg(Color::Rgb(94, 129, 172))
+                .fg(Color::Rgb(236, 239, 244)),
+        )
+        .line_numbers_style(
+            Style::default()
+                .bg(Color::Rgb(46, 52, 64))
+                .fg(Color::Rgb(76, 86, 106)),
+        )
         .block(block)
         .hide_status_line()
-}
-
-fn estimate_wrapped_line_count(text: &Text<'_>, _area_width: u16) -> u16 {
-    let count = text.lines.len();
-    if count == 0 {
-        1
-    } else {
-        count.min(u16::MAX as usize) as u16
-    }
 }
 
 fn sanitize_terminal_display_text(input: &str) -> String {
@@ -1099,10 +1502,7 @@ fn session_status_label(status: Option<&WorkerSessionStatus>) -> &'static str {
     }
 }
 
-fn workflow_badge_for_session(
-    session: &SessionProjection,
-    domain: &ProjectionState,
-) -> String {
+fn workflow_badge_for_session(session: &SessionProjection, domain: &ProjectionState) -> String {
     session
         .work_item_id
         .as_ref()
@@ -1158,9 +1558,7 @@ fn session_turn_is_running(
 fn workflow_state_to_badge_label(state: &WorkflowState) -> String {
     match state {
         WorkflowState::New | WorkflowState::Planning => "planning",
-        WorkflowState::Implementing | WorkflowState::PRDrafted => {
-            "implementation"
-        }
+        WorkflowState::Implementing | WorkflowState::PRDrafted => "implementation",
         WorkflowState::AwaitingYourReview
         | WorkflowState::ReadyForReview
         | WorkflowState::InReview => "review",
@@ -1279,11 +1677,7 @@ fn expanded_needs_input_layout_active(prompt: &NeedsInputComposerState) -> bool 
         return true;
     }
 
-    if prompt
-        .prompt_id
-        .to_ascii_lowercase()
-        .contains("plan")
-    {
+    if prompt.prompt_id.to_ascii_lowercase().contains("plan") {
         return true;
     }
 
@@ -1319,7 +1713,11 @@ fn needs_input_choice_height(
     expanded_layout: bool,
 ) -> u16 {
     let content_width = panel_width.saturating_sub(10);
-    let Some(options) = question.options.as_ref().filter(|options| !options.is_empty()) else {
+    let Some(options) = question
+        .options
+        .as_ref()
+        .filter(|options| !options.is_empty())
+    else {
         return 3;
     };
 
@@ -1340,7 +1738,8 @@ fn needs_input_choice_height(
         NEEDS_INPUT_CHOICE_MAX_ROWS_DEFAULT
     };
     let clamped_rows = rows.clamp(NEEDS_INPUT_CHOICE_MIN_ROWS_DEFAULT, max_rows);
-    u16::try_from(clamped_rows).unwrap_or(NEEDS_INPUT_CHOICE_MAX_EXPANDED_HEIGHT_U16)
+    u16::try_from(clamped_rows)
+        .unwrap_or(NEEDS_INPUT_CHOICE_MAX_EXPANDED_HEIGHT_U16)
         .saturating_add(2)
 }
 
@@ -1351,11 +1750,7 @@ fn wrapped_row_count(text: &str, width: u16) -> u16 {
     let mut rows = 0usize;
     for segment in text.split('\n') {
         let chars = segment.chars().count();
-        let wrapped = if chars == 0 {
-            1
-        } else {
-            chars.div_ceil(width)
-        };
+        let wrapped = if chars == 0 { 1 } else { chars.div_ceil(width) };
         rows = rows.saturating_add(wrapped.max(1));
     }
     u16::try_from(rows).unwrap_or(u16::MAX)
@@ -1412,15 +1807,16 @@ fn render_terminal_needs_input_panel(
 
     let header = format!("{} | {}", question.header, question.question);
     frame.render_widget(
-        Paragraph::new(compact_focus_card_text(header.as_str())).block(
-            Block::default()
-                .title("question")
-                .borders(Borders::ALL),
-        ),
+        Paragraph::new(compact_focus_card_text(header.as_str()))
+            .block(Block::default().title("question").borders(Borders::ALL)),
         question_area,
     );
 
-    if let Some(options) = question.options.as_ref().filter(|options| !options.is_empty()) {
+    if let Some(options) = question
+        .options
+        .as_ref()
+        .filter(|options| !options.is_empty())
+    {
         let selected_index = prompt.select_state.selected_index;
         let highlighted_index = prompt
             .select_state
@@ -1545,8 +1941,7 @@ fn render_worktree_diff_modal(
     let labels = session_display_labels(domain, &modal.session_id);
     let title = format!(
         "diff | ticket: {} | base: {}",
-        labels.compact_label,
-        modal.base_branch
+        labels.compact_label, modal.base_branch
     );
     frame.render_widget(Clear, popup);
     if modal.loading {
@@ -1862,7 +2257,10 @@ fn parse_diff_file_summaries(content: &str) -> Vec<DiffFileSummary> {
     files
 }
 
-fn render_diff_file_list(modal: &WorktreeDiffModalState, files: &[DiffFileSummary]) -> Text<'static> {
+fn render_diff_file_list(
+    modal: &WorktreeDiffModalState,
+    files: &[DiffFileSummary],
+) -> Text<'static> {
     if files.is_empty() {
         return Text::from(Line::from(Span::styled(
             "(No changed files.)",
@@ -1906,7 +2304,10 @@ fn selected_file_and_hunk_range(
     Some((file.start_index, file.end_index, hunk))
 }
 
-fn render_selected_file_diff(modal: &WorktreeDiffModalState, files: &[DiffFileSummary]) -> Text<'static> {
+fn render_selected_file_diff(
+    modal: &WorktreeDiffModalState,
+    files: &[DiffFileSummary],
+) -> Text<'static> {
     let parsed = parse_rendered_diff_lines(modal.content.as_str());
     let Some((start, end, selected_hunk)) = selected_file_and_hunk_range(modal, files) else {
         return Text::from(Line::from(Span::styled(
@@ -1921,7 +2322,9 @@ fn render_selected_file_diff(modal: &WorktreeDiffModalState, files: &[DiffFileSu
         if let Some((hunk_start, hunk_end)) = selected_hunk {
             if global_index >= hunk_start && global_index <= hunk_end {
                 style = if modal.focus == DiffPaneFocus::Diff {
-                    style.bg(Color::Rgb(59, 66, 82)).add_modifier(Modifier::BOLD)
+                    style
+                        .bg(Color::Rgb(59, 66, 82))
+                        .add_modifier(Modifier::BOLD)
                 } else {
                     style.bg(Color::Rgb(47, 52, 63))
                 };
@@ -1937,7 +2340,8 @@ fn worktree_diff_modal_scroll(
     files: &[DiffFileSummary],
     viewport_rows: usize,
 ) -> u16 {
-    let Some((file_start, file_end, selected_hunk)) = selected_file_and_hunk_range(modal, files) else {
+    let Some((file_start, file_end, selected_hunk)) = selected_file_and_hunk_range(modal, files)
+    else {
         return 0;
     };
     let center = selected_hunk
@@ -2011,7 +2415,9 @@ fn worktree_diff_modal_line_count(modal: &WorktreeDiffModalState) -> usize {
     if let Some((start, end, _)) = selected_file_and_hunk_range(modal, files.as_slice()) {
         return end.saturating_sub(start).saturating_add(1).max(1);
     }
-    parse_rendered_diff_lines(modal.content.as_str()).len().max(1)
+    parse_rendered_diff_lines(modal.content.as_str())
+        .len()
+        .max(1)
 }
 
 fn collect_selected_worktree_diff_refs(
@@ -2122,8 +2528,11 @@ fn render_archive_session_confirm_overlay(
     };
     frame.render_widget(Clear, popup);
     frame.render_widget(
-        Paragraph::new(content)
-            .block(Block::default().title("archive session").borders(Borders::ALL)),
+        Paragraph::new(content).block(
+            Block::default()
+                .title("archive session")
+                .borders(Borders::ALL),
+        ),
         popup,
     );
 }
@@ -2143,8 +2552,11 @@ fn render_ticket_archive_confirm_overlay(
     };
     frame.render_widget(Clear, popup);
     frame.render_widget(
-        Paragraph::new(content)
-            .block(Block::default().title("archive ticket").borders(Borders::ALL)),
+        Paragraph::new(content).block(
+            Block::default()
+                .title("archive ticket")
+                .borders(Borders::ALL),
+        ),
         popup,
     );
 }

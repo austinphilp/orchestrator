@@ -8,11 +8,13 @@ mod tests {
     use async_trait::async_trait;
     use orchestrator_core::{
         ArtifactId, ArtifactKind, ArtifactProjection, CoreError, InboxItemProjection,
-        LlmProviderKind, LlmResponseStream, LlmResponseSubscription, LlmStreamChunk,
-        OrchestrationEventPayload, OrchestrationEventType, SessionBlockedPayload,
-        SessionCheckpointPayload, SessionNeedsInputPayload, SessionProjection,
+        InboxItemCreatedPayload, LlmProviderKind, LlmResponseStream, LlmResponseSubscription,
+        LlmStreamChunk, OrchestrationEventPayload, OrchestrationEventType, SessionBlockedPayload,
+        SessionCheckpointPayload,
+        SessionCompletedPayload, SessionNeedsInputPayload, SessionProjection,
         SessionRuntimeProjection, StoredEventEnvelope, SupervisorQueryFinishedPayload,
-        TicketProvider, UserRespondedPayload, WorkItemProjection, WorkflowState,
+        TicketProvider, UserRespondedPayload, WorkItemProjection, WorkflowTransitionPayload,
+        WorkflowTransitionReason, WorkflowState,
     };
     use orchestrator_runtime::{
         BackendCapabilities, BackendEvent, BackendKind, BackendNeedsInputEvent,
@@ -199,19 +201,50 @@ mod tests {
 
         async fn archive_session(
             &self,
-            _session_id: WorkerSessionId,
-        ) -> Result<Option<String>, CoreError> {
-            Ok(None)
+            session_id: WorkerSessionId,
+        ) -> Result<SessionArchiveOutcome, CoreError> {
+            Ok(SessionArchiveOutcome {
+                warning: None,
+                event: stored_event_for_test(
+                    "evt-test-session-archived",
+                    1,
+                    None,
+                    Some(session_id.clone()),
+                    OrchestrationEventPayload::SessionCompleted(SessionCompletedPayload {
+                        session_id,
+                        summary: Some("archived".to_owned()),
+                    }),
+                ),
+            })
         }
 
         async fn reload_projection(&self) -> Result<ProjectionState, CoreError> {
             Ok(ProjectionState::default())
+        }
+
+        async fn complete_session_after_merge(
+            &self,
+            session_id: WorkerSessionId,
+        ) -> Result<SessionMergeFinalizeOutcome, CoreError> {
+            Ok(SessionMergeFinalizeOutcome {
+                event: stored_event_for_test(
+                    "evt-test-session-merged",
+                    2,
+                    None,
+                    Some(session_id.clone()),
+                    OrchestrationEventPayload::SessionCompleted(SessionCompletedPayload {
+                        session_id,
+                        summary: Some("merged".to_owned()),
+                    }),
+                ),
+            })
         }
     }
 
     #[derive(Default)]
     struct RecordingTicketPickerProvider {
         published_inbox_requests: Arc<Mutex<Vec<InboxPublishRequest>>>,
+        resolved_inbox_requests: Arc<Mutex<Vec<InboxResolveRequest>>>,
     }
 
     impl RecordingTicketPickerProvider {
@@ -219,6 +252,13 @@ mod tests {
             self.published_inbox_requests
                 .lock()
                 .expect("published inbox requests lock")
+                .clone()
+        }
+
+        fn resolved_inbox_requests(&self) -> Vec<InboxResolveRequest> {
+            self.resolved_inbox_requests
+                .lock()
+                .expect("resolved inbox requests lock")
                 .clone()
         }
     }
@@ -255,12 +295,108 @@ mod tests {
         async fn publish_inbox_item(
             &self,
             request: InboxPublishRequest,
-        ) -> Result<ProjectionState, CoreError> {
+        ) -> Result<StoredEventEnvelope, CoreError> {
             self.published_inbox_requests
                 .lock()
                 .expect("published inbox requests lock")
                 .push(request);
+            let request = self
+                .published_inbox_requests
+                .lock()
+                .expect("published inbox requests lock")
+                .last()
+                .cloned()
+                .expect("request recorded");
+            Ok(stored_event_for_test(
+                "evt-test-inbox-published",
+                1,
+                Some(request.work_item_id.clone()),
+                request.session_id.clone(),
+                OrchestrationEventPayload::InboxItemCreated(InboxItemCreatedPayload {
+                    inbox_item_id: InboxItemId::new("inbox-test"),
+                    work_item_id: request.work_item_id,
+                    kind: request.kind,
+                    title: request.title,
+                }),
+            ))
+        }
+
+        async fn resolve_inbox_item(
+            &self,
+            request: InboxResolveRequest,
+        ) -> Result<Option<StoredEventEnvelope>, CoreError> {
+            self.resolved_inbox_requests
+                .lock()
+                .expect("resolved inbox requests lock")
+                .push(request.clone());
+            Ok(Some(stored_event_for_test(
+                "evt-test-inbox-resolved",
+                2,
+                Some(request.work_item_id.clone()),
+                None,
+                OrchestrationEventPayload::InboxItemResolved(
+                    orchestrator_core::InboxItemResolvedPayload {
+                        inbox_item_id: request.inbox_item_id,
+                        work_item_id: request.work_item_id,
+                    },
+                ),
+            )))
+        }
+    }
+
+    #[derive(Default)]
+    struct RecordingWorkingStateProvider {
+        persisted_working_states: Arc<Mutex<Vec<(WorkerSessionId, bool)>>>,
+    }
+
+    impl RecordingWorkingStateProvider {
+        fn persisted_working_states(&self) -> Vec<(WorkerSessionId, bool)> {
+            self.persisted_working_states
+                .lock()
+                .expect("persisted working states lock")
+                .clone()
+        }
+    }
+
+    #[async_trait]
+    impl TicketPickerProvider for RecordingWorkingStateProvider {
+        async fn list_unfinished_tickets(&self) -> Result<Vec<TicketSummary>, CoreError> {
+            Ok(Vec::new())
+        }
+
+        async fn start_or_resume_ticket(
+            &self,
+            _ticket: TicketSummary,
+            _repository_override: Option<PathBuf>,
+        ) -> Result<SelectedTicketFlowResult, CoreError> {
+            Err(CoreError::DependencyUnavailable(
+                "not used in recording working-state provider".to_owned(),
+            ))
+        }
+
+        async fn create_ticket_from_brief(
+            &self,
+            _request: CreateTicketFromPickerRequest,
+        ) -> Result<TicketSummary, CoreError> {
+            Err(CoreError::DependencyUnavailable(
+                "not used in recording working-state provider".to_owned(),
+            ))
+        }
+
+        async fn reload_projection(&self) -> Result<ProjectionState, CoreError> {
             Ok(ProjectionState::default())
+        }
+
+        async fn set_session_working_state(
+            &self,
+            session_id: WorkerSessionId,
+            is_working: bool,
+        ) -> Result<(), CoreError> {
+            self.persisted_working_states
+                .lock()
+                .expect("persisted working states lock")
+                .push((session_id, is_working));
+            Ok(())
         }
     }
 
@@ -283,12 +419,88 @@ mod tests {
         }
     }
 
+    fn stored_event_for_test(
+        event_id: &str,
+        sequence: u64,
+        work_item_id: Option<WorkItemId>,
+        session_id: Option<WorkerSessionId>,
+        payload: OrchestrationEventPayload,
+    ) -> StoredEventEnvelope {
+        let event_type = match &payload {
+            OrchestrationEventPayload::TicketSynced(_) => OrchestrationEventType::TicketSynced,
+            OrchestrationEventPayload::TicketDetailsSynced(_) => {
+                OrchestrationEventType::TicketDetailsSynced
+            }
+            OrchestrationEventPayload::WorkItemCreated(_) => OrchestrationEventType::WorkItemCreated,
+            OrchestrationEventPayload::WorktreeCreated(_) => OrchestrationEventType::WorktreeCreated,
+            OrchestrationEventPayload::SessionSpawned(_) => OrchestrationEventType::SessionSpawned,
+            OrchestrationEventPayload::SessionCheckpoint(_) => {
+                OrchestrationEventType::SessionCheckpoint
+            }
+            OrchestrationEventPayload::SessionNeedsInput(_) => {
+                OrchestrationEventType::SessionNeedsInput
+            }
+            OrchestrationEventPayload::SessionBlocked(_) => OrchestrationEventType::SessionBlocked,
+            OrchestrationEventPayload::SessionCompleted(_) => {
+                OrchestrationEventType::SessionCompleted
+            }
+            OrchestrationEventPayload::SessionCrashed(_) => OrchestrationEventType::SessionCrashed,
+            OrchestrationEventPayload::ArtifactCreated(_) => OrchestrationEventType::ArtifactCreated,
+            OrchestrationEventPayload::WorkflowTransition(_) => {
+                OrchestrationEventType::WorkflowTransition
+            }
+            OrchestrationEventPayload::InboxItemCreated(_) => OrchestrationEventType::InboxItemCreated,
+            OrchestrationEventPayload::InboxItemResolved(_) => {
+                OrchestrationEventType::InboxItemResolved
+            }
+            OrchestrationEventPayload::UserResponded(_) => OrchestrationEventType::UserResponded,
+            OrchestrationEventPayload::SupervisorQueryStarted(_) => {
+                OrchestrationEventType::SupervisorQueryStarted
+            }
+            OrchestrationEventPayload::SupervisorQueryChunk(_) => {
+                OrchestrationEventType::SupervisorQueryChunk
+            }
+            OrchestrationEventPayload::SupervisorQueryCancelled(_) => {
+                OrchestrationEventType::SupervisorQueryCancelled
+            }
+            OrchestrationEventPayload::SupervisorQueryFinished(_) => {
+                OrchestrationEventType::SupervisorQueryFinished
+            }
+        };
+        StoredEventEnvelope {
+            event_id: event_id.to_owned(),
+            sequence,
+            occurred_at: "2026-02-21T00:00:00Z".to_owned(),
+            work_item_id,
+            session_id,
+            event_type,
+            payload,
+            schema_version: 1,
+        }
+    }
+
     fn ctrl_key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::CONTROL)
     }
 
     fn shift_key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::SHIFT)
+    }
+
+    async fn wait_for_working_state_persist_count(
+        provider: &RecordingWorkingStateProvider,
+        expected_count: usize,
+    ) {
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if provider.persisted_working_states().len() >= expected_count {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("working-state persists should complete");
     }
 
     #[derive(Default, Debug)]
@@ -445,6 +657,87 @@ mod tests {
             SessionProjection {
                 id: WorkerSessionId::new("sess-review"),
                 work_item_id: Some(work_item_id),
+                status: Some(WorkerSessionStatus::Running),
+                latest_checkpoint: None,
+            },
+        );
+
+        projection
+    }
+
+    fn mixed_reconcile_projection() -> ProjectionState {
+        let mut projection = ProjectionState::default();
+        for (work_item_id, session_id, workflow_state, status) in [
+            (
+                WorkItemId::new("wi-planning"),
+                WorkerSessionId::new("sess-planning"),
+                WorkflowState::Planning,
+                WorkerSessionStatus::Running,
+            ),
+            (
+                WorkItemId::new("wi-implementing"),
+                WorkerSessionId::new("sess-implementing"),
+                WorkflowState::Implementing,
+                WorkerSessionStatus::Running,
+            ),
+            (
+                WorkItemId::new("wi-review"),
+                WorkerSessionId::new("sess-review"),
+                WorkflowState::InReview,
+                WorkerSessionStatus::Running,
+            ),
+            (
+                WorkItemId::new("wi-pending-merge"),
+                WorkerSessionId::new("sess-pending-merge"),
+                WorkflowState::PendingMerge,
+                WorkerSessionStatus::Running,
+            ),
+            (
+                WorkItemId::new("wi-pr-drafted"),
+                WorkerSessionId::new("sess-pr-drafted"),
+                WorkflowState::PRDrafted,
+                WorkerSessionStatus::Running,
+            ),
+            (
+                WorkItemId::new("wi-done"),
+                WorkerSessionId::new("sess-done"),
+                WorkflowState::Planning,
+                WorkerSessionStatus::Done,
+            ),
+        ] {
+            projection.work_items.insert(
+                work_item_id.clone(),
+                WorkItemProjection {
+                    id: work_item_id.clone(),
+                    ticket_id: None,
+                    project_id: None,
+                    workflow_state: Some(workflow_state),
+                    session_id: Some(session_id.clone()),
+                    worktree_id: None,
+                    inbox_items: Vec::new(),
+                    artifacts: Vec::new(),
+                },
+            );
+            projection.sessions.insert(
+                session_id.clone(),
+                SessionProjection {
+                    id: session_id.clone(),
+                    work_item_id: Some(work_item_id),
+                    status: Some(status),
+                    latest_checkpoint: None,
+                },
+            );
+            projection.session_runtime.insert(
+                session_id,
+                SessionRuntimeProjection { is_working: false },
+            );
+        }
+
+        projection.sessions.insert(
+            WorkerSessionId::new("sess-orphan"),
+            SessionProjection {
+                id: WorkerSessionId::new("sess-orphan"),
+                work_item_id: Some(WorkItemId::new("wi-orphan")),
                 status: Some(WorkerSessionStatus::Running),
                 latest_checkpoint: None,
             },
@@ -1667,6 +1960,107 @@ mod tests {
     }
 
     #[test]
+    fn session_panel_line_metrics_tracks_selected_row_line() {
+        let rows = vec![
+            SessionPanelRow {
+                session_id: WorkerSessionId::new("sess-a-1"),
+                project: "Alpha".to_owned(),
+                group: SessionStateGroup::Planning,
+                ticket_label: "Alpha planning".to_owned(),
+                badge: "planning".to_owned(),
+                activity: SessionRowActivity::Idle,
+            },
+            SessionPanelRow {
+                session_id: WorkerSessionId::new("sess-a-2"),
+                project: "Alpha".to_owned(),
+                group: SessionStateGroup::Implementation,
+                ticket_label: "Alpha implementation".to_owned(),
+                badge: "implementing".to_owned(),
+                activity: SessionRowActivity::Idle,
+            },
+            SessionPanelRow {
+                session_id: WorkerSessionId::new("sess-b-1"),
+                project: "Beta".to_owned(),
+                group: SessionStateGroup::Review,
+                ticket_label: "Beta review".to_owned(),
+                badge: "review".to_owned(),
+                activity: SessionRowActivity::Idle,
+            },
+        ];
+
+        let selected = WorkerSessionId::new("sess-b-1");
+        let metrics = session_panel_line_metrics_from_rows(&rows, Some(&selected));
+        assert_eq!(metrics.total_lines, 9);
+        assert_eq!(metrics.selected_line, Some(8));
+    }
+
+    #[test]
+    fn session_panel_virtualization_renders_only_visible_lines() {
+        let rows = vec![
+            SessionPanelRow {
+                session_id: WorkerSessionId::new("sess-a-1"),
+                project: "Alpha".to_owned(),
+                group: SessionStateGroup::Planning,
+                ticket_label: "Ticket A1".to_owned(),
+                badge: "planning".to_owned(),
+                activity: SessionRowActivity::Idle,
+            },
+            SessionPanelRow {
+                session_id: WorkerSessionId::new("sess-a-2"),
+                project: "Alpha".to_owned(),
+                group: SessionStateGroup::Planning,
+                ticket_label: "Ticket A2".to_owned(),
+                badge: "planning".to_owned(),
+                activity: SessionRowActivity::Idle,
+            },
+            SessionPanelRow {
+                session_id: WorkerSessionId::new("sess-a-3"),
+                project: "Alpha".to_owned(),
+                group: SessionStateGroup::Implementation,
+                ticket_label: "Ticket A3".to_owned(),
+                badge: "implementing".to_owned(),
+                activity: SessionRowActivity::Idle,
+            },
+            SessionPanelRow {
+                session_id: WorkerSessionId::new("sess-b-1"),
+                project: "Beta".to_owned(),
+                group: SessionStateGroup::Planning,
+                ticket_label: "Ticket B1".to_owned(),
+                badge: "planning".to_owned(),
+                activity: SessionRowActivity::Idle,
+            },
+        ];
+
+        let rendered = render_sessions_panel_text_virtualized_from_rows(&rows, None, 3, 4);
+        let lines = rendered
+            .lines
+            .iter()
+            .map(render_plain_text_line)
+            .collect::<Vec<_>>();
+        assert_eq!(lines.len(), 4);
+        assert!(lines[0].contains("Ticket A2"));
+        assert_eq!(lines[1], "  Implementation:");
+        assert!(lines[2].contains("Ticket A3"));
+        assert_eq!(lines[3], "");
+    }
+
+    #[test]
+    fn session_panel_viewport_sync_keeps_selected_visible() {
+        let mut shell_state = UiShellState::new("ready".to_owned(), ProjectionState::default());
+        shell_state.sync_session_panel_viewport(30, Some(0), 5);
+        assert_eq!(shell_state.session_panel_scroll_line(), 0);
+
+        shell_state.sync_session_panel_viewport(30, Some(8), 5);
+        assert_eq!(shell_state.session_panel_scroll_line(), 4);
+
+        shell_state.sync_session_panel_viewport(30, Some(3), 5);
+        assert_eq!(shell_state.session_panel_scroll_line(), 3);
+
+        shell_state.sync_session_panel_viewport(3, Some(2), 5);
+        assert_eq!(shell_state.session_panel_scroll_line(), 0);
+    }
+
+    #[test]
     fn resolved_inbox_rows_keep_animation_tick_active_until_auto_dismiss() {
         let mut projection = sample_projection(true);
         let work_item_id = WorkItemId::new("wi-1");
@@ -2525,6 +2919,264 @@ mod tests {
         assert!(shell_state.session_requires_progression_approval(&session_id));
     }
 
+    #[tokio::test]
+    async fn planning_turn_state_flaps_coalesce_to_single_persisted_write() {
+        let backend = Arc::new(ManualTerminalBackend::default());
+        let provider = Arc::new(RecordingWorkingStateProvider::default());
+        let mut projection = sample_projection(true);
+        let session_id = WorkerSessionId::new("sess-1");
+        projection
+            .work_items
+            .get_mut(&WorkItemId::new("wi-1"))
+            .expect("work item")
+            .workflow_state = Some(WorkflowState::Planning);
+
+        let mut shell_state = UiShellState::new_with_integrations(
+            "ready".to_owned(),
+            projection,
+            None,
+            None,
+            Some(provider.clone()),
+            Some(backend),
+        );
+        shell_state.open_terminal_and_enter_mode();
+        let sender = shell_state
+            .terminal_session_sender
+            .clone()
+            .expect("terminal sender");
+
+        for active in [true, false, true] {
+            sender
+                .try_send(TerminalSessionEvent::TurnState {
+                    session_id: session_id.clone(),
+                    turn_state: BackendTurnStateEvent { active },
+                })
+                .expect("queue turn state");
+        }
+        shell_state.poll_terminal_session_events();
+
+        assert!(provider.persisted_working_states().is_empty());
+        assert_eq!(
+            shell_state
+                .pending_session_working_state_persists
+                .get(&session_id)
+                .map(|pending| pending.is_working),
+            Some(true)
+        );
+
+        shell_state
+            .pending_session_working_state_persists
+            .get_mut(&session_id)
+            .expect("pending planning persist")
+            .deadline = Instant::now() - Duration::from_millis(1);
+        shell_state.flush_due_session_working_state_persists();
+
+        wait_for_working_state_persist_count(provider.as_ref(), 1).await;
+        assert_eq!(
+            provider.persisted_working_states(),
+            vec![(session_id.clone(), true)]
+        );
+    }
+
+    #[tokio::test]
+    async fn planning_turn_state_persists_after_settle_window() {
+        let backend = Arc::new(ManualTerminalBackend::default());
+        let provider = Arc::new(RecordingWorkingStateProvider::default());
+        let mut projection = sample_projection(true);
+        let session_id = WorkerSessionId::new("sess-1");
+        projection
+            .work_items
+            .get_mut(&WorkItemId::new("wi-1"))
+            .expect("work item")
+            .workflow_state = Some(WorkflowState::Planning);
+
+        let mut shell_state = UiShellState::new_with_integrations(
+            "ready".to_owned(),
+            projection,
+            None,
+            None,
+            Some(provider.clone()),
+            Some(backend),
+        );
+        shell_state.open_terminal_and_enter_mode();
+        let sender = shell_state
+            .terminal_session_sender
+            .clone()
+            .expect("terminal sender");
+
+        sender
+            .try_send(TerminalSessionEvent::TurnState {
+                session_id: session_id.clone(),
+                turn_state: BackendTurnStateEvent { active: true },
+            })
+            .expect("queue turn state");
+        shell_state.poll_terminal_session_events();
+
+        assert!(provider.persisted_working_states().is_empty());
+        shell_state
+            .pending_session_working_state_persists
+            .get_mut(&session_id)
+            .expect("pending planning persist")
+            .deadline = Instant::now() - Duration::from_millis(1);
+        shell_state.flush_due_session_working_state_persists();
+
+        wait_for_working_state_persist_count(provider.as_ref(), 1).await;
+        assert_eq!(provider.persisted_working_states(), vec![(session_id, true)]);
+    }
+
+    #[tokio::test]
+    async fn non_planning_turn_state_persists_immediately() {
+        let backend = Arc::new(ManualTerminalBackend::default());
+        let provider = Arc::new(RecordingWorkingStateProvider::default());
+        let projection = sample_projection(true);
+        let session_id = WorkerSessionId::new("sess-1");
+        let mut shell_state = UiShellState::new_with_integrations(
+            "ready".to_owned(),
+            projection,
+            None,
+            None,
+            Some(provider.clone()),
+            Some(backend),
+        );
+        shell_state.open_terminal_and_enter_mode();
+        let sender = shell_state
+            .terminal_session_sender
+            .clone()
+            .expect("terminal sender");
+
+        sender
+            .try_send(TerminalSessionEvent::TurnState {
+                session_id: session_id.clone(),
+                turn_state: BackendTurnStateEvent { active: true },
+            })
+            .expect("queue turn state");
+        shell_state.poll_terminal_session_events();
+
+        wait_for_working_state_persist_count(provider.as_ref(), 1).await;
+        assert_eq!(
+            provider.persisted_working_states(),
+            vec![(session_id.clone(), true)]
+        );
+        assert!(!shell_state
+            .pending_session_working_state_persists
+            .contains_key(&session_id));
+    }
+
+    #[tokio::test]
+    async fn stream_end_bypasses_planning_debounce_and_clears_pending_true_write() {
+        let backend = Arc::new(ManualTerminalBackend::default());
+        let provider = Arc::new(RecordingWorkingStateProvider::default());
+        let mut projection = sample_projection(true);
+        let session_id = WorkerSessionId::new("sess-1");
+        projection
+            .work_items
+            .get_mut(&WorkItemId::new("wi-1"))
+            .expect("work item")
+            .workflow_state = Some(WorkflowState::Planning);
+
+        let mut shell_state = UiShellState::new_with_integrations(
+            "ready".to_owned(),
+            projection,
+            None,
+            None,
+            Some(provider.clone()),
+            Some(backend),
+        );
+        shell_state.open_terminal_and_enter_mode();
+        let sender = shell_state
+            .terminal_session_sender
+            .clone()
+            .expect("terminal sender");
+
+        sender
+            .try_send(TerminalSessionEvent::TurnState {
+                session_id: session_id.clone(),
+                turn_state: BackendTurnStateEvent { active: true },
+            })
+            .expect("queue turn state");
+        shell_state.poll_terminal_session_events();
+        assert!(shell_state
+            .pending_session_working_state_persists
+            .contains_key(&session_id));
+
+        sender
+            .try_send(TerminalSessionEvent::StreamEnded {
+                session_id: session_id.clone(),
+            })
+            .expect("queue stream ended");
+        shell_state.poll_terminal_session_events();
+
+        wait_for_working_state_persist_count(provider.as_ref(), 1).await;
+        assert_eq!(
+            provider.persisted_working_states(),
+            vec![(session_id.clone(), false)]
+        );
+        assert!(!shell_state
+            .pending_session_working_state_persists
+            .contains_key(&session_id));
+
+        shell_state.flush_due_session_working_state_persists();
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert_eq!(
+            provider.persisted_working_states(),
+            vec![(session_id, false)]
+        );
+    }
+
+    #[tokio::test]
+    async fn progression_approval_poll_only_scans_progression_eligible_sessions() {
+        let mut projection = mixed_reconcile_projection();
+        let stale_review_inbox_id =
+            InboxItemId::new("sess-review-workflow-awaiting-progression");
+        let review_work_item_id = WorkItemId::new("wi-review");
+        projection
+            .work_items
+            .get_mut(&review_work_item_id)
+            .expect("review work item")
+            .inbox_items
+            .push(stale_review_inbox_id.clone());
+        projection.inbox_items.insert(
+            stale_review_inbox_id.clone(),
+            InboxItemProjection {
+                id: stale_review_inbox_id,
+                work_item_id: review_work_item_id,
+                kind: InboxItemKind::NeedsApproval,
+                title: "Stale progression approval in review stage".to_owned(),
+                resolved: false,
+            },
+        );
+
+        let provider = Arc::new(RecordingTicketPickerProvider::default());
+        let mut shell_state = UiShellState::new_with_integrations(
+            "ready".to_owned(),
+            projection,
+            None,
+            None,
+            Some(provider.clone()),
+            None,
+        );
+
+        shell_state.mark_all_eligible_reconcile_dirty();
+        shell_state.enqueue_event_driven_reconciles();
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        shell_state.poll_ticket_picker_events();
+
+        let mut published_session_ids = provider
+            .published_inbox_requests()
+            .into_iter()
+            .filter(|request| request.coalesce_key == "workflow-awaiting-progression")
+            .filter_map(|request| request.session_id.map(|id| id.as_str().to_owned()))
+            .collect::<Vec<_>>();
+        published_session_ids.sort();
+        assert_eq!(
+            published_session_ids,
+            vec!["sess-implementing".to_owned(), "sess-planning".to_owned()]
+        );
+
+        let resolved = provider.resolved_inbox_requests();
+        assert!(resolved.is_empty());
+    }
+
     #[test]
     fn workflow_transition_routing_maps_prdrafted_to_approvals_and_review_to_pr_lane() {
         assert_eq!(
@@ -2543,6 +3195,153 @@ mod tests {
                 "Ticket is idle in review stage"
             ))
         );
+    }
+
+    #[test]
+    fn reconcile_eligibility_indexes_initialize_from_projection() {
+        let mut projection = sample_projection(true);
+        let planning_work_item_id = WorkItemId::new("wi-plan");
+        let planning_session_id = WorkerSessionId::new("sess-plan");
+        let review_work_item_id = WorkItemId::new("wi-review");
+        let review_session_id = WorkerSessionId::new("sess-review");
+
+        projection.work_items.insert(
+            planning_work_item_id.clone(),
+            WorkItemProjection {
+                id: planning_work_item_id.clone(),
+                ticket_id: None,
+                project_id: None,
+                workflow_state: Some(WorkflowState::Planning),
+                session_id: Some(planning_session_id.clone()),
+                worktree_id: None,
+                inbox_items: vec![],
+                artifacts: vec![],
+            },
+        );
+        projection.sessions.insert(
+            planning_session_id.clone(),
+            SessionProjection {
+                id: planning_session_id.clone(),
+                work_item_id: Some(planning_work_item_id),
+                status: Some(WorkerSessionStatus::Running),
+                latest_checkpoint: None,
+            },
+        );
+        projection.work_items.insert(
+            review_work_item_id.clone(),
+            WorkItemProjection {
+                id: review_work_item_id.clone(),
+                ticket_id: None,
+                project_id: None,
+                workflow_state: Some(WorkflowState::InReview),
+                session_id: Some(review_session_id.clone()),
+                worktree_id: None,
+                inbox_items: vec![],
+                artifacts: vec![],
+            },
+        );
+        projection.sessions.insert(
+            review_session_id.clone(),
+            SessionProjection {
+                id: review_session_id.clone(),
+                work_item_id: Some(review_work_item_id),
+                status: Some(WorkerSessionStatus::Running),
+                latest_checkpoint: None,
+            },
+        );
+
+        let shell_state = UiShellState::new("ready".to_owned(), projection);
+        assert!(shell_state
+            .approval_reconcile_candidate_sessions
+            .contains(&WorkerSessionId::new("sess-1")));
+        assert!(shell_state
+            .approval_reconcile_candidate_sessions
+            .contains(&planning_session_id));
+        assert!(!shell_state
+            .approval_reconcile_candidate_sessions
+            .contains(&review_session_id));
+        assert!(shell_state
+            .review_reconcile_eligible_sessions
+            .contains(&review_session_id));
+        assert!(!shell_state
+            .review_reconcile_eligible_sessions
+            .contains(&WorkerSessionId::new("sess-1")));
+    }
+
+    #[test]
+    fn reconcile_eligibility_indexes_update_on_workflow_transition_fallback() {
+        let mut shell_state = UiShellState::new("ready".to_owned(), sample_projection(true));
+        let session_id = WorkerSessionId::new("sess-1");
+
+        assert!(shell_state
+            .approval_reconcile_candidate_sessions
+            .contains(&session_id));
+        assert!(!shell_state
+            .review_reconcile_eligible_sessions
+            .contains(&session_id));
+
+        shell_state.apply_ticket_picker_event(TicketPickerEvent::SessionWorkflowAdvanced {
+            outcome: SessionWorkflowAdvanceOutcome {
+                session_id: session_id.clone(),
+                work_item_id: WorkItemId::new("wi-1"),
+                from: WorkflowState::Implementing,
+                to: WorkflowState::InReview,
+                instruction: None,
+                event: stored_event_for_test(
+                    "evt-test-workflow-inreview",
+                    2,
+                    Some(WorkItemId::new("wi-1")),
+                    Some(session_id.clone()),
+                    OrchestrationEventPayload::WorkflowTransition(WorkflowTransitionPayload {
+                        work_item_id: WorkItemId::new("wi-1"),
+                        from: WorkflowState::Implementing,
+                        to: WorkflowState::InReview,
+                        reason: Some(WorkflowTransitionReason::PlanCommitted),
+                    }),
+                ),
+            },
+        });
+
+        assert!(!shell_state
+            .approval_reconcile_candidate_sessions
+            .contains(&session_id));
+        assert!(shell_state
+            .review_reconcile_eligible_sessions
+            .contains(&session_id));
+    }
+
+    #[test]
+    fn reconcile_eligibility_indexes_update_on_archive_fallback() {
+        let mut shell_state = UiShellState::new("ready".to_owned(), sample_projection(true));
+        let session_id = WorkerSessionId::new("sess-1");
+
+        assert!(shell_state
+            .approval_reconcile_candidate_sessions
+            .contains(&session_id));
+
+        shell_state.apply_ticket_picker_event(TicketPickerEvent::SessionArchived {
+            session_id: session_id.clone(),
+            warning: None,
+            event: stored_event_for_test(
+                "evt-test-session-archived",
+                2,
+                Some(WorkItemId::new("wi-1")),
+                Some(session_id.clone()),
+                OrchestrationEventPayload::WorkflowTransition(WorkflowTransitionPayload {
+                    work_item_id: WorkItemId::new("wi-1"),
+                    from: WorkflowState::Implementing,
+                    to: WorkflowState::Abandoned,
+                    reason: Some(WorkflowTransitionReason::Cancelled),
+                }),
+            ),
+        });
+
+        assert!(!shell_state
+            .approval_reconcile_candidate_sessions
+            .contains(&session_id));
+        assert!(!shell_state
+            .review_reconcile_eligible_sessions
+            .contains(&session_id));
     }
 
     #[test]
@@ -3554,6 +4353,7 @@ mod tests {
             .get_mut(&WorkerSessionId::new("sess-2"))
             .expect("offscreen state should exist");
         offscreen_state.last_background_flush_at = Some(Instant::now() - Duration::from_secs(16));
+        shell_state.recompute_background_terminal_flush_deadline();
 
         assert!(shell_state.flush_background_terminal_output_and_report());
         let flushed = shell_state
@@ -3806,6 +4606,93 @@ mod tests {
     }
 
     #[test]
+    fn session_info_background_summary_refresh_is_throttled() {
+        let mut shell_state = UiShellState::new("ready".to_owned(), sample_projection(true));
+        shell_state.open_terminal_and_enter_mode();
+        shell_state.cycle_pane_focus();
+        assert!(!shell_state.session_info_is_foreground());
+        let session_id = shell_state
+            .active_terminal_session_id()
+            .cloned()
+            .expect("active session");
+        let previous = Instant::now() - Duration::from_secs(1);
+        shell_state
+            .session_info_summary_last_refresh_at
+            .insert(session_id.clone(), previous);
+        shell_state.schedule_session_info_summary_refresh_for_active_session();
+        shell_state.session_info_summary_deadline = Some(Instant::now() - Duration::from_millis(1));
+
+        assert!(!shell_state.tick_session_info_summary_refresh());
+        let deadline = shell_state
+            .session_info_summary_deadline
+            .expect("deadline should be deferred");
+        assert!(deadline >= previous + Duration::from_secs(15));
+    }
+
+    #[test]
+    fn session_info_foreground_refresh_stays_responsive() {
+        let mut shell_state = UiShellState::new("ready".to_owned(), sample_projection(true));
+        shell_state.open_terminal_and_enter_mode();
+        assert!(shell_state.session_info_is_foreground());
+        let session_id = shell_state
+            .active_terminal_session_id()
+            .cloned()
+            .expect("active session");
+        shell_state
+            .session_info_summary_last_refresh_at
+            .insert(session_id, Instant::now() - Duration::from_secs(1));
+        shell_state.schedule_session_info_summary_refresh_for_active_session();
+        shell_state.session_info_summary_deadline = Some(Instant::now() - Duration::from_millis(1));
+
+        assert!(shell_state.tick_session_info_summary_refresh());
+        assert!(shell_state.session_info_summary_deadline.is_none());
+    }
+
+    #[test]
+    fn session_info_background_diff_load_is_throttled() {
+        let mut shell_state = UiShellState::new("ready".to_owned(), sample_projection(true));
+        shell_state.open_terminal_and_enter_mode();
+        shell_state.cycle_pane_focus();
+        assert!(!shell_state.session_info_is_foreground());
+        let session_id = shell_state
+            .active_terminal_session_id()
+            .cloned()
+            .expect("active session");
+
+        assert!(!shell_state.ensure_session_info_diff_loaded_for_active_session());
+        assert!(
+            shell_state
+                .session_info_diff_last_refresh_at
+                .contains_key(&session_id)
+        );
+
+        assert!(!shell_state.ensure_session_info_diff_loaded_for_active_session());
+        shell_state
+            .session_info_diff_last_refresh_at
+            .insert(session_id, Instant::now() - Duration::from_secs(16));
+        assert!(shell_state.ensure_session_info_diff_loaded_for_active_session());
+    }
+
+    #[test]
+    fn entering_terminal_mode_reschedules_session_info_summary_refresh() {
+        let mut shell_state = UiShellState::new("ready".to_owned(), sample_projection(true));
+        shell_state.open_terminal_and_enter_mode();
+        shell_state.cycle_pane_focus();
+        shell_state.session_info_summary_deadline = None;
+        shell_state.schedule_session_info_summary_refresh_for_active_session();
+        let background_deadline = shell_state
+            .session_info_summary_deadline
+            .expect("background deadline");
+        assert!(background_deadline >= Instant::now() + Duration::from_secs(14));
+
+        shell_state.enter_terminal_mode();
+        let foreground_deadline = shell_state
+            .session_info_summary_deadline
+            .expect("foreground deadline");
+        assert!(foreground_deadline <= Instant::now() + Duration::from_secs(1));
+    }
+
+    #[test]
     fn chat_stream_coalesces_chunks_and_renders_incrementally() {
         let mut shell_state = UiShellState::new("ready".to_owned(), inspector_projection());
         shell_state.open_inspector_for_selected(ArtifactInspectorKind::Chat);
@@ -4049,7 +4936,7 @@ mod tests {
     }
 
     #[test]
-    fn merge_reconcile_poll_runs_for_review_session_without_pr_artifact() {
+    fn merge_reconcile_event_trigger_runs_for_review_session_without_pr_artifact() {
         let projection = review_projection_without_pr_artifact();
         let dispatcher = Arc::new(TestSupervisorDispatcher::new(Vec::new()));
         let mut shell_state = UiShellState::new_with_integrations(
@@ -4061,7 +4948,9 @@ mod tests {
             None,
         );
 
-        shell_state.enqueue_merge_reconcile_polls();
+        let session_id = WorkerSessionId::new("sess-review");
+        let _ = shell_state.mark_reconcile_dirty_for_session(&session_id);
+        assert!(shell_state.enqueue_event_driven_reconciles());
 
         assert_eq!(shell_state.merge_queue.len(), 1);
         let request = shell_state
@@ -4069,7 +4958,127 @@ mod tests {
             .front()
             .expect("merge reconcile request queued");
         assert_eq!(request.kind, MergeQueueCommandKind::Reconcile);
-        assert_eq!(request.session_id.as_str(), "sess-review");
+        assert_eq!(request.session_id, session_id);
+    }
+
+    #[test]
+    fn sparse_reconcile_fallback_enqueues_only_review_eligible_sessions() {
+        let mut projection = review_projection_without_pr_artifact();
+        let work_item_id = WorkItemId::new("wi-impl");
+        let session_id = WorkerSessionId::new("sess-impl");
+        projection.work_items.insert(
+            work_item_id.clone(),
+            WorkItemProjection {
+                id: work_item_id.clone(),
+                ticket_id: None,
+                project_id: None,
+                workflow_state: Some(WorkflowState::Implementing),
+                session_id: Some(session_id.clone()),
+                worktree_id: None,
+                inbox_items: vec![],
+                artifacts: vec![],
+            },
+        );
+        projection.sessions.insert(
+            session_id.clone(),
+            SessionProjection {
+                id: session_id,
+                work_item_id: Some(work_item_id),
+                status: Some(WorkerSessionStatus::Running),
+                latest_checkpoint: None,
+            },
+        );
+
+        let dispatcher = Arc::new(TestSupervisorDispatcher::new(Vec::new()));
+        let mut shell_state = UiShellState::new_with_integrations(
+            "ready".to_owned(),
+            projection,
+            None,
+            Some(dispatcher),
+            None,
+            None,
+        );
+        shell_state.merge_queue.clear();
+        shell_state.dirty_review_reconcile_sessions.clear();
+        shell_state.dirty_approval_reconcile_sessions.clear();
+        shell_state.review_fallback_last_sweep_at =
+            Some(Instant::now() - RECONCILE_SPARSE_FALLBACK_INTERVAL - Duration::from_secs(1));
+        shell_state.approval_fallback_last_sweep_at =
+            Some(Instant::now() - RECONCILE_SPARSE_FALLBACK_INTERVAL - Duration::from_secs(1));
+
+        assert!(shell_state.run_sparse_reconcile_fallbacks());
+        assert_eq!(shell_state.merge_queue.len(), 1);
+        assert_eq!(
+            shell_state
+                .merge_queue
+                .front()
+                .expect("review reconcile request")
+                .session_id
+                .as_str(),
+            "sess-review"
+        );
+    }
+
+    #[test]
+    fn sparse_reconcile_fallback_skips_when_interval_not_elapsed() {
+        let projection = review_projection_without_pr_artifact();
+        let dispatcher = Arc::new(TestSupervisorDispatcher::new(Vec::new()));
+        let mut shell_state = UiShellState::new_with_integrations(
+            "ready".to_owned(),
+            projection,
+            None,
+            Some(dispatcher),
+            None,
+            None,
+        );
+        shell_state.merge_queue.clear();
+        shell_state.dirty_review_reconcile_sessions.clear();
+        shell_state.dirty_approval_reconcile_sessions.clear();
+        shell_state.review_fallback_last_sweep_at = Some(Instant::now());
+        shell_state.approval_fallback_last_sweep_at = Some(Instant::now());
+
+        assert!(!shell_state.run_sparse_reconcile_fallbacks());
+        assert!(shell_state.merge_queue.is_empty());
+    }
+
+    #[test]
+    fn sparse_reconcile_fallback_scans_only_review_eligible_sessions() {
+        let projection = mixed_reconcile_projection();
+        let dispatcher = Arc::new(TestSupervisorDispatcher::new(Vec::new()));
+        let mut shell_state = UiShellState::new_with_integrations(
+            "ready".to_owned(),
+            projection,
+            None,
+            Some(dispatcher),
+            None,
+            None,
+        );
+        shell_state.merge_queue.clear();
+        shell_state.dirty_review_reconcile_sessions.clear();
+        shell_state.dirty_approval_reconcile_sessions.clear();
+        shell_state.review_fallback_last_sweep_at =
+            Some(Instant::now() - RECONCILE_SPARSE_FALLBACK_INTERVAL - Duration::from_secs(1));
+        shell_state.approval_fallback_last_sweep_at =
+            Some(Instant::now() - RECONCILE_SPARSE_FALLBACK_INTERVAL - Duration::from_secs(1));
+
+        assert!(shell_state.run_sparse_reconcile_fallbacks());
+
+        let mut queued_session_ids = shell_state
+            .merge_queue
+            .iter()
+            .map(|request| {
+                assert_eq!(request.kind, MergeQueueCommandKind::Reconcile);
+                request.session_id.as_str().to_owned()
+            })
+            .collect::<Vec<_>>();
+        queued_session_ids.sort();
+        assert_eq!(
+            queued_session_ids,
+            vec![
+                "sess-pending-merge".to_owned(),
+                "sess-review".to_owned()
+            ]
+        );
     }
 
     #[test]
@@ -5039,8 +6048,19 @@ mod tests {
                 from: WorkflowState::Implementing,
                 to: WorkflowState::PRDrafted,
                 instruction: None,
+                event: stored_event_for_test(
+                    "evt-test-workflow-1",
+                    1,
+                    Some(WorkItemId::new("wi-1")),
+                    Some(WorkerSessionId::new("sess-1")),
+                    OrchestrationEventPayload::WorkflowTransition(WorkflowTransitionPayload {
+                        work_item_id: WorkItemId::new("wi-1"),
+                        from: WorkflowState::Implementing,
+                        to: WorkflowState::PRDrafted,
+                        reason: Some(WorkflowTransitionReason::PlanCommitted),
+                    }),
+                ),
             },
-            projection: None,
         });
 
         let ui_state = shell_state.ui_state();
@@ -5068,8 +6088,19 @@ mod tests {
                 from: WorkflowState::Implementing,
                 to: WorkflowState::PRDrafted,
                 instruction: None,
+                event: stored_event_for_test(
+                    "evt-test-workflow-2",
+                    1,
+                    Some(WorkItemId::new("wi-1")),
+                    Some(WorkerSessionId::new("sess-1")),
+                    OrchestrationEventPayload::WorkflowTransition(WorkflowTransitionPayload {
+                        work_item_id: WorkItemId::new("wi-1"),
+                        from: WorkflowState::Implementing,
+                        to: WorkflowState::PRDrafted,
+                        reason: Some(WorkflowTransitionReason::PlanCommitted),
+                    }),
+                ),
             },
-            projection: None,
         });
 
         let status = shell_state.ui_state().status;
@@ -5098,8 +6129,19 @@ mod tests {
                 from: WorkflowState::Implementing,
                 to: WorkflowState::PRDrafted,
                 instruction: None,
+                event: stored_event_for_test(
+                    "evt-test-workflow-3",
+                    1,
+                    Some(WorkItemId::new("wi-c")),
+                    Some(WorkerSessionId::new("sess-c")),
+                    OrchestrationEventPayload::WorkflowTransition(WorkflowTransitionPayload {
+                        work_item_id: WorkItemId::new("wi-c"),
+                        from: WorkflowState::Implementing,
+                        to: WorkflowState::PRDrafted,
+                        reason: Some(WorkflowTransitionReason::PlanCommitted),
+                    }),
+                ),
             },
-            projection: None,
         });
 
         assert_eq!(shell_state.ui_state().selected_inbox_item_id, before);
@@ -5128,8 +6170,19 @@ mod tests {
                 from: WorkflowState::Implementing,
                 to: WorkflowState::PRDrafted,
                 instruction: None,
+                event: stored_event_for_test(
+                    "evt-test-workflow-4",
+                    1,
+                    Some(WorkItemId::new("wi-3")),
+                    Some(WorkerSessionId::new("sess-3")),
+                    OrchestrationEventPayload::WorkflowTransition(WorkflowTransitionPayload {
+                        work_item_id: WorkItemId::new("wi-3"),
+                        from: WorkflowState::Implementing,
+                        to: WorkflowState::PRDrafted,
+                        reason: Some(WorkflowTransitionReason::PlanCommitted),
+                    }),
+                ),
             },
-            projection: None,
         });
 
         assert_eq!(shell_state.ui_state().selected_inbox_item_id, before);
@@ -5493,13 +6546,11 @@ mod tests {
             TicketPickerEvent::TicketCreated {
                 created_ticket,
                 submit_mode,
-                projection,
                 tickets,
                 warning,
             } => {
                 assert_eq!(created_ticket.identifier, created.identifier);
                 assert_eq!(submit_mode, TicketCreateSubmitMode::CreateOnly);
-                assert!(projection.is_some());
                 assert_eq!(tickets.unwrap_or_default(), refreshed);
                 assert!(warning
                     .as_deref()
@@ -5529,7 +6580,6 @@ mod tests {
         shell_state.apply_ticket_picker_event(TicketPickerEvent::TicketCreated {
             created_ticket: created.clone(),
             submit_mode: TicketCreateSubmitMode::CreateOnly,
-            projection: None,
             tickets: Some(vec![
                 sample_ticket_summary("issue-401", "AP-401", "Todo"),
                 created,
@@ -5558,7 +6608,6 @@ mod tests {
         shell_state.apply_ticket_picker_event(TicketPickerEvent::TicketCreated {
             created_ticket: created,
             submit_mode: TicketCreateSubmitMode::CreateAndStart,
-            projection: None,
             tickets: Some(vec![sample_ticket_summary("issue-401", "AP-401", "Todo")]),
             warning: None,
         });
@@ -5586,7 +6635,6 @@ mod tests {
         shell_state.apply_ticket_picker_event(TicketPickerEvent::TicketCreated {
             created_ticket: created,
             submit_mode: TicketCreateSubmitMode::CreateOnly,
-            projection: None,
             tickets: Some(vec![sample_ticket_summary("issue-501", "AP-501", "Todo")]),
             warning: None,
         });
@@ -5782,10 +6830,10 @@ mod tests {
         match event {
             MergeQueueEvent::SessionFinalized {
                 session_id: event_session_id,
-                projection,
+                event,
             } => {
                 assert_eq!(event_session_id, session_id);
-                assert!(projection.is_some());
+                assert_eq!(event.event_id, "evt-test-session-merged");
             }
             _ => panic!("expected merge finalize success event"),
         }
@@ -5823,7 +6871,7 @@ mod tests {
             async fn complete_session_after_merge(
                 &self,
                 _session_id: WorkerSessionId,
-            ) -> Result<(), CoreError> {
+            ) -> Result<SessionMergeFinalizeOutcome, CoreError> {
                 Err(CoreError::DependencyUnavailable(
                     "merge finalize failed in test".to_owned(),
                 ))
@@ -5865,11 +6913,11 @@ mod tests {
             TicketPickerEvent::SessionArchived {
                 session_id: event_session_id,
                 warning,
-                projection,
+                event,
             } => {
                 assert_eq!(event_session_id, session_id);
                 assert!(warning.is_none());
-                assert!(projection.is_some());
+                assert_eq!(event.event_id, "evt-test-session-archived");
             }
             _ => panic!("expected session archived event"),
         }
@@ -5903,7 +6951,7 @@ mod tests {
             async fn archive_session(
                 &self,
                 _session_id: WorkerSessionId,
-            ) -> Result<Option<String>, CoreError> {
+            ) -> Result<SessionArchiveOutcome, CoreError> {
                 Err(CoreError::DependencyUnavailable(
                     "session archive failed in test".to_owned(),
                 ))
@@ -6653,6 +7701,95 @@ mod tests {
                 "> system: workflow transition".to_owned(),
             ]
         );
+    }
+
+    #[test]
+    fn terminal_viewport_rendering_is_bounded_by_viewport_plus_overscan() {
+        let mut state = TerminalViewState {
+            entries: (0..5_000)
+                .map(|index| TerminalTranscriptEntry::Message(format!("line {index}")))
+                .collect(),
+            ..TerminalViewState::default()
+        };
+        state.render_cache.invalidate_all();
+
+        let viewport_rows = 20usize;
+        let overscan_rows = 4usize;
+        let render = render_terminal_output_viewport(
+            &mut state,
+            TerminalViewportRequest {
+                width: 90,
+                scroll_top: 2_500,
+                viewport_rows,
+                overscan_rows,
+                indicator: TerminalActivityIndicator::None,
+            },
+        );
+
+        assert_eq!(render.text.lines.len(), viewport_rows + (overscan_rows * 2));
+        assert_eq!(terminal_total_rendered_rows(&mut state, 90, TerminalActivityIndicator::None), 5_000);
+        assert_eq!(render.local_scroll_top, overscan_rows as u16);
+    }
+
+    #[test]
+    fn terminal_viewport_total_rows_match_full_render_with_markdown() {
+        let mut state = TerminalViewState {
+            entries: vec![
+                TerminalTranscriptEntry::Message("# Heading".to_owned()),
+                TerminalTranscriptEntry::Message("plain text".to_owned()),
+                TerminalTranscriptEntry::Message("- list item".to_owned()),
+                TerminalTranscriptEntry::Message("`inline` code".to_owned()),
+                TerminalTranscriptEntry::Message("regular line".to_owned()),
+            ],
+            ..TerminalViewState::default()
+        };
+        state.render_cache.invalidate_all();
+
+        let width = 72u16;
+        let full_lines = render_terminal_transcript_lines(&state);
+        let full = render_terminal_output_with_accents(&full_lines, width);
+
+        let total = terminal_total_rendered_rows(&mut state, width, TerminalActivityIndicator::None);
+        assert_eq!(total, full.lines.len());
+
+        let total_with_indicator =
+            terminal_total_rendered_rows(&mut state, width, TerminalActivityIndicator::Working);
+        assert_eq!(total_with_indicator, full.lines.len() + 2);
+    }
+
+    #[test]
+    fn terminal_transcript_truncates_to_default_line_limit() {
+        let mut state = TerminalViewState::default();
+        let payload = (1..=101)
+            .map(|line| format!("line {line}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n";
+        append_terminal_assistant_output(&mut state, payload.into_bytes());
+
+        assert_eq!(state.entries.len(), 100);
+        assert!(state.transcript_truncated);
+        assert_eq!(state.transcript_truncated_line_count, 1);
+        assert_eq!(
+            state.entries.first(),
+            Some(&TerminalTranscriptEntry::Message("line 2".to_owned()))
+        );
+        assert_eq!(
+            state.entries.last(),
+            Some(&TerminalTranscriptEntry::Message("line 101".to_owned()))
+        );
+    }
+
+    #[test]
+    fn terminal_top_bar_shows_transcript_truncation_indicator() {
+        let projection = sample_projection(true);
+        let session_id = WorkerSessionId::new("sess-1");
+        let mut view = TerminalViewState::default();
+        view.transcript_truncated = true;
+        view.transcript_truncated_line_count = 7;
+
+        let rendered = render_terminal_top_bar(&projection, &session_id, Some(&view));
+        assert!(rendered.contains("history: truncated (-7 lines)"));
     }
 
     #[test]

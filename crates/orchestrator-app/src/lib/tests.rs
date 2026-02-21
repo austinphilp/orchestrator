@@ -528,7 +528,9 @@ mod tests {
                     config.event_store_path,
                     expected_event_store.to_string_lossy()
                 );
+                assert_eq!(config.ui.transcript_line_limit, 100);
                 assert_eq!(config.ui.background_session_refresh_secs, 15);
+                assert_eq!(config.ui.session_info_background_refresh_secs, 15);
                 assert!(Path::new(&config.workspace).is_absolute());
                 assert!(Path::new(&config.event_store_path).is_absolute());
                 assert_eq!(
@@ -543,7 +545,9 @@ mod tests {
                     parsed.event_store_path,
                     expected_event_store.to_string_lossy()
                 );
+                assert_eq!(parsed.ui.transcript_line_limit, 100);
                 assert_eq!(parsed.ui.background_session_refresh_secs, 15);
+                assert_eq!(parsed.ui.session_info_background_refresh_secs, 15);
             },
         );
 
@@ -576,7 +580,9 @@ mod tests {
                     config.event_store_path,
                     expected_event_store.to_string_lossy()
                 );
+                assert_eq!(config.ui.transcript_line_limit, 100);
                 assert_eq!(config.ui.background_session_refresh_secs, 15);
+                assert_eq!(config.ui.session_info_background_refresh_secs, 15);
                 assert!(expected.exists());
                 let contents = std::fs::read_to_string(expected.clone()).unwrap();
                 let parsed: AppConfig = toml::from_str(&contents).unwrap();
@@ -585,7 +591,9 @@ mod tests {
                     parsed.event_store_path,
                     expected_event_store.to_string_lossy()
                 );
+                assert_eq!(parsed.ui.transcript_line_limit, 100);
                 assert_eq!(parsed.ui.background_session_refresh_secs, 15);
+                assert_eq!(parsed.ui.session_info_background_refresh_secs, 15);
             },
         );
 
@@ -608,7 +616,9 @@ mod tests {
                 let config = AppConfig::from_env().expect("parse config");
                 assert_eq!(config.workspace, "/tmp/work");
                 assert_eq!(config.event_store_path, "/tmp/events.db");
+                assert_eq!(config.ui.transcript_line_limit, 100);
                 assert_eq!(config.ui.background_session_refresh_secs, 15);
+                assert_eq!(config.ui.session_info_background_refresh_secs, 15);
             },
         );
 
@@ -736,12 +746,12 @@ mod tests {
     }
 
     #[test]
-    fn config_clamps_background_session_refresh_secs_to_supported_bounds() {
+    fn config_clamps_background_refresh_settings_to_supported_bounds() {
         let home = unique_temp_dir("ui-refresh-clamp");
         let config_path = home.join("config.toml");
         write_config_file(
             &config_path,
-            "workspace = '/tmp/work'\nevent_store_path = '/tmp/events.db'\n[ui]\nbackground_session_refresh_secs = 99\n",
+            "workspace = '/tmp/work'\nevent_store_path = '/tmp/events.db'\n[ui]\nbackground_session_refresh_secs = 99\nsession_info_background_refresh_secs = 3\n",
         );
 
         with_env_var(
@@ -750,12 +760,13 @@ mod tests {
             || {
                 let config = AppConfig::from_env().expect("parse and normalize config");
                 assert_eq!(config.ui.background_session_refresh_secs, 15);
+                assert_eq!(config.ui.session_info_background_refresh_secs, 15);
             },
         );
 
         write_config_file(
             &config_path,
-            "workspace = '/tmp/work'\nevent_store_path = '/tmp/events.db'\n[ui]\nbackground_session_refresh_secs = 1\n",
+            "workspace = '/tmp/work'\nevent_store_path = '/tmp/events.db'\n[ui]\nbackground_session_refresh_secs = 1\nsession_info_background_refresh_secs = 30\n",
         );
 
         with_env_var(
@@ -764,6 +775,42 @@ mod tests {
             || {
                 let config = AppConfig::from_env().expect("parse and normalize low config");
                 assert_eq!(config.ui.background_session_refresh_secs, 2);
+                assert_eq!(config.ui.session_info_background_refresh_secs, 30);
+            },
+        );
+
+        remove_temp_path(&home);
+    }
+
+    #[test]
+    fn config_clamps_transcript_line_limit_to_supported_bounds() {
+        let home = unique_temp_dir("ui-transcript-limit-clamp");
+        let config_path = home.join("config.toml");
+        write_config_file(
+            &config_path,
+            "workspace = '/tmp/work'\nevent_store_path = '/tmp/events.db'\n[ui]\ntranscript_line_limit = 0\n",
+        );
+
+        with_env_var(
+            "ORCHESTRATOR_CONFIG",
+            Some(config_path.to_str().unwrap()),
+            || {
+                let config = AppConfig::from_env().expect("parse and normalize config");
+                assert_eq!(config.ui.transcript_line_limit, 1);
+            },
+        );
+
+        write_config_file(
+            &config_path,
+            "workspace = '/tmp/work'\nevent_store_path = '/tmp/events.db'\n[ui]\ntranscript_line_limit = 250\n",
+        );
+
+        with_env_var(
+            "ORCHESTRATOR_CONFIG",
+            Some(config_path.to_str().unwrap()),
+            || {
+                let config = AppConfig::from_env().expect("parse and preserve config");
+                assert_eq!(config.ui.transcript_line_limit, 250);
             },
         );
 
@@ -1268,11 +1315,15 @@ mod tests {
             spawn_calls: Mutex::new(Vec::new()),
         };
 
-        let warning = app
+        let outcome = app
             .archive_session(&session_id, &backend)
             .await
             .expect("archive session");
-        assert!(warning.is_none());
+        assert!(outcome.warning.is_none());
+        assert!(matches!(
+            outcome.event.payload,
+            OrchestrationEventPayload::SessionCompleted(_)
+        ));
 
         let store = SqliteEventStore::open(temp_db.path()).expect("open store");
         let mapping = store

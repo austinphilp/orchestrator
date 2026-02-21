@@ -8,14 +8,16 @@ use integration_linear::{
 use integration_shortcut::{ShortcutConfig, ShortcutTicketingProvider};
 use orchestrator_app::{App, AppConfig, AppTicketPickerProvider};
 use orchestrator_core::{
-    BackendKind, CoreError, OrchestrationEventPayload, SpawnSpec, SqliteEventStore, TicketProvider,
-    TicketRecord, TicketingProvider, WorkItemId, WorkerBackend, WorkflowState,
+    BackendKind, CoreError, EventPrunePolicy, OrchestrationEventPayload, SpawnSpec,
+    SqliteEventStore, TicketProvider, TicketRecord, TicketingProvider, WorkItemId, WorkerBackend,
+    WorkflowState,
 };
 use orchestrator_github::{GhCliClient, ProcessCommandRunner as GhProcessCommandRunner};
 use orchestrator_supervisor::OpenRouterSupervisor;
 use orchestrator_ui::Ui;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 const ENV_HARNESS_SESSION_ID: &str = "ORCHESTRATOR_HARNESS_SESSION_ID";
 const ENV_OPENROUTER_API_KEY: &str = "OPENROUTER_API_KEY";
@@ -43,7 +45,9 @@ async fn main() -> Result<()> {
         config.ui.theme.clone(),
         config.ui.ticket_picker_priority_states.clone(),
         config.supervisor.model.clone(),
+        config.ui.transcript_line_limit,
         config.ui.background_session_refresh_secs,
+        config.ui.session_info_background_refresh_secs,
     );
 
     let openrouter_api_key = required_env(ENV_OPENROUTER_API_KEY)?;
@@ -77,6 +81,9 @@ async fn main() -> Result<()> {
         supervisor,
         github,
     });
+    if let Err(error) = run_event_prune_maintenance(&app.config) {
+        tracing::warn!(error = %error, "event prune maintenance failed at startup");
+    }
     let ticket_picker_provider = Arc::new(AppTicketPickerProvider::new(
         Arc::clone(&app),
         ticketing,
@@ -343,6 +350,38 @@ fn required_env(name: &str) -> Result<String, CoreError> {
         )));
     }
     Ok(value)
+}
+
+fn run_event_prune_maintenance(config: &AppConfig) -> Result<(), CoreError> {
+    if !config.runtime.event_prune_enabled {
+        return Ok(());
+    }
+
+    let mut store = SqliteEventStore::open(config.event_store_path.as_str())?;
+    let now_unix_seconds = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let report = store.prune_completed_session_events(
+        EventPrunePolicy {
+            retention_days: config.runtime.event_retention_days,
+        },
+        now_unix_seconds,
+    )?;
+
+    tracing::info!(
+        retention_days = config.runtime.event_retention_days,
+        cutoff_unix_seconds = report.cutoff_unix_seconds,
+        candidate_sessions = report.candidate_sessions,
+        eligible_sessions = report.eligible_sessions,
+        pruned_work_items = report.pruned_work_items,
+        deleted_events = report.deleted_events,
+        deleted_event_artifact_refs = report.deleted_event_artifact_refs,
+        skipped_invalid_timestamps = report.skipped_invalid_timestamps,
+        "event prune maintenance completed"
+    );
+
+    Ok(())
 }
 
 async fn rehydrate_inflight_sessions(

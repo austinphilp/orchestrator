@@ -5,13 +5,14 @@ use orchestrator_core::{
     LlmProvider, NewEventEnvelope, OrchestrationEventPayload, ProjectionState, RuntimeSessionId,
     SelectedTicketFlowConfig, SelectedTicketFlowResult, SessionCompletedPayload,
     SessionCrashedPayload, SessionHandle, SqliteEventStore, Supervisor, TicketSummary,
-    TicketingProvider, UntypedCommandInvocation, VcsProvider, WorkItemId, WorkerBackend,
-    WorkerSessionId, WorkerSessionStatus, WorkflowGuardContext, WorkflowState,
+    StoredEventEnvelope, TicketingProvider, UntypedCommandInvocation, VcsProvider, WorkItemId,
+    WorkerBackend, WorkerSessionId, WorkerSessionStatus, WorkflowGuardContext, WorkflowState,
     WorkflowTransitionPayload, WorkflowTransitionReason, DOMAIN_EVENT_SCHEMA_VERSION,
     SessionRuntimeProjection,
 };
 use orchestrator_ui::{
-    InboxPublishRequest, InboxResolveRequest, SessionWorkflowAdvanceOutcome, SupervisorCommandContext,
+    InboxPublishRequest, InboxResolveRequest, SessionArchiveOutcome,
+    SessionMergeFinalizeOutcome, SessionWorkflowAdvanceOutcome, SupervisorCommandContext,
     SupervisorCommandDispatcher,
 };
 use serde::{Deserialize, Serialize};
@@ -74,7 +75,10 @@ const DEFAULT_HARNESS_LOG_NORMALIZED_EVENTS: bool = false;
 const DEFAULT_OPENCODE_BINARY: &str = "opencode";
 const DEFAULT_OPENCODE_SERVER_BASE_URL: &str = "http://127.0.0.1:8787";
 const DEFAULT_CODEX_BINARY: &str = "codex";
+const DEFAULT_EVENT_RETENTION_DAYS: u64 = 14;
+const DEFAULT_EVENT_PRUNE_ENABLED: bool = true;
 const DEFAULT_UI_THEME: &str = "nord";
+const DEFAULT_UI_TRANSCRIPT_LINE_LIMIT: usize = 100;
 const DEFAULT_TICKET_PICKER_PRIORITY_STATES: &[&str] =
     &["In Progress", "Final Approval", "Todo", "Backlog"];
 
@@ -259,6 +263,10 @@ pub struct RuntimeConfigToml {
     pub opencode_server_base_url: String,
     #[serde(default = "default_codex_binary")]
     pub codex_binary: String,
+    #[serde(default = "default_event_retention_days")]
+    pub event_retention_days: u64,
+    #[serde(default = "default_event_prune_enabled")]
+    pub event_prune_enabled: bool,
 }
 
 impl Default for RuntimeConfigToml {
@@ -271,6 +279,8 @@ impl Default for RuntimeConfigToml {
             opencode_binary: default_opencode_binary(),
             opencode_server_base_url: default_opencode_server_base_url(),
             codex_binary: default_codex_binary(),
+            event_retention_days: default_event_retention_days(),
+            event_prune_enabled: default_event_prune_enabled(),
         }
     }
 }
@@ -281,8 +291,12 @@ pub struct UiConfigToml {
     pub theme: String,
     #[serde(default = "default_ticket_picker_priority_states")]
     pub ticket_picker_priority_states: Vec<String>,
+    #[serde(default = "default_ui_transcript_line_limit")]
+    pub transcript_line_limit: usize,
     #[serde(default = "default_ui_background_session_refresh_secs")]
     pub background_session_refresh_secs: u64,
+    #[serde(default = "default_ui_session_info_background_refresh_secs")]
+    pub session_info_background_refresh_secs: u64,
 }
 
 impl Default for UiConfigToml {
@@ -290,7 +304,9 @@ impl Default for UiConfigToml {
         Self {
             theme: default_ui_theme(),
             ticket_picker_priority_states: default_ticket_picker_priority_states(),
+            transcript_line_limit: default_ui_transcript_line_limit(),
             background_session_refresh_secs: default_ui_background_session_refresh_secs(),
+            session_info_background_refresh_secs: default_ui_session_info_background_refresh_secs(),
         }
     }
 }
@@ -371,12 +387,28 @@ fn default_codex_binary() -> String {
     DEFAULT_CODEX_BINARY.to_owned()
 }
 
+fn default_event_retention_days() -> u64 {
+    DEFAULT_EVENT_RETENTION_DAYS
+}
+
+fn default_event_prune_enabled() -> bool {
+    DEFAULT_EVENT_PRUNE_ENABLED
+}
+
 fn default_ui_theme() -> String {
     DEFAULT_UI_THEME.to_owned()
 }
 
 fn default_ui_background_session_refresh_secs() -> u64 {
     15
+}
+
+fn default_ui_session_info_background_refresh_secs() -> u64 {
+    15
+}
+
+fn default_ui_transcript_line_limit() -> usize {
+    DEFAULT_UI_TRANSCRIPT_LINE_LIMIT
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -672,11 +704,20 @@ fn normalize_config(config: &mut AppConfig) -> bool {
         default_opencode_server_base_url(),
     );
     changed |= normalize_non_empty_string(&mut config.runtime.codex_binary, default_codex_binary());
+    if config.runtime.event_retention_days == 0 {
+        config.runtime.event_retention_days = default_event_retention_days();
+        changed = true;
+    }
 
     changed |= normalize_non_empty_string(&mut config.ui.theme, default_ui_theme());
     changed |= normalize_string_vec(&mut config.ui.ticket_picker_priority_states);
     if config.ui.ticket_picker_priority_states.is_empty() {
         config.ui.ticket_picker_priority_states = default_ticket_picker_priority_states();
+        changed = true;
+    }
+    let normalized_transcript_line_limit = config.ui.transcript_line_limit.max(1);
+    if normalized_transcript_line_limit != config.ui.transcript_line_limit {
+        config.ui.transcript_line_limit = normalized_transcript_line_limit;
         changed = true;
     }
     let normalized_background_refresh_secs = config
@@ -685,6 +726,15 @@ fn normalize_config(config: &mut AppConfig) -> bool {
         .clamp(2, 15);
     if normalized_background_refresh_secs != config.ui.background_session_refresh_secs {
         config.ui.background_session_refresh_secs = normalized_background_refresh_secs;
+        changed = true;
+    }
+    let normalized_session_info_background_refresh_secs =
+        config.ui.session_info_background_refresh_secs.max(15);
+    if normalized_session_info_background_refresh_secs
+        != config.ui.session_info_background_refresh_secs
+    {
+        config.ui.session_info_background_refresh_secs =
+            normalized_session_info_background_refresh_secs;
         changed = true;
     }
 
