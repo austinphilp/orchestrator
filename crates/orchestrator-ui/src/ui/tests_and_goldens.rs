@@ -4835,7 +4835,7 @@ mod tests {
     }
 
     #[test]
-    fn merge_reconcile_poll_only_scans_review_eligible_sessions() {
+    fn sparse_reconcile_fallback_scans_only_review_eligible_sessions() {
         let projection = mixed_reconcile_projection();
         let dispatcher = Arc::new(TestSupervisorDispatcher::new(Vec::new()));
         let mut shell_state = UiShellState::new_with_integrations(
@@ -4846,8 +4846,15 @@ mod tests {
             None,
             None,
         );
+        shell_state.merge_queue.clear();
+        shell_state.dirty_review_reconcile_sessions.clear();
+        shell_state.dirty_approval_reconcile_sessions.clear();
+        shell_state.review_fallback_last_sweep_at =
+            Some(Instant::now() - RECONCILE_SPARSE_FALLBACK_INTERVAL - Duration::from_secs(1));
+        shell_state.approval_fallback_last_sweep_at =
+            Some(Instant::now() - RECONCILE_SPARSE_FALLBACK_INTERVAL - Duration::from_secs(1));
 
-        shell_state.enqueue_merge_reconcile_polls();
+        assert!(shell_state.run_sparse_reconcile_fallbacks());
 
         let mut queued_session_ids = shell_state
             .merge_queue
