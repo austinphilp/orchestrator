@@ -21,10 +21,10 @@ pub use adapters::{
     LlmProviderKind, LlmRateLimitState, LlmResponseStream, LlmResponseSubscription, LlmRole,
     LlmStreamChunk, LlmTokenUsage, LlmTool, LlmToolCall, LlmToolCallOutput, LlmToolChoice,
     LlmToolChoiceFunction, LlmToolFunction, LlmToolResult, PullRequestCiStatus,
-    PullRequestMergeState, PullRequestRef, PullRequestSummary, RepositoryRef, ReviewerRequest,
-    Supervisor, TicketAttachment, TicketDetails, TicketQuery, TicketSummary, TicketingProvider,
-    UpdateTicketDescriptionRequest, UpdateTicketStateRequest, UrlOpener, VcsProvider,
-    WorktreeManager, WorktreeStatus, WorktreeSummary,
+    PullRequestMergeState, PullRequestRef, PullRequestReviewSummary, PullRequestSummary,
+    RepositoryRef, ReviewerRequest, Supervisor, TicketAttachment, TicketDetails, TicketQuery,
+    TicketSummary, TicketingProvider, UpdateTicketDescriptionRequest, UpdateTicketStateRequest,
+    UrlOpener, VcsProvider, WorktreeManager, WorktreeStatus, WorktreeSummary,
 };
 pub use attention_engine::{
     attention_inbox_snapshot, AttentionBatchKind, AttentionBatchSurface, AttentionEngineConfig,

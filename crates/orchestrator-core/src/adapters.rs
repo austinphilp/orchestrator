@@ -308,12 +308,28 @@ pub struct PullRequestSummary {
 pub struct PullRequestMergeState {
     pub merged: bool,
     pub is_draft: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_decision: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_summary: Option<PullRequestReviewSummary>,
     #[serde(default)]
     pub merge_conflict: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base_branch: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub head_branch: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct PullRequestReviewSummary {
+    pub total: u32,
+    pub approved: u32,
+    pub changes_requested: u32,
+    pub commented: u32,
+    pub pending: u32,
+    pub dismissed: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

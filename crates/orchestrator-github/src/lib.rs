@@ -6,8 +6,8 @@ use std::process::Command;
 
 use orchestrator_core::{
     CodeHostKind, CodeHostProvider, CoreError, CreatePullRequestRequest, GithubClient,
-    PullRequestCiStatus, PullRequestMergeState, PullRequestRef, PullRequestSummary, RepositoryRef,
-    ReviewerRequest, UrlOpener,
+    PullRequestCiStatus, PullRequestMergeState, PullRequestRef, PullRequestReviewSummary,
+    PullRequestSummary, RepositoryRef, ReviewerRequest, UrlOpener,
 };
 use serde::Deserialize;
 use serde_json::Value;
@@ -264,7 +264,9 @@ impl<R: CommandRunner> GhCliClient<R> {
             OsString::from("view"),
             OsString::from(pr.number.to_string()),
             OsString::from("--json"),
-            OsString::from("mergedAt,isDraft,mergeStateStatus,baseRefName,headRefName"),
+            OsString::from(
+                "mergedAt,isDraft,state,reviewDecision,latestReviews,mergeStateStatus,baseRefName,headRefName",
+            ),
         ]
     }
 
@@ -783,6 +785,13 @@ impl<R: CommandRunner> CodeHostProvider for GhCliClient<R> {
         Ok(PullRequestMergeState {
             merged: parsed.merged_at.is_some(),
             is_draft: parsed.is_draft,
+            state: parsed
+                .state
+                .and_then(|value| sanitize_optional_non_empty(value.as_str())),
+            review_decision: parsed
+                .review_decision
+                .and_then(|value| sanitize_optional_non_empty(value.as_str())),
+            review_summary: summarize_reviews(parsed.latest_reviews),
             merge_conflict: parsed
                 .merge_state_status
                 .as_deref()
@@ -1002,6 +1011,52 @@ impl<R: CommandRunner> CodeHostProvider for GhCliClient<R> {
     }
 }
 
+fn sanitize_optional_non_empty(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_owned())
+    }
+}
+
+fn summarize_reviews(
+    reviews: Option<Vec<GhPullRequestReview>>,
+) -> Option<PullRequestReviewSummary> {
+    let reviews = reviews?;
+    if reviews.is_empty() {
+        return None;
+    }
+
+    let mut summary = PullRequestReviewSummary::default();
+    for review in reviews {
+        let Some(state) = review.state else {
+            continue;
+        };
+        let normalized = state.trim().to_ascii_uppercase();
+        if normalized.is_empty() {
+            continue;
+        }
+        summary.total = summary.total.saturating_add(1);
+        match normalized.as_str() {
+            "APPROVED" => summary.approved = summary.approved.saturating_add(1),
+            "CHANGES_REQUESTED" => {
+                summary.changes_requested = summary.changes_requested.saturating_add(1)
+            }
+            "COMMENTED" => summary.commented = summary.commented.saturating_add(1),
+            "PENDING" => summary.pending = summary.pending.saturating_add(1),
+            "DISMISSED" => summary.dismissed = summary.dismissed.saturating_add(1),
+            _ => {}
+        }
+    }
+
+    if summary.total == 0 {
+        None
+    } else {
+        Some(summary)
+    }
+}
+
 #[derive(Debug, Deserialize)]
 struct GhReviewQueuePullRequest {
     number: u64,
@@ -1037,10 +1092,22 @@ struct GhPullRequestMergeState {
     is_draft: bool,
     #[serde(rename = "mergeStateStatus", default)]
     merge_state_status: Option<String>,
+    #[serde(default)]
+    state: Option<String>,
+    #[serde(rename = "reviewDecision", default)]
+    review_decision: Option<String>,
+    #[serde(rename = "latestReviews", default)]
+    latest_reviews: Option<Vec<GhPullRequestReview>>,
     #[serde(rename = "baseRefName", default)]
     base_ref_name: Option<String>,
     #[serde(rename = "headRefName", default)]
     head_ref_name: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GhPullRequestReview {
+    #[serde(default)]
+    state: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1731,6 +1798,52 @@ mod tests {
         assert_eq!(queue.len(), 1);
         assert_eq!(queue[0].reference.repository.id, "octo/docs");
         assert!(queue[0].is_draft);
+    }
+
+    #[tokio::test]
+    async fn pull_request_merge_state_parses_pr_state_and_reviews() {
+        let runner = StubRunner::with_results(vec![Ok(output(
+            0,
+            r#"{"mergedAt":null,"isDraft":false,"state":"OPEN","reviewDecision":"CHANGES_REQUESTED","latestReviews":[{"state":"APPROVED"},{"state":"CHANGES_REQUESTED"},{"state":"COMMENTED"}],"mergeStateStatus":"CLEAN","baseRefName":"main","headRefName":"ap/AP-280"}"#,
+            "",
+        ))]);
+        let client = GhCliClient::new(runner, PathBuf::from("gh"), false).expect("init");
+        let pr = PullRequestRef {
+            repository: sample_repository(),
+            number: 88,
+            url: "https://github.com/octocat/orchestrator/pull/88".to_owned(),
+        };
+
+        let state = CodeHostProvider::get_pull_request_merge_state(&client, &pr)
+            .await
+            .expect("read merge state");
+        assert!(!state.merged);
+        assert!(!state.is_draft);
+        assert_eq!(state.state.as_deref(), Some("OPEN"));
+        assert_eq!(state.review_decision.as_deref(), Some("CHANGES_REQUESTED"));
+        let review_summary = state.review_summary.expect("review summary");
+        assert_eq!(review_summary.total, 3);
+        assert_eq!(review_summary.approved, 1);
+        assert_eq!(review_summary.changes_requested, 1);
+        assert_eq!(review_summary.commented, 1);
+        assert!(!state.merge_conflict);
+        assert_eq!(state.base_branch.as_deref(), Some("main"));
+        assert_eq!(state.head_branch.as_deref(), Some("ap/AP-280"));
+
+        let calls = client.runner.calls.lock().expect("lock");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(
+            calls[0].1,
+            vec![
+                OsString::from("pr"),
+                OsString::from("view"),
+                OsString::from("88"),
+                OsString::from("--json"),
+                OsString::from(
+                    "mergedAt,isDraft,state,reviewDecision,latestReviews,mergeStateStatus,baseRefName,headRefName",
+                ),
+            ]
+        );
     }
 
     #[tokio::test]
