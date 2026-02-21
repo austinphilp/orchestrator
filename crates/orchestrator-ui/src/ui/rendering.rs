@@ -82,14 +82,18 @@ fn session_panel_rows(
         let ticket = ticket_label_for_session(session, domain, &ticket_labels);
         let badge = workflow_badge_for_session(session, domain);
         let group = session_state_group_for_session(session, domain, badge.as_str());
-        let is_turn_active = session_turn_is_running(terminal_session_states, session);
+        let activity = if session_turn_is_running(terminal_session_states, session) {
+            SessionRowActivity::Active
+        } else {
+            SessionRowActivity::Idle
+        };
         rows.push(SessionPanelRow {
             session_id: session.id.clone(),
             project,
             group,
             ticket_label: ticket,
             badge,
-            is_turn_active,
+            activity,
         });
     }
 
@@ -108,14 +112,29 @@ fn session_panel_rows(
     rows
 }
 
+#[cfg(test)]
 fn render_sessions_panel(
     domain: &ProjectionState,
     terminal_session_states: &HashMap<WorkerSessionId, TerminalViewState>,
     selected_session_id: Option<&WorkerSessionId>,
 ) -> String {
+    let rendered = render_sessions_panel_text(domain, terminal_session_states, selected_session_id);
+    rendered
+        .lines
+        .iter()
+        .map(render_plain_text_line)
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn render_sessions_panel_text(
+    domain: &ProjectionState,
+    terminal_session_states: &HashMap<WorkerSessionId, TerminalViewState>,
+    selected_session_id: Option<&WorkerSessionId>,
+) -> Text<'static> {
     let session_rows = session_panel_rows(domain, terminal_session_states);
     if session_rows.is_empty() {
-        return "No open sessions.".to_owned();
+        return Text::from("No open sessions.");
     }
 
     let mut lines = Vec::new();
@@ -126,30 +145,37 @@ fn render_sessions_panel(
         let marker = if is_selected { ">" } else { " " };
         if previous_project.as_deref() != Some(row.project.as_str()) {
             if previous_project.is_some() {
-                lines.push(String::new());
+                lines.push(Line::from(String::new()));
             }
-            lines.push(format!("{}:", row.project));
+            lines.push(Line::from(format!("{}:", row.project)));
             previous_project = Some(row.project.clone());
             previous_group = None;
         }
         if previous_group.as_ref() != Some(&row.group) {
-            lines.push(format!("  {}:", row.group.display_label()));
+            lines.push(Line::from(format!("  {}:", row.group.display_label())));
             previous_group = Some(row.group.clone());
         }
-        let spinner = if row.is_turn_active {
-            format!(" {}", loading_spinner_frame())
+        let indicator = if row.activity == SessionRowActivity::Active {
+            loading_spinner_frame()
         } else {
-            String::new()
+            "•"
         };
-        let line = if row.group.is_other() {
-            format!("    [{}] {}{}", row.badge, row.ticket_label, spinner)
-        } else {
-            format!("    {}{}", row.ticket_label, spinner)
-        };
-        lines.push(format!("{marker}{line}"));
+        let status_chip = row.activity.status_chip();
+        let status_style = row.activity.style();
+        let mut spans = vec![
+            Span::raw(marker.to_owned()),
+            Span::raw("    ".to_owned()),
+            Span::styled(format!("{indicator} "), status_style),
+            Span::styled(format!("{status_chip} "), status_style),
+        ];
+        if row.group.is_other() {
+            spans.push(Span::raw(format!("[{}] ", row.badge)));
+        }
+        spans.push(Span::raw(row.ticket_label));
+        lines.push(Line::from(spans));
     }
 
-    lines.join("\n")
+    Text::from(lines)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -159,7 +185,7 @@ struct SessionPanelRow {
     group: SessionStateGroup,
     ticket_label: String,
     badge: String,
-    is_turn_active: bool,
+    activity: SessionRowActivity,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -191,6 +217,38 @@ impl SessionStateGroup {
 
     fn is_other(&self) -> bool {
         matches!(self, Self::Other(_))
+    }
+}
+
+#[cfg(test)]
+fn render_plain_text_line(line: &Line<'_>) -> String {
+    line.spans
+        .iter()
+        .map(|span| span.content.as_ref())
+        .collect::<String>()
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SessionRowActivity {
+    Active,
+    Idle,
+}
+
+impl SessionRowActivity {
+    fn status_chip(self) -> &'static str {
+        match self {
+            Self::Active => "[active]",
+            Self::Idle => "[idle]",
+        }
+    }
+
+    fn style(self) -> Style {
+        match self {
+            Self::Active => Style::default()
+                .fg(Color::LightGreen)
+                .add_modifier(Modifier::BOLD),
+            Self::Idle => Style::default().fg(Color::Gray).add_modifier(Modifier::DIM),
+        }
     }
 }
 

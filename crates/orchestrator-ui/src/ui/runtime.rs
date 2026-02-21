@@ -106,7 +106,7 @@ impl Ui {
                         Layout::vertical([Constraint::Percentage(45), Constraint::Percentage(55)]);
                     let [sessions_area, inbox_area] = left_layout.areas(left_area);
 
-                    let sessions_text = render_sessions_panel(
+                    let sessions_text = render_sessions_panel_text(
                         &shell_state.domain,
                         &shell_state.terminal_session_states,
                         shell_state.selected_session_id_for_panel().as_ref(),
