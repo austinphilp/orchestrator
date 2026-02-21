@@ -3,13 +3,14 @@ use std::path::Path;
 use orchestrator_runtime::BackendKind;
 use rusqlite::{params, Connection, OptionalExtension, Transaction};
 use serde_json::Value;
+use time::{format_description::well_known::Rfc3339, OffsetDateTime};
 
 use crate::error::CoreError;
 use crate::events::{NewEventEnvelope, OrchestrationEventPayload, StoredEventEnvelope};
 use crate::identifiers::{ArtifactId, TicketId, TicketProvider, WorkItemId, WorkerSessionId};
 use crate::status::{ArtifactKind, WorkerSessionStatus};
 
-const CURRENT_SCHEMA_VERSION: u32 = 8;
+const CURRENT_SCHEMA_VERSION: u32 = 9;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RetrievalScope {
@@ -86,6 +87,22 @@ pub struct ArtifactRecord {
 pub struct StoredEventWithArtifacts {
     pub event: StoredEventEnvelope,
     pub artifact_ids: Vec<ArtifactId>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EventPrunePolicy {
+    pub retention_days: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct EventPruneReport {
+    pub cutoff_unix_seconds: u64,
+    pub candidate_sessions: u64,
+    pub eligible_sessions: u64,
+    pub pruned_work_items: u64,
+    pub deleted_events: u64,
+    pub deleted_event_artifact_refs: u64,
+    pub skipped_invalid_timestamps: u64,
 }
 
 pub trait EventStore {

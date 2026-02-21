@@ -464,3 +464,226 @@ fn artifact_payload_uses_reference_metadata_not_embedded_blob() {
     assert!(serialized.contains("artifact://logs/worker-1"));
     assert!(!serialized.contains("BEGIN RAW LOG CONTENT"));
 }
+
+fn seed_runtime_mapping(
+    store: &mut SqliteEventStore,
+    work_item_id: &str,
+    session_id: &str,
+    status: WorkerSessionStatus,
+    updated_at: &str,
+) {
+    let ticket_suffix = work_item_id.trim_start_matches("wi-");
+    let mapping = RuntimeMappingRecord {
+        ticket: TicketRecord {
+            ticket_id: TicketId::from_provider_uuid(TicketProvider::Linear, ticket_suffix),
+            provider: TicketProvider::Linear,
+            provider_ticket_id: ticket_suffix.to_owned(),
+            identifier: format!("AP-{ticket_suffix}"),
+            title: format!("Ticket {ticket_suffix}"),
+            state: "In Progress".to_owned(),
+            updated_at: updated_at.to_owned(),
+        },
+        work_item_id: WorkItemId::new(work_item_id),
+        worktree: WorktreeRecord {
+            worktree_id: WorktreeId::new(format!("wt-{work_item_id}")),
+            work_item_id: WorkItemId::new(work_item_id),
+            path: format!("/tmp/{work_item_id}"),
+            branch: format!("ap/{work_item_id}"),
+            base_branch: "main".to_owned(),
+            created_at: "2026-01-01T00:00:00Z".to_owned(),
+        },
+        session: SessionRecord {
+            session_id: WorkerSessionId::new(session_id),
+            work_item_id: WorkItemId::new(work_item_id),
+            backend_kind: BackendKind::Codex,
+            workdir: format!("/tmp/{work_item_id}"),
+            model: Some("gpt-5-codex".to_owned()),
+            status,
+            created_at: "2026-01-01T00:00:00Z".to_owned(),
+            updated_at: updated_at.to_owned(),
+        },
+    };
+
+    store
+        .upsert_runtime_mapping(&mapping)
+        .expect("seed runtime mapping");
+}
+
+#[test]
+fn prune_deletes_old_completed_work_item_events_and_event_refs() {
+    let mut store = SqliteEventStore::in_memory().expect("in-memory store");
+
+    seed_runtime_mapping(
+        &mut store,
+        "wi-old",
+        "sess-old",
+        WorkerSessionStatus::Done,
+        "100.000000000Z",
+    );
+    seed_runtime_mapping(
+        &mut store,
+        "wi-active",
+        "sess-active",
+        WorkerSessionStatus::Running,
+        "1990000.000000000Z",
+    );
+
+    store
+        .append(NewEventEnvelope {
+            event_id: "evt-old-1".to_owned(),
+            occurred_at: "100.000000000Z".to_owned(),
+            work_item_id: Some(WorkItemId::new("wi-old")),
+            session_id: Some(WorkerSessionId::new("sess-old")),
+            payload: OrchestrationEventPayload::UserResponded(UserRespondedPayload {
+                session_id: Some(WorkerSessionId::new("sess-old")),
+                work_item_id: Some(WorkItemId::new("wi-old")),
+                message: "old event".to_owned(),
+            }),
+            schema_version: 1,
+        })
+        .expect("append old event");
+
+    let old_artifact_id = ArtifactId::new("artifact-old-1");
+    store
+        .create_artifact(&ArtifactRecord {
+            artifact_id: old_artifact_id.clone(),
+            work_item_id: WorkItemId::new("wi-old"),
+            kind: ArtifactKind::LogSnippet,
+            metadata: serde_json::json!({"summary":"old"}),
+            storage_ref: "artifact://old".to_owned(),
+            created_at: "100.000000000Z".to_owned(),
+        })
+        .expect("create old artifact");
+    store
+        .append_event(
+            NewEventEnvelope {
+                event_id: "evt-old-2".to_owned(),
+                occurred_at: "100.000000000Z".to_owned(),
+                work_item_id: Some(WorkItemId::new("wi-old")),
+                session_id: Some(WorkerSessionId::new("sess-old")),
+                payload: OrchestrationEventPayload::ArtifactCreated(ArtifactCreatedPayload {
+                    artifact_id: old_artifact_id.clone(),
+                    work_item_id: WorkItemId::new("wi-old"),
+                    kind: ArtifactKind::LogSnippet,
+                    label: "old artifact".to_owned(),
+                    uri: "artifact://old".to_owned(),
+                }),
+                schema_version: 1,
+            },
+            std::slice::from_ref(&old_artifact_id),
+        )
+        .expect("append old artifact event");
+
+    store
+        .append(NewEventEnvelope {
+            event_id: "evt-active-1".to_owned(),
+            occurred_at: "1990000.000000000Z".to_owned(),
+            work_item_id: Some(WorkItemId::new("wi-active")),
+            session_id: Some(WorkerSessionId::new("sess-active")),
+            payload: OrchestrationEventPayload::UserResponded(UserRespondedPayload {
+                session_id: Some(WorkerSessionId::new("sess-active")),
+                work_item_id: Some(WorkItemId::new("wi-active")),
+                message: "active event".to_owned(),
+            }),
+            schema_version: 1,
+        })
+        .expect("append active event");
+
+    let report = store
+        .prune_completed_session_events(EventPrunePolicy { retention_days: 14 }, 2_000_000)
+        .expect("prune old sessions");
+
+    assert_eq!(report.candidate_sessions, 1);
+    assert_eq!(report.eligible_sessions, 1);
+    assert_eq!(report.pruned_work_items, 1);
+    assert_eq!(report.deleted_events, 2);
+    assert_eq!(report.deleted_event_artifact_refs, 1);
+    assert_eq!(report.skipped_invalid_timestamps, 0);
+
+    assert_eq!(
+        store
+            .count_events(RetrievalScope::WorkItem(WorkItemId::new("wi-old")))
+            .expect("count old work item"),
+        0
+    );
+    assert_eq!(
+        store
+            .count_events(RetrievalScope::WorkItem(WorkItemId::new("wi-active")))
+            .expect("count active work item"),
+        1
+    );
+}
+
+#[test]
+fn prune_is_idempotent() {
+    let mut store = SqliteEventStore::in_memory().expect("in-memory store");
+    seed_runtime_mapping(
+        &mut store,
+        "wi-old",
+        "sess-old",
+        WorkerSessionStatus::Crashed,
+        "100.000000000Z",
+    );
+    store
+        .append(NewEventEnvelope {
+            event_id: "evt-old-1".to_owned(),
+            occurred_at: "100.000000000Z".to_owned(),
+            work_item_id: Some(WorkItemId::new("wi-old")),
+            session_id: Some(WorkerSessionId::new("sess-old")),
+            payload: OrchestrationEventPayload::SessionCrashed(SessionCrashedPayload {
+                session_id: WorkerSessionId::new("sess-old"),
+                reason: "panic".to_owned(),
+            }),
+            schema_version: 1,
+        })
+        .expect("append old crash event");
+
+    let first = store
+        .prune_completed_session_events(EventPrunePolicy { retention_days: 14 }, 2_000_000)
+        .expect("first prune");
+    let second = store
+        .prune_completed_session_events(EventPrunePolicy { retention_days: 14 }, 2_000_000)
+        .expect("second prune");
+
+    assert_eq!(first.deleted_events, 1);
+    assert_eq!(second.deleted_events, 0);
+    assert_eq!(second.pruned_work_items, 0);
+}
+
+#[test]
+fn prune_skips_invalid_updated_at_without_deleting_events() {
+    let mut store = SqliteEventStore::in_memory().expect("in-memory store");
+    seed_runtime_mapping(
+        &mut store,
+        "wi-invalid",
+        "sess-invalid",
+        WorkerSessionStatus::Done,
+        "not-a-timestamp",
+    );
+    store
+        .append(NewEventEnvelope {
+            event_id: "evt-invalid-1".to_owned(),
+            occurred_at: "2026-02-15T14:00:00Z".to_owned(),
+            work_item_id: Some(WorkItemId::new("wi-invalid")),
+            session_id: Some(WorkerSessionId::new("sess-invalid")),
+            payload: OrchestrationEventPayload::SessionCompleted(SessionCompletedPayload {
+                session_id: WorkerSessionId::new("sess-invalid"),
+                summary: Some("done".to_owned()),
+            }),
+            schema_version: 1,
+        })
+        .expect("append event");
+
+    let report = store
+        .prune_completed_session_events(EventPrunePolicy { retention_days: 14 }, 2_000_000)
+        .expect("prune should succeed");
+
+    assert_eq!(report.skipped_invalid_timestamps, 1);
+    assert_eq!(report.deleted_events, 0);
+    assert_eq!(
+        store
+            .count_events(RetrievalScope::WorkItem(WorkItemId::new("wi-invalid")))
+            .expect("count remaining events"),
+        1
+    );
+}

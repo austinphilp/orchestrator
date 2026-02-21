@@ -74,6 +74,8 @@ const DEFAULT_HARNESS_LOG_NORMALIZED_EVENTS: bool = false;
 const DEFAULT_OPENCODE_BINARY: &str = "opencode";
 const DEFAULT_OPENCODE_SERVER_BASE_URL: &str = "http://127.0.0.1:8787";
 const DEFAULT_CODEX_BINARY: &str = "codex";
+const DEFAULT_EVENT_RETENTION_DAYS: u64 = 14;
+const DEFAULT_EVENT_PRUNE_ENABLED: bool = true;
 const DEFAULT_UI_THEME: &str = "nord";
 const DEFAULT_TICKET_PICKER_PRIORITY_STATES: &[&str] =
     &["In Progress", "Final Approval", "Todo", "Backlog"];
@@ -259,6 +261,10 @@ pub struct RuntimeConfigToml {
     pub opencode_server_base_url: String,
     #[serde(default = "default_codex_binary")]
     pub codex_binary: String,
+    #[serde(default = "default_event_retention_days")]
+    pub event_retention_days: u64,
+    #[serde(default = "default_event_prune_enabled")]
+    pub event_prune_enabled: bool,
 }
 
 impl Default for RuntimeConfigToml {
@@ -271,6 +277,8 @@ impl Default for RuntimeConfigToml {
             opencode_binary: default_opencode_binary(),
             opencode_server_base_url: default_opencode_server_base_url(),
             codex_binary: default_codex_binary(),
+            event_retention_days: default_event_retention_days(),
+            event_prune_enabled: default_event_prune_enabled(),
         }
     }
 }
@@ -369,6 +377,14 @@ fn default_opencode_server_base_url() -> String {
 
 fn default_codex_binary() -> String {
     DEFAULT_CODEX_BINARY.to_owned()
+}
+
+fn default_event_retention_days() -> u64 {
+    DEFAULT_EVENT_RETENTION_DAYS
+}
+
+fn default_event_prune_enabled() -> bool {
+    DEFAULT_EVENT_PRUNE_ENABLED
 }
 
 fn default_ui_theme() -> String {
@@ -672,6 +688,10 @@ fn normalize_config(config: &mut AppConfig) -> bool {
         default_opencode_server_base_url(),
     );
     changed |= normalize_non_empty_string(&mut config.runtime.codex_binary, default_codex_binary());
+    if config.runtime.event_retention_days == 0 {
+        config.runtime.event_retention_days = default_event_retention_days();
+        changed = true;
+    }
 
     changed |= normalize_non_empty_string(&mut config.ui.theme, default_ui_theme());
     changed |= normalize_string_vec(&mut config.ui.ticket_picker_priority_states);

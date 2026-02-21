@@ -64,7 +64,7 @@ fn migration_from_schema_v1_adds_runtime_mapping_tables() {
     drop(conn);
 
     let store = SqliteEventStore::open(db.path()).expect("open and migrate");
-    assert_eq!(store.schema_version().expect("schema version"), 8);
+    assert_eq!(store.schema_version().expect("schema version"), 9);
     drop(store);
 
     let conn = rusqlite::Connection::open(db.path()).expect("open sqlite for inspection");
@@ -92,7 +92,7 @@ fn migration_from_schema_v1_adds_runtime_mapping_tables() {
             row.get(0)
         })
         .expect("count migrations");
-    assert_eq!(migration_count, 8);
+    assert_eq!(migration_count, 9);
 
     let deprecated_table_exists: Option<i64> = conn
         .query_row(
