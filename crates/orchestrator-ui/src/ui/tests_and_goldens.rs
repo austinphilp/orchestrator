@@ -264,6 +264,62 @@ mod tests {
         }
     }
 
+    #[derive(Default)]
+    struct RecordingWorkingStateProvider {
+        persisted_working_states: Arc<Mutex<Vec<(WorkerSessionId, bool)>>>,
+    }
+
+    impl RecordingWorkingStateProvider {
+        fn persisted_working_states(&self) -> Vec<(WorkerSessionId, bool)> {
+            self.persisted_working_states
+                .lock()
+                .expect("persisted working states lock")
+                .clone()
+        }
+    }
+
+    #[async_trait]
+    impl TicketPickerProvider for RecordingWorkingStateProvider {
+        async fn list_unfinished_tickets(&self) -> Result<Vec<TicketSummary>, CoreError> {
+            Ok(Vec::new())
+        }
+
+        async fn start_or_resume_ticket(
+            &self,
+            _ticket: TicketSummary,
+            _repository_override: Option<PathBuf>,
+        ) -> Result<SelectedTicketFlowResult, CoreError> {
+            Err(CoreError::DependencyUnavailable(
+                "not used in recording working-state provider".to_owned(),
+            ))
+        }
+
+        async fn create_ticket_from_brief(
+            &self,
+            _request: CreateTicketFromPickerRequest,
+        ) -> Result<TicketSummary, CoreError> {
+            Err(CoreError::DependencyUnavailable(
+                "not used in recording working-state provider".to_owned(),
+            ))
+        }
+
+        async fn reload_projection(&self) -> Result<ProjectionState, CoreError> {
+            Ok(ProjectionState::default())
+        }
+
+        async fn set_session_working_state(
+            &self,
+            session_id: WorkerSessionId,
+            is_working: bool,
+        ) -> Result<(), CoreError> {
+            self.persisted_working_states
+                .lock()
+                .expect("persisted working states lock")
+                .push((session_id, is_working));
+            Ok(())
+        }
+    }
+
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
     }
@@ -289,6 +345,22 @@ mod tests {
 
     fn shift_key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::SHIFT)
+    }
+
+    async fn wait_for_working_state_persist_count(
+        provider: &RecordingWorkingStateProvider,
+        expected_count: usize,
+    ) {
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if provider.persisted_working_states().len() >= expected_count {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("working-state persists should complete");
     }
 
     #[derive(Default, Debug)]
@@ -2624,6 +2696,210 @@ mod tests {
         shell_state.poll_terminal_session_events();
 
         assert!(shell_state.session_requires_progression_approval(&session_id));
+    }
+
+    #[tokio::test]
+    async fn planning_turn_state_flaps_coalesce_to_single_persisted_write() {
+        let backend = Arc::new(ManualTerminalBackend::default());
+        let provider = Arc::new(RecordingWorkingStateProvider::default());
+        let mut projection = sample_projection(true);
+        let session_id = WorkerSessionId::new("sess-1");
+        projection
+            .work_items
+            .get_mut(&WorkItemId::new("wi-1"))
+            .expect("work item")
+            .workflow_state = Some(WorkflowState::Planning);
+
+        let mut shell_state = UiShellState::new_with_integrations(
+            "ready".to_owned(),
+            projection,
+            None,
+            None,
+            Some(provider.clone()),
+            Some(backend),
+        );
+        shell_state.open_terminal_and_enter_mode();
+        let sender = shell_state
+            .terminal_session_sender
+            .clone()
+            .expect("terminal sender");
+
+        for active in [true, false, true] {
+            sender
+                .try_send(TerminalSessionEvent::TurnState {
+                    session_id: session_id.clone(),
+                    turn_state: BackendTurnStateEvent { active },
+                })
+                .expect("queue turn state");
+        }
+        shell_state.poll_terminal_session_events();
+
+        assert!(provider.persisted_working_states().is_empty());
+        assert_eq!(
+            shell_state
+                .pending_session_working_state_persists
+                .get(&session_id)
+                .map(|pending| pending.is_working),
+            Some(true)
+        );
+
+        shell_state
+            .pending_session_working_state_persists
+            .get_mut(&session_id)
+            .expect("pending planning persist")
+            .deadline = Instant::now() - Duration::from_millis(1);
+        shell_state.flush_due_session_working_state_persists();
+
+        wait_for_working_state_persist_count(provider.as_ref(), 1).await;
+        assert_eq!(
+            provider.persisted_working_states(),
+            vec![(session_id.clone(), true)]
+        );
+    }
+
+    #[tokio::test]
+    async fn planning_turn_state_persists_after_settle_window() {
+        let backend = Arc::new(ManualTerminalBackend::default());
+        let provider = Arc::new(RecordingWorkingStateProvider::default());
+        let mut projection = sample_projection(true);
+        let session_id = WorkerSessionId::new("sess-1");
+        projection
+            .work_items
+            .get_mut(&WorkItemId::new("wi-1"))
+            .expect("work item")
+            .workflow_state = Some(WorkflowState::Planning);
+
+        let mut shell_state = UiShellState::new_with_integrations(
+            "ready".to_owned(),
+            projection,
+            None,
+            None,
+            Some(provider.clone()),
+            Some(backend),
+        );
+        shell_state.open_terminal_and_enter_mode();
+        let sender = shell_state
+            .terminal_session_sender
+            .clone()
+            .expect("terminal sender");
+
+        sender
+            .try_send(TerminalSessionEvent::TurnState {
+                session_id: session_id.clone(),
+                turn_state: BackendTurnStateEvent { active: true },
+            })
+            .expect("queue turn state");
+        shell_state.poll_terminal_session_events();
+
+        assert!(provider.persisted_working_states().is_empty());
+        shell_state
+            .pending_session_working_state_persists
+            .get_mut(&session_id)
+            .expect("pending planning persist")
+            .deadline = Instant::now() - Duration::from_millis(1);
+        shell_state.flush_due_session_working_state_persists();
+
+        wait_for_working_state_persist_count(provider.as_ref(), 1).await;
+        assert_eq!(provider.persisted_working_states(), vec![(session_id, true)]);
+    }
+
+    #[tokio::test]
+    async fn non_planning_turn_state_persists_immediately() {
+        let backend = Arc::new(ManualTerminalBackend::default());
+        let provider = Arc::new(RecordingWorkingStateProvider::default());
+        let projection = sample_projection(true);
+        let session_id = WorkerSessionId::new("sess-1");
+        let mut shell_state = UiShellState::new_with_integrations(
+            "ready".to_owned(),
+            projection,
+            None,
+            None,
+            Some(provider.clone()),
+            Some(backend),
+        );
+        shell_state.open_terminal_and_enter_mode();
+        let sender = shell_state
+            .terminal_session_sender
+            .clone()
+            .expect("terminal sender");
+
+        sender
+            .try_send(TerminalSessionEvent::TurnState {
+                session_id: session_id.clone(),
+                turn_state: BackendTurnStateEvent { active: true },
+            })
+            .expect("queue turn state");
+        shell_state.poll_terminal_session_events();
+
+        wait_for_working_state_persist_count(provider.as_ref(), 1).await;
+        assert_eq!(
+            provider.persisted_working_states(),
+            vec![(session_id.clone(), true)]
+        );
+        assert!(!shell_state
+            .pending_session_working_state_persists
+            .contains_key(&session_id));
+    }
+
+    #[tokio::test]
+    async fn stream_end_bypasses_planning_debounce_and_clears_pending_true_write() {
+        let backend = Arc::new(ManualTerminalBackend::default());
+        let provider = Arc::new(RecordingWorkingStateProvider::default());
+        let mut projection = sample_projection(true);
+        let session_id = WorkerSessionId::new("sess-1");
+        projection
+            .work_items
+            .get_mut(&WorkItemId::new("wi-1"))
+            .expect("work item")
+            .workflow_state = Some(WorkflowState::Planning);
+
+        let mut shell_state = UiShellState::new_with_integrations(
+            "ready".to_owned(),
+            projection,
+            None,
+            None,
+            Some(provider.clone()),
+            Some(backend),
+        );
+        shell_state.open_terminal_and_enter_mode();
+        let sender = shell_state
+            .terminal_session_sender
+            .clone()
+            .expect("terminal sender");
+
+        sender
+            .try_send(TerminalSessionEvent::TurnState {
+                session_id: session_id.clone(),
+                turn_state: BackendTurnStateEvent { active: true },
+            })
+            .expect("queue turn state");
+        shell_state.poll_terminal_session_events();
+        assert!(shell_state
+            .pending_session_working_state_persists
+            .contains_key(&session_id));
+
+        sender
+            .try_send(TerminalSessionEvent::StreamEnded {
+                session_id: session_id.clone(),
+            })
+            .expect("queue stream ended");
+        shell_state.poll_terminal_session_events();
+
+        wait_for_working_state_persist_count(provider.as_ref(), 1).await;
+        assert_eq!(
+            provider.persisted_working_states(),
+            vec![(session_id.clone(), false)]
+        );
+        assert!(!shell_state
+            .pending_session_working_state_persists
+            .contains_key(&session_id));
+
+        shell_state.flush_due_session_working_state_persists();
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert_eq!(
+            provider.persisted_working_states(),
+            vec![(session_id, false)]
+        );
     }
 
     #[test]
