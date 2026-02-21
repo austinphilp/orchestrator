@@ -328,8 +328,19 @@ mod tests {
             self.resolved_inbox_requests
                 .lock()
                 .expect("resolved inbox requests lock")
-                .push(request);
-            Ok(None)
+                .push(request.clone());
+            Ok(Some(stored_event_for_test(
+                "evt-test-inbox-resolved",
+                2,
+                Some(request.work_item_id.clone()),
+                None,
+                OrchestrationEventPayload::InboxItemResolved(
+                    orchestrator_core::InboxItemResolvedPayload {
+                        inbox_item_id: request.inbox_item_id,
+                        work_item_id: request.work_item_id,
+                    },
+                ),
+            )))
         }
     }
 
