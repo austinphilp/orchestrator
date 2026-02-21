@@ -6450,7 +6450,6 @@ mod tests {
 
         shell_state.set_selection(Some(decision_index), &rows);
 
-        assert!(shell_state.is_right_pane_focused());
         assert!(matches!(
             shell_state.view_stack.active_center(),
             Some(CenterView::TerminalView { session_id }) if session_id.as_str() == "sess-decision"
@@ -6469,9 +6468,8 @@ mod tests {
 
         shell_state.set_selection(Some(approval_index), &rows);
 
-        assert!(shell_state.is_left_pane_focused());
-        assert!(shell_state.is_sessions_sidebar_focused());
         assert_eq!(shell_state.mode, UiMode::Normal);
+        assert!(!shell_state.is_terminal_view_active());
         assert_eq!(
             shell_state
                 .selected_session_id_for_panel()
@@ -6497,8 +6495,8 @@ mod tests {
         shell_state.set_selection(Some(approval_index), &rows);
         shell_state.set_selection(Some(fyi_index), &rows);
 
-        assert!(shell_state.is_left_pane_focused());
-        assert!(shell_state.is_sessions_sidebar_focused());
+        assert_eq!(shell_state.mode, UiMode::Normal);
+        assert!(!shell_state.is_terminal_view_active());
         assert_eq!(
             shell_state
                 .selected_session_id_for_panel()

@@ -4284,8 +4284,6 @@ impl UiShellState {
             return;
         }
 
-        self.pane_focus = PaneFocus::Left;
-        self.sidebar_focus = SidebarFocus::Sessions;
         self.enter_normal_mode();
 
         let Some(session_id) = selected_row.session_id.clone() else {
