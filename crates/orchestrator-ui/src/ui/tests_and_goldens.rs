@@ -324,12 +324,12 @@ mod tests {
         async fn resolve_inbox_item(
             &self,
             request: InboxResolveRequest,
-        ) -> Result<ProjectionState, CoreError> {
+        ) -> Result<Option<StoredEventEnvelope>, CoreError> {
             self.resolved_inbox_requests
                 .lock()
                 .expect("resolved inbox requests lock")
                 .push(request);
-            Ok(ProjectionState::default())
+            Ok(None)
         }
     }
 
@@ -3275,8 +3275,19 @@ mod tests {
                 from: WorkflowState::Implementing,
                 to: WorkflowState::InReview,
                 instruction: None,
+                event: stored_event_for_test(
+                    "evt-test-workflow-fallback",
+                    1,
+                    Some(WorkItemId::new("wi-1")),
+                    Some(session_id.clone()),
+                    OrchestrationEventPayload::WorkflowTransition(WorkflowTransitionPayload {
+                        work_item_id: WorkItemId::new("wi-1"),
+                        from: WorkflowState::Implementing,
+                        to: WorkflowState::InReview,
+                        reason: Some(WorkflowTransitionReason::PlanCommitted),
+                    }),
+                ),
             },
-            projection: None,
         });
 
         assert!(!shell_state
@@ -3299,7 +3310,16 @@ mod tests {
         shell_state.apply_ticket_picker_event(TicketPickerEvent::SessionArchived {
             session_id: session_id.clone(),
             warning: None,
-            projection: None,
+            event: stored_event_for_test(
+                "evt-test-session-archived-fallback",
+                1,
+                Some(WorkItemId::new("wi-1")),
+                Some(session_id.clone()),
+                OrchestrationEventPayload::SessionCompleted(SessionCompletedPayload {
+                    session_id: session_id.clone(),
+                    summary: Some("archived".to_owned()),
+                }),
+            ),
         });
 
         assert!(!shell_state
@@ -4126,6 +4146,7 @@ mod tests {
             .get_mut(&WorkerSessionId::new("sess-2"))
             .expect("offscreen state should exist");
         offscreen_state.last_background_flush_at = Some(Instant::now() - Duration::from_secs(16));
+        shell_state.recompute_background_terminal_flush_deadline();
 
         assert!(shell_state.flush_background_terminal_output_and_report());
         let flushed = shell_state

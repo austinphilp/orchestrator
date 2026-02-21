@@ -64,6 +64,7 @@ struct UiShellState {
     pending_session_working_state_persists: HashMap<WorkerSessionId, PendingWorkingStatePersist>,
     session_info_summary_last_refresh_at: HashMap<WorkerSessionId, Instant>,
     session_info_diff_last_refresh_at: HashMap<WorkerSessionId, Instant>,
+    background_terminal_flush_deadline: Option<Instant>,
     terminal_session_streamed: HashSet<WorkerSessionId>,
     terminal_compose_editor: EditorState,
     terminal_compose_event_handler: EditorEventHandler,
@@ -187,7 +188,7 @@ impl UiShellState {
             pending_session_working_state_persists: HashMap::new(),
             session_info_summary_last_refresh_at: HashMap::new(),
             session_info_diff_last_refresh_at: HashMap::new(),
-            pending_session_working_state_persists: HashMap::new(),
+            background_terminal_flush_deadline: None,
             terminal_session_streamed: HashSet::new(),
             terminal_compose_editor: insert_mode_editor_state(),
             terminal_compose_event_handler: EditorEventHandler::default(),
@@ -1897,13 +1898,7 @@ impl UiShellState {
         }
     }
 
-    fn tick_ticket_picker_and_report(&mut self) -> bool {
-        let mut changed = self.poll_ticket_picker_events();
-        changed |= self.tick_ticket_picker_create_refresh();
-        changed
-    }
-
-    fn tick_ticket_picker_create_refresh(&mut self) -> bool {
+    fn tick_ticket_picker_create_refresh_at(&mut self, now: Instant) -> bool {
         if !self.ticket_picker_overlay.visible || !self.ticket_picker_overlay.creating {
             self.ticket_picker_create_refresh_deadline = None;
             return false;
@@ -1911,7 +1906,6 @@ impl UiShellState {
         if self.ticket_picker_overlay.loading {
             return false;
         }
-        let now = Instant::now();
         let deadline = self.ticket_picker_create_refresh_deadline.unwrap_or(now);
         if now < deadline {
             return false;
@@ -1950,22 +1944,11 @@ impl UiShellState {
             .collect::<Vec<_>>()
     }
 
+    #[cfg(test)]
     fn tick_terminal_view_and_report(&mut self) -> bool {
-        let mut changed = false;
-        changed |= self.poll_terminal_session_events();
-        changed |= self.flush_due_session_working_state_persists();
-        changed |= self.flush_background_terminal_output_and_report();
-        changed |= self.enqueue_progression_approval_reconcile_polls();
-        changed |= self.poll_merge_queue_events();
-        changed |= self.poll_session_info_summary_events();
-        changed |= self.tick_session_info_summary_refresh();
-        changed |= self.enqueue_merge_reconcile_polls();
-        changed |= self.dispatch_merge_queue_requests();
-        changed |= self.ensure_session_info_diff_loaded_for_active_session();
-        if let Some(session_id) = self.active_terminal_session_id().cloned() {
-            changed |= self.flush_deferred_terminal_output_for_session(&session_id);
-            changed |= self.ensure_terminal_stream_and_report(session_id);
-        }
+        let mut changed = self.drain_async_events_and_report();
+        changed |= self.run_due_periodic_tasks_and_report(Instant::now());
+        changed |= self.maintain_active_terminal_view_and_report();
         changed
     }
 
@@ -1978,13 +1961,28 @@ impl UiShellState {
         }
         let bytes = std::mem::take(&mut view.deferred_output);
         append_terminal_assistant_output(view, bytes);
-        view.last_background_flush_at = Some(Instant::now());
+        view.last_background_flush_at = None;
+        self.recompute_background_terminal_flush_deadline();
         true
     }
 
+    #[cfg(test)]
     fn flush_background_terminal_output_and_report(&mut self) -> bool {
+        self.flush_background_terminal_output_and_report_at(Instant::now())
+    }
+
+    fn flush_background_terminal_output_and_report_at(&mut self, now: Instant) -> bool {
+        if self.background_terminal_flush_deadline.is_none() {
+            self.recompute_background_terminal_flush_deadline();
+        }
+        if self
+            .background_terminal_flush_deadline
+            .map(|deadline| now < deadline)
+            .unwrap_or(true)
+        {
+            return false;
+        }
         let active_session_id = self.active_terminal_session_id().cloned();
-        let now = Instant::now();
         let interval = background_session_refresh_interval_config_value();
         let mut flushed_any = false;
 
@@ -2021,7 +2019,26 @@ impl UiShellState {
             flushed_any = true;
         }
 
+        self.recompute_background_terminal_flush_deadline();
         flushed_any
+    }
+
+    fn recompute_background_terminal_flush_deadline(&mut self) {
+        let now = Instant::now();
+        let interval = background_session_refresh_interval_config_value();
+        let active_session_id = self.active_terminal_session_id().cloned();
+        self.background_terminal_flush_deadline = self
+            .terminal_session_states
+            .iter()
+            .filter(|(session_id, view)| {
+                active_session_id.as_ref() != Some(*session_id) && !view.deferred_output.is_empty()
+            })
+            .map(|(_, view)| {
+                view.last_background_flush_at
+                    .map(|previous| previous + interval)
+                    .unwrap_or(now)
+            })
+            .min();
     }
 
     fn poll_terminal_session_events(&mut self) -> bool {
@@ -2166,6 +2183,9 @@ impl UiShellState {
                     self.reconcile_progression_approval_inbox_for_session(&session_id);
                 }
             }
+        }
+        if had_events {
+            self.recompute_background_terminal_flush_deadline();
         }
         had_events
     }
@@ -2395,11 +2415,15 @@ impl UiShellState {
         had_events
     }
 
+    #[cfg(test)]
     fn enqueue_merge_reconcile_polls(&mut self) -> bool {
+        self.enqueue_merge_reconcile_polls_at(Instant::now())
+    }
+
+    fn enqueue_merge_reconcile_polls_at(&mut self, now: Instant) -> bool {
         if self.supervisor_command_dispatcher.is_none() {
             return false;
         }
-        let now = Instant::now();
         if self
             .merge_last_poll_at
             .map(|previous| now.duration_since(previous) < MERGE_POLL_INTERVAL)
@@ -2446,8 +2470,7 @@ impl UiShellState {
         changed
     }
 
-    fn enqueue_progression_approval_reconcile_polls(&mut self) -> bool {
-        let now = Instant::now();
+    fn enqueue_progression_approval_reconcile_polls_at(&mut self, now: Instant) -> bool {
         if self
             .approval_reconcile_last_poll_at
             .map(|previous| now.duration_since(previous) < APPROVAL_RECONCILE_POLL_INTERVAL)
@@ -2470,6 +2493,11 @@ impl UiShellState {
         changed
     }
 
+    #[cfg(test)]
+    fn enqueue_progression_approval_reconcile_polls(&mut self) -> bool {
+        self.enqueue_progression_approval_reconcile_polls_at(Instant::now())
+    }
+
     fn ensure_review_sync_instruction(&mut self, session_id: &WorkerSessionId) -> bool {
         if self.review_sync_instructions_sent.contains(session_id) {
             return false;
@@ -2483,14 +2511,13 @@ impl UiShellState {
         true
     }
 
-    fn dispatch_merge_queue_requests(&mut self) -> bool {
+    fn dispatch_merge_queue_requests_at(&mut self, now: Instant) -> bool {
         if self.supervisor_command_dispatcher.is_none() {
             return false;
         }
         if self.merge_queue.is_empty() {
             return false;
         }
-        let now = Instant::now();
         if self
             .merge_last_dispatched_at
             .map(|previous| now.duration_since(previous) < MERGE_REQUEST_RATE_LIMIT)
@@ -4533,11 +4560,10 @@ impl UiShellState {
         changed
     }
 
-    fn tick_session_info_summary_refresh(&mut self) -> bool {
+    fn tick_session_info_summary_refresh_at(&mut self, now: Instant) -> bool {
         let Some(deadline) = self.session_info_summary_deadline else {
             return false;
         };
-        let now = Instant::now();
         if now < deadline {
             return false;
         }
@@ -4556,6 +4582,119 @@ impl UiShellState {
         }
         self.session_info_summary_deadline = None;
         self.spawn_active_session_summary_refresh()
+    }
+
+    #[cfg(test)]
+    fn tick_session_info_summary_refresh(&mut self) -> bool {
+        self.tick_session_info_summary_refresh_at(Instant::now())
+    }
+
+    fn drain_async_events_and_report(&mut self) -> bool {
+        let mut changed = false;
+        changed |= self.tick_supervisor_stream_and_report();
+        changed |= self.poll_ticket_picker_events();
+        changed |= self.poll_terminal_session_events();
+        changed |= self.poll_merge_queue_events();
+        changed |= self.poll_session_info_summary_events();
+        changed
+    }
+
+    fn run_due_periodic_tasks_and_report(&mut self, now: Instant) -> bool {
+        let mut changed = false;
+        changed |= self.flush_due_session_working_state_persists();
+        changed |= self.tick_ticket_picker_create_refresh_at(now);
+        changed |= self.flush_background_terminal_output_and_report_at(now);
+        changed |= self.enqueue_progression_approval_reconcile_polls_at(now);
+        changed |= self.tick_session_info_summary_refresh_at(now);
+        changed |= self.enqueue_merge_reconcile_polls_at(now);
+        changed |= self.dispatch_merge_queue_requests_at(now);
+        changed
+    }
+
+    fn maintain_active_terminal_view_and_report(&mut self) -> bool {
+        let mut changed = self.ensure_session_info_diff_loaded_for_active_session();
+        if let Some(session_id) = self.active_terminal_session_id().cloned() {
+            changed |= self.flush_deferred_terminal_output_for_session(&session_id);
+            changed |= self.ensure_terminal_stream_and_report(session_id);
+        }
+        changed
+    }
+
+    fn has_pending_async_activity(&self) -> bool {
+        let supervisor_busy = self.supervisor_chat_stream.as_ref().is_some_and(|stream| {
+            !stream.pending_delta.is_empty()
+                || matches!(
+                    stream.lifecycle,
+                    SupervisorStreamLifecycle::Connecting
+                        | SupervisorStreamLifecycle::Streaming
+                        | SupervisorStreamLifecycle::Cancelling
+                )
+        });
+        let ticket_picker_busy = self.ticket_picker_overlay.loading
+            || self.ticket_picker_overlay.creating
+            || self.ticket_picker_overlay.starting_ticket_id.is_some()
+            || self.ticket_picker_overlay.archiving_ticket_id.is_some();
+        let terminal_busy = !self.terminal_session_streamed.is_empty()
+            || self
+                .terminal_session_states
+                .values()
+                .any(|view| view.turn_active || !view.deferred_output.is_empty());
+        let merge_busy = !self.merge_queue.is_empty()
+            || !self.merge_pending_sessions.is_empty()
+            || !self.merge_finalizing_sessions.is_empty();
+        let summary_busy = self
+            .session_info_summary_cache
+            .values()
+            .any(|cache| cache.loading);
+        supervisor_busy || ticket_picker_busy || terminal_busy || merge_busy || summary_busy
+    }
+
+    fn next_wake_deadline(
+        &self,
+        now: Instant,
+        animation_state: AnimationState,
+        last_animation_frame: Instant,
+    ) -> Option<Instant> {
+        let animation_deadline = match animation_state {
+            AnimationState::ActiveTurn => Some(last_animation_frame + Duration::from_millis(200)),
+            AnimationState::ResolvedOnly => Some(last_animation_frame + Duration::from_millis(1_000)),
+            AnimationState::None => None,
+        };
+        let ticket_refresh_deadline = self
+            .ticket_picker_create_refresh_deadline
+            .filter(|_| self.ticket_picker_overlay.visible && self.ticket_picker_overlay.creating)
+            .filter(|_| !self.ticket_picker_overlay.loading);
+        let summary_deadline = self.session_info_summary_deadline;
+        let background_flush_deadline = self.background_terminal_flush_deadline;
+        let merge_deadline = self
+            .supervisor_command_dispatcher
+            .as_ref()
+            .map(|_| self.merge_last_poll_at.map(|previous| previous + MERGE_POLL_INTERVAL).unwrap_or(now));
+        let approval_deadline = self
+            .approval_reconcile_last_poll_at
+            .map(|previous| previous + APPROVAL_RECONCILE_POLL_INTERVAL)
+            .or(Some(now));
+        let merge_dispatch_deadline = if self.merge_queue.is_empty() {
+            None
+        } else {
+            Some(
+                self.merge_last_dispatched_at
+                    .map(|previous| previous + MERGE_REQUEST_RATE_LIMIT)
+                    .unwrap_or(now),
+            )
+        };
+        [
+            animation_deadline,
+            ticket_refresh_deadline,
+            summary_deadline,
+            background_flush_deadline,
+            merge_deadline,
+            approval_deadline,
+            merge_dispatch_deadline,
+        ]
+        .into_iter()
+        .flatten()
+        .min()
     }
 
     fn spawn_active_session_summary_refresh(&mut self) -> bool {

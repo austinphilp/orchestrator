@@ -70,16 +70,16 @@ impl Ui {
         let mut last_animation_frame = Instant::now();
         let mut cached_ui_state: Option<UiState> = None;
         loop {
+            let now = Instant::now();
             let mut changed = false;
-            changed |= shell_state.tick_supervisor_stream_and_report();
-            changed |= shell_state.tick_ticket_picker_and_report();
-            changed |= shell_state.tick_terminal_view_and_report();
+            changed |= shell_state.drain_async_events_and_report();
+            changed |= shell_state.run_due_periodic_tasks_and_report(now);
+            changed |= shell_state.maintain_active_terminal_view_and_report();
             changed |= shell_state.ensure_startup_session_feed_opened_and_report();
             if changed {
                 shell_state.invalidate_draw_caches();
             }
 
-            let now = Instant::now();
             shell_state.maybe_emit_projection_perf_log(now);
             let animation_state = shell_state.animation_state(now);
             let animation_frame_interval = match animation_state {
@@ -413,9 +413,19 @@ impl Ui {
             }
 
             force_draw = false;
-            let poll_timeout = match animation_state {
-                AnimationState::ActiveTurn => Duration::from_millis(50),
-                AnimationState::ResolvedOnly | AnimationState::None => Duration::from_millis(250),
+            let event_scan_interval = if matches!(animation_state, AnimationState::ActiveTurn)
+                || shell_state.has_pending_async_activity()
+            {
+                Duration::from_millis(50)
+            } else {
+                Duration::from_secs(1)
+            };
+            let wake_deadline =
+                shell_state.next_wake_deadline(now, animation_state, last_animation_frame);
+            let poll_timeout = match wake_deadline {
+                Some(deadline) if deadline <= now => Duration::from_millis(0),
+                Some(deadline) => deadline.duration_since(now).min(event_scan_interval),
+                None => event_scan_interval,
             };
             if event::poll(poll_timeout)? {
                 if let Event::Key(key) = event::read()? {
