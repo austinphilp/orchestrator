@@ -436,7 +436,7 @@ impl UiShellState {
         if let Some(session_id) = terminal_session_id {
             self.ensure_terminal_stream(session_id.clone());
             let _ = self.flush_deferred_terminal_output_for_session(&session_id);
-            self.enter_terminal_mode();
+            self.pane_focus = PaneFocus::Right;
             self.schedule_session_info_summary_refresh_for_active_session();
         }
     }
@@ -476,7 +476,7 @@ impl UiShellState {
         });
         self.ensure_terminal_stream(session_id.clone());
         let _ = self.flush_deferred_terminal_output_for_session(&session_id);
-        self.enter_terminal_mode();
+        self.pane_focus = PaneFocus::Right;
         self.status_warning = None;
 
         if acknowledge_selection {
@@ -721,7 +721,9 @@ impl UiShellState {
     }
 
     fn session_info_is_foreground(&self) -> bool {
-        self.active_terminal_session_id().is_some() && self.mode == UiMode::Terminal
+        self.active_terminal_session_id().is_some()
+            && self.is_right_pane_focused()
+            && self.mode == UiMode::Insert
     }
 
     fn session_info_diff_cache_for(
@@ -847,7 +849,7 @@ impl UiShellState {
 
         self.ensure_terminal_stream(session_id.clone());
         let _ = self.flush_deferred_terminal_output_for_session(&session_id);
-        self.enter_terminal_mode();
+        self.pane_focus = PaneFocus::Right;
         self.schedule_session_info_summary_refresh_for_active_session();
     }
 
@@ -3376,7 +3378,7 @@ impl UiShellState {
                     session_id: new_session_id,
                 });
                 self.ensure_terminal_stream(started_session);
-                self.enter_terminal_mode();
+                self.pane_focus = PaneFocus::Right;
                 let labels = session_display_labels(&self.domain, session_id);
                 self.status_warning = Some(format!(
                     "terminal {} was not found; opened a fresh terminal",
@@ -3891,13 +3893,10 @@ impl UiShellState {
     }
 
     fn apply_terminal_compose_key(&mut self, key: KeyEvent) -> bool {
-        if self.mode != UiMode::Terminal || !self.is_terminal_view_active() {
+        if self.mode != UiMode::Insert || !self.is_terminal_view_active() {
             return false;
         }
         if self.terminal_session_has_any_needs_input() {
-            return false;
-        }
-        if is_ctrl_char(key, '\\') || is_ctrl_char(key, 'n') {
             return false;
         }
 
@@ -4579,9 +4578,7 @@ impl UiShellState {
     }
 
     fn enter_insert_mode(&mut self) {
-        if !self.is_terminal_view_active() {
-            self.apply_ui_mode(UiMode::Insert);
-        }
+        self.apply_ui_mode(UiMode::Insert);
     }
 
     fn enter_insert_mode_for_current_focus(&mut self) {
@@ -4589,9 +4586,10 @@ impl UiShellState {
             if self.terminal_session_has_any_needs_input() && !self.terminal_session_has_active_needs_input()
             {
                 let _ = self.activate_terminal_needs_input(true);
-            } else {
-                self.enter_terminal_mode();
             }
+            self.snap_active_terminal_output_to_bottom();
+            self.schedule_session_info_summary_refresh_for_active_session();
+            self.apply_ui_mode(UiMode::Insert);
             return;
         }
 
@@ -4608,28 +4606,19 @@ impl UiShellState {
         self.enter_insert_mode();
     }
 
-    fn enter_terminal_mode(&mut self) {
-        if self.is_terminal_view_active() {
-            self.snap_active_terminal_output_to_bottom();
-            self.apply_ui_mode(UiMode::Terminal);
-            self.schedule_session_info_summary_refresh_for_active_session();
-        }
-    }
-
     fn apply_ui_mode(&mut self, mode: UiMode) {
         self.mode = mode;
         self.mode_key_buffer.clear();
         self.which_key_overlay = None;
-        self.terminal_escape_pending = false;
         self.terminal_compose_editor.mode = match mode {
             UiMode::Normal => EditorMode::Normal,
-            UiMode::Insert | UiMode::Terminal => EditorMode::Insert,
+            UiMode::Insert => EditorMode::Insert,
         };
     }
 
     fn open_terminal_and_enter_mode(&mut self) {
         self.open_terminal_for_selected();
-        self.enter_terminal_mode();
+        self.enter_insert_mode_for_current_focus();
     }
 
     fn needs_input_prompt_from_event(
@@ -5566,12 +5555,6 @@ impl UiShellState {
                     "merge finalization unavailable: tokio runtime is not active".to_owned(),
                 );
             }
-        }
-    }
-
-    fn begin_terminal_escape_chord(&mut self) {
-        if self.mode == UiMode::Terminal {
-            self.terminal_escape_pending = true;
         }
     }
 

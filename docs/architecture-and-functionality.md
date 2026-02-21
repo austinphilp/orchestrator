@@ -126,7 +126,7 @@ The repository is a Rust workspace with a layered design:
 ## UI and interaction model
 
 - Main TUI in `orchestrator-ui/src/lib.rs`:
-  - Modal interaction (`Normal`, `Insert`, `Terminal`).
+  - Modal interaction (`Normal`, `Insert`).
   - Center stack views (`Inbox`, focus card, terminal, inspectors, supervisor chat).
   - Active overlay dialogs (ticket picker, confirm dialogs, diff modal) take keyboard priority over terminal needs-input prompts; plan input remains pending until the user returns to session interaction.
   - Inbox lane routing rules:

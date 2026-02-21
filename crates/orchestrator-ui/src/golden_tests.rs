@@ -40,7 +40,6 @@ enum FixtureUiMode {
     #[default]
     Normal,
     Insert,
-    Terminal,
 }
 
 #[derive(Debug, Deserialize)]
@@ -284,14 +283,6 @@ fn apply_fixture_mode(shell_state: &mut UiShellState, mode: FixtureUiMode, fixtu
                 shell_state.mode,
                 UiMode::Insert,
                 "fixture {fixture_name} requested insert mode but shell did not enter insert mode"
-            );
-        }
-        FixtureUiMode::Terminal => {
-            shell_state.enter_terminal_mode();
-            assert_eq!(
-                shell_state.mode,
-                UiMode::Terminal,
-                "fixture {fixture_name} requested terminal mode but active center view is not terminal"
             );
         }
     }

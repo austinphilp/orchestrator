@@ -582,7 +582,6 @@ pub enum UiMode {
     #[default]
     Normal,
     Insert,
-    Terminal,
 }
 
 impl UiMode {
@@ -590,7 +589,6 @@ impl UiMode {
         match self {
             Self::Normal => "Normal",
             Self::Insert => "Insert",
-            Self::Terminal => "Terminal",
         }
     }
 }

@@ -2539,7 +2539,7 @@ mod tests {
             with_session.view_stack.active_center(),
             Some(CenterView::TerminalView { .. })
         ));
-        assert_eq!(with_session.mode, UiMode::Terminal);
+        assert_eq!(with_session.mode, UiMode::Insert);
 
         with_session.open_terminal_for_selected();
         assert_eq!(with_session.view_stack.center_views().len(), 1);
@@ -2563,7 +2563,7 @@ mod tests {
             without_session.view_stack.active_center(),
             Some(CenterView::TerminalView { .. })
         ));
-        assert_eq!(without_session.mode, UiMode::Terminal);
+        assert_eq!(without_session.mode, UiMode::Insert);
         assert_eq!(backend.spawned_session_ids().len(), 1);
     }
 
@@ -2651,7 +2651,7 @@ mod tests {
         assert_eq!(prompt.prompt_id.as_str(), "prompt-plan-gate");
         assert!(prompt.interaction_active);
         assert!(shell_state.terminal_session_has_active_needs_input());
-        assert!(shell_state.mode == UiMode::Terminal);
+        assert!(shell_state.mode == UiMode::Insert);
     }
 
     #[tokio::test]
@@ -4832,7 +4832,7 @@ mod tests {
     fn backspace_does_not_minimize_terminal_view_in_normal_mode() {
         let mut shell_state = UiShellState::new("ready".to_owned(), sample_projection(true));
         shell_state.open_terminal_and_enter_mode();
-        assert_eq!(shell_state.mode, UiMode::Terminal);
+        assert_eq!(shell_state.mode, UiMode::Insert);
         assert!(matches!(
             shell_state.view_stack.active_center(),
             Some(CenterView::TerminalView { session_id }) if session_id.as_str() == "sess-1"
@@ -5178,7 +5178,7 @@ mod tests {
     }
 
     #[test]
-    fn entering_terminal_mode_reschedules_session_info_summary_refresh() {
+    fn entering_insert_mode_reschedules_session_info_summary_refresh() {
         let mut shell_state = UiShellState::new("ready".to_owned(), sample_projection(true));
         shell_state.open_terminal_and_enter_mode();
         shell_state.enter_normal_mode();
@@ -5189,7 +5189,7 @@ mod tests {
             .expect("background deadline");
         assert!(background_deadline >= Instant::now() + Duration::from_secs(14));
 
-        shell_state.enter_terminal_mode();
+        shell_state.enter_insert_mode_for_current_focus();
         let foreground_deadline = shell_state
             .session_info_summary_deadline
             .expect("foreground deadline");
@@ -6636,7 +6636,7 @@ mod tests {
             shell_state.view_stack.active_center(),
             Some(CenterView::TerminalView { session_id }) if session_id.as_str() == "sess-1"
         ));
-        assert_eq!(shell_state.mode, UiMode::Terminal);
+        assert_eq!(shell_state.mode, UiMode::Insert);
         assert!(
             shell_state
                 .domain
@@ -7877,7 +7877,6 @@ mod tests {
             UiCommand::OpenTestInspectorForSelected,
             UiCommand::OpenPrInspectorForSelected,
             UiCommand::OpenChatInspectorForSelected,
-            UiCommand::StartTerminalEscapeChord,
             UiCommand::QuitShell,
             UiCommand::FocusNextInbox,
             UiCommand::FocusPreviousInbox,
@@ -7933,19 +7932,15 @@ mod tests {
     }
 
     #[test]
-    fn insert_mode_is_not_entered_while_terminal_view_is_active() {
+    fn insert_mode_is_entered_while_terminal_view_is_active() {
         let mut shell_state = UiShellState::new("ready".to_owned(), sample_projection(true));
-        handle_key_press(&mut shell_state, key(KeyCode::Char('I')));
-        assert_eq!(shell_state.mode, UiMode::Terminal);
-        assert!(shell_state.is_terminal_view_active());
-
-        handle_key_press(&mut shell_state, key(KeyCode::Esc));
+        shell_state.open_terminal_for_selected();
+        shell_state.enter_normal_mode();
         assert_eq!(shell_state.mode, UiMode::Normal);
-        assert_eq!(shell_state.terminal_compose_editor.mode, EditorMode::Normal);
-        assert!(shell_state.is_terminal_view_active());
 
         shell_state.enter_insert_mode();
-        assert_eq!(shell_state.mode, UiMode::Normal);
+        assert_eq!(shell_state.mode, UiMode::Insert);
+        assert!(shell_state.is_terminal_view_active());
     }
 
     #[test]
@@ -7960,10 +7955,10 @@ mod tests {
     }
 
     #[test]
-    fn terminal_mode_supports_escape_chord_with_compose_buffer() {
+    fn ctrl_backslash_is_ignored_in_insert_mode() {
         let mut shell_state = UiShellState::new("ready".to_owned(), sample_projection(true));
-        handle_key_press(&mut shell_state, key(KeyCode::Char('I')));
-        assert_eq!(shell_state.mode, UiMode::Terminal);
+        shell_state.open_terminal_and_enter_mode();
+        assert_eq!(shell_state.mode, UiMode::Insert);
         assert!(shell_state.is_terminal_view_active());
         assert_eq!(shell_state.terminal_compose_editor.mode, EditorMode::Insert);
 
@@ -7971,22 +7966,17 @@ mod tests {
         assert!(matches!(routed, RoutedInput::Ignore));
         assert_eq!(editor_state_text(&shell_state.terminal_compose_editor), "j");
 
-        let start_chord = handle_key_press(&mut shell_state, ctrl_key(KeyCode::Char('\\')));
-        assert!(!start_chord);
-        assert!(shell_state.terminal_escape_pending);
-        assert_eq!(shell_state.mode, UiMode::Terminal);
-
-        let finish_chord = handle_key_press(&mut shell_state, ctrl_key(KeyCode::Char('n')));
-        assert!(!finish_chord);
-        assert_eq!(shell_state.mode, UiMode::Normal);
-        assert!(!shell_state.terminal_escape_pending);
+        let routed = route_key_press(&mut shell_state, ctrl_key(KeyCode::Char('\\')));
+        assert!(matches!(routed, RoutedInput::Ignore));
+        assert_eq!(shell_state.mode, UiMode::Insert);
+        assert_eq!(editor_state_text(&shell_state.terminal_compose_editor), "j");
     }
 
     #[test]
     fn terminal_compose_restores_insert_mode_after_focus_returns() {
         let mut shell_state = UiShellState::new("ready".to_owned(), sample_projection(true));
-        handle_key_press(&mut shell_state, key(KeyCode::Char('I')));
-        assert_eq!(shell_state.mode, UiMode::Terminal);
+        shell_state.open_terminal_and_enter_mode();
+        assert_eq!(shell_state.mode, UiMode::Insert);
         assert_eq!(shell_state.terminal_compose_editor.mode, EditorMode::Insert);
 
         handle_key_press(&mut shell_state, key(KeyCode::Char('a')));
@@ -7995,37 +7985,23 @@ mod tests {
         assert_eq!(shell_state.terminal_compose_editor.mode, EditorMode::Normal);
 
         handle_key_press(&mut shell_state, key(KeyCode::Char('i')));
-        assert_eq!(shell_state.mode, UiMode::Terminal);
+        assert_eq!(shell_state.mode, UiMode::Insert);
         assert_eq!(shell_state.terminal_compose_editor.mode, EditorMode::Insert);
         handle_key_press(&mut shell_state, key(KeyCode::Char('b')));
         assert_eq!(editor_state_text(&shell_state.terminal_compose_editor), "ab");
     }
 
     #[test]
-    fn terminal_mode_without_terminal_view_recovers_to_normal() {
+    fn insert_mode_without_terminal_view_ignores_navigation() {
         let mut shell_state = UiShellState::new("ready".to_owned(), triage_projection());
-        shell_state.mode = UiMode::Terminal;
+        shell_state.mode = UiMode::Insert;
         assert!(!shell_state.is_terminal_view_active());
+        let before_index = shell_state.ui_state().selected_inbox_index;
 
         let should_quit = handle_key_press(&mut shell_state, key(KeyCode::Char('j')));
         assert!(!should_quit);
-        assert_eq!(shell_state.mode, UiMode::Normal);
-
-        handle_key_press(&mut shell_state, key(KeyCode::Char('j')));
-        assert_eq!(shell_state.mode, UiMode::Normal);
-    }
-
-    #[test]
-    fn terminal_escape_prefix_replays_when_chord_not_completed() {
-        let mut shell_state = UiShellState::new("ready".to_owned(), sample_projection(true));
-        handle_key_press(&mut shell_state, key(KeyCode::Char('I')));
-        assert_eq!(shell_state.mode, UiMode::Terminal);
-
-        handle_key_press(&mut shell_state, ctrl_key(KeyCode::Char('\\')));
-        let routed = route_key_press(&mut shell_state, key(KeyCode::Char('x')));
-        assert!(matches!(routed, RoutedInput::Ignore));
-        assert!(!shell_state.terminal_escape_pending);
-        assert!(editor_state_text(&shell_state.terminal_compose_editor).is_empty());
+        assert_eq!(shell_state.mode, UiMode::Insert);
+        assert_eq!(shell_state.ui_state().selected_inbox_index, before_index);
     }
 
     #[test]
@@ -8104,8 +8080,8 @@ mod tests {
     #[test]
     fn terminal_compose_supports_multiline_input() {
         let mut shell_state = UiShellState::new("ready".to_owned(), sample_projection(true));
-        handle_key_press(&mut shell_state, key(KeyCode::Char('I')));
-        assert_eq!(shell_state.mode, UiMode::Terminal);
+        shell_state.open_terminal_and_enter_mode();
+        assert_eq!(shell_state.mode, UiMode::Insert);
         assert_eq!(shell_state.terminal_compose_editor.mode, EditorMode::Insert);
 
         handle_key_press(&mut shell_state, key(KeyCode::Char('h')));
@@ -8128,7 +8104,7 @@ mod tests {
             Some(backend),
         );
         shell_state.open_terminal_and_enter_mode();
-        assert_eq!(shell_state.mode, UiMode::Terminal);
+        assert_eq!(shell_state.mode, UiMode::Insert);
         assert_eq!(shell_state.terminal_compose_editor.mode, EditorMode::Insert);
 
         handle_key_press(&mut shell_state, key(KeyCode::Char('h')));
@@ -8152,7 +8128,7 @@ mod tests {
             Some(backend),
         );
         shell_state.open_terminal_and_enter_mode();
-        assert_eq!(shell_state.mode, UiMode::Terminal);
+        assert_eq!(shell_state.mode, UiMode::Insert);
         assert_eq!(shell_state.terminal_compose_editor.mode, EditorMode::Insert);
 
         handle_key_press(&mut shell_state, key(KeyCode::Char('o')));
@@ -8166,7 +8142,7 @@ mod tests {
     }
 
     #[test]
-    fn terminal_submit_failure_keeps_terminal_mode() {
+    fn terminal_submit_failure_keeps_insert_mode() {
         let backend = Arc::new(ManualTerminalBackend::default());
         let mut shell_state = UiShellState::new_with_integrations(
             "ready".to_owned(),
@@ -8177,11 +8153,11 @@ mod tests {
             Some(backend),
         );
         shell_state.open_terminal_and_enter_mode();
-        assert_eq!(shell_state.mode, UiMode::Terminal);
+        assert_eq!(shell_state.mode, UiMode::Insert);
 
         handle_key_press(&mut shell_state, key(KeyCode::Enter));
 
-        assert_eq!(shell_state.mode, UiMode::Terminal);
+        assert_eq!(shell_state.mode, UiMode::Insert);
         assert!(shell_state
             .status_warning
             .as_deref()
@@ -8189,10 +8165,10 @@ mod tests {
     }
 
     #[test]
-    fn entering_terminal_mode_snaps_stream_view_to_bottom() {
+    fn entering_insert_mode_snaps_stream_view_to_bottom() {
         let mut shell_state = UiShellState::new("ready".to_owned(), sample_projection(true));
-        handle_key_press(&mut shell_state, key(KeyCode::Char('I')));
-        assert_eq!(shell_state.mode, UiMode::Terminal);
+        shell_state.open_terminal_and_enter_mode();
+        assert_eq!(shell_state.mode, UiMode::Insert);
         let session_id = shell_state
             .active_terminal_session_id()
             .expect("active terminal session")
@@ -8222,8 +8198,8 @@ mod tests {
         handle_key_press(&mut shell_state, key(KeyCode::Esc));
         assert_eq!(shell_state.mode, UiMode::Normal);
 
-        handle_key_press(&mut shell_state, key(KeyCode::Char('I')));
-        assert_eq!(shell_state.mode, UiMode::Terminal);
+        handle_key_press(&mut shell_state, key(KeyCode::Char('i')));
+        assert_eq!(shell_state.mode, UiMode::Insert);
 
         let view = shell_state
             .terminal_session_states
@@ -8240,8 +8216,8 @@ mod tests {
     #[test]
     fn terminal_stream_normal_mode_scrolls_with_shift_jk() {
         let mut shell_state = UiShellState::new("ready".to_owned(), sample_projection(true));
-        handle_key_press(&mut shell_state, key(KeyCode::Char('I')));
-        assert_eq!(shell_state.mode, UiMode::Terminal);
+        shell_state.open_terminal_and_enter_mode();
+        assert_eq!(shell_state.mode, UiMode::Insert);
         let session_id = shell_state
             .active_terminal_session_id()
             .expect("active terminal session")
@@ -8289,8 +8265,8 @@ mod tests {
     #[test]
     fn terminal_stream_scroll_uses_rendered_line_count_without_initial_jump() {
         let mut shell_state = UiShellState::new("ready".to_owned(), sample_projection(true));
-        handle_key_press(&mut shell_state, key(KeyCode::Char('I')));
-        assert_eq!(shell_state.mode, UiMode::Terminal);
+        shell_state.open_terminal_and_enter_mode();
+        assert_eq!(shell_state.mode, UiMode::Insert);
         let session_id = shell_state
             .active_terminal_session_id()
             .expect("active terminal session")
@@ -8513,10 +8489,6 @@ mod tests {
             Some(UiCommand::EnterInsertMode)
         );
         assert_eq!(
-            routed_command(route_key_press(&mut shell_state, key(KeyCode::Char('I')))),
-            Some(UiCommand::OpenTerminalForSelected)
-        );
-        assert_eq!(
             routed_command(route_key_press(&mut shell_state, key(KeyCode::Char('q')))),
             Some(UiCommand::QuitShell)
         );
@@ -8555,7 +8527,7 @@ mod tests {
         let help = mode_help(UiMode::Normal);
         assert!(help.contains("Navigate: j/k sessions"));
         assert!(help.contains("Shift+J/K output"));
-        assert!(help.contains("Views: i/I"));
+        assert!(help.contains("Views: i"));
         assert!(!help.contains("i: "));
         assert!(!help.contains("I: "));
 
@@ -8568,13 +8540,10 @@ mod tests {
     fn bottom_bar_styles_are_mode_specific_and_readable() {
         let normal = bottom_bar_style(UiMode::Normal);
         let insert = bottom_bar_style(UiMode::Insert);
-        let terminal = bottom_bar_style(UiMode::Terminal);
 
         assert_ne!(normal, insert);
-        assert_ne!(insert, terminal);
-        assert_ne!(normal, terminal);
 
-        for style in [normal, insert, terminal] {
+        for style in [normal, insert] {
             assert!(style.fg.is_some(), "foreground color should be set");
             assert!(style.bg.is_some(), "background color should be set");
             assert_ne!(style.fg, style.bg, "foreground and background must differ");
