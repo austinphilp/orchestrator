@@ -17,6 +17,12 @@ enum AnimationState {
     ResolvedOnly,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PendingWorkingStatePersist {
+    is_working: bool,
+    deadline: Instant,
+}
+
 struct UiShellState {
     base_status: String,
     status_warning: Option<String>,
@@ -55,6 +61,7 @@ struct UiShellState {
     session_info_diff_cache: HashMap<WorkerSessionId, SessionInfoDiffCache>,
     session_info_summary_cache: HashMap<WorkerSessionId, SessionInfoSummaryCache>,
     session_info_summary_deadline: Option<Instant>,
+    pending_session_working_state_persists: HashMap<WorkerSessionId, PendingWorkingStatePersist>,
     terminal_session_streamed: HashSet<WorkerSessionId>,
     terminal_compose_editor: EditorState,
     terminal_compose_event_handler: EditorEventHandler,
@@ -166,6 +173,7 @@ impl UiShellState {
             session_info_diff_cache: HashMap::new(),
             session_info_summary_cache: HashMap::new(),
             session_info_summary_deadline: None,
+            pending_session_working_state_persists: HashMap::new(),
             terminal_session_streamed: HashSet::new(),
             terminal_compose_editor: insert_mode_editor_state(),
             terminal_compose_event_handler: EditorEventHandler::default(),
@@ -959,6 +967,60 @@ impl UiShellState {
         }
     }
 
+    fn enqueue_or_persist_session_working_state(
+        &mut self,
+        session_id: WorkerSessionId,
+        is_working: bool,
+    ) {
+        if self.session_is_in_planning_stage(&session_id) {
+            self.pending_session_working_state_persists.insert(
+                session_id,
+                PendingWorkingStatePersist {
+                    is_working,
+                    deadline: Instant::now() + PLANNING_WORKING_STATE_PERSIST_DEBOUNCE,
+                },
+            );
+            return;
+        }
+
+        self.persist_session_working_state_immediately(session_id, is_working);
+    }
+
+    fn persist_session_working_state_immediately(
+        &mut self,
+        session_id: WorkerSessionId,
+        is_working: bool,
+    ) {
+        self.pending_session_working_state_persists
+            .remove(&session_id);
+        self.spawn_set_session_working_state(session_id, is_working);
+    }
+
+    fn flush_due_session_working_state_persists(&mut self) -> bool {
+        if self.pending_session_working_state_persists.is_empty() {
+            return false;
+        }
+
+        let now = Instant::now();
+        let due_persists = self
+            .pending_session_working_state_persists
+            .iter()
+            .filter_map(|(session_id, pending)| {
+                if now >= pending.deadline || !self.session_is_in_planning_stage(session_id) {
+                    Some((session_id.clone(), pending.is_working))
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>();
+
+        for (session_id, is_working) in due_persists.iter() {
+            self.persist_session_working_state_immediately(session_id.clone(), *is_working);
+        }
+
+        !due_persists.is_empty()
+    }
+
     fn acknowledge_inbox_item(&mut self, inbox_item_id: InboxItemId, work_item_id: WorkItemId) {
         if let Some(item) = self.domain.inbox_items.get_mut(&inbox_item_id) {
             item.resolved = true;
@@ -1109,6 +1171,13 @@ impl UiShellState {
         }
 
         !self.session_waiting_for_plan_input(session_id)
+    }
+
+    fn session_is_in_planning_stage(&self, session_id: &WorkerSessionId) -> bool {
+        matches!(
+            self.workflow_state_for_session(session_id),
+            Some(WorkflowState::Planning)
+        )
     }
 
     fn find_progression_approval_inbox_for_session(
@@ -1801,6 +1870,7 @@ impl UiShellState {
     fn tick_terminal_view_and_report(&mut self) -> bool {
         let mut changed = false;
         changed |= self.poll_terminal_session_events();
+        changed |= self.flush_due_session_working_state_persists();
         changed |= self.flush_background_terminal_output_and_report();
         changed |= self.enqueue_progression_approval_reconcile_polls();
         changed |= self.poll_merge_queue_events();
@@ -1922,7 +1992,6 @@ impl UiShellState {
                     session_id,
                     turn_state,
                 } => {
-                    let persisted_session_id = session_id.clone();
                     let view = self
                         .terminal_session_states
                         .entry(session_id.clone())
@@ -1930,8 +1999,8 @@ impl UiShellState {
                     let previous_turn_active = view.turn_active;
                     view.turn_active = turn_state.active;
                     if previous_turn_active != turn_state.active {
-                        self.spawn_set_session_working_state(
-                            persisted_session_id,
+                        self.enqueue_or_persist_session_working_state(
+                            session_id.clone(),
                             turn_state.active,
                         );
                         if self.active_terminal_session_id() == Some(&session_id) {
@@ -1978,7 +2047,7 @@ impl UiShellState {
                     view.output_scroll_line = 0;
                     view.output_follow_tail = true;
                     view.turn_active = false;
-                    self.spawn_set_session_working_state(session_id.clone(), false);
+                    self.persist_session_working_state_immediately(session_id.clone(), false);
                     self.publish_error_for_session(
                         &session_id,
                         "terminal-stream",
@@ -1994,7 +2063,6 @@ impl UiShellState {
                 }
                 TerminalSessionEvent::StreamEnded { session_id } => {
                     self.terminal_session_streamed.remove(&session_id);
-                    let persisted_session_id = session_id.clone();
                     let view = self
                         .terminal_session_states
                         .entry(session_id.clone())
@@ -2006,7 +2074,7 @@ impl UiShellState {
                     view.last_background_flush_at = None;
                     flush_terminal_output_fragment(view);
                     view.turn_active = false;
-                    self.spawn_set_session_working_state(persisted_session_id, false);
+                    self.persist_session_working_state_immediately(session_id.clone(), false);
                     if self.active_terminal_session_id() == Some(&session_id) {
                         self.schedule_session_info_summary_refresh_for_active_session();
                     }

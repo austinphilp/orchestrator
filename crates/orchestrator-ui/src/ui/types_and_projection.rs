@@ -62,6 +62,7 @@ const MERGE_REQUEST_RATE_LIMIT: Duration = Duration::from_secs(1);
 const TICKET_PICKER_CREATE_REFRESH_INTERVAL: Duration = Duration::from_secs(1);
 const BACKGROUND_SESSION_DEFERRED_OUTPUT_MAX_BYTES: usize = 64 * 1024;
 const RESOLVED_ANIMATION_REFRESH_INTERVAL: Duration = Duration::from_secs(1);
+const PLANNING_WORKING_STATE_PERSIST_DEBOUNCE: Duration = Duration::from_millis(500);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct UiRuntimeConfig {
