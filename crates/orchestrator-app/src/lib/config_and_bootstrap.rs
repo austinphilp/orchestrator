@@ -4,10 +4,11 @@ use orchestrator_core::{
     GetTicketRequest, GithubClient, InboxItemCreatedPayload, InboxItemId, InboxItemResolvedPayload,
     LlmProvider, NewEventEnvelope, OrchestrationEventPayload, ProjectionState, RuntimeSessionId,
     SelectedTicketFlowConfig, SelectedTicketFlowResult, SessionCompletedPayload,
-    SessionCrashedPayload, SessionHandle, SqliteEventStore, Supervisor, TicketSummary,
+    SessionCrashedPayload, SessionHandle, SqliteEventStore, Supervisor, TicketId, TicketSummary,
     StoredEventEnvelope, TicketingProvider, UntypedCommandInvocation, VcsProvider, WorkItemId,
     WorkerBackend, WorkerSessionId, WorkerSessionStatus, WorkflowGuardContext, WorkflowState,
-    WorkflowTransitionPayload, WorkflowTransitionReason, DOMAIN_EVENT_SCHEMA_VERSION,
+    WorkflowInteractionProfile, WorkflowInteractionProfilesConfig, WorkflowTransitionPayload,
+    WorkflowTransitionReason, DOMAIN_EVENT_SCHEMA_VERSION,
     SessionRuntimeProjection,
 };
 use orchestrator_ui::{
@@ -307,6 +308,10 @@ pub struct UiConfigToml {
     pub merge_poll_max_backoff_secs: u64,
     #[serde(default = "default_ui_merge_poll_backoff_multiplier")]
     pub merge_poll_backoff_multiplier: u64,
+    #[serde(default = "default_workflow_interaction_profiles")]
+    pub workflow_interaction_profiles: Vec<WorkflowInteractionProfile>,
+    #[serde(default = "default_workflow_profile_name")]
+    pub default_workflow_profile: String,
 }
 
 impl Default for UiConfigToml {
@@ -320,6 +325,8 @@ impl Default for UiConfigToml {
             merge_poll_base_interval_secs: default_ui_merge_poll_base_interval_secs(),
             merge_poll_max_backoff_secs: default_ui_merge_poll_max_backoff_secs(),
             merge_poll_backoff_multiplier: default_ui_merge_poll_backoff_multiplier(),
+            workflow_interaction_profiles: default_workflow_interaction_profiles(),
+            default_workflow_profile: default_workflow_profile_name(),
         }
     }
 }
@@ -438,6 +445,14 @@ fn default_ui_merge_poll_max_backoff_secs() -> u64 {
 
 fn default_ui_merge_poll_backoff_multiplier() -> u64 {
     2
+}
+
+fn default_workflow_interaction_profiles() -> Vec<WorkflowInteractionProfile> {
+    WorkflowInteractionProfilesConfig::default().profiles
+}
+
+fn default_workflow_profile_name() -> String {
+    WorkflowInteractionProfilesConfig::default().default_profile
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -785,6 +800,72 @@ fn normalize_config(config: &mut AppConfig) -> bool {
     let normalized_merge_poll_backoff_multiplier = config.ui.merge_poll_backoff_multiplier.clamp(1, 8);
     if normalized_merge_poll_backoff_multiplier != config.ui.merge_poll_backoff_multiplier {
         config.ui.merge_poll_backoff_multiplier = normalized_merge_poll_backoff_multiplier;
+        changed = true;
+    }
+    changed |= normalize_workflow_profiles(&mut config.ui);
+
+    changed
+}
+
+fn normalize_workflow_profiles(ui: &mut UiConfigToml) -> bool {
+    let mut changed = false;
+    let mut dedup = std::collections::HashSet::new();
+    let mut normalized_profiles = Vec::new();
+
+    for mut profile in std::mem::take(&mut ui.workflow_interaction_profiles) {
+        let trimmed_name = profile.name.trim().to_owned();
+        if trimmed_name.is_empty() {
+            changed = true;
+            continue;
+        }
+        if !dedup.insert(trimmed_name.to_ascii_lowercase()) {
+            changed = true;
+            continue;
+        }
+        if profile.name != trimmed_name {
+            profile.name = trimmed_name;
+            changed = true;
+        }
+
+        let mut level_by_state = std::collections::HashMap::new();
+        for entry in profile.levels {
+            level_by_state.insert(entry.state, entry.level);
+        }
+        let mut rebuilt_levels = Vec::new();
+        for state in orchestrator_core::all_workflow_states() {
+            let level = level_by_state
+                .remove(&state)
+                .unwrap_or(orchestrator_core::WorkflowInteractionLevel::Manual);
+            rebuilt_levels.push(orchestrator_core::WorkflowInteractionStateLevel { state, level });
+        }
+        profile.levels = rebuilt_levels;
+        normalized_profiles.push(profile);
+    }
+
+    if normalized_profiles.is_empty() {
+        let defaults = WorkflowInteractionProfilesConfig::default();
+        normalized_profiles = defaults.profiles;
+        ui.default_workflow_profile = defaults.default_profile;
+        changed = true;
+    }
+
+    let default_profile = ui.default_workflow_profile.trim().to_owned();
+    let default_exists = normalized_profiles
+        .iter()
+        .any(|profile| profile.name == default_profile);
+    if default_profile.is_empty() || !default_exists {
+        let fallback = normalized_profiles[0].name.clone();
+        if ui.default_workflow_profile != fallback {
+            ui.default_workflow_profile = fallback;
+            changed = true;
+        }
+    } else if ui.default_workflow_profile != default_profile {
+        ui.default_workflow_profile = default_profile;
+        changed = true;
+    }
+
+    if ui.workflow_interaction_profiles != normalized_profiles {
+        ui.workflow_interaction_profiles = normalized_profiles;
         changed = true;
     }
 

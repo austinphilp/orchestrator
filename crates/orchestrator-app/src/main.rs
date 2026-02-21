@@ -51,6 +51,10 @@ async fn main() -> Result<()> {
         config.ui.merge_poll_base_interval_secs,
         config.ui.merge_poll_max_backoff_secs,
         config.ui.merge_poll_backoff_multiplier,
+        orchestrator_core::WorkflowInteractionProfilesConfig {
+            default_profile: config.ui.default_workflow_profile.clone(),
+            profiles: config.ui.workflow_interaction_profiles.clone(),
+        },
     );
 
     let openrouter_api_key = required_env(ENV_OPENROUTER_API_KEY)?;

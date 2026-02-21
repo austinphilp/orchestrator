@@ -642,6 +642,8 @@ fn collect_timeline(
             OrchestrationEventPayload::TicketSynced(_)
             | OrchestrationEventPayload::TicketDetailsSynced(_)
             | OrchestrationEventPayload::WorkItemCreated(_)
+            | OrchestrationEventPayload::WorkItemProfileOverrideSet(_)
+            | OrchestrationEventPayload::WorkItemProfileOverrideCleared(_)
             | OrchestrationEventPayload::WorktreeCreated(_)
             | OrchestrationEventPayload::SupervisorQueryStarted(_)
             | OrchestrationEventPayload::SupervisorQueryChunk(_)

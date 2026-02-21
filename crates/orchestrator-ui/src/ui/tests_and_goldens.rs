@@ -180,7 +180,8 @@ mod tests {
             &self,
             _ticket: TicketSummary,
             _repository_override: Option<PathBuf>,
-        ) -> Result<SelectedTicketFlowResult, CoreError> {
+                _profile_override: Option<String>,
+            ) -> Result<SelectedTicketFlowResult, CoreError> {
             Err(CoreError::DependencyUnavailable(
                 "not used in this test provider".to_owned(),
             ))
@@ -273,7 +274,8 @@ mod tests {
             &self,
             _ticket: TicketSummary,
             _repository_override: Option<PathBuf>,
-        ) -> Result<SelectedTicketFlowResult, CoreError> {
+                _profile_override: Option<String>,
+            ) -> Result<SelectedTicketFlowResult, CoreError> {
             Err(CoreError::DependencyUnavailable(
                 "not used in recording test provider".to_owned(),
             ))
@@ -368,7 +370,8 @@ mod tests {
             &self,
             _ticket: TicketSummary,
             _repository_override: Option<PathBuf>,
-        ) -> Result<SelectedTicketFlowResult, CoreError> {
+                _profile_override: Option<String>,
+            ) -> Result<SelectedTicketFlowResult, CoreError> {
             Err(CoreError::DependencyUnavailable(
                 "not used in recording working-state provider".to_owned(),
             ))
@@ -432,7 +435,8 @@ mod tests {
             &self,
             _ticket: TicketSummary,
             _repository_override: Option<PathBuf>,
-        ) -> Result<SelectedTicketFlowResult, CoreError> {
+                _profile_override: Option<String>,
+            ) -> Result<SelectedTicketFlowResult, CoreError> {
             Err(CoreError::DependencyUnavailable(
                 "not used in autopilot recording provider".to_owned(),
             ))
@@ -536,6 +540,12 @@ mod tests {
                 OrchestrationEventType::TicketDetailsSynced
             }
             OrchestrationEventPayload::WorkItemCreated(_) => OrchestrationEventType::WorkItemCreated,
+            OrchestrationEventPayload::WorkItemProfileOverrideSet(_) => {
+                OrchestrationEventType::WorkItemProfileOverrideSet
+            }
+            OrchestrationEventPayload::WorkItemProfileOverrideCleared(_) => {
+                OrchestrationEventType::WorkItemProfileOverrideCleared
+            }
             OrchestrationEventPayload::WorktreeCreated(_) => OrchestrationEventType::WorktreeCreated,
             OrchestrationEventPayload::SessionSpawned(_) => OrchestrationEventType::SessionSpawned,
             OrchestrationEventPayload::SessionCheckpoint(_) => {
@@ -709,6 +719,7 @@ mod tests {
                 worktree_id: None,
                 inbox_items: vec![inbox_item_id.clone()],
                 artifacts: vec![],
+            profile_override: None,
             },
         );
 
@@ -754,6 +765,7 @@ mod tests {
                 worktree_id: None,
                 inbox_items: vec![],
                 artifacts: vec![],
+            profile_override: None,
             },
         );
         projection.sessions.insert(
@@ -820,6 +832,7 @@ mod tests {
                     worktree_id: None,
                     inbox_items: Vec::new(),
                     artifacts: Vec::new(),
+                profile_override: None,
                 },
             );
             projection.sessions.insert(
@@ -889,6 +902,7 @@ mod tests {
                     worktree_id: None,
                     inbox_items: vec![inbox_item_id.clone()],
                     artifacts: vec![],
+                profile_override: None,
                 },
             );
 
@@ -932,6 +946,7 @@ mod tests {
                     worktree_id: None,
                     inbox_items: vec![inbox_item_id.clone()],
                     artifacts: vec![],
+                profile_override: None,
                 },
             );
 
@@ -986,6 +1001,7 @@ mod tests {
                     worktree_id: None,
                     inbox_items: vec![inbox_item_id.clone()],
                     artifacts: vec![],
+                profile_override: None,
                 },
             );
 
@@ -1073,6 +1089,7 @@ mod tests {
                     pr_artifact_id.clone(),
                     chat_artifact_id.clone(),
                 ],
+            profile_override: None,
             },
         );
         projection.sessions.insert(
@@ -1248,6 +1265,7 @@ mod tests {
                 worktree_id: None,
                 inbox_items: vec![inbox_item_id.clone()],
                 artifacts: vec![pr_artifact_id.clone(), log_artifact_id.clone()],
+            profile_override: None,
             },
         );
         projection.sessions.insert(
@@ -1341,6 +1359,7 @@ mod tests {
                 worktree_id: None,
                 inbox_items: vec![inbox_item_id.clone()],
                 artifacts: vec![],
+            profile_override: None,
             },
         );
         projection.sessions.insert(
@@ -1439,6 +1458,7 @@ mod tests {
                 worktree_id: None,
                 inbox_items: vec![inbox_item_id.clone()],
                 artifacts: artifact_ids,
+            profile_override: None,
             },
         );
         projection.inbox_items.insert(
@@ -1502,6 +1522,7 @@ mod tests {
                 worktree_id: None,
                 inbox_items: vec![],
                 artifacts: vec![],
+            profile_override: None,
             },
         );
         projection.work_items.insert(
@@ -1515,6 +1536,7 @@ mod tests {
                 worktree_id: None,
                 inbox_items: vec![],
                 artifacts: vec![],
+            profile_override: None,
             },
         );
 
@@ -1618,6 +1640,7 @@ mod tests {
                 worktree_id: None,
                 inbox_items: vec![],
                 artifacts: vec![],
+            profile_override: None,
             },
         );
         projection.sessions.insert(
@@ -1697,6 +1720,7 @@ mod tests {
                 worktree_id: None,
                 inbox_items: vec![],
                 artifacts: vec![],
+            profile_override: None,
             },
         );
         projection.sessions.insert(
@@ -1755,6 +1779,7 @@ mod tests {
                 worktree_id: None,
                 inbox_items: vec![],
                 artifacts: vec![],
+            profile_override: None,
             },
         );
         projection.work_items.insert(
@@ -1768,6 +1793,7 @@ mod tests {
                 worktree_id: None,
                 inbox_items: vec![],
                 artifacts: vec![],
+            profile_override: None,
             },
         );
         projection.work_items.insert(
@@ -1781,6 +1807,7 @@ mod tests {
                 worktree_id: None,
                 inbox_items: vec![],
                 artifacts: vec![],
+            profile_override: None,
             },
         );
         projection.work_items.insert(
@@ -1794,6 +1821,7 @@ mod tests {
                 worktree_id: None,
                 inbox_items: vec![],
                 artifacts: vec![],
+            profile_override: None,
             },
         );
 
@@ -1906,6 +1934,7 @@ mod tests {
                 worktree_id: None,
                 inbox_items: vec![],
                 artifacts: vec![],
+            profile_override: None,
             },
         );
         projection.sessions.insert(
@@ -1960,6 +1989,7 @@ mod tests {
                 worktree_id: None,
                 inbox_items: vec![],
                 artifacts: vec![],
+            profile_override: None,
             },
         );
         projection.sessions.insert(
@@ -2026,6 +2056,7 @@ mod tests {
                 worktree_id: None,
                 inbox_items: vec![],
                 artifacts: vec![],
+            profile_override: None,
             },
         );
         projection.sessions.insert(
@@ -2247,6 +2278,7 @@ mod tests {
                 worktree_id: None,
                 inbox_items: vec![],
                 artifacts: vec![],
+            profile_override: None,
             },
         );
         projection.work_items.insert(
@@ -2260,6 +2292,7 @@ mod tests {
                 worktree_id: None,
                 inbox_items: vec![],
                 artifacts: vec![],
+            profile_override: None,
             },
         );
 
@@ -2477,6 +2510,7 @@ mod tests {
             started_session_id: WorkerSessionId::new("sess-1"),
             projection: Some(sample_projection(true)),
             tickets: None,
+            profile_overrides: None,
             warning: None,
         });
 
@@ -2957,6 +2991,7 @@ mod tests {
                 worktree_id: None,
                 inbox_items: vec![InboxItemId::new("inbox-1")],
                 artifacts: vec![],
+            profile_override: None,
             },
         );
         projection.sessions.insert(
@@ -2990,6 +3025,7 @@ mod tests {
                 worktree_id: None,
                 inbox_items: vec![InboxItemId::new("inbox-2")],
                 artifacts: vec![],
+            profile_override: None,
             },
         );
         projection.sessions.insert(
@@ -3490,6 +3526,7 @@ mod tests {
                 worktree_id: None,
                 inbox_items: vec![],
                 artifacts: vec![],
+            profile_override: None,
             },
         );
         projection.sessions.insert(
@@ -3512,6 +3549,7 @@ mod tests {
                 worktree_id: None,
                 inbox_items: vec![],
                 artifacts: vec![],
+            profile_override: None,
             },
         );
         projection.sessions.insert(
@@ -4443,6 +4481,7 @@ mod tests {
                 worktree_id: None,
                 inbox_items: Vec::new(),
                 artifacts: Vec::new(),
+            profile_override: None,
             },
         );
         projection.sessions.insert(
@@ -4508,6 +4547,7 @@ mod tests {
                 worktree_id: None,
                 inbox_items: Vec::new(),
                 artifacts: Vec::new(),
+            profile_override: None,
             },
         );
         projection.sessions.insert(
@@ -4586,6 +4626,7 @@ mod tests {
                 worktree_id: None,
                 inbox_items: Vec::new(),
                 artifacts: Vec::new(),
+            profile_override: None,
             },
         );
         projection.sessions.insert(
@@ -5262,6 +5303,7 @@ mod tests {
             projection,
             None,
             Some(dispatcher),
+            None,
             None,
         );
         let session_id = WorkerSessionId::new("sess-review");
@@ -6068,6 +6110,7 @@ mod tests {
                 worktree_id: None,
                 inbox_items: vec![inbox_item_a.clone()],
                 artifacts: vec![],
+            profile_override: None,
             },
         );
         projection.work_items.insert(
@@ -6081,6 +6124,7 @@ mod tests {
                 worktree_id: None,
                 inbox_items: vec![inbox_item_b.clone()],
                 artifacts: vec![],
+            profile_override: None,
             },
         );
         projection.inbox_items.insert(
@@ -6218,6 +6262,7 @@ mod tests {
                 worktree_id: None,
                 inbox_items: vec![inbox_item_id.clone()],
                 artifacts: vec![],
+            profile_override: None,
             },
         );
         projection.inbox_items.insert(
@@ -6320,6 +6365,7 @@ mod tests {
                 worktree_id: None,
                 inbox_items: vec![],
                 artifacts: vec![],
+            profile_override: None,
             },
         );
         projection.sessions.insert(
@@ -7148,6 +7194,7 @@ mod tests {
                     worktree_id: None,
                     inbox_items: Vec::new(),
                     artifacts: Vec::new(),
+                profile_override: None,
                 },
             );
             projection.sessions.insert(
@@ -7228,6 +7275,7 @@ mod tests {
                 },
             ],
             projects: Vec::new(),
+            profile_overrides: HashMap::new(),
         });
 
         let identifiers = shell_state
@@ -7308,6 +7356,7 @@ mod tests {
                 &self,
                 _ticket: TicketSummary,
                 _repository_override: Option<PathBuf>,
+                _profile_override: Option<String>,
             ) -> Result<SelectedTicketFlowResult, CoreError> {
                 Err(CoreError::DependencyUnavailable("not used".to_owned()))
             }
@@ -7392,6 +7441,7 @@ mod tests {
                 &self,
                 _ticket: TicketSummary,
                 _repository_override: Option<PathBuf>,
+                _profile_override: Option<String>,
             ) -> Result<SelectedTicketFlowResult, CoreError> {
                 Err(CoreError::DependencyUnavailable("not used".to_owned()))
             }
@@ -7455,6 +7505,7 @@ mod tests {
                 worktree_id: None,
                 inbox_items: vec![resolved_approval.clone()],
                 artifacts: vec![],
+            profile_override: None,
             },
         );
         projection.work_items.insert(
@@ -7468,6 +7519,7 @@ mod tests {
                 worktree_id: None,
                 inbox_items: vec![unresolved_approval.clone()],
                 artifacts: vec![],
+            profile_override: None,
             },
         );
         projection.inbox_items.insert(

@@ -542,6 +542,15 @@ fn summarize_event_payload(payload: &OrchestrationEventPayload, max_chars: usize
                 work_item.project_id.as_str()
             )
         }
+        OrchestrationEventPayload::WorkItemProfileOverrideSet(override_set) => format!(
+            "work item {} profile override set to {}",
+            override_set.work_item_id.as_str(),
+            override_set.profile_name
+        ),
+        OrchestrationEventPayload::WorkItemProfileOverrideCleared(override_cleared) => format!(
+            "work item {} profile override cleared",
+            override_cleared.work_item_id.as_str()
+        ),
         OrchestrationEventPayload::WorktreeCreated(worktree) => {
             format!(
                 "worktree {} created at {} on branch {} (base {})",

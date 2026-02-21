@@ -12,6 +12,7 @@ mod store;
 pub mod test_support;
 mod ticket_selection;
 mod workflow;
+mod workflow_interaction;
 mod workflow_automation;
 
 pub use adapters::{
@@ -44,8 +45,8 @@ pub use events::{
     SupervisorQueryCancellationSource, SupervisorQueryCancelledPayload,
     SupervisorQueryChunkPayload, SupervisorQueryFinishedPayload, SupervisorQueryKind,
     SupervisorQueryStartedPayload, TicketDetailsSyncedPayload, TicketSyncedPayload,
-    UserRespondedPayload, WorkItemCreatedPayload, WorkflowTransitionPayload,
-    WorktreeCreatedPayload,
+    UserRespondedPayload, WorkItemCreatedPayload, WorkItemProfileOverrideClearedPayload,
+    WorkItemProfileOverrideSetPayload, WorkflowTransitionPayload, WorktreeCreatedPayload,
 };
 pub use identifiers::{
     ArtifactId, InboxItemId, ProjectId, TicketId, TicketProvider, WorkItemId, WorkerSessionId,
@@ -79,6 +80,10 @@ pub use ticket_selection::{
 pub use workflow::{
     apply_workflow_transition, initial_workflow_state, validate_workflow_transition, WorkflowGuard,
     WorkflowGuardContext, WorkflowTransitionError, WorkflowTransitionReason,
+};
+pub use workflow_interaction::{
+    all_workflow_states, WorkflowInteractionLevel, WorkflowInteractionProfile,
+    WorkflowInteractionProfilesConfig, WorkflowInteractionStateLevel,
 };
 pub use workflow_automation::{
     plan_workflow_automation, plan_workflow_automation_with_policy, HumanApprovalGateMode,

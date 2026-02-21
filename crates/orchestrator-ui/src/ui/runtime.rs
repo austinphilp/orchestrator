@@ -371,12 +371,13 @@ impl Ui {
                     }
 
                     let footer_style = bottom_bar_style(shell_state.mode);
+                    let workflow_profiles = workflow_profiles_config_value();
                     let footer_text = Text::from(vec![
                         Line::from(format!(
-                            "status: {} | mode: {} | app: {}",
+                            "status: {} | mode: {} | profile: {}",
                             ui_state.status,
                             shell_state.mode.label(),
-                            shell_state.application_mode_label()
+                            workflow_profiles.default_profile
                         )),
                         Line::from(mode_help(shell_state.mode)),
                     ]);
@@ -399,6 +400,13 @@ impl Ui {
                             frame,
                             main,
                             &mut shell_state.ticket_picker_overlay,
+                        );
+                    }
+                    if shell_state.workflow_profiles_modal.visible {
+                        render_workflow_profiles_modal(
+                            frame,
+                            main,
+                            &shell_state.workflow_profiles_modal,
                         );
                     }
                     if let Some(ticket) = shell_state
@@ -430,6 +438,7 @@ impl Ui {
                 })?;
 
                 if shell_state.ticket_picker_overlay.has_repository_prompt()
+                    || shell_state.workflow_profiles_modal.renaming
                     || shell_state.terminal_needs_input_is_note_insert_mode()
                     || (shell_state.mode == UiMode::Terminal
                         && shell_state.is_terminal_view_active())

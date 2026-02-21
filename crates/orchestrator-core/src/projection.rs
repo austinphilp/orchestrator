@@ -15,6 +15,7 @@ pub struct WorkItemProjection {
     pub ticket_id: Option<TicketId>,
     pub project_id: Option<ProjectId>,
     pub workflow_state: Option<WorkflowState>,
+    pub profile_override: Option<String>,
     pub session_id: Option<WorkerSessionId>,
     pub worktree_id: Option<WorktreeId>,
     pub inbox_items: Vec<InboxItemId>,
@@ -69,6 +70,7 @@ fn empty_work_item_projection(id: WorkItemId) -> WorkItemProjection {
         ticket_id: None,
         project_id: None,
         workflow_state: None,
+        profile_override: None,
         session_id: None,
         worktree_id: None,
         inbox_items: vec![],
@@ -162,6 +164,20 @@ pub fn apply_event(state: &mut ProjectionState, event: StoredEventEnvelope) {
                 .or_insert_with(|| empty_work_item_projection(payload.work_item_id.clone()));
             work_item.workflow_state = Some(payload.to.clone());
             state.orchestrator_status = Some(format!("{:?}", payload.to));
+        }
+        OrchestrationEventPayload::WorkItemProfileOverrideSet(payload) => {
+            let work_item = state
+                .work_items
+                .entry(payload.work_item_id.clone())
+                .or_insert_with(|| empty_work_item_projection(payload.work_item_id.clone()));
+            work_item.profile_override = Some(payload.profile_name.clone());
+        }
+        OrchestrationEventPayload::WorkItemProfileOverrideCleared(payload) => {
+            let work_item = state
+                .work_items
+                .entry(payload.work_item_id.clone())
+                .or_insert_with(|| empty_work_item_projection(payload.work_item_id.clone()));
+            work_item.profile_override = None;
         }
         OrchestrationEventPayload::InboxItemCreated(payload) => {
             let resolved = state

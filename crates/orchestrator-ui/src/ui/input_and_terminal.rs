@@ -29,16 +29,17 @@ enum UiCommand {
     TicketPickerFoldProject,
     TicketPickerUnfoldProject,
     TicketPickerStartSelected,
+    SetApplicationModeAutopilot,
+    SetApplicationModeManual,
+    ToggleWorkflowProfilesModal,
     ToggleWorktreeDiffModal,
     AdvanceTerminalWorkflowStage,
     ArchiveSelectedSession,
     OpenSessionOutputForSelectedInbox,
-    SetApplicationModeAutopilot,
-    SetApplicationModeManual,
 }
 
 impl UiCommand {
-    const ALL: [Self; 35] = [
+    const ALL: [Self; 36] = [
         Self::EnterNormalMode,
         Self::EnterInsertMode,
         Self::ToggleGlobalSupervisorChat,
@@ -68,12 +69,13 @@ impl UiCommand {
         Self::TicketPickerFoldProject,
         Self::TicketPickerUnfoldProject,
         Self::TicketPickerStartSelected,
+        Self::SetApplicationModeAutopilot,
+        Self::SetApplicationModeManual,
+        Self::ToggleWorkflowProfilesModal,
         Self::ToggleWorktreeDiffModal,
         Self::AdvanceTerminalWorkflowStage,
         Self::ArchiveSelectedSession,
         Self::OpenSessionOutputForSelectedInbox,
-        Self::SetApplicationModeAutopilot,
-        Self::SetApplicationModeManual,
     ];
 
     const fn id(self) -> &'static str {
@@ -107,12 +109,13 @@ impl UiCommand {
             Self::TicketPickerFoldProject => "ui.ticket_picker.fold_project",
             Self::TicketPickerUnfoldProject => "ui.ticket_picker.unfold_project",
             Self::TicketPickerStartSelected => "ui.ticket_picker.start_selected",
+            Self::SetApplicationModeAutopilot => "ui.mode.autopilot",
+            Self::SetApplicationModeManual => "ui.mode.manual",
+            Self::ToggleWorkflowProfilesModal => "ui.workflow_profiles.toggle_modal",
             Self::ToggleWorktreeDiffModal => "ui.worktree.diff.toggle",
             Self::AdvanceTerminalWorkflowStage => "ui.terminal.workflow.advance",
             Self::ArchiveSelectedSession => "ui.terminal.archive_selected_session",
             Self::OpenSessionOutputForSelectedInbox => "ui.open_session_output_for_selected_inbox",
-            Self::SetApplicationModeAutopilot => "ui.app_mode.autopilot",
-            Self::SetApplicationModeManual => "ui.app_mode.manual",
         }
     }
 
@@ -147,14 +150,15 @@ impl UiCommand {
             Self::TicketPickerFoldProject => "Fold selected project in ticket picker",
             Self::TicketPickerUnfoldProject => "Unfold selected project in ticket picker",
             Self::TicketPickerStartSelected => "Start selected ticket",
+            Self::SetApplicationModeAutopilot => "Set workflow mode to autopilot",
+            Self::SetApplicationModeManual => "Set workflow mode to manual",
+            Self::ToggleWorkflowProfilesModal => "Toggle workflow profiles modal",
             Self::ToggleWorktreeDiffModal => "Toggle worktree diff modal for selected session",
             Self::AdvanceTerminalWorkflowStage => "Advance terminal workflow stage",
             Self::ArchiveSelectedSession => "Archive selected terminal session",
             Self::OpenSessionOutputForSelectedInbox => {
                 "Open session output for selected inbox item"
             }
-            Self::SetApplicationModeAutopilot => "Set application mode to autopilot",
-            Self::SetApplicationModeManual => "Set application mode to manual",
         }
     }
 
@@ -211,6 +215,7 @@ fn default_keymap_config() -> KeymapConfig {
                     binding(&["i"], UiCommand::EnterInsertMode),
                     binding(&["I"], UiCommand::OpenTerminalForSelected),
                     binding(&["o"], UiCommand::OpenSessionOutputForSelectedInbox),
+                    binding(&["`"], UiCommand::ToggleWorkflowProfilesModal),
                     binding(&["D"], UiCommand::ToggleWorktreeDiffModal),
                     binding(&["w", "n"], UiCommand::AdvanceTerminalWorkflowStage),
                     binding(&["x"], UiCommand::ArchiveSelectedSession),
@@ -222,8 +227,6 @@ fn default_keymap_config() -> KeymapConfig {
                     binding(&["v", "t"], UiCommand::OpenTestInspectorForSelected),
                     binding(&["v", "p"], UiCommand::OpenPrInspectorForSelected),
                     binding(&["v", "c"], UiCommand::OpenChatInspectorForSelected),
-                    binding(&["m", "a"], UiCommand::SetApplicationModeAutopilot),
-                    binding(&["m", "m"], UiCommand::SetApplicationModeManual),
                 ],
                 prefixes: vec![
                     KeyPrefixConfig {
@@ -237,10 +240,6 @@ fn default_keymap_config() -> KeymapConfig {
                     KeyPrefixConfig {
                         keys: vec!["w".to_owned()],
                         label: "Workflow Actions".to_owned(),
-                    },
-                    KeyPrefixConfig {
-                        keys: vec!["m".to_owned()],
-                        label: "Application modes".to_owned(),
                     },
                 ],
             },
@@ -292,15 +291,11 @@ fn bottom_bar_hint_groups(mode: UiMode) -> &'static [BottomBarHintGroup] {
             },
             BottomBarHintGroup {
                 label: "Views:",
-                hints: &["i/I", "o", "s", "c", "v{d/t/p/c}", "D"],
+                hints: &["i/I", "o", "s", "c", "`", "v{d/t/p/c}", "D"],
             },
             BottomBarHintGroup {
                 label: "Workflow:",
                 hints: &["w n", "x", "q"],
-            },
-            BottomBarHintGroup {
-                label: "Modes:",
-                hints: &["m a", "m m"],
             },
         ],
         UiMode::Insert => &[
@@ -593,6 +588,9 @@ fn route_key_press(shell_state: &mut UiShellState, key: KeyEvent) -> RoutedInput
     if shell_state.worktree_diff_modal.is_some() {
         return route_worktree_diff_modal_key(shell_state, key);
     }
+    if shell_state.workflow_profiles_modal.visible {
+        return route_workflow_profiles_modal_key(shell_state, key);
+    }
     if shell_state.is_ticket_picker_visible() {
         return route_ticket_picker_key(shell_state, key);
     }
@@ -770,6 +768,89 @@ fn route_worktree_diff_modal_key(shell_state: &mut UiShellState, key: KeyEvent) 
     RoutedInput::Ignore
 }
 
+fn route_workflow_profiles_modal_key(shell_state: &mut UiShellState, key: KeyEvent) -> RoutedInput {
+    if shell_state.workflow_profiles_modal.renaming {
+        if is_escape_to_normal(key) {
+            shell_state.cancel_workflow_profile_rename();
+            return RoutedInput::Ignore;
+        }
+        if matches!(key.code, KeyCode::Enter) && key.modifiers.is_empty() {
+            shell_state.submit_workflow_profile_rename();
+            return RoutedInput::Ignore;
+        }
+        if key.modifiers.is_empty() {
+            match key.code {
+                KeyCode::Backspace => {
+                    shell_state.pop_workflow_profile_rename_char();
+                    return RoutedInput::Ignore;
+                }
+                KeyCode::Char(ch) => {
+                    shell_state.append_workflow_profile_rename_char(ch);
+                    return RoutedInput::Ignore;
+                }
+                _ => {}
+            }
+        }
+        return RoutedInput::Ignore;
+    }
+
+    if is_escape_to_normal(key) {
+        shell_state.close_workflow_profiles_modal();
+        return RoutedInput::Ignore;
+    }
+    if !key.modifiers.is_empty() {
+        return RoutedInput::Ignore;
+    }
+
+    match key.code {
+        KeyCode::Char('`') | KeyCode::Char('q') => {
+            shell_state.close_workflow_profiles_modal();
+            RoutedInput::Ignore
+        }
+        KeyCode::Char('h') | KeyCode::Left => {
+            shell_state.cycle_workflow_profile_selection(-1);
+            RoutedInput::Ignore
+        }
+        KeyCode::Char('l') | KeyCode::Right => {
+            shell_state.cycle_workflow_profile_selection(1);
+            RoutedInput::Ignore
+        }
+        KeyCode::Char('j') | KeyCode::Down => {
+            shell_state.move_workflow_profile_state_selection(1);
+            RoutedInput::Ignore
+        }
+        KeyCode::Char('k') | KeyCode::Up => {
+            shell_state.move_workflow_profile_state_selection(-1);
+            RoutedInput::Ignore
+        }
+        KeyCode::Char(' ') | KeyCode::Enter => {
+            shell_state.toggle_selected_workflow_profile_state_level();
+            RoutedInput::Ignore
+        }
+        KeyCode::Char('c') => {
+            shell_state.add_workflow_profile();
+            RoutedInput::Ignore
+        }
+        KeyCode::Char('d') => {
+            shell_state.delete_selected_workflow_profile();
+            RoutedInput::Ignore
+        }
+        KeyCode::Char('g') => {
+            shell_state.set_selected_workflow_profile_as_default();
+            RoutedInput::Ignore
+        }
+        KeyCode::Char('r') => {
+            shell_state.begin_workflow_profile_rename();
+            RoutedInput::Ignore
+        }
+        KeyCode::Char('s') => {
+            shell_state.save_workflow_profiles();
+            RoutedInput::Ignore
+        }
+        _ => RoutedInput::Ignore,
+    }
+}
+
 fn route_configured_mode_key(shell_state: &mut UiShellState, key: KeyEvent) -> RoutedInput {
     match shell_state.keymap.route_key_event(
         shell_state.mode,
@@ -925,6 +1006,18 @@ fn dispatch_command(shell_state: &mut UiShellState, command: UiCommand) -> bool 
             shell_state.start_selected_ticket_from_picker();
             false
         }
+        UiCommand::SetApplicationModeAutopilot => {
+            shell_state.set_application_mode_autopilot();
+            false
+        }
+        UiCommand::SetApplicationModeManual => {
+            shell_state.set_application_mode_manual();
+            false
+        }
+        UiCommand::ToggleWorkflowProfilesModal => {
+            shell_state.toggle_workflow_profiles_modal();
+            false
+        }
         UiCommand::ToggleWorktreeDiffModal => {
             shell_state.toggle_worktree_diff_modal();
             false
@@ -939,14 +1032,6 @@ fn dispatch_command(shell_state: &mut UiShellState, command: UiCommand) -> bool 
         }
         UiCommand::OpenSessionOutputForSelectedInbox => {
             shell_state.open_session_output_for_selected_inbox();
-            false
-        }
-        UiCommand::SetApplicationModeAutopilot => {
-            shell_state.set_application_mode_autopilot();
-            false
-        }
-        UiCommand::SetApplicationModeManual => {
-            shell_state.set_application_mode_manual();
             false
         }
     }

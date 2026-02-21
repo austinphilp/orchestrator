@@ -21,6 +21,8 @@ pub enum OrchestrationEventType {
     SessionCrashed,
     ArtifactCreated,
     WorkflowTransition,
+    WorkItemProfileOverrideSet,
+    WorkItemProfileOverrideCleared,
     InboxItemCreated,
     InboxItemResolved,
     UserResponded,
@@ -132,6 +134,17 @@ pub struct WorkflowTransitionPayload {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkItemProfileOverrideSetPayload {
+    pub work_item_id: WorkItemId,
+    pub profile_name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkItemProfileOverrideClearedPayload {
+    pub work_item_id: WorkItemId,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InboxItemCreatedPayload {
     pub inbox_item_id: InboxItemId,
     pub work_item_id: WorkItemId,
@@ -233,6 +246,8 @@ pub enum OrchestrationEventPayload {
     SessionCrashed(SessionCrashedPayload),
     ArtifactCreated(ArtifactCreatedPayload),
     WorkflowTransition(WorkflowTransitionPayload),
+    WorkItemProfileOverrideSet(WorkItemProfileOverrideSetPayload),
+    WorkItemProfileOverrideCleared(WorkItemProfileOverrideClearedPayload),
     InboxItemCreated(InboxItemCreatedPayload),
     InboxItemResolved(InboxItemResolvedPayload),
     UserResponded(UserRespondedPayload),
@@ -257,6 +272,12 @@ impl OrchestrationEventPayload {
             Self::SessionCrashed(_) => OrchestrationEventType::SessionCrashed,
             Self::ArtifactCreated(_) => OrchestrationEventType::ArtifactCreated,
             Self::WorkflowTransition(_) => OrchestrationEventType::WorkflowTransition,
+            Self::WorkItemProfileOverrideSet(_) => {
+                OrchestrationEventType::WorkItemProfileOverrideSet
+            }
+            Self::WorkItemProfileOverrideCleared(_) => {
+                OrchestrationEventType::WorkItemProfileOverrideCleared
+            }
             Self::InboxItemCreated(_) => OrchestrationEventType::InboxItemCreated,
             Self::InboxItemResolved(_) => OrchestrationEventType::InboxItemResolved,
             Self::UserResponded(_) => OrchestrationEventType::UserResponded,

@@ -515,6 +515,10 @@ fn render_event_type(event_type: &OrchestrationEventType) -> &'static str {
         OrchestrationEventType::TicketSynced => "ticket_synced",
         OrchestrationEventType::TicketDetailsSynced => "ticket_details_synced",
         OrchestrationEventType::WorkItemCreated => "work_item_created",
+        OrchestrationEventType::WorkItemProfileOverrideSet => "work_item_profile_override_set",
+        OrchestrationEventType::WorkItemProfileOverrideCleared => {
+            "work_item_profile_override_cleared"
+        }
         OrchestrationEventType::WorktreeCreated => "worktree_created",
         OrchestrationEventType::SessionSpawned => "session_spawned",
         OrchestrationEventType::SessionCheckpoint => "session_checkpoint",
