@@ -150,15 +150,80 @@ fn render_sessions_panel_text(
     render_sessions_panel_text_from_rows(&session_rows, selected_session_id)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SessionPanelLineMetrics {
+    total_lines: usize,
+    selected_line: Option<usize>,
+}
+
+fn session_panel_line_metrics_from_rows(
+    session_rows: &[SessionPanelRow],
+    selected_session_id: Option<&WorkerSessionId>,
+) -> SessionPanelLineMetrics {
+    if session_rows.is_empty() {
+        return SessionPanelLineMetrics {
+            total_lines: 1,
+            selected_line: None,
+        };
+    }
+
+    let mut total_lines = 0usize;
+    let mut selected_line = None;
+    let mut previous_project: Option<String> = None;
+    let mut previous_group: Option<SessionStateGroup> = None;
+    for row in session_rows {
+        if previous_project.as_deref() != Some(row.project.as_str()) {
+            if previous_project.is_some() {
+                total_lines += 1;
+            }
+            total_lines += 1;
+            previous_project = Some(row.project.clone());
+            previous_group = None;
+        }
+        if previous_group.as_ref() != Some(&row.group) {
+            total_lines += 1;
+            previous_group = Some(row.group.clone());
+        }
+        if selected_session_id == Some(&row.session_id) {
+            selected_line = Some(total_lines);
+        }
+        total_lines += 1;
+    }
+
+    SessionPanelLineMetrics {
+        total_lines,
+        selected_line,
+    }
+}
+
+#[cfg(test)]
 fn render_sessions_panel_text_from_rows(
     session_rows: &[SessionPanelRow],
     selected_session_id: Option<&WorkerSessionId>,
+) -> Text<'static> {
+    let metrics = session_panel_line_metrics_from_rows(session_rows, selected_session_id);
+    render_sessions_panel_text_virtualized_from_rows(
+        session_rows,
+        selected_session_id,
+        0,
+        metrics.total_lines.max(1),
+    )
+}
+
+fn render_sessions_panel_text_virtualized_from_rows(
+    session_rows: &[SessionPanelRow],
+    selected_session_id: Option<&WorkerSessionId>,
+    scroll_line: usize,
+    viewport_rows: usize,
 ) -> Text<'static> {
     if session_rows.is_empty() {
         return Text::from("No open sessions.");
     }
 
+    let viewport_start = scroll_line;
+    let viewport_end = viewport_start.saturating_add(viewport_rows.max(1));
     let mut lines = Vec::new();
+    let mut line_index = 0usize;
     let mut previous_project: Option<String> = None;
     let mut previous_group: Option<SessionStateGroup> = None;
     for row in session_rows {
@@ -166,14 +231,23 @@ fn render_sessions_panel_text_from_rows(
         let marker = if is_selected { ">" } else { " " };
         if previous_project.as_deref() != Some(row.project.as_str()) {
             if previous_project.is_some() {
-                lines.push(Line::from(String::new()));
+                if (viewport_start..viewport_end).contains(&line_index) {
+                    lines.push(Line::from(String::new()));
+                }
+                line_index += 1;
             }
-            lines.push(Line::from(format!("{}:", row.project)));
+            if (viewport_start..viewport_end).contains(&line_index) {
+                lines.push(Line::from(format!("{}:", row.project)));
+            }
+            line_index += 1;
             previous_project = Some(row.project.clone());
             previous_group = None;
         }
         if previous_group.as_ref() != Some(&row.group) {
-            lines.push(Line::from(format!("  {}:", row.group.display_label())));
+            if (viewport_start..viewport_end).contains(&line_index) {
+                lines.push(Line::from(format!("  {}:", row.group.display_label())));
+            }
+            line_index += 1;
             previous_group = Some(row.group.clone());
         }
         let indicator = if row.activity == SessionRowActivity::Active {
@@ -193,7 +267,10 @@ fn render_sessions_panel_text_from_rows(
             spans.push(Span::raw(format!("[{}] ", row.badge)));
         }
         spans.push(Span::raw(row.ticket_label.clone()));
-        lines.push(Line::from(spans));
+        if (viewport_start..viewport_end).contains(&line_index) {
+            lines.push(Line::from(spans));
+        }
+        line_index += 1;
     }
 
     Text::from(lines)
