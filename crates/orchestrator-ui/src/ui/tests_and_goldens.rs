@@ -8,7 +8,7 @@ mod tests {
     use async_trait::async_trait;
     use orchestrator_core::{
         ArtifactId, ArtifactKind, ArtifactProjection, CoreError, InboxItemProjection,
-        InboxItemCreatedPayload, InboxItemResolvedPayload, LlmProviderKind, LlmResponseStream, LlmResponseSubscription,
+        InboxItemCreatedPayload, LlmProviderKind, LlmResponseStream, LlmResponseSubscription,
         LlmStreamChunk, OrchestrationEventPayload, OrchestrationEventType, SessionBlockedPayload,
         SessionCheckpointPayload,
         SessionCompletedPayload, SessionNeedsInputPayload, SessionProjection,
@@ -3317,11 +3317,7 @@ mod tests {
                 Some(session_id.clone()),
                 OrchestrationEventPayload::SessionCompleted(SessionCompletedPayload {
                     session_id: session_id.clone(),
-<<<<<<< HEAD
                     summary: Some("archived".to_owned()),
-=======
-                    summary: None,
->>>>>>> e7db479 (fix(ui): align rebase conflict resolution with latest main interfaces)
                 }),
             ),
         });
