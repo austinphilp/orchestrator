@@ -57,6 +57,10 @@ const DEFAULT_BACKGROUND_SESSION_REFRESH_SECS: u64 = 15;
 const DEFAULT_TRANSCRIPT_LINE_LIMIT: usize = 100;
 const MIN_BACKGROUND_SESSION_REFRESH_SECS: u64 = 2;
 const MAX_BACKGROUND_SESSION_REFRESH_SECS: u64 = 15;
+const DEFAULT_SESSION_INFO_BACKGROUND_REFRESH_SECS: u64 = 15;
+const MIN_SESSION_INFO_BACKGROUND_REFRESH_SECS: u64 = 15;
+const RECONCILE_SPARSE_FALLBACK_INTERVAL: Duration = Duration::from_secs(120);
+const MERGE_REQUEST_RATE_LIMIT: Duration = Duration::from_secs(1);
 const APPROVAL_RECONCILE_POLL_INTERVAL: Duration = Duration::from_secs(15);
 const TICKET_PICKER_CREATE_REFRESH_INTERVAL: Duration = Duration::from_secs(1);
 const BACKGROUND_SESSION_DEFERRED_OUTPUT_MAX_BYTES: usize = 64 * 1024;
@@ -382,7 +386,7 @@ pub enum MergeQueueEvent {
     },
     SessionFinalized {
         session_id: WorkerSessionId,
-        projection: Option<ProjectionState>,
+        event: StoredEventEnvelope,
     },
     SessionFinalizeFailed {
         session_id: WorkerSessionId,

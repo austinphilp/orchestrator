@@ -727,3 +727,10 @@ enum DiffPaneFocus {
     Files,
     Diff,
 }
+
+#[derive(Debug, Clone)]
+struct MergeQueueRequest {
+    session_id: WorkerSessionId,
+    _context: SupervisorCommandContext,
+    kind: MergeQueueCommandKind,
+}

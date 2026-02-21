@@ -5,13 +5,14 @@ use async_trait::async_trait;
 use orchestrator_core::{
     ArchiveTicketRequest, CodeHostProvider, Command, CommandRegistry, CoreError, CreateTicketRequest,
     GithubClient, LlmChatRequest, LlmMessage, LlmProvider, LlmRole, ProjectionState,
-    SelectedTicketFlowResult, Supervisor, TicketQuery, TicketSummary, TicketingProvider,
+    SelectedTicketFlowResult, StoredEventEnvelope, Supervisor, TicketQuery, TicketSummary, TicketingProvider,
     VcsProvider, WorkerBackend, WorkerSessionId, WorkerSessionStatus, WorkflowState,
 };
 use orchestrator_ui::{
     CiCheckStatus, CreateTicketFromPickerRequest, InboxPublishRequest, InboxResolveRequest,
-    MergeQueueCommandKind, MergeQueueEvent, SessionWorktreeDiff, SessionWorkflowAdvanceOutcome,
-    SupervisorCommandContext, SupervisorCommandDispatcher, TicketPickerProvider,
+    MergeQueueCommandKind, MergeQueueEvent, SessionArchiveOutcome, SessionMergeFinalizeOutcome,
+    SessionWorktreeDiff, SessionWorkflowAdvanceOutcome, SupervisorCommandContext,
+    SupervisorCommandDispatcher, TicketPickerProvider,
 };
 use std::path::PathBuf;
 use tokio::sync::{mpsc, watch, Mutex};

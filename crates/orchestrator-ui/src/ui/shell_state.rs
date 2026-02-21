@@ -75,6 +75,10 @@ struct UiShellState {
     archive_session_confirm_session: Option<WorkerSessionId>,
     archiving_session_id: Option<WorkerSessionId>,
     review_merge_confirm_session: Option<WorkerSessionId>,
+    merge_queue: VecDeque<MergeQueueRequest>,
+    merge_last_dispatched_at: Option<Instant>,
+    review_fallback_last_sweep_at: Option<Instant>,
+    approval_fallback_last_sweep_at: Option<Instant>,
     approval_reconcile_last_poll_at: Option<Instant>,
     merge_event_sender: Option<mpsc::Sender<MergeQueueEvent>>,
     merge_event_receiver: Option<mpsc::Receiver<MergeQueueEvent>>,
@@ -200,6 +204,10 @@ impl UiShellState {
             archive_session_confirm_session: None,
             archiving_session_id: None,
             review_merge_confirm_session: None,
+            merge_queue: VecDeque::new(),
+            merge_last_dispatched_at: None,
+            review_fallback_last_sweep_at: None,
+            approval_fallback_last_sweep_at: None,
             approval_reconcile_last_poll_at: None,
             merge_event_sender: merge_event_sender.clone(),
             merge_event_receiver,
@@ -219,7 +227,13 @@ impl UiShellState {
             attention_projection_cache: None,
             session_panel_rows_cache: None,
             event_derived_label_cache: EventDerivedLabelCache::default(),
+            full_projection_replacements: 0,
+            incremental_domain_event_applies: 0,
+            attention_projection_recomputes: 0,
+            last_projection_perf_log_at: None,
         };
+        shell.refresh_reconcile_eligibility_for_all_sessions();
+        shell.mark_all_eligible_reconcile_dirty();
         shell.start_pr_pipeline_polling(merge_event_sender.clone());
         shell
     }
@@ -1949,18 +1963,33 @@ impl UiShellState {
             return false;
         }
 
+        let now = Instant::now();
         let mut changed = false;
         changed |= self.poll_terminal_session_events();
-        changed |= self.flush_background_terminal_output_and_report();
-        changed |= self.enqueue_progression_approval_reconcile_polls();
+        changed |= self.flush_background_terminal_output_and_report_at(now);
+        changed |= self.enqueue_progression_approval_reconcile_polls_at(now);
         changed |= self.poll_merge_queue_events();
         changed |= self.poll_session_info_summary_events();
-        changed |= self.tick_session_info_summary_refresh();
+        changed |= self.tick_session_info_summary_refresh_at(now);
         changed |= self.refresh_review_stage_tracking();
         changed |= self.ensure_session_info_diff_loaded_for_active_session();
         if let Some(session_id) = self.active_terminal_session_id().cloned() {
             changed |= self.flush_deferred_terminal_output_for_session(&session_id);
             changed |= self.ensure_terminal_stream_and_report(session_id);
+        }
+        let pending_needs_input_sessions = self
+            .terminal_session_states
+            .iter()
+            .filter_map(|(session_id, view)| {
+                if view.active_needs_input.is_some() {
+                    Some(session_id.clone())
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>();
+        for session_id in pending_needs_input_sessions {
+            changed |= self.autopilot_handle_needs_input_for_session(&session_id);
         }
         changed
     }
@@ -2500,6 +2529,13 @@ impl UiShellState {
         changed
     }
 
+    fn mark_all_eligible_reconcile_dirty(&mut self) {
+        self.dirty_approval_reconcile_sessions
+            .extend(self.approval_reconcile_candidate_sessions.iter().cloned());
+        self.dirty_review_reconcile_sessions
+            .extend(self.review_reconcile_eligible_sessions.iter().cloned());
+    }
+
     fn refresh_reconcile_eligibility_for_all_sessions(&mut self) -> bool {
         let open_sessions = self
             .domain
@@ -2538,6 +2574,38 @@ impl UiShellState {
             changed |= self.refresh_reconcile_eligibility_for_session(&session_id);
         }
         changed
+    }
+
+    fn enqueue_merge_queue_request(
+        &mut self,
+        session_id: WorkerSessionId,
+        kind: MergeQueueCommandKind,
+    ) -> bool {
+        let Some(context) = self.supervisor_context_for_session(&session_id) else {
+            return false;
+        };
+        if self
+            .merge_queue
+            .iter()
+            .any(|queued| queued.session_id == session_id && queued.kind == kind)
+        {
+            return false;
+        }
+        let request = MergeQueueRequest {
+            session_id,
+            _context: context,
+            kind,
+        };
+        if kind == MergeQueueCommandKind::Merge {
+            self.merge_queue.push_front(request);
+        } else {
+            self.merge_queue.push_back(request);
+        }
+        true
+    }
+
+    fn dispatch_merge_queue_requests_at(&mut self, _now: Instant) -> bool {
+        false
     }
 
     fn refresh_reconcile_eligibility_for_session(&mut self, session_id: &WorkerSessionId) -> bool {
@@ -2614,7 +2682,15 @@ impl UiShellState {
         self.enqueue_event_driven_reconciles()
     }
 
-    fn enqueue_progression_approval_reconcile_polls_at(&mut self, _now: Instant) -> bool {
+    fn enqueue_progression_approval_reconcile_polls_at(&mut self, now: Instant) -> bool {
+        if self
+            .approval_reconcile_last_poll_at
+            .map(|previous| now.duration_since(previous) < APPROVAL_RECONCILE_POLL_INTERVAL)
+            .unwrap_or(false)
+        {
+            return false;
+        }
+        self.approval_reconcile_last_poll_at = Some(now);
         self.mark_all_eligible_reconcile_dirty();
         self.enqueue_event_driven_reconciles()
     }
@@ -2745,6 +2821,22 @@ impl UiShellState {
                 )
             })
             .unwrap_or(false)
+    }
+
+    fn supervisor_context_for_session(
+        &self,
+        session_id: &WorkerSessionId,
+    ) -> Option<SupervisorCommandContext> {
+        let session = self.domain.sessions.get(session_id)?;
+        let work_item_id = session
+            .work_item_id
+            .as_ref()
+            .map(|id| id.as_str().to_owned());
+        Some(SupervisorCommandContext {
+            selected_work_item_id: work_item_id,
+            selected_session_id: Some(session_id.as_str().to_owned()),
+            scope: Some(format!("session:{}", session_id.as_str())),
+        })
     }
 
     fn rebuild_reconcile_eligibility_indexes(&mut self) {
