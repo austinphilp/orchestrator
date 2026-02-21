@@ -3645,6 +3645,24 @@ fn apply_ticket_picker_event(&mut self, event: TicketPickerEvent) {
         self.active_terminal_needs_input().is_some()
     }
 
+    fn active_terminal_session_requires_manual_needs_input_activation(&self) -> bool {
+        self.active_terminal_session_id()
+            .map(|session_id| self.session_requires_manual_needs_input_activation(session_id))
+            .unwrap_or(false)
+    }
+
+    fn deactivate_terminal_needs_input_interaction(&mut self) -> bool {
+        let Some(prompt) = self.active_terminal_needs_input_mut() else {
+            return false;
+        };
+        if !prompt.interaction_active {
+            return false;
+        }
+        prompt.persist_current_draft();
+        prompt.set_interaction_active(false);
+        true
+    }
+
     fn activate_terminal_needs_input(&mut self, enable_note_insert_mode: bool) -> bool {
         let Some(prompt) = self.active_terminal_needs_input_mut() else {
             return false;

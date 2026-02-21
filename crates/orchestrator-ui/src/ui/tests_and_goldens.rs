@@ -1962,6 +1962,175 @@ mod tests {
     }
 
     #[test]
+    fn planning_needs_input_single_esc_deactivates_and_preserves_draft() {
+        let backend = Arc::new(ManualTerminalBackend::default());
+        let mut projection = sample_projection(true);
+        projection
+            .work_items
+            .get_mut(&WorkItemId::new("wi-1"))
+            .expect("work item")
+            .workflow_state = Some(WorkflowState::Planning);
+        let mut shell_state = UiShellState::new_with_integrations(
+            "ready".to_owned(),
+            projection,
+            None,
+            None,
+            None,
+            Some(backend),
+        );
+        shell_state.open_terminal_and_enter_mode();
+
+        let sender = shell_state
+            .terminal_session_sender
+            .clone()
+            .expect("terminal sender");
+        sender
+            .try_send(TerminalSessionEvent::NeedsInput {
+                session_id: WorkerSessionId::new("sess-1"),
+                needs_input: BackendNeedsInputEvent {
+                    prompt_id: "prompt-planning-esc".to_owned(),
+                    question: "Add planning note".to_owned(),
+                    options: vec!["Continue".to_owned(), "Revise".to_owned()],
+                    default_option: Some("Continue".to_owned()),
+                    questions: Vec::new(),
+                },
+            })
+            .expect("queue needs-input event");
+        shell_state.poll_terminal_session_events();
+
+        handle_key_press(&mut shell_state, key(KeyCode::Char('i')));
+        handle_key_press(&mut shell_state, key(KeyCode::Char('n')));
+        let prompt = shell_state
+            .terminal_session_states
+            .get(&WorkerSessionId::new("sess-1"))
+            .and_then(|view| view.active_needs_input.as_ref())
+            .expect("planning prompt should be active");
+        assert!(prompt.interaction_active);
+        assert!(prompt.note_insert_mode);
+        assert_eq!(editor_state_text(&prompt.note_editor_state), "n");
+
+        handle_key_press(&mut shell_state, key(KeyCode::Esc));
+        let prompt = shell_state
+            .terminal_session_states
+            .get(&WorkerSessionId::new("sess-1"))
+            .and_then(|view| view.active_needs_input.as_ref())
+            .expect("planning prompt should remain present");
+        assert!(!prompt.interaction_active);
+        assert!(!prompt.note_insert_mode);
+        assert_eq!(shell_state.mode, UiMode::Terminal);
+
+        handle_key_press(&mut shell_state, key(KeyCode::Char('i')));
+        let prompt = shell_state
+            .terminal_session_states
+            .get(&WorkerSessionId::new("sess-1"))
+            .and_then(|view| view.active_needs_input.as_ref())
+            .expect("planning prompt should reactivate");
+        assert!(prompt.interaction_active);
+        assert!(prompt.note_insert_mode);
+        assert_eq!(editor_state_text(&prompt.note_editor_state), "n");
+    }
+
+    #[test]
+    fn new_state_needs_input_single_esc_deactivates_interaction() {
+        let backend = Arc::new(ManualTerminalBackend::default());
+        let mut projection = sample_projection(true);
+        projection
+            .work_items
+            .get_mut(&WorkItemId::new("wi-1"))
+            .expect("work item")
+            .workflow_state = Some(WorkflowState::New);
+        let mut shell_state = UiShellState::new_with_integrations(
+            "ready".to_owned(),
+            projection,
+            None,
+            None,
+            None,
+            Some(backend),
+        );
+        shell_state.open_terminal_and_enter_mode();
+
+        let sender = shell_state
+            .terminal_session_sender
+            .clone()
+            .expect("terminal sender");
+        sender
+            .try_send(TerminalSessionEvent::NeedsInput {
+                session_id: WorkerSessionId::new("sess-1"),
+                needs_input: BackendNeedsInputEvent {
+                    prompt_id: "prompt-new-esc".to_owned(),
+                    question: "Provide kickoff details".to_owned(),
+                    options: vec!["Start".to_owned(), "Refine".to_owned()],
+                    default_option: Some("Start".to_owned()),
+                    questions: Vec::new(),
+                },
+            })
+            .expect("queue needs-input event");
+        shell_state.poll_terminal_session_events();
+
+        handle_key_press(&mut shell_state, key(KeyCode::Char('i')));
+        assert!(shell_state.terminal_session_has_active_needs_input());
+        handle_key_press(&mut shell_state, key(KeyCode::Esc));
+
+        let prompt = shell_state
+            .terminal_session_states
+            .get(&WorkerSessionId::new("sess-1"))
+            .and_then(|view| view.active_needs_input.as_ref())
+            .expect("new-state prompt should remain present");
+        assert!(!prompt.interaction_active);
+        assert!(!prompt.note_insert_mode);
+    }
+
+    #[test]
+    fn non_planning_needs_input_esc_keeps_interaction_active() {
+        let backend = Arc::new(ManualTerminalBackend::default());
+        let mut projection = sample_projection(true);
+        projection
+            .work_items
+            .get_mut(&WorkItemId::new("wi-1"))
+            .expect("work item")
+            .workflow_state = Some(WorkflowState::Implementing);
+        let mut shell_state = UiShellState::new_with_integrations(
+            "ready".to_owned(),
+            projection,
+            None,
+            None,
+            None,
+            Some(backend),
+        );
+        shell_state.open_terminal_and_enter_mode();
+
+        let sender = shell_state
+            .terminal_session_sender
+            .clone()
+            .expect("terminal sender");
+        sender
+            .try_send(TerminalSessionEvent::NeedsInput {
+                session_id: WorkerSessionId::new("sess-1"),
+                needs_input: BackendNeedsInputEvent {
+                    prompt_id: "prompt-implementing-esc".to_owned(),
+                    question: "Choose implementation detail".to_owned(),
+                    options: vec!["A".to_owned(), "B".to_owned()],
+                    default_option: Some("A".to_owned()),
+                    questions: Vec::new(),
+                },
+            })
+            .expect("queue needs-input event");
+        shell_state.poll_terminal_session_events();
+
+        assert!(shell_state.terminal_session_has_active_needs_input());
+        handle_key_press(&mut shell_state, key(KeyCode::Char('i')));
+        handle_key_press(&mut shell_state, key(KeyCode::Esc));
+
+        let prompt = shell_state
+            .terminal_session_states
+            .get(&WorkerSessionId::new("sess-1"))
+            .and_then(|view| view.active_needs_input.as_ref())
+            .expect("implementing prompt should stay active");
+        assert!(prompt.interaction_active);
+        assert!(!prompt.note_insert_mode);
+    }
+
+    #[test]
     fn needs_input_routing_planning_state_uses_needs_decision_lane() {
         let mut projection = sample_projection(true);
         projection
