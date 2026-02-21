@@ -3108,8 +3108,8 @@ mod tests {
 
         let advanced = provider.advanced_sessions();
         let archived = provider.archived_sessions();
-        assert!(advanced.is_empty());
-        assert!(archived.is_empty());
+        assert!(advanced.iter().any(|session_id| session_id.as_str() == "sess-1"));
+        assert!(archived.iter().any(|session_id| session_id.as_str() == "sess-2"));
     }
 
     #[test]
@@ -5455,6 +5455,23 @@ mod tests {
 
         shell_state.poll_merge_queue_events();
         tokio::time::sleep(Duration::from_millis(20)).await;
+        shell_state.view_stack.replace_center(CenterView::TerminalView {
+            session_id: session_id.clone(),
+        });
+        let sender = shell_state
+            .terminal_session_sender
+            .clone()
+            .expect("terminal sender");
+        sender
+            .try_send(TerminalSessionEvent::Output {
+                session_id: session_id.clone(),
+                output: BackendOutputEvent {
+                    stream: BackendOutputStream::Stdout,
+                    bytes: b"you: system: CI pipeline failure detected while this ticket is in review (Tests / tests). Investigate failing GitHub Actions checks, implement a fix, push updates, and report what changed. Use CI as the source of truth instead of running the full local build/test suite.\n".to_vec(),
+                },
+            })
+            .expect("send terminal output");
+        shell_state.poll_terminal_session_events();
 
         let rendered = render_terminal_transcript_entries(
             shell_state
