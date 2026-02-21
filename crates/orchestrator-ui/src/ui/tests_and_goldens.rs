@@ -7295,14 +7295,38 @@ mod tests {
 
         clear_editor_state(&mut shell_state.ticket_picker_overlay.new_ticket_brief_editor);
         route_ticket_picker_key(&mut shell_state, key(KeyCode::Enter));
-        route_ticket_picker_key(&mut shell_state, key(KeyCode::Esc));
-        route_ticket_picker_key(&mut shell_state, key(KeyCode::Enter));
         assert!(shell_state
             .ticket_picker_overlay
             .error
             .as_deref()
             .unwrap_or_default()
             .contains("enter a brief description"));
+    }
+
+    #[test]
+    fn ticket_picker_new_ticket_mode_enter_submits_create_only_from_insert_mode() {
+        let mut shell_state = UiShellState::new("ready".to_owned(), triage_projection());
+        shell_state.ticket_picker_overlay.open();
+        shell_state.ticket_picker_overlay.begin_new_ticket_mode();
+        assert_eq!(
+            shell_state.ticket_picker_overlay.new_ticket_brief_editor.mode,
+            EditorMode::Insert
+        );
+
+        route_ticket_picker_key(&mut shell_state, key(KeyCode::Char('a')));
+        route_ticket_picker_key(&mut shell_state, key(KeyCode::Enter));
+
+        assert!(
+            editor_state_text(&shell_state.ticket_picker_overlay.new_ticket_brief_editor)
+                .is_empty()
+        );
+        assert!(!shell_state.ticket_picker_overlay.new_ticket_mode);
+        assert!(shell_state
+            .ticket_picker_overlay
+            .error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("ticket provider unavailable"));
     }
 
     #[test]
@@ -7316,7 +7340,6 @@ mod tests {
         );
 
         route_ticket_picker_key(&mut shell_state, key(KeyCode::Char('a')));
-        route_ticket_picker_key(&mut shell_state, key(KeyCode::Esc));
         route_ticket_picker_key(&mut shell_state, shift_key(KeyCode::Enter));
 
         assert!(
