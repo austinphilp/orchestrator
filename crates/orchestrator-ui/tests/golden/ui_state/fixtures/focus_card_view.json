@@ -33,7 +33,7 @@
         "data": {
           "session_id": "sess-focus",
           "work_item_id": "wi-focus",
-          "model": "openai/gpt-4o-mini"
+          "model": "c/claude-haiku-4.5"
         }
       }
     },

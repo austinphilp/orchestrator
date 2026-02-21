@@ -45,14 +45,39 @@ fn render_inbox_panel(ui_state: &UiState) -> String {
                 " "
             };
             let resolved = if row.resolved { "x" } else { " " };
+            let display_title = sanitize_inbox_display_title(&row.title);
             lines.push(format!(
-                "{selected} [{resolved}] {:?}: {}",
-                row.kind, row.title
+                "{selected} [{resolved}] {}",
+                display_title
             ));
         }
     }
 
     lines.join("\n")
+}
+
+fn sanitize_inbox_display_title(title: &str) -> String {
+    let trimmed = title.trim_start();
+    let Some((raw_prefix, remainder)) = trimmed.split_once(':') else {
+        return title.to_owned();
+    };
+    let prefix = raw_prefix.trim();
+    let is_status_prefix = [
+        "NeedsDecision",
+        "NeedsReview",
+        "NeedsApproval",
+        "ReadyForReview",
+        "Blocked",
+        "FYI",
+    ]
+    .iter()
+    .any(|candidate| prefix.eq_ignore_ascii_case(candidate));
+
+    if !is_status_prefix {
+        return title.to_owned();
+    }
+
+    remainder.trim_start().to_owned()
 }
 
 fn session_panel_rows(
@@ -150,31 +175,105 @@ fn render_sessions_panel_text(
     render_sessions_panel_text_from_rows(&session_rows, selected_session_id)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SessionPanelLineMetrics {
+    total_lines: usize,
+    selected_line: Option<usize>,
+}
+
+fn session_panel_line_metrics_from_rows(
+    session_rows: &[SessionPanelRow],
+    selected_session_id: Option<&WorkerSessionId>,
+) -> SessionPanelLineMetrics {
+    if session_rows.is_empty() {
+        return SessionPanelLineMetrics {
+            total_lines: 1,
+            selected_line: None,
+        };
+    }
+
+    let mut total_lines = 0usize;
+    let mut selected_line = None;
+    let mut previous_project: Option<String> = None;
+    let mut previous_group: Option<SessionStateGroup> = None;
+    for row in session_rows {
+        if previous_project.as_deref() != Some(row.project.as_str()) {
+            if previous_project.is_some() {
+                total_lines += 1;
+            }
+            total_lines += 1;
+            previous_project = Some(row.project.clone());
+            previous_group = None;
+        }
+        if previous_group.as_ref() != Some(&row.group) {
+            total_lines += 1;
+            previous_group = Some(row.group.clone());
+        }
+        if selected_session_id == Some(&row.session_id) {
+            selected_line = Some(total_lines);
+        }
+        total_lines += 1;
+    }
+
+    SessionPanelLineMetrics {
+        total_lines,
+        selected_line,
+    }
+}
+
+#[cfg(test)]
 fn render_sessions_panel_text_from_rows(
     session_rows: &[SessionPanelRow],
     selected_session_id: Option<&WorkerSessionId>,
+) -> Text<'static> {
+    let metrics = session_panel_line_metrics_from_rows(session_rows, selected_session_id);
+    render_sessions_panel_text_virtualized_from_rows(
+        session_rows,
+        selected_session_id,
+        0,
+        metrics.total_lines.max(1),
+    )
+}
+
+fn render_sessions_panel_text_virtualized_from_rows(
+    session_rows: &[SessionPanelRow],
+    selected_session_id: Option<&WorkerSessionId>,
+    scroll_line: usize,
+    viewport_rows: usize,
 ) -> Text<'static> {
     if session_rows.is_empty() {
         return Text::from("No open sessions.");
     }
 
-    let mut lines = Vec::new();
-    let mut previous_project: Option<String> = None;
-    let mut previous_group: Option<SessionStateGroup> = None;
+    let viewport_start = scroll_line;
+    let viewport_end = viewport_start.saturating_add(viewport_rows.max(1));
+    let mut lines = Vec::with_capacity(viewport_rows.max(1));
+    let mut line_index = 0usize;
+    let mut previous_project: Option<&str> = None;
+    let mut previous_group: Option<&SessionStateGroup> = None;
     for row in session_rows {
         let is_selected = selected_session_id == Some(&row.session_id);
         let marker = if is_selected { ">" } else { " " };
-        if previous_project.as_deref() != Some(row.project.as_str()) {
+        if previous_project != Some(row.project.as_str()) {
             if previous_project.is_some() {
-                lines.push(Line::from(String::new()));
+                if (viewport_start..viewport_end).contains(&line_index) {
+                    lines.push(Line::from(String::new()));
+                }
+                line_index += 1;
             }
-            lines.push(Line::from(format!("{}:", row.project)));
-            previous_project = Some(row.project.clone());
+            if (viewport_start..viewport_end).contains(&line_index) {
+                lines.push(Line::from(format!("{}:", row.project)));
+            }
+            line_index += 1;
+            previous_project = Some(row.project.as_str());
             previous_group = None;
         }
-        if previous_group.as_ref() != Some(&row.group) {
-            lines.push(Line::from(format!("  {}:", row.group.display_label())));
-            previous_group = Some(row.group.clone());
+        if previous_group != Some(&row.group) {
+            if (viewport_start..viewport_end).contains(&line_index) {
+                lines.push(Line::from(format!("  {}:", row.group.display_label())));
+            }
+            line_index += 1;
+            previous_group = Some(&row.group);
         }
         let indicator = if row.activity == SessionRowActivity::Active {
             loading_spinner_frame()
@@ -184,8 +283,8 @@ fn render_sessions_panel_text_from_rows(
         let status_chip = row.activity.status_chip();
         let status_style = row.activity.style();
         let mut spans = vec![
-            Span::raw(marker.to_owned()),
-            Span::raw("    ".to_owned()),
+            Span::raw(marker),
+            Span::raw("    "),
             Span::styled(format!("{indicator} "), status_style),
             Span::styled(format!("{status_chip} "), status_style),
         ];
@@ -193,7 +292,10 @@ fn render_sessions_panel_text_from_rows(
             spans.push(Span::raw(format!("[{}] ", row.badge)));
         }
         spans.push(Span::raw(row.ticket_label.clone()));
-        lines.push(Line::from(spans));
+        if (viewport_start..viewport_end).contains(&line_index) {
+            lines.push(Line::from(spans));
+        }
+        line_index += 1;
     }
 
     Text::from(lines)
@@ -287,7 +389,6 @@ fn render_session_info_panel(
     diff_cache: Option<&SessionInfoDiffCache>,
     summary_cache: Option<&SessionInfoSummaryCache>,
     ci_cache: Option<&SessionCiStatusCache>,
-    pr_cache: Option<&SessionPrMetadataCache>,
 ) -> String {
     let mut lines = Vec::new();
     lines.push(format!("session: {}", session_id.as_str()));
@@ -298,7 +399,7 @@ fn render_session_info_panel(
         .and_then(|work_item_id| domain.work_items.get(work_item_id));
 
     lines.push(String::new());
-    lines.push("PR status:".to_owned());
+    lines.push("PR:".to_owned());
     if let Some(work_item_id) = work_item.map(|entry| &entry.id) {
         let pr = collect_work_item_artifacts(work_item_id, domain, 1, is_pr_artifact)
             .into_iter()
@@ -308,73 +409,14 @@ fn render_session_info_panel(
                 "- {}",
                 compact_focus_card_text(pr_artifact.uri.as_str())
             ));
-            let status_label =
-                session_pr_status_label(pr_cache, infer_draft_from_uri(pr_artifact.uri.as_str()));
-            lines.push(format!("- Status: {status_label}"));
-            match pr_cache.and_then(|cache| cache.review_summary.as_ref()) {
-                Some(summary) => {
-                    let decision = pr_cache
-                        .and_then(|cache| cache.review_decision.as_deref())
-                        .map(str::trim)
-                        .filter(|value| !value.is_empty())
-                        .unwrap_or("UNKNOWN");
-                    lines.push(format!(
-                        "- Decision: {decision} | Reviews: {} ({} approved, {} changes, {} commented)",
-                        summary.total,
-                        summary.approved,
-                        summary.changes_requested,
-                        summary.commented
-                    ));
-                }
-                None => lines.push("- Reviews: unavailable.".to_owned()),
-            };
+            if let Some(metadata) = pr_metadata_summary_line(pr_artifact) {
+                lines.push(format!("  {}", compact_focus_card_text(metadata.as_str())));
+            }
         } else {
             lines.push("- No PR artifact available.".to_owned());
         }
     } else {
         lines.push("- No work item context.".to_owned());
-    }
-
-    lines.push(String::new());
-    lines.push("Checks:".to_owned());
-    match ci_cache {
-        Some(cache) if cache.error.is_some() => lines.push(format!(
-            "- CI status unavailable: {}",
-            compact_focus_card_text(cache.error.as_deref().unwrap_or_default())
-        )),
-        Some(cache) if cache.checks.is_empty() => {
-            lines.push("- No required CI checks reported.".to_owned())
-        }
-        Some(cache) => {
-            let summary = summarize_ci_buckets(cache.checks.as_slice());
-            lines.push(format!(
-                "- Summary: PASS {} | FAIL {} | PENDING {} | SKIP {} | UNKNOWN {}",
-                summary.pass, summary.fail, summary.pending, summary.skip, summary.unknown
-            ));
-            for check in &cache.checks {
-                let workflow_prefix = check
-                    .workflow
-                    .as_deref()
-                    .map(str::trim)
-                    .filter(|workflow| !workflow.is_empty())
-                    .map(|workflow| format!("{workflow} / "))
-                    .unwrap_or_default();
-                let bucket = check.bucket.trim();
-                let status_label = if bucket.is_empty() {
-                    "unknown".to_owned()
-                } else {
-                    bucket.to_ascii_uppercase()
-                };
-                lines.push(format!(
-                    "- [{status_label}] {workflow_prefix}{}",
-                    compact_focus_card_text(check.name.as_str())
-                ));
-                if let Some(link) = check.link.as_deref() {
-                    lines.push(format!("  {}", compact_focus_card_text(link)));
-                }
-            }
-        }
-        None => lines.push("- No CI status polled yet.".to_owned()),
     }
 
     lines.push(String::new());
@@ -442,10 +484,10 @@ fn render_session_info_panel(
                 continue;
             }
             has_open = true;
+            let display_title = sanitize_inbox_display_title(item.title.as_str());
             lines.push(format!(
-                "- {:?}: {}",
-                item.kind,
-                compact_focus_card_text(item.title.as_str())
+                "- {}",
+                compact_focus_card_text(display_title.as_str())
             ));
         }
         if !has_open {
@@ -453,6 +495,43 @@ fn render_session_info_panel(
         }
     } else {
         lines.push("- No work item context.".to_owned());
+    }
+
+    lines.push(String::new());
+    lines.push("CI status:".to_owned());
+    match ci_cache {
+        Some(cache) if cache.error.is_some() => lines.push(format!(
+            "- CI status unavailable: {}",
+            compact_focus_card_text(cache.error.as_deref().unwrap_or_default())
+        )),
+        Some(cache) if cache.checks.is_empty() => {
+            lines.push("- No required CI checks reported.".to_owned())
+        }
+        Some(cache) => {
+            for check in &cache.checks {
+                let workflow_prefix = check
+                    .workflow
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|workflow| !workflow.is_empty())
+                    .map(|workflow| format!("{workflow} / "))
+                    .unwrap_or_default();
+                let bucket = check.bucket.trim();
+                let status_label = if bucket.is_empty() {
+                    "unknown".to_owned()
+                } else {
+                    bucket.to_ascii_uppercase()
+                };
+                lines.push(format!(
+                    "- [{status_label}] {workflow_prefix}{}",
+                    compact_focus_card_text(check.name.as_str())
+                ));
+                if let Some(link) = check.link.as_deref() {
+                    lines.push(format!("  {}", compact_focus_card_text(link)));
+                }
+            }
+        }
+        None => lines.push("- No CI status polled yet.".to_owned()),
     }
 
     lines.push(String::new());
@@ -473,73 +552,13 @@ fn render_session_info_panel(
     lines.join("\n")
 }
 
-fn infer_draft_from_uri(uri: &str) -> bool {
-    let Some((_, query)) = uri.split_once('?') else {
-        return false;
-    };
-    for pair in query.split('&') {
-        let (raw_key, raw_value) = pair.split_once('=').unwrap_or((pair, ""));
-        if !raw_key.eq_ignore_ascii_case("draft") {
-            continue;
-        }
-        let value = raw_value.trim();
-        if value == "1" || value.eq_ignore_ascii_case("true") || value.eq_ignore_ascii_case("yes") {
-            return true;
-        }
-    }
-    false
-}
-
-fn session_pr_status_label(
-    pr_cache: Option<&SessionPrMetadataCache>,
-    fallback_is_draft: bool,
+fn render_terminal_top_bar(
+    domain: &ProjectionState,
+    session_id: &WorkerSessionId,
+    terminal_view_state: Option<&TerminalViewState>,
 ) -> String {
-    if let Some(cache) = pr_cache {
-        if cache.is_draft {
-            return "DRAFT".to_owned();
-        }
-        if let Some(state) = cache
-            .state
-            .as_deref()
-            .map(str::trim)
-            .filter(|state| !state.is_empty())
-        {
-            return state.to_ascii_uppercase();
-        }
-    }
-    if fallback_is_draft {
-        "DRAFT".to_owned()
-    } else {
-        "UNKNOWN".to_owned()
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-struct CiBucketSummary {
-    pass: usize,
-    fail: usize,
-    pending: usize,
-    skip: usize,
-    unknown: usize,
-}
-
-fn summarize_ci_buckets(checks: &[CiCheckStatus]) -> CiBucketSummary {
-    let mut summary = CiBucketSummary::default();
-    for check in checks {
-        match check.bucket.trim().to_ascii_lowercase().as_str() {
-            "pass" => summary.pass += 1,
-            "fail" => summary.fail += 1,
-            "pending" => summary.pending += 1,
-            "skip" => summary.skip += 1,
-            _ => summary.unknown += 1,
-        }
-    }
-    summary
-}
-
-fn render_terminal_top_bar(domain: &ProjectionState, session_id: &WorkerSessionId) -> String {
     let labels = session_display_labels(domain, session_id);
-    let text = if let Some(session) = domain.sessions.get(session_id) {
+    let mut text = if let Some(session) = domain.sessions.get(session_id) {
         let status = session
             .status
             .as_ref()
@@ -560,75 +579,121 @@ fn render_terminal_top_bar(domain: &ProjectionState, session_id: &WorkerSessionI
             labels.compact_label
         )
     };
+    if let Some(view) = terminal_view_state {
+        if view.transcript_truncated {
+            text.push_str(
+                format!(
+                    " | history: truncated (-{} lines)",
+                    view.transcript_truncated_line_count
+                )
+                .as_str(),
+            );
+        }
+    }
     sanitize_terminal_display_text(text.as_str())
 }
 
 fn render_terminal_transcript_lines(state: &TerminalViewState) -> Vec<String> {
-    render_terminal_transcript_entries(state)
-        .into_iter()
-        .map(|line| line.text)
-        .collect()
+    let mut lines = Vec::with_capacity(
+        state.entries.len().saturating_mul(2) + usize::from(!state.output_fragment.is_empty()),
+    );
+    render_terminal_transcript_lines_into(state, &mut lines);
+    lines
+}
+
+fn render_terminal_transcript_line_count(state: &TerminalViewState) -> usize {
+    let mut count = 0usize;
+    let mut previous_is_foldable = false;
+    let mut previous_rendered_non_empty = false;
+    for entry in &state.entries {
+        let current_is_foldable = matches!(entry, TerminalTranscriptEntry::Foldable(_));
+        if count > 0 && (previous_is_foldable || current_is_foldable) {
+            count += 1;
+            previous_rendered_non_empty = false;
+        }
+        match entry {
+            TerminalTranscriptEntry::Message(line) => {
+                let is_outgoing = is_user_outgoing_terminal_message(line);
+                if is_outgoing && previous_rendered_non_empty {
+                    count += 1;
+                }
+                count += 1;
+                if is_outgoing {
+                    count += 1;
+                    previous_rendered_non_empty = false;
+                } else {
+                    previous_rendered_non_empty = !line.trim().is_empty();
+                }
+            }
+            TerminalTranscriptEntry::Foldable(section) => {
+                count += 1;
+                if !section.folded {
+                    count += section
+                        .content
+                        .lines()
+                        .filter(|line| !line.trim().is_empty())
+                        .count();
+                }
+                previous_rendered_non_empty = true;
+            }
+        }
+        previous_is_foldable = current_is_foldable;
+    }
+    if !state.output_fragment.is_empty() {
+        count += 1;
+    }
+    count
 }
 
 fn render_terminal_transcript_entries(state: &TerminalViewState) -> Vec<RenderedTerminalLine> {
-    let mut lines = Vec::new();
+    render_terminal_transcript_lines(state)
+        .into_iter()
+        .map(|text| RenderedTerminalLine { text })
+        .collect()
+}
+
+fn render_terminal_transcript_lines_into(state: &TerminalViewState, lines: &mut Vec<String>) {
+    let mut previous_is_foldable = false;
     for (index, entry) in state.entries.iter().enumerate() {
-        let previous_is_foldable = index
-            .checked_sub(1)
-            .and_then(|previous| state.entries.get(previous))
-            .map(|previous| matches!(previous, TerminalTranscriptEntry::Foldable(_)))
-            .unwrap_or(false);
         let current_is_foldable = matches!(entry, TerminalTranscriptEntry::Foldable(_));
         if index > 0 && (previous_is_foldable || current_is_foldable) {
-            lines.push(RenderedTerminalLine {
-                text: String::new(),
-            });
+            lines.push(String::new());
         }
         match entry {
             TerminalTranscriptEntry::Message(line) => {
                 if is_user_outgoing_terminal_message(line)
                     && lines
                         .last()
-                        .map(|previous| !previous.text.trim().is_empty())
+                        .map(|previous| !previous.trim().is_empty())
                         .unwrap_or(false)
                 {
-                    lines.push(RenderedTerminalLine {
-                        text: String::new(),
-                    });
+                    lines.push(String::new());
                 }
-                lines.push(RenderedTerminalLine { text: line.clone() });
+                lines.push(line.clone());
                 if is_user_outgoing_terminal_message(line) {
-                    lines.push(RenderedTerminalLine {
-                        text: String::new(),
-                    });
+                    lines.push(String::new());
                 }
             }
             TerminalTranscriptEntry::Foldable(section) => {
                 let fold_marker = if section.folded { "[+]" } else { "[-]" };
                 let summary = summarize_folded_terminal_content(section.content.as_str());
-                lines.push(RenderedTerminalLine {
-                    text: format!("  {fold_marker} {}: {summary}", section.kind.label()),
-                });
+                lines.push(format!("  {fold_marker} {}: {summary}", section.kind.label()));
                 if !section.folded {
                     for content_line in section.content.lines() {
                         let trimmed = content_line.trim();
                         if trimmed.is_empty() {
                             continue;
                         }
-                        lines.push(RenderedTerminalLine {
-                            text: format!("  {trimmed}"),
-                        });
+                        lines.push(format!("  {trimmed}"));
                     }
                 }
             }
         }
+        previous_is_foldable = current_is_foldable;
     }
     if !state.output_fragment.is_empty() {
-        lines.push(RenderedTerminalLine {
-            text: state.output_fragment.clone(),
-        });
+        lines.push(state.output_fragment.clone());
     }
-    lines
 }
 
 fn is_user_outgoing_terminal_message(line: &str) -> bool {
@@ -637,7 +702,13 @@ fn is_user_outgoing_terminal_message(line: &str) -> bool {
 }
 
 fn summarize_folded_terminal_content(content: &str) -> String {
-    let compact = content.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut compact = String::with_capacity(content.len());
+    for segment in content.split_whitespace() {
+        if !compact.is_empty() {
+            compact.push(' ');
+        }
+        compact.push_str(segment);
+    }
     if compact.is_empty() {
         return "(no details)".to_owned();
     }
@@ -650,15 +721,99 @@ fn summarize_folded_terminal_content(content: &str) -> String {
     }
 }
 
-fn render_terminal_output_panel(ui_state: &UiState, width: u16) -> Text<'static> {
-    if ui_state.center_pane.lines.is_empty() {
-        return Text::raw("No terminal output available yet.");
-    }
-    render_terminal_output_with_accents(&ui_state.center_pane.lines, width.max(1))
+#[derive(Debug, Clone)]
+struct TerminalViewportRequest {
+    width: u16,
+    scroll_top: usize,
+    viewport_rows: usize,
+    overscan_rows: usize,
+    indicator: TerminalActivityIndicator,
 }
 
-fn render_terminal_output_with_accents(lines: &[String], width: u16) -> Text<'static> {
+#[derive(Debug, Clone)]
+struct TerminalViewportRender {
+    text: Text<'static>,
+    local_scroll_top: u16,
+}
+
+fn terminal_total_rendered_rows(
+    state: &mut TerminalViewState,
+    width: u16,
+    indicator: TerminalActivityIndicator,
+) -> usize {
+    ensure_terminal_render_metrics(state, width.max(1));
+    let transcript_rows = state
+        .render_cache
+        .rendered_prefix_sums
+        .last()
+        .copied()
+        .unwrap_or(0);
+    transcript_rows + terminal_indicator_rows(transcript_rows > 0, indicator).len()
+}
+
+fn render_terminal_output_viewport(
+    state: &mut TerminalViewState,
+    request: TerminalViewportRequest,
+) -> TerminalViewportRender {
+    let width = request.width.max(1);
+    ensure_terminal_render_metrics(state, width);
+    let transcript_rows = state
+        .render_cache
+        .rendered_prefix_sums
+        .last()
+        .copied()
+        .unwrap_or(0);
+    let indicator_rows = terminal_indicator_rows(transcript_rows > 0, request.indicator);
+    let total_rows = transcript_rows + indicator_rows.len();
+
+    if total_rows == 0 {
+        return TerminalViewportRender {
+            text: Text::raw("No terminal output available yet."),
+            local_scroll_top: 0,
+        };
+    }
+
+    let max_scroll = total_rows.saturating_sub(request.viewport_rows.max(1));
+    let scroll_top = request.scroll_top.min(max_scroll);
+    let slice_start = scroll_top.saturating_sub(request.overscan_rows);
+    let slice_end = scroll_top
+        .saturating_add(request.viewport_rows.max(1))
+        .saturating_add(request.overscan_rows)
+        .min(total_rows);
+    let local_scroll_top = scroll_top.saturating_sub(slice_start).min(u16::MAX as usize) as u16;
+
     let mut rendered = Vec::new();
+    if transcript_rows > 0 && slice_start < transcript_rows {
+        let transcript_slice_end = slice_end.min(transcript_rows);
+        rendered.extend(render_terminal_transcript_slice(
+            state,
+            width,
+            slice_start,
+            transcript_slice_end,
+        ));
+    }
+
+    if slice_end > transcript_rows && !indicator_rows.is_empty() {
+        let indicator_start = slice_start.saturating_sub(transcript_rows);
+        let indicator_end = slice_end.saturating_sub(transcript_rows).min(indicator_rows.len());
+        for row in indicator_rows
+            .iter()
+            .skip(indicator_start)
+            .take(indicator_end.saturating_sub(indicator_start))
+        {
+            rendered.push(Line::from(Span::styled(row.text.clone(), row.style)));
+        }
+    }
+
+    TerminalViewportRender {
+        text: Text::from(rendered),
+        local_scroll_top,
+    }
+}
+
+#[cfg(test)]
+fn render_terminal_output_with_accents(lines: &[String], width: u16) -> Text<'static> {
+    let mut rendered = Vec::with_capacity(lines.len().saturating_mul(2));
     let mut active_fold_kind: Option<TerminalFoldKind> = None;
 
     for raw_line in lines {
@@ -708,6 +863,214 @@ fn render_terminal_output_with_accents(lines: &[String], width: u16) -> Text<'st
     }
 
     Text::from(rendered)
+}
+
+fn ensure_terminal_render_metrics(state: &mut TerminalViewState, width: u16) {
+    ensure_terminal_transcript_cache(state);
+    if state.render_cache.width != width {
+        state.render_cache.metrics_stale = true;
+        state.render_cache.width = width;
+    }
+    if !state.render_cache.metrics_stale {
+        return;
+    }
+
+    let mut active_fold_kind: Option<TerminalFoldKind> = None;
+    state.render_cache.rendered_row_counts.clear();
+    state
+        .render_cache
+        .rendered_row_counts
+        .reserve(state.render_cache.transcript_lines.len());
+    for line in &state.render_cache.transcript_lines {
+        let row_count = terminal_rendered_row_count_for_line(line, width, &mut active_fold_kind);
+        state.render_cache.rendered_row_counts.push(row_count.max(1));
+    }
+
+    state.render_cache.rendered_prefix_sums.clear();
+    state
+        .render_cache
+        .rendered_prefix_sums
+        .reserve(state.render_cache.rendered_row_counts.len() + 1);
+    state.render_cache.rendered_prefix_sums.push(0);
+    for row_count in &state.render_cache.rendered_row_counts {
+        let next = state
+            .render_cache
+            .rendered_prefix_sums
+            .last()
+            .copied()
+            .unwrap_or(0)
+            .saturating_add(*row_count);
+        state.render_cache.rendered_prefix_sums.push(next);
+    }
+    state.render_cache.metrics_stale = false;
+}
+
+fn ensure_terminal_transcript_cache(state: &mut TerminalViewState) {
+    if !state.render_cache.transcript_stale {
+        return;
+    }
+    state.render_cache.transcript_lines = render_terminal_transcript_entries(state)
+        .into_iter()
+        .map(|line| line.text)
+        .collect();
+    state.render_cache.transcript_stale = false;
+    state.render_cache.metrics_stale = true;
+}
+
+fn terminal_rendered_row_count_for_line(
+    raw_line: &str,
+    width: u16,
+    active_fold_kind: &mut Option<TerminalFoldKind>,
+) -> usize {
+    let line = sanitize_terminal_display_text(raw_line);
+    if line.trim().is_empty() {
+        *active_fold_kind = None;
+        return 1;
+    }
+
+    if let Some((kind, folded)) = parse_fold_header_line(&line) {
+        *active_fold_kind = if folded { None } else { Some(kind) };
+        return 1;
+    }
+
+    if active_fold_kind.is_some() || line.starts_with("> ") || !line_looks_like_markdown(&line) {
+        return 1;
+    }
+
+    let markdown = render_markdown_for_terminal(line.as_str(), width);
+    markdown.lines.len().max(1)
+}
+
+fn render_terminal_transcript_slice(
+    state: &TerminalViewState,
+    width: u16,
+    start_row: usize,
+    end_row: usize,
+) -> Vec<Line<'static>> {
+    if start_row >= end_row || state.render_cache.transcript_lines.is_empty() {
+        return Vec::new();
+    }
+    let prefix = &state.render_cache.rendered_prefix_sums;
+    let max_row = prefix.last().copied().unwrap_or(0);
+    if start_row >= max_row {
+        return Vec::new();
+    }
+
+    let clamped_end = end_row.min(max_row);
+    let mut raw_start = prefix.partition_point(|&row| row <= start_row).saturating_sub(1);
+    raw_start = raw_start.min(state.render_cache.transcript_lines.len().saturating_sub(1));
+    let mut raw_end = prefix.partition_point(|&row| row < clamped_end);
+    raw_end = raw_end.min(state.render_cache.transcript_lines.len());
+
+    let mut active_fold_kind: Option<TerminalFoldKind> = None;
+    for line in state.render_cache.transcript_lines.iter().take(raw_start) {
+        let sanitized = sanitize_terminal_display_text(line);
+        if sanitized.trim().is_empty() {
+            active_fold_kind = None;
+            continue;
+        }
+        if let Some((kind, folded)) = parse_fold_header_line(&sanitized) {
+            active_fold_kind = if folded { None } else { Some(kind) };
+        }
+    }
+
+    let mut rendered = Vec::new();
+    for raw_index in raw_start..raw_end {
+        let line_start = prefix.get(raw_index).copied().unwrap_or(0);
+        let line_end = prefix.get(raw_index + 1).copied().unwrap_or(line_start);
+        if line_end <= start_row || line_start >= clamped_end {
+            continue;
+        }
+
+        let line = &state.render_cache.transcript_lines[raw_index];
+        let mut expanded = render_terminal_line_with_context(line, width, &mut active_fold_kind);
+        let local_start = start_row.saturating_sub(line_start);
+        let local_end = clamped_end.saturating_sub(line_start).min(expanded.len());
+        if local_start < local_end {
+            rendered.extend(expanded.drain(local_start..local_end));
+        }
+    }
+
+    rendered
+}
+
+fn render_terminal_line_with_context(
+    raw_line: &str,
+    width: u16,
+    active_fold_kind: &mut Option<TerminalFoldKind>,
+) -> Vec<Line<'static>> {
+    let line = sanitize_terminal_display_text(raw_line);
+    if line.trim().is_empty() {
+        *active_fold_kind = None;
+        return vec![Line::from(String::new())];
+    }
+
+    if let Some((kind, folded)) = parse_fold_header_line(&line) {
+        *active_fold_kind = if folded { None } else { Some(kind) };
+        return vec![Line::from(Span::styled(line, fold_accent_style(kind, true)))];
+    }
+
+    if let Some(kind) = *active_fold_kind {
+        return vec![Line::from(Span::styled(
+            line,
+            fold_accent_style(kind, false),
+        ))];
+    }
+
+    if line.starts_with("> ") {
+        return vec![Line::from(Span::styled(
+            line,
+            Style::default().fg(Color::LightBlue),
+        ))];
+    }
+
+    if !line_looks_like_markdown(line.as_str()) {
+        return vec![Line::from(line)];
+    }
+
+    let markdown = render_markdown_for_terminal(line.as_str(), width);
+    if markdown.lines.is_empty() {
+        vec![Line::from(String::new())]
+    } else {
+        markdown.lines
+    }
+}
+
+#[derive(Debug, Clone)]
+struct TerminalIndicatorRow {
+    text: String,
+    style: Style,
+}
+
+fn terminal_indicator_rows(
+    transcript_has_content: bool,
+    indicator: TerminalActivityIndicator,
+) -> Vec<TerminalIndicatorRow> {
+    if matches!(indicator, TerminalActivityIndicator::None) {
+        return Vec::new();
+    }
+
+    let mut rows = Vec::with_capacity(2);
+    if transcript_has_content {
+        rows.push(TerminalIndicatorRow {
+            text: String::new(),
+            style: Style::default(),
+        });
+    }
+    match indicator {
+        TerminalActivityIndicator::None => {}
+        TerminalActivityIndicator::Working => rows.push(TerminalIndicatorRow {
+            text: format!("{} agent working...", loading_spinner_frame()),
+            style: Style::default()
+                .fg(Color::LightCyan)
+                .add_modifier(Modifier::DIM),
+        }),
+        TerminalActivityIndicator::AwaitingInput => rows.push(TerminalIndicatorRow {
+            text: "󰥔 awaiting input".to_owned(),
+            style: Style::default().fg(Color::Yellow),
+        }),
+    }
+    rows
 }
 
 fn line_looks_like_markdown(line: &str) -> bool {
@@ -868,37 +1231,6 @@ fn session_turn_is_active(
         .get(session_id)
         .map(|state| state.turn_active)
         .unwrap_or(false)
-}
-
-fn append_terminal_loading_indicator(
-    mut text: Text<'static>,
-    indicator: TerminalActivityIndicator,
-) -> Text<'static> {
-    if matches!(indicator, TerminalActivityIndicator::None) {
-        return text;
-    }
-    if !text.lines.is_empty() {
-        text.lines.push(Line::from(String::new()));
-    }
-    match indicator {
-        TerminalActivityIndicator::None => {}
-        TerminalActivityIndicator::Working => {
-            let frame = loading_spinner_frame();
-            text.lines.push(Line::from(Span::styled(
-                format!("{frame} agent working..."),
-                Style::default()
-                    .fg(Color::LightCyan)
-                    .add_modifier(Modifier::DIM),
-            )));
-        }
-        TerminalActivityIndicator::AwaitingInput => {
-            text.lines.push(Line::from(Span::styled(
-                "󰥔 awaiting input",
-                Style::default().fg(Color::Yellow),
-            )));
-        }
-    }
-    text
 }
 
 fn loading_spinner_frame() -> &'static str {
@@ -1066,15 +1398,6 @@ fn nord_editor_theme<'a>(block: Block<'a>) -> EditorTheme<'a> {
         )
         .block(block)
         .hide_status_line()
-}
-
-fn estimate_wrapped_line_count(text: &Text<'_>, _area_width: u16) -> u16 {
-    let count = text.lines.len();
-    if count == 0 {
-        1
-    } else {
-        count.min(u16::MAX as usize) as u16
-    }
 }
 
 fn sanitize_terminal_display_text(input: &str) -> String {
@@ -1286,7 +1609,21 @@ fn render_ticket_picker_overlay(
         popup,
     );
     if popup.width > 4 && popup.height > 4 {
-        let input_height: u16 = if overlay.new_ticket_mode { 4 } else { 3 };
+        let input_height: u16 = if overlay.new_ticket_mode {
+            let max_input_height = popup.height.saturating_sub(3);
+            if max_input_height < TICKET_PICKER_BRIEF_MIN_HEIGHT {
+                return;
+            }
+            editor_widget_height(
+                &overlay.new_ticket_brief_editor,
+                popup.width.saturating_sub(2),
+                TICKET_PICKER_BRIEF_MIN_HEIGHT,
+                TICKET_PICKER_BRIEF_MAX_HEIGHT,
+            )
+            .min(max_input_height)
+        } else {
+            3
+        };
         if popup.height <= input_height.saturating_add(1) {
             return;
         }
@@ -1333,9 +1670,14 @@ fn render_ticket_picker_overlay(
     }
 }
 
-const DEFAULT_TERMINAL_INPUT_HEIGHT: u16 = 6;
+const TERMINAL_COMPOSE_MIN_HEIGHT: u16 = 6;
+const TERMINAL_COMPOSE_MAX_HEIGHT: u16 = 14;
+const TICKET_PICKER_BRIEF_MIN_HEIGHT: u16 = 4;
+const TICKET_PICKER_BRIEF_MAX_HEIGHT: u16 = 10;
 const INPUT_PANEL_OUTER_BORDER_HEIGHT: u16 = 2;
-const NEEDS_INPUT_NOTE_HEIGHT: u16 = 3;
+const EDITOR_WIDGET_BORDER_HEIGHT: u16 = 2;
+const NEEDS_INPUT_NOTE_MIN_HEIGHT: u16 = 3;
+const NEEDS_INPUT_NOTE_MAX_HEIGHT: u16 = 8;
 const NEEDS_INPUT_HELP_HEIGHT: u16 = 1;
 const NEEDS_INPUT_ERROR_HEIGHT: u16 = 1;
 const NEEDS_INPUT_QUESTION_MIN_HEIGHT: u16 = 3;
@@ -1349,28 +1691,48 @@ fn terminal_input_pane_height(
     center_height: u16,
     center_width: u16,
     prompt: Option<&NeedsInputComposerState>,
+    compose_editor: &EditorState,
 ) -> u16 {
+    let max_height = center_height.saturating_sub(4).max(3);
+
     let Some(prompt) = prompt else {
-        return DEFAULT_TERMINAL_INPUT_HEIGHT;
+        let compose_height = editor_widget_height(
+            compose_editor,
+            center_width,
+            TERMINAL_COMPOSE_MIN_HEIGHT,
+            TERMINAL_COMPOSE_MAX_HEIGHT,
+        );
+        return compose_height.clamp(3, max_height);
     };
     let Some(question) = prompt.current_question() else {
-        return DEFAULT_TERMINAL_INPUT_HEIGHT;
+        let compose_height = editor_widget_height(
+            compose_editor,
+            center_width,
+            TERMINAL_COMPOSE_MIN_HEIGHT,
+            TERMINAL_COMPOSE_MAX_HEIGHT,
+        );
+        return compose_height.clamp(3, max_height);
     };
     let is_plan_prompt = expanded_needs_input_layout_active(prompt);
     let question_height = needs_input_question_height(question, center_width, is_plan_prompt);
     let choice_height = needs_input_choice_height(question, center_width, is_plan_prompt);
+    let note_height = editor_widget_height(
+        &prompt.note_editor_state,
+        center_width.saturating_sub(INPUT_PANEL_OUTER_BORDER_HEIGHT),
+        NEEDS_INPUT_NOTE_MIN_HEIGHT,
+        NEEDS_INPUT_NOTE_MAX_HEIGHT,
+    );
     let mut inner_required = question_height
         .saturating_add(choice_height)
-        .saturating_add(NEEDS_INPUT_NOTE_HEIGHT)
+        .saturating_add(note_height)
         .saturating_add(NEEDS_INPUT_HELP_HEIGHT);
     if prompt.error.is_some() {
         inner_required = inner_required.saturating_add(NEEDS_INPUT_ERROR_HEIGHT);
     }
     let mut target_height = inner_required.saturating_add(INPUT_PANEL_OUTER_BORDER_HEIGHT);
     if is_plan_prompt {
-        target_height = target_height.max(DEFAULT_TERMINAL_INPUT_HEIGHT.saturating_mul(2));
+        target_height = target_height.max(TERMINAL_COMPOSE_MIN_HEIGHT.saturating_mul(2));
     }
-    let max_height = center_height.saturating_sub(4).max(3);
     target_height.clamp(3, max_height)
 }
 
@@ -1447,6 +1809,41 @@ fn needs_input_choice_height(
 
 const NEEDS_INPUT_CHOICE_MAX_EXPANDED_HEIGHT_U16: u16 = 12;
 
+fn editor_widget_height(
+    state: &EditorState,
+    widget_width: u16,
+    min_height: u16,
+    max_height: u16,
+) -> u16 {
+    let max_height = max_height.max(min_height);
+    let content_width = widget_width.saturating_sub(EDITOR_WIDGET_BORDER_HEIGHT);
+    let max_content_rows = usize::from(
+        max_height
+            .saturating_sub(EDITOR_WIDGET_BORDER_HEIGHT)
+            .max(1),
+    );
+    let content_rows = editor_wrapped_row_count(state, content_width, max_content_rows);
+    content_rows
+        .saturating_add(EDITOR_WIDGET_BORDER_HEIGHT)
+        .clamp(min_height, max_height)
+}
+
+fn editor_wrapped_row_count(state: &EditorState, content_width: u16, max_rows: usize) -> u16 {
+    let width = usize::from(content_width.max(1));
+    let max_rows = max_rows.max(1);
+    let mut rows = 0usize;
+    for row in state.lines.iter_row() {
+        let chars = row.len();
+        let wrapped = if chars == 0 { 1 } else { chars.div_ceil(width) };
+        rows = rows.saturating_add(wrapped.max(1));
+        if rows >= max_rows {
+            rows = max_rows;
+            break;
+        }
+    }
+    u16::try_from(rows.max(1)).unwrap_or(u16::MAX)
+}
+
 fn wrapped_row_count(text: &str, width: u16) -> u16 {
     let width = width.max(1) as usize;
     let mut rows = 0usize;
@@ -1492,11 +1889,17 @@ fn render_terminal_needs_input_panel(
     let is_plan_prompt = expanded_needs_input_layout_active(prompt);
     let question_height = needs_input_question_height(question, input_area.width, is_plan_prompt);
     let choice_height = needs_input_choice_height(question, input_area.width, is_plan_prompt);
+    let note_height = editor_widget_height(
+        &prompt.note_editor_state,
+        inner.width,
+        NEEDS_INPUT_NOTE_MIN_HEIGHT,
+        NEEDS_INPUT_NOTE_MAX_HEIGHT,
+    );
 
     let mut constraints = vec![
         Constraint::Length(question_height),
         Constraint::Min(choice_height),
-        Constraint::Length(NEEDS_INPUT_NOTE_HEIGHT),
+        Constraint::Length(note_height),
     ];
     if prompt.error.is_some() {
         constraints.push(Constraint::Length(NEEDS_INPUT_ERROR_HEIGHT));

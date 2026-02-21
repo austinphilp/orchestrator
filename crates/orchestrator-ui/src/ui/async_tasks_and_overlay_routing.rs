@@ -62,10 +62,6 @@ async fn run_merge_queue_command_task(
                     merge_conflict: false,
                     base_branch: None,
                     head_branch: None,
-                    pr_state: None,
-                    pr_is_draft: false,
-                    review_decision: None,
-                    review_summary: None,
                     ci_checks: Vec::new(),
                     ci_failures: Vec::new(),
                     ci_has_failures: false,
@@ -91,10 +87,6 @@ async fn run_merge_queue_command_task(
                     merge_conflict: false,
                     base_branch: None,
                     head_branch: None,
-                    pr_state: None,
-                    pr_is_draft: false,
-                    review_decision: None,
-                    review_summary: None,
                     ci_checks: Vec::new(),
                     ci_failures: Vec::new(),
                     ci_has_failures: false,
@@ -120,10 +112,6 @@ async fn run_merge_queue_command_task(
                         merge_conflict: false,
                         base_branch: None,
                         head_branch: None,
-                        pr_state: None,
-                        pr_is_draft: false,
-                        review_decision: None,
-                        review_summary: None,
                         ci_checks: Vec::new(),
                         ci_failures: Vec::new(),
                         ci_has_failures: false,
@@ -145,10 +133,6 @@ async fn run_merge_queue_command_task(
             merge_conflict: parsed.merge_conflict,
             base_branch: parsed.base_branch,
             head_branch: parsed.head_branch,
-            pr_state: parsed.pr_state,
-            pr_is_draft: parsed.pr_is_draft,
-            review_decision: parsed.review_decision,
-            review_summary: parsed.review_summary,
             ci_checks: parsed.ci_checks,
             ci_failures: parsed.ci_failures,
             ci_has_failures: parsed.ci_has_failures,
@@ -167,12 +151,11 @@ async fn run_session_merge_finalize_task(
         .complete_session_after_merge(session_id.clone())
         .await
     {
-        Ok(()) => {
-            let projection = provider.reload_projection().await.ok();
+        Ok(outcome) => {
             let _ = sender
                 .send(MergeQueueEvent::SessionFinalized {
                     session_id,
-                    projection,
+                    event: outcome.event,
                 })
                 .await;
         }
@@ -193,13 +176,12 @@ async fn run_session_archive_task(
     sender: mpsc::Sender<TicketPickerEvent>,
 ) {
     match provider.archive_session(session_id.clone()).await {
-        Ok(warning) => {
-            let projection = provider.reload_projection().await.ok();
+        Ok(outcome) => {
             let _ = sender
                 .send(TicketPickerEvent::SessionArchived {
                     session_id,
-                    warning,
-                    projection,
+                    warning: outcome.warning,
+                    event: outcome.event,
                 })
                 .await;
         }
@@ -230,9 +212,9 @@ async fn run_publish_inbox_item_task(
     sender: mpsc::Sender<TicketPickerEvent>,
 ) {
     match provider.publish_inbox_item(request).await {
-        Ok(projection) => {
+        Ok(event) => {
             let _ = sender
-                .send(TicketPickerEvent::InboxItemPublished { projection })
+                .send(TicketPickerEvent::InboxItemPublished { event })
                 .await;
         }
         Err(error) => {
@@ -251,9 +233,9 @@ async fn run_resolve_inbox_item_task(
     sender: mpsc::Sender<TicketPickerEvent>,
 ) {
     match provider.resolve_inbox_item(request).await {
-        Ok(projection) => {
+        Ok(event) => {
             let _ = sender
-                .send(TicketPickerEvent::InboxItemResolved { projection })
+                .send(TicketPickerEvent::InboxItemResolved { event })
                 .await;
         }
         Err(error) => {
@@ -271,10 +253,6 @@ struct MergeQueueResponse {
     merge_conflict: bool,
     base_branch: Option<String>,
     head_branch: Option<String>,
-    pr_state: Option<String>,
-    pr_is_draft: bool,
-    review_decision: Option<String>,
-    review_summary: Option<SessionPrReviewSummary>,
     ci_checks: Vec<CiCheckStatus>,
     ci_failures: Vec<String>,
     ci_has_failures: bool,
@@ -309,57 +287,6 @@ fn parse_merge_queue_response(output: &str) -> MergeQueueResponse {
             .and_then(|entry| entry.as_str())
             .map(|entry| entry.trim().to_owned())
             .filter(|entry| !entry.is_empty()),
-        pr_state: value
-            .get("pr_state")
-            .and_then(|entry| entry.as_str())
-            .map(str::trim)
-            .filter(|entry| !entry.is_empty())
-            .map(str::to_owned),
-        pr_is_draft: value
-            .get("pr_is_draft")
-            .and_then(|entry| entry.as_bool())
-            .unwrap_or(false),
-        review_decision: value
-            .get("review_decision")
-            .and_then(|entry| entry.as_str())
-            .map(str::trim)
-            .filter(|entry| !entry.is_empty())
-            .map(str::to_owned),
-        review_summary: value
-            .get("review_summary")
-            .and_then(|entry| entry.as_object())
-            .map(|summary| SessionPrReviewSummary {
-                total: summary
-                    .get("total")
-                    .and_then(|entry| entry.as_u64())
-                    .and_then(|value| u32::try_from(value).ok())
-                    .unwrap_or(0),
-                approved: summary
-                    .get("approved")
-                    .and_then(|entry| entry.as_u64())
-                    .and_then(|value| u32::try_from(value).ok())
-                    .unwrap_or(0),
-                changes_requested: summary
-                    .get("changes_requested")
-                    .and_then(|entry| entry.as_u64())
-                    .and_then(|value| u32::try_from(value).ok())
-                    .unwrap_or(0),
-                commented: summary
-                    .get("commented")
-                    .and_then(|entry| entry.as_u64())
-                    .and_then(|value| u32::try_from(value).ok())
-                    .unwrap_or(0),
-                pending: summary
-                    .get("pending")
-                    .and_then(|entry| entry.as_u64())
-                    .and_then(|value| u32::try_from(value).ok())
-                    .unwrap_or(0),
-                dismissed: summary
-                    .get("dismissed")
-                    .and_then(|entry| entry.as_u64())
-                    .and_then(|value| u32::try_from(value).ok())
-                    .unwrap_or(0),
-            }),
         ci_checks: value
             .get("ci_statuses")
             .and_then(|entry| entry.as_array())
@@ -525,7 +452,10 @@ async fn run_ticket_picker_load_task(
                 Err(_) => Vec::new(),
             };
             let _ = sender
-                .send(TicketPickerEvent::TicketsLoaded { tickets, projects })
+                .send(TicketPickerEvent::TicketsLoaded {
+                    tickets,
+                    projects,
+                })
                 .await;
         }
         Err(error) => {
@@ -545,12 +475,8 @@ async fn run_session_workflow_advance_task(
 ) {
     match provider.advance_session_workflow(session_id.clone()).await {
         Ok(outcome) => {
-            let projection = provider.reload_projection().await.ok();
             let _ = sender
-                .send(TicketPickerEvent::SessionWorkflowAdvanced {
-                    outcome,
-                    projection,
-                })
+                .send(TicketPickerEvent::SessionWorkflowAdvanced { outcome })
                 .await;
         }
         Err(error) => {
@@ -736,13 +662,6 @@ async fn run_ticket_picker_create_task(
     };
 
     let mut warning = Vec::new();
-    let projection = match provider.reload_projection().await {
-        Ok(projection) => Some(projection),
-        Err(error) => {
-            warning.push(format!("failed to reload projection: {error}"));
-            None
-        }
-    };
     let tickets = match provider.list_unfinished_tickets().await {
         Ok(tickets) => Some(tickets),
         Err(error) => {
@@ -760,7 +679,6 @@ async fn run_ticket_picker_create_task(
         .send(TicketPickerEvent::TicketCreated {
             created_ticket,
             submit_mode,
-            projection,
             tickets,
             warning: (!warning.is_empty()).then(|| warning.join("; ")),
         })
@@ -987,6 +905,7 @@ fn route_needs_input_modal_key(shell_state: &mut UiShellState, key: KeyEvent) ->
         && shell_state.active_terminal_session_requires_manual_needs_input_activation()
     {
         let _ = shell_state.deactivate_terminal_needs_input_interaction();
+        shell_state.enter_normal_mode();
         return RoutedInput::Ignore;
     }
 
@@ -1112,11 +1031,7 @@ fn route_ticket_picker_key(shell_state: &mut UiShellState, key: KeyEvent) -> Rou
         return route_ticket_picker_repository_prompt_key(shell_state, key);
     }
 
-    if shell_state
-        .ticket_picker_overlay
-        .archive_confirm_ticket
-        .is_some()
-    {
+    if shell_state.ticket_picker_overlay.archive_confirm_ticket.is_some() {
         if is_escape_to_normal(key) {
             shell_state.cancel_ticket_picker_archive_confirmation();
             return RoutedInput::Ignore;
@@ -1139,11 +1054,7 @@ fn route_ticket_picker_key(shell_state: &mut UiShellState, key: KeyEvent) -> Rou
 
     if shell_state.ticket_picker_overlay.new_ticket_mode {
         if is_escape_to_normal(key) {
-            if shell_state
-                .ticket_picker_overlay
-                .new_ticket_brief_editor
-                .mode
-                != EditorMode::Normal
+            if shell_state.ticket_picker_overlay.new_ticket_brief_editor.mode != EditorMode::Normal
             {
                 if let Some(key_input) = map_edtui_key_input(key) {
                     shell_state
@@ -1166,17 +1077,13 @@ fn route_ticket_picker_key(shell_state: &mut UiShellState, key: KeyEvent) -> Rou
 
         match key.code {
             KeyCode::Enter if key.modifiers.is_empty() => {
-                if shell_state
-                    .ticket_picker_overlay
-                    .new_ticket_brief_editor
-                    .mode
+                if shell_state.ticket_picker_overlay.new_ticket_brief_editor.mode
                     == EditorMode::Normal
                 {
-                    shell_state
-                        .submit_created_ticket_from_picker(TicketCreateSubmitMode::CreateOnly);
+                    shell_state.submit_created_ticket_from_picker(TicketCreateSubmitMode::CreateOnly);
                 } else {
-                    let enter = edtui_key_input(KeyCode::Enter, KeyModifiers::NONE)
-                        .expect("enter key conversion");
+                    let enter =
+                        edtui_key_input(KeyCode::Enter, KeyModifiers::NONE).expect("enter key conversion");
                     shell_state
                         .ticket_picker_overlay
                         .new_ticket_brief_event_handler
@@ -1187,17 +1094,14 @@ fn route_ticket_picker_key(shell_state: &mut UiShellState, key: KeyEvent) -> Rou
                 }
             }
             KeyCode::Enter if key.modifiers == KeyModifiers::SHIFT => {
-                if shell_state
-                    .ticket_picker_overlay
-                    .new_ticket_brief_editor
-                    .mode
+                if shell_state.ticket_picker_overlay.new_ticket_brief_editor.mode
                     == EditorMode::Normal
                 {
                     shell_state
                         .submit_created_ticket_from_picker(TicketCreateSubmitMode::CreateAndStart);
                 } else {
-                    let enter = edtui_key_input(KeyCode::Enter, KeyModifiers::NONE)
-                        .expect("enter key conversion");
+                    let enter =
+                        edtui_key_input(KeyCode::Enter, KeyModifiers::NONE).expect("enter key conversion");
                     shell_state
                         .ticket_picker_overlay
                         .new_ticket_brief_event_handler
@@ -1277,7 +1181,10 @@ fn route_review_merge_confirm_key(shell_state: &mut UiShellState, key: KeyEvent)
     RoutedInput::Ignore
 }
 
-fn route_archive_session_confirm_key(shell_state: &mut UiShellState, key: KeyEvent) -> RoutedInput {
+fn route_archive_session_confirm_key(
+    shell_state: &mut UiShellState,
+    key: KeyEvent,
+) -> RoutedInput {
     if is_escape_to_normal(key) {
         shell_state.cancel_archive_selected_session_confirmation();
         return RoutedInput::Ignore;

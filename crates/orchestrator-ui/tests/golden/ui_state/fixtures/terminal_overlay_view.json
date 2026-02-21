@@ -38,7 +38,7 @@
         "data": {
           "session_id": "sess-terminal",
           "work_item_id": "wi-terminal",
-          "model": "openai/gpt-4o-mini"
+          "model": "c/claude-haiku-4.5"
         }
       }
     },

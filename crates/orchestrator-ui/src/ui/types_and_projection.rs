@@ -13,18 +13,19 @@ use crossterm::terminal::{
 use crossterm::ExecutableCommand;
 use edtui::{EditorEventHandler, EditorMode, EditorState, EditorTheme, EditorView, Lines};
 use orchestrator_core::{
-    attention_inbox_snapshot, command_ids, ArtifactKind, ArtifactProjection, AttentionBatchKind,
-    AttentionEngineConfig, AttentionInboxSnapshot, AttentionPriorityBand, Command, CommandRegistry,
-    CoreError, InboxItemId, InboxItemKind, LlmChatRequest, LlmFinishReason, LlmMessage,
-    LlmProvider, LlmRateLimitState, LlmResponseStream, LlmRole, LlmTokenUsage,
-    OrchestrationEventPayload, ProjectId, ProjectionState, SelectedTicketFlowResult,
-    SessionProjection, SupervisorQueryArgs, SupervisorQueryContextArgs, TicketId, TicketSummary,
+    apply_event, attention_inbox_snapshot, command_ids, ArtifactKind, ArtifactProjection,
+    AttentionBatchKind, AttentionEngineConfig, AttentionInboxSnapshot, AttentionPriorityBand,
+    Command, CommandRegistry, CoreError, InboxItemId, InboxItemKind, LlmChatRequest,
+    LlmFinishReason, LlmMessage, LlmProvider, LlmRateLimitState, LlmResponseStream, LlmRole,
+    LlmTokenUsage, OrchestrationEventPayload, ProjectId,
+    ProjectionState, SelectedTicketFlowResult, SessionProjection, SupervisorQueryArgs,
+    StoredEventEnvelope, SupervisorQueryContextArgs, TicketId, TicketSummary,
     UntypedCommandInvocation, WorkItemId, WorkerSessionId, WorkerSessionStatus, WorkflowState,
 };
 use orchestrator_runtime::{
     BackendEvent, BackendKind, BackendNeedsInputAnswer, BackendNeedsInputEvent,
-    BackendNeedsInputQuestion, BackendOutputEvent, BackendTurnStateEvent, RuntimeError,
-    RuntimeResult, RuntimeSessionId, SessionHandle, SpawnSpec, WorkerBackend,
+    BackendNeedsInputOption, BackendNeedsInputQuestion, BackendOutputEvent, BackendTurnStateEvent,
+    RuntimeError, RuntimeResult, RuntimeSessionId, SessionHandle, SpawnSpec, WorkerBackend,
 };
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Layout, Rect};
@@ -51,23 +52,41 @@ const TERMINAL_STREAM_EVENT_CHANNEL_CAPACITY: usize = 128;
 const TICKET_PICKER_PRIORITY_STATES_DEFAULT: &[&str] =
     &["In Progress", "Final Approval", "Todo", "Backlog"];
 const DEFAULT_UI_THEME: &str = "nord";
-const DEFAULT_SUPERVISOR_MODEL: &str = "openai/gpt-4o-mini";
+const DEFAULT_SUPERVISOR_MODEL: &str = "c/claude-haiku-4.5";
 const DEFAULT_BACKGROUND_SESSION_REFRESH_SECS: u64 = 15;
+const DEFAULT_TRANSCRIPT_LINE_LIMIT: usize = 100;
 const MIN_BACKGROUND_SESSION_REFRESH_SECS: u64 = 2;
 const MAX_BACKGROUND_SESSION_REFRESH_SECS: u64 = 15;
-const MERGE_POLL_INTERVAL: Duration = Duration::from_secs(15);
-const APPROVAL_RECONCILE_POLL_INTERVAL: Duration = Duration::from_secs(15);
+const DEFAULT_SESSION_INFO_BACKGROUND_REFRESH_SECS: u64 = 15;
+const MIN_SESSION_INFO_BACKGROUND_REFRESH_SECS: u64 = 15;
+const RECONCILE_SPARSE_FALLBACK_INTERVAL: Duration = Duration::from_secs(120);
+const DEFAULT_MERGE_POLL_BASE_INTERVAL_SECS: u64 = 15;
+const MIN_MERGE_POLL_BASE_INTERVAL_SECS: u64 = 5;
+const MAX_MERGE_POLL_BASE_INTERVAL_SECS: u64 = 300;
+const DEFAULT_MERGE_POLL_MAX_BACKOFF_SECS: u64 = 120;
+const MIN_MERGE_POLL_MAX_BACKOFF_SECS: u64 = 15;
+const MAX_MERGE_POLL_MAX_BACKOFF_SECS: u64 = 900;
+const DEFAULT_MERGE_POLL_BACKOFF_MULTIPLIER: u64 = 2;
+const MIN_MERGE_POLL_BACKOFF_MULTIPLIER: u64 = 1;
+const MAX_MERGE_POLL_BACKOFF_MULTIPLIER: u64 = 8;
 const MERGE_REQUEST_RATE_LIMIT: Duration = Duration::from_secs(1);
 const TICKET_PICKER_CREATE_REFRESH_INTERVAL: Duration = Duration::from_secs(1);
 const BACKGROUND_SESSION_DEFERRED_OUTPUT_MAX_BYTES: usize = 64 * 1024;
 const RESOLVED_ANIMATION_REFRESH_INTERVAL: Duration = Duration::from_secs(1);
+const PLANNING_WORKING_STATE_PERSIST_DEBOUNCE: Duration = Duration::from_millis(500);
+const PROJECTION_PERF_LOG_INTERVAL: Duration = Duration::from_secs(15);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct UiRuntimeConfig {
     theme: String,
     ticket_picker_priority_states: Vec<String>,
     supervisor_model: String,
+    transcript_line_limit: usize,
     background_session_refresh_secs: u64,
+    session_info_background_refresh_secs: u64,
+    merge_poll_base_interval_secs: u64,
+    merge_poll_max_backoff_secs: u64,
+    merge_poll_backoff_multiplier: u64,
 }
 
 impl Default for UiRuntimeConfig {
@@ -79,7 +98,12 @@ impl Default for UiRuntimeConfig {
                 .map(|value| (*value).to_owned())
                 .collect(),
             supervisor_model: DEFAULT_SUPERVISOR_MODEL.to_owned(),
+            transcript_line_limit: DEFAULT_TRANSCRIPT_LINE_LIMIT,
             background_session_refresh_secs: DEFAULT_BACKGROUND_SESSION_REFRESH_SECS,
+            session_info_background_refresh_secs: DEFAULT_SESSION_INFO_BACKGROUND_REFRESH_SECS,
+            merge_poll_base_interval_secs: DEFAULT_MERGE_POLL_BASE_INTERVAL_SECS,
+            merge_poll_max_backoff_secs: DEFAULT_MERGE_POLL_MAX_BACKOFF_SECS,
+            merge_poll_backoff_multiplier: DEFAULT_MERGE_POLL_BACKOFF_MULTIPLIER,
         }
     }
 }
@@ -94,7 +118,12 @@ pub fn set_ui_runtime_config(
     theme: String,
     ticket_picker_priority_states: Vec<String>,
     supervisor_model: String,
+    transcript_line_limit: usize,
     background_session_refresh_secs: u64,
+    session_info_background_refresh_secs: u64,
+    merge_poll_base_interval_secs: u64,
+    merge_poll_max_backoff_secs: u64,
+    merge_poll_backoff_multiplier: u64,
 ) {
     let mut parsed_states = ticket_picker_priority_states
         .into_iter()
@@ -126,9 +155,25 @@ pub fn set_ui_runtime_config(
                 trimmed.to_owned()
             }
         },
-        background_session_refresh_secs: background_session_refresh_secs.clamp(
-            MIN_BACKGROUND_SESSION_REFRESH_SECS,
-            MAX_BACKGROUND_SESSION_REFRESH_SECS,
+        transcript_line_limit: transcript_line_limit.max(1),
+        background_session_refresh_secs: background_session_refresh_secs
+            .clamp(
+                MIN_BACKGROUND_SESSION_REFRESH_SECS,
+                MAX_BACKGROUND_SESSION_REFRESH_SECS,
+            ),
+        session_info_background_refresh_secs: session_info_background_refresh_secs
+            .max(MIN_SESSION_INFO_BACKGROUND_REFRESH_SECS),
+        merge_poll_base_interval_secs: merge_poll_base_interval_secs.clamp(
+            MIN_MERGE_POLL_BASE_INTERVAL_SECS,
+            MAX_MERGE_POLL_BASE_INTERVAL_SECS,
+        ),
+        merge_poll_max_backoff_secs: merge_poll_max_backoff_secs.clamp(
+            MIN_MERGE_POLL_MAX_BACKOFF_SECS,
+            MAX_MERGE_POLL_MAX_BACKOFF_SECS,
+        ),
+        merge_poll_backoff_multiplier: merge_poll_backoff_multiplier.clamp(
+            MIN_MERGE_POLL_BACKOFF_MULTIPLIER,
+            MAX_MERGE_POLL_BACKOFF_MULTIPLIER,
         ),
     };
 
@@ -163,6 +208,14 @@ fn supervisor_model_config_value() -> String {
         .unwrap_or_else(|_| DEFAULT_SUPERVISOR_MODEL.to_owned())
 }
 
+fn transcript_line_limit_config_value() -> usize {
+    ui_runtime_config_store()
+        .read()
+        .map(|guard| guard.transcript_line_limit)
+        .unwrap_or(DEFAULT_TRANSCRIPT_LINE_LIMIT)
+        .max(1)
+}
+
 fn background_session_refresh_interval_config_value() -> Duration {
     let secs = ui_runtime_config_store()
         .read()
@@ -173,6 +226,50 @@ fn background_session_refresh_interval_config_value() -> Duration {
             MAX_BACKGROUND_SESSION_REFRESH_SECS,
         );
     Duration::from_secs(secs)
+}
+
+fn session_info_background_refresh_interval_config_value() -> Duration {
+    let secs = ui_runtime_config_store()
+        .read()
+        .map(|guard| guard.session_info_background_refresh_secs)
+        .unwrap_or(DEFAULT_SESSION_INFO_BACKGROUND_REFRESH_SECS)
+        .max(MIN_SESSION_INFO_BACKGROUND_REFRESH_SECS);
+    Duration::from_secs(secs)
+}
+
+fn merge_poll_base_interval_config_value() -> Duration {
+    let secs = ui_runtime_config_store()
+        .read()
+        .map(|guard| guard.merge_poll_base_interval_secs)
+        .unwrap_or(DEFAULT_MERGE_POLL_BASE_INTERVAL_SECS)
+        .clamp(
+            MIN_MERGE_POLL_BASE_INTERVAL_SECS,
+            MAX_MERGE_POLL_BASE_INTERVAL_SECS,
+        );
+    Duration::from_secs(secs)
+}
+
+fn merge_poll_max_backoff_config_value() -> Duration {
+    let secs = ui_runtime_config_store()
+        .read()
+        .map(|guard| guard.merge_poll_max_backoff_secs)
+        .unwrap_or(DEFAULT_MERGE_POLL_MAX_BACKOFF_SECS)
+        .clamp(
+            MIN_MERGE_POLL_MAX_BACKOFF_SECS,
+            MAX_MERGE_POLL_MAX_BACKOFF_SECS,
+        );
+    Duration::from_secs(secs)
+}
+
+fn merge_poll_backoff_multiplier_config_value() -> u64 {
+    ui_runtime_config_store()
+        .read()
+        .map(|guard| guard.merge_poll_backoff_multiplier)
+        .unwrap_or(DEFAULT_MERGE_POLL_BACKOFF_MULTIPLIER)
+        .clamp(
+            MIN_MERGE_POLL_BACKOFF_MULTIPLIER,
+            MAX_MERGE_POLL_BACKOFF_MULTIPLIER,
+        )
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -186,6 +283,17 @@ pub struct CreateTicketFromPickerRequest {
     pub brief: String,
     pub selected_project: Option<String>,
     pub submit_mode: TicketCreateSubmitMode,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionArchiveOutcome {
+    pub warning: Option<String>,
+    pub event: StoredEventEnvelope,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionMergeFinalizeOutcome {
+    pub event: StoredEventEnvelope,
 }
 
 #[async_trait]
@@ -211,7 +319,7 @@ pub trait TicketPickerProvider: Send + Sync {
     async fn archive_session(
         &self,
         _session_id: WorkerSessionId,
-    ) -> Result<Option<String>, CoreError> {
+    ) -> Result<SessionArchiveOutcome, CoreError> {
         Err(CoreError::DependencyUnavailable(
             "session archiving is not supported by this ticket provider".to_owned(),
         ))
@@ -250,13 +358,15 @@ pub trait TicketPickerProvider: Send + Sync {
     async fn complete_session_after_merge(
         &self,
         _session_id: WorkerSessionId,
-    ) -> Result<(), CoreError> {
-        Ok(())
+    ) -> Result<SessionMergeFinalizeOutcome, CoreError> {
+        Err(CoreError::DependencyUnavailable(
+            "session merge finalization is not supported by this ticket provider".to_owned(),
+        ))
     }
     async fn publish_inbox_item(
         &self,
         _request: InboxPublishRequest,
-    ) -> Result<ProjectionState, CoreError> {
+    ) -> Result<StoredEventEnvelope, CoreError> {
         Err(CoreError::DependencyUnavailable(
             "inbox publishing is not supported by this ticket provider".to_owned(),
         ))
@@ -264,7 +374,7 @@ pub trait TicketPickerProvider: Send + Sync {
     async fn resolve_inbox_item(
         &self,
         _request: InboxResolveRequest,
-    ) -> Result<ProjectionState, CoreError> {
+    ) -> Result<Option<StoredEventEnvelope>, CoreError> {
         Err(CoreError::DependencyUnavailable(
             "inbox resolution is not supported by this ticket provider".to_owned(),
         ))
@@ -300,6 +410,7 @@ pub struct SessionWorkflowAdvanceOutcome {
     pub from: WorkflowState,
     pub to: WorkflowState,
     pub instruction: Option<String>,
+    pub event: StoredEventEnvelope,
 }
 
 pub type SupervisorCommandContext = SupervisorQueryContextArgs;
@@ -392,6 +503,22 @@ impl UiMode {
             Self::Normal => "Normal",
             Self::Insert => "Insert",
             Self::Terminal => "Terminal",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum ApplicationMode {
+    #[default]
+    Manual,
+    Autopilot,
+}
+
+impl ApplicationMode {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Manual => "Manual",
+            Self::Autopilot => "Autopilot",
         }
     }
 }
@@ -519,7 +646,7 @@ struct UiAttentionProjection {
 
 #[derive(Debug, Clone)]
 struct AttentionProjectionCache {
-    projection: UiAttentionProjection,
+    projection: Arc<UiAttentionProjection>,
     refreshed_at: Instant,
     epoch: u64,
 }
@@ -572,10 +699,7 @@ struct SessionDisplayLabels {
     compact_label: String,
 }
 
-fn session_display_labels(
-    domain: &ProjectionState,
-    session_id: &WorkerSessionId,
-) -> SessionDisplayLabels {
+fn session_display_labels(domain: &ProjectionState, session_id: &WorkerSessionId) -> SessionDisplayLabels {
     let fallback = format!("session {}", session_id.as_str());
     let Some(work_item_id) = domain
         .sessions
@@ -629,6 +753,31 @@ fn session_display_labels(
     }
 }
 
+fn session_info_sidebar_title(domain: &ProjectionState, session_id: &WorkerSessionId) -> String {
+    let Some(work_item_id) = domain
+        .sessions
+        .get(session_id)
+        .and_then(|session| session.work_item_id.as_ref())
+    else {
+        return "session info".to_owned();
+    };
+    let Some(work_item) = domain.work_items.get(work_item_id) else {
+        return "session info".to_owned();
+    };
+    let Some(ticket_id) = work_item.ticket_id.as_ref() else {
+        return "session info".to_owned();
+    };
+    let Some(metadata) = latest_ticket_metadata(domain, ticket_id) else {
+        return "session info".to_owned();
+    };
+    let title = metadata.title.trim();
+    if title.is_empty() {
+        "session info".to_owned()
+    } else {
+        compact_focus_card_text(title)
+    }
+}
+
 fn session_display_with_status(
     domain: &ProjectionState,
     session_id: &WorkerSessionId,
@@ -648,10 +797,7 @@ struct TicketDisplayMetadata {
     description: Option<String>,
 }
 
-fn latest_ticket_metadata(
-    domain: &ProjectionState,
-    ticket_id: &TicketId,
-) -> Option<TicketDisplayMetadata> {
+fn latest_ticket_metadata(domain: &ProjectionState, ticket_id: &TicketId) -> Option<TicketDisplayMetadata> {
     let mut latest_synced: Option<TicketDisplayMetadata> = None;
     let mut latest_description: Option<Option<String>> = None;
     for event in domain.events.iter().rev() {
@@ -726,24 +872,6 @@ struct SessionInfoSummaryCache {
 struct SessionCiStatusCache {
     checks: Vec<CiCheckStatus>,
     error: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-struct SessionPrMetadataCache {
-    state: Option<String>,
-    is_draft: bool,
-    review_decision: Option<String>,
-    review_summary: Option<SessionPrReviewSummary>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-struct SessionPrReviewSummary {
-    total: u32,
-    approved: u32,
-    changes_requested: u32,
-    commented: u32,
-    pending: u32,
-    dismissed: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -929,7 +1057,14 @@ fn project_ui_state_with_attention(
     });
     let center_pane = active_center
         .as_ref()
-        .map(|center| project_center_pane(center, &inbox_rows, domain, terminal_view_state))
+        .map(|center| {
+            project_center_pane(
+                center,
+                &inbox_rows,
+                domain,
+                terminal_view_state,
+            )
+        })
         .unwrap_or_else(|| CenterPaneState {
             title: "Terminal".to_owned(),
             lines: vec!["No terminal output available yet.".to_owned()],
@@ -1131,8 +1266,11 @@ impl SupervisorResponseState {
 #[derive(Debug, Clone)]
 struct TerminalViewState {
     entries: Vec<TerminalTranscriptEntry>,
+    transcript_truncated: bool,
+    transcript_truncated_line_count: usize,
     error: Option<String>,
     output_fragment: String,
+    render_cache: TerminalRenderCache,
     deferred_output: Vec<u8>,
     last_background_flush_at: Option<Instant>,
     output_rendered_line_count: usize,
@@ -1149,8 +1287,11 @@ impl Default for TerminalViewState {
     fn default() -> Self {
         Self {
             entries: Vec::new(),
+            transcript_truncated: false,
+            transcript_truncated_line_count: 0,
             error: None,
             output_fragment: String::new(),
+            render_cache: TerminalRenderCache::default(),
             deferred_output: Vec::new(),
             last_background_flush_at: None,
             output_rendered_line_count: 0,
@@ -1162,6 +1303,36 @@ impl Default for TerminalViewState {
             active_needs_input: None,
             last_merge_conflict_signature: None,
         }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct TerminalRenderCache {
+    transcript_lines: Vec<String>,
+    rendered_row_counts: Vec<usize>,
+    rendered_prefix_sums: Vec<usize>,
+    width: u16,
+    transcript_stale: bool,
+    metrics_stale: bool,
+}
+
+impl Default for TerminalRenderCache {
+    fn default() -> Self {
+        Self {
+            transcript_lines: Vec::new(),
+            rendered_row_counts: Vec::new(),
+            rendered_prefix_sums: Vec::new(),
+            width: 0,
+            transcript_stale: true,
+            metrics_stale: true,
+        }
+    }
+}
+
+impl TerminalRenderCache {
+    fn invalidate_all(&mut self) {
+        self.transcript_stale = true;
+        self.metrics_stale = true;
     }
 }
 
@@ -1195,6 +1366,7 @@ impl TerminalViewState {
             self.active_needs_input = Some(NeedsInputComposerState::new(
                 prompt.prompt_id,
                 prompt.questions,
+                prompt.default_option_labels,
                 !prompt.requires_manual_activation,
                 prompt.is_structured_plan_request,
             ));
@@ -1257,6 +1429,7 @@ struct NeedsInputAnswerDraft {
 struct NeedsInputPromptState {
     prompt_id: String,
     questions: Vec<BackendNeedsInputQuestion>,
+    default_option_labels: Vec<Option<String>>,
     requires_manual_activation: bool,
     is_structured_plan_request: bool,
 }
@@ -1265,6 +1438,7 @@ struct NeedsInputPromptState {
 struct NeedsInputComposerState {
     prompt_id: String,
     questions: Vec<BackendNeedsInputQuestion>,
+    default_option_labels: Vec<Option<String>>,
     answer_drafts: Vec<NeedsInputAnswerDraft>,
     current_question_index: usize,
     select_state: SelectState,
@@ -1281,20 +1455,15 @@ impl std::fmt::Debug for NeedsInputComposerState {
             .field("prompt_id", &self.prompt_id)
             .field("questions", &self.questions)
             .field("answer_drafts", &self.answer_drafts)
+            .field("default_option_labels", &self.default_option_labels)
             .field("current_question_index", &self.current_question_index)
             .field("select_state", &self.select_state)
             .field("note_editor_mode", &self.note_editor_state.mode)
-            .field(
-                "note_editor_text",
-                &editor_state_text(&self.note_editor_state),
-            )
+            .field("note_editor_text", &editor_state_text(&self.note_editor_state))
             .field("interaction_active", &self.interaction_active)
             .field("note_insert_mode", &self.note_insert_mode)
             .field("error", &self.error)
-            .field(
-                "is_structured_plan_request",
-                &self.is_structured_plan_request,
-            )
+            .field("is_structured_plan_request", &self.is_structured_plan_request)
             .finish()
     }
 }
@@ -1303,13 +1472,19 @@ impl NeedsInputComposerState {
     fn new(
         prompt_id: String,
         questions: Vec<BackendNeedsInputQuestion>,
+        default_option_labels: Vec<Option<String>>,
         interaction_active: bool,
         is_structured_plan_request: bool,
     ) -> Self {
         let answer_drafts = vec![NeedsInputAnswerDraft::default(); questions.len()];
+        let mut normalized_default_option_labels = default_option_labels;
+        if normalized_default_option_labels.len() != questions.len() {
+            normalized_default_option_labels.resize(questions.len(), None);
+        }
         let mut state = Self {
             prompt_id,
             questions,
+            default_option_labels: normalized_default_option_labels,
             answer_drafts,
             current_question_index: 0,
             select_state: SelectState::new(0),
@@ -1336,14 +1511,21 @@ impl NeedsInputComposerState {
     }
 
     fn refresh_controls_from_current_question(&mut self) {
-        let Some(question) = self.current_question() else {
+        let Some((options_len, options)) = self
+            .current_question()
+            .map(|question| {
+                (
+                    question.options.as_ref().map(Vec::len).unwrap_or(0),
+                    question.options.clone(),
+                )
+            })
+        else {
             self.select_state = SelectState::new(0);
             clear_editor_state(&mut self.note_editor_state);
             self.note_insert_mode = false;
             return;
         };
 
-        let options_len = question.options.as_ref().map(Vec::len).unwrap_or(0);
         let draft = self
             .answer_drafts
             .get(self.current_question_index)
@@ -1351,19 +1533,29 @@ impl NeedsInputComposerState {
             .unwrap_or_default();
         self.select_state = SelectState::new(options_len);
         self.select_state.focused = self.interaction_active && options_len > 0;
-        if let Some(index) = draft
-            .selected_option_index
-            .filter(|index| *index < options_len)
-        {
+        if let Some(index) = draft.selected_option_index.filter(|index| *index < options_len) {
             self.select_state.selected_index = Some(index);
             self.select_state.highlighted_index = index;
+        } else if let Some(default_label) = self
+            .default_option_labels
+            .get(self.current_question_index)
+            .and_then(|value| value.as_deref())
+        {
+            if let Some(default_index) = options
+                .as_ref()
+                .and_then(|entries| entries.iter().position(|option| option.label == default_label))
+            {
+                self.select_state.selected_index = Some(default_index);
+                self.select_state.highlighted_index = default_index;
+            }
         }
         set_editor_state_text(&mut self.note_editor_state, draft.note.as_str());
-        self.note_editor_state.mode = if self.interaction_active && self.note_insert_mode {
-            EditorMode::Insert
-        } else {
-            EditorMode::Normal
-        };
+        self.note_editor_state.mode =
+            if self.interaction_active && self.note_insert_mode {
+                EditorMode::Insert
+            } else {
+                EditorMode::Normal
+            };
     }
 
     fn move_to_question(&mut self, next_index: usize) {
@@ -1401,11 +1593,7 @@ impl NeedsInputComposerState {
         for (index, question) in self.questions.iter().enumerate() {
             let draft = self.answer_drafts.get(index).cloned().unwrap_or_default();
             let mut entries = Vec::new();
-            if let Some(options) = question
-                .options
-                .as_ref()
-                .filter(|options| !options.is_empty())
-            {
+            if let Some(options) = question.options.as_ref().filter(|options| !options.is_empty()) {
                 let Some(selected_index) = draft.selected_option_index else {
                     return Err(RuntimeError::Protocol(format!(
                         "select an option for '{}'",

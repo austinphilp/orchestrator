@@ -9,7 +9,7 @@ center_title: Focus Card inbox-focus
 Batch lanes: [1] Decide / Unblock 1
 
 󰞋 Decide / Unblock:
-> [ ] NeedsDecision: Confirm golden snapshot update workflow
+> [ ] Confirm golden snapshot update workflow
 
 [center]
 Stack: FocusCard(inbox-focus)
