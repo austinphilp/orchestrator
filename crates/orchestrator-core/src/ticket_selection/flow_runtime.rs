@@ -1,6 +1,7 @@
 async fn start_new_mapping(
     store: &mut SqliteEventStore,
     selected_ticket: &TicketSummary,
+    selected_ticket_description: Option<&str>,
     config: &SelectedTicketFlowConfig,
     project_id: ProjectId,
     repository_override: Option<PathBuf>,
@@ -140,7 +141,14 @@ async fn start_new_mapping(
         &mapping.session.backend_kind,
     )
     .await?;
-    ensure_lifecycle_events(store, selected_ticket, &mapping, &project_id, true)?;
+    ensure_lifecycle_events(
+        store,
+        selected_ticket,
+        selected_ticket_description,
+        &mapping,
+        &project_id,
+        true,
+    )?;
 
     Ok(SelectedTicketFlowResult {
         action: SelectedTicketFlowAction::Started,
@@ -151,6 +159,7 @@ async fn start_new_mapping(
 async fn resume_existing_mapping(
     store: &mut SqliteEventStore,
     selected_ticket: &TicketSummary,
+    selected_ticket_description: Option<&str>,
     _project_id: ProjectId,
     config: &SelectedTicketFlowConfig,
     worker_backend: &dyn WorkerBackend,
@@ -240,6 +249,7 @@ async fn resume_existing_mapping(
     ensure_lifecycle_events(
         store,
         selected_ticket,
+        selected_ticket_description,
         &mapping,
         &config.project_id,
         spawned_new_runtime_session,
@@ -348,6 +358,7 @@ fn resume_spawn_environment(
 fn ensure_lifecycle_events(
     store: &mut SqliteEventStore,
     selected_ticket: &TicketSummary,
+    selected_ticket_description: Option<&str>,
     mapping: &RuntimeMappingRecord,
     project_id: &ProjectId,
     force_session_spawned_event: bool,
@@ -394,6 +405,18 @@ fn ensure_lifecycle_events(
             state: selected_ticket.state.clone(),
             assignee: selected_ticket.assignee.clone(),
             priority: selected_ticket.priority,
+        }),
+    ))?;
+    store.append(new_event(
+        "ticket-details-synced",
+        Some(mapping.work_item_id.clone()),
+        None,
+        OrchestrationEventPayload::TicketDetailsSynced(crate::TicketDetailsSyncedPayload {
+            ticket_id: mapping.ticket.ticket_id.clone(),
+            description: selected_ticket_description
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToOwned::to_owned),
         }),
     ))?;
 
@@ -514,4 +537,3 @@ fn new_event(
         schema_version: DOMAIN_EVENT_SCHEMA_VERSION,
     }
 }
-

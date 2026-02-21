@@ -520,6 +520,20 @@ fn summarize_event_payload(payload: &OrchestrationEventPayload, max_chars: usize
             }
             summary
         }
+        OrchestrationEventPayload::TicketDetailsSynced(details) => format!(
+            "ticket details synced for {} ({})",
+            details.ticket_id.as_str(),
+            if details
+                .description
+                .as_deref()
+                .map(str::trim)
+                .is_some_and(|value| !value.is_empty())
+            {
+                "description present"
+            } else {
+                "description empty"
+            }
+        ),
         OrchestrationEventPayload::WorkItemCreated(work_item) => {
             format!(
                 "work item {} created for ticket {} in project {}",

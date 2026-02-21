@@ -10,6 +10,7 @@ use crate::workflow::WorkflowTransitionReason;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum OrchestrationEventType {
     TicketSynced,
+    TicketDetailsSynced,
     WorkItemCreated,
     WorktreeCreated,
     SessionSpawned,
@@ -39,6 +40,13 @@ pub struct TicketSyncedPayload {
     pub assignee: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub priority: Option<i32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TicketDetailsSyncedPayload {
+    pub ticket_id: TicketId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -214,6 +222,7 @@ pub struct SupervisorQueryFinishedPayload {
 #[serde(tag = "type", content = "data")]
 pub enum OrchestrationEventPayload {
     TicketSynced(TicketSyncedPayload),
+    TicketDetailsSynced(TicketDetailsSyncedPayload),
     WorkItemCreated(WorkItemCreatedPayload),
     WorktreeCreated(WorktreeCreatedPayload),
     SessionSpawned(SessionSpawnedPayload),
@@ -237,6 +246,7 @@ impl OrchestrationEventPayload {
     pub(crate) fn event_type(&self) -> OrchestrationEventType {
         match self {
             Self::TicketSynced(_) => OrchestrationEventType::TicketSynced,
+            Self::TicketDetailsSynced(_) => OrchestrationEventType::TicketDetailsSynced,
             Self::WorkItemCreated(_) => OrchestrationEventType::WorkItemCreated,
             Self::WorktreeCreated(_) => OrchestrationEventType::WorktreeCreated,
             Self::SessionSpawned(_) => OrchestrationEventType::SessionSpawned,

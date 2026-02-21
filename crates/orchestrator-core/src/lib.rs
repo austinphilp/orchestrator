@@ -43,7 +43,8 @@ pub use events::{
     SessionNeedsInputPayload, SessionSpawnedPayload, StoredEventEnvelope,
     SupervisorQueryCancellationSource, SupervisorQueryCancelledPayload,
     SupervisorQueryChunkPayload, SupervisorQueryFinishedPayload, SupervisorQueryKind,
-    SupervisorQueryStartedPayload, TicketSyncedPayload, UserRespondedPayload,
+    SupervisorQueryStartedPayload, TicketDetailsSyncedPayload, TicketSyncedPayload,
+    UserRespondedPayload,
     WorkItemCreatedPayload, WorkflowTransitionPayload, WorktreeCreatedPayload,
 };
 pub use identifiers::{

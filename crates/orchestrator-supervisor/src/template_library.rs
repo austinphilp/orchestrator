@@ -513,6 +513,7 @@ fn render_scope(scope: &RetrievalScope) -> String {
 fn render_event_type(event_type: &OrchestrationEventType) -> &'static str {
     match event_type {
         OrchestrationEventType::TicketSynced => "ticket_synced",
+        OrchestrationEventType::TicketDetailsSynced => "ticket_details_synced",
         OrchestrationEventType::WorkItemCreated => "work_item_created",
         OrchestrationEventType::WorktreeCreated => "worktree_created",
         OrchestrationEventType::SessionSpawned => "session_spawned",

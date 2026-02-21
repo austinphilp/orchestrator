@@ -618,6 +618,7 @@ fn collect_timeline(
                 }
             }
             OrchestrationEventPayload::TicketSynced(_)
+            | OrchestrationEventPayload::TicketDetailsSynced(_)
             | OrchestrationEventPayload::WorkItemCreated(_)
             | OrchestrationEventPayload::WorktreeCreated(_)
             | OrchestrationEventPayload::SupervisorQueryStarted(_)
