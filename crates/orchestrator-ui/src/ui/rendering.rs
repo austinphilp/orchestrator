@@ -1584,7 +1584,21 @@ fn render_ticket_picker_overlay(
         popup,
     );
     if popup.width > 4 && popup.height > 4 {
-        let input_height: u16 = if overlay.new_ticket_mode { 4 } else { 3 };
+        let input_height: u16 = if overlay.new_ticket_mode {
+            let max_input_height = popup.height.saturating_sub(3);
+            if max_input_height < TICKET_PICKER_BRIEF_MIN_HEIGHT {
+                return;
+            }
+            editor_widget_height(
+                &overlay.new_ticket_brief_editor,
+                popup.width.saturating_sub(2),
+                TICKET_PICKER_BRIEF_MIN_HEIGHT,
+                TICKET_PICKER_BRIEF_MAX_HEIGHT,
+            )
+            .min(max_input_height)
+        } else {
+            3
+        };
         if popup.height <= input_height.saturating_add(1) {
             return;
         }
@@ -1631,9 +1645,14 @@ fn render_ticket_picker_overlay(
     }
 }
 
-const DEFAULT_TERMINAL_INPUT_HEIGHT: u16 = 6;
+const TERMINAL_COMPOSE_MIN_HEIGHT: u16 = 6;
+const TERMINAL_COMPOSE_MAX_HEIGHT: u16 = 14;
+const TICKET_PICKER_BRIEF_MIN_HEIGHT: u16 = 4;
+const TICKET_PICKER_BRIEF_MAX_HEIGHT: u16 = 10;
 const INPUT_PANEL_OUTER_BORDER_HEIGHT: u16 = 2;
-const NEEDS_INPUT_NOTE_HEIGHT: u16 = 3;
+const EDITOR_WIDGET_BORDER_HEIGHT: u16 = 2;
+const NEEDS_INPUT_NOTE_MIN_HEIGHT: u16 = 3;
+const NEEDS_INPUT_NOTE_MAX_HEIGHT: u16 = 8;
 const NEEDS_INPUT_HELP_HEIGHT: u16 = 1;
 const NEEDS_INPUT_ERROR_HEIGHT: u16 = 1;
 const NEEDS_INPUT_QUESTION_MIN_HEIGHT: u16 = 3;
@@ -1647,28 +1666,48 @@ fn terminal_input_pane_height(
     center_height: u16,
     center_width: u16,
     prompt: Option<&NeedsInputComposerState>,
+    compose_editor: &EditorState,
 ) -> u16 {
+    let max_height = center_height.saturating_sub(4).max(3);
+
     let Some(prompt) = prompt else {
-        return DEFAULT_TERMINAL_INPUT_HEIGHT;
+        let compose_height = editor_widget_height(
+            compose_editor,
+            center_width,
+            TERMINAL_COMPOSE_MIN_HEIGHT,
+            TERMINAL_COMPOSE_MAX_HEIGHT,
+        );
+        return compose_height.clamp(3, max_height);
     };
     let Some(question) = prompt.current_question() else {
-        return DEFAULT_TERMINAL_INPUT_HEIGHT;
+        let compose_height = editor_widget_height(
+            compose_editor,
+            center_width,
+            TERMINAL_COMPOSE_MIN_HEIGHT,
+            TERMINAL_COMPOSE_MAX_HEIGHT,
+        );
+        return compose_height.clamp(3, max_height);
     };
     let is_plan_prompt = expanded_needs_input_layout_active(prompt);
     let question_height = needs_input_question_height(question, center_width, is_plan_prompt);
     let choice_height = needs_input_choice_height(question, center_width, is_plan_prompt);
+    let note_height = editor_widget_height(
+        &prompt.note_editor_state,
+        center_width.saturating_sub(INPUT_PANEL_OUTER_BORDER_HEIGHT),
+        NEEDS_INPUT_NOTE_MIN_HEIGHT,
+        NEEDS_INPUT_NOTE_MAX_HEIGHT,
+    );
     let mut inner_required = question_height
         .saturating_add(choice_height)
-        .saturating_add(NEEDS_INPUT_NOTE_HEIGHT)
+        .saturating_add(note_height)
         .saturating_add(NEEDS_INPUT_HELP_HEIGHT);
     if prompt.error.is_some() {
         inner_required = inner_required.saturating_add(NEEDS_INPUT_ERROR_HEIGHT);
     }
     let mut target_height = inner_required.saturating_add(INPUT_PANEL_OUTER_BORDER_HEIGHT);
     if is_plan_prompt {
-        target_height = target_height.max(DEFAULT_TERMINAL_INPUT_HEIGHT.saturating_mul(2));
+        target_height = target_height.max(TERMINAL_COMPOSE_MIN_HEIGHT.saturating_mul(2));
     }
-    let max_height = center_height.saturating_sub(4).max(3);
     target_height.clamp(3, max_height)
 }
 
@@ -1745,6 +1784,41 @@ fn needs_input_choice_height(
 
 const NEEDS_INPUT_CHOICE_MAX_EXPANDED_HEIGHT_U16: u16 = 12;
 
+fn editor_widget_height(
+    state: &EditorState,
+    widget_width: u16,
+    min_height: u16,
+    max_height: u16,
+) -> u16 {
+    let max_height = max_height.max(min_height);
+    let content_width = widget_width.saturating_sub(EDITOR_WIDGET_BORDER_HEIGHT);
+    let max_content_rows = usize::from(
+        max_height
+            .saturating_sub(EDITOR_WIDGET_BORDER_HEIGHT)
+            .max(1),
+    );
+    let content_rows = editor_wrapped_row_count(state, content_width, max_content_rows);
+    content_rows
+        .saturating_add(EDITOR_WIDGET_BORDER_HEIGHT)
+        .clamp(min_height, max_height)
+}
+
+fn editor_wrapped_row_count(state: &EditorState, content_width: u16, max_rows: usize) -> u16 {
+    let width = usize::from(content_width.max(1));
+    let max_rows = max_rows.max(1);
+    let mut rows = 0usize;
+    for row in state.lines.iter_row() {
+        let chars = row.len();
+        let wrapped = if chars == 0 { 1 } else { chars.div_ceil(width) };
+        rows = rows.saturating_add(wrapped.max(1));
+        if rows >= max_rows {
+            rows = max_rows;
+            break;
+        }
+    }
+    u16::try_from(rows.max(1)).unwrap_or(u16::MAX)
+}
+
 fn wrapped_row_count(text: &str, width: u16) -> u16 {
     let width = width.max(1) as usize;
     let mut rows = 0usize;
@@ -1790,11 +1864,17 @@ fn render_terminal_needs_input_panel(
     let is_plan_prompt = expanded_needs_input_layout_active(prompt);
     let question_height = needs_input_question_height(question, input_area.width, is_plan_prompt);
     let choice_height = needs_input_choice_height(question, input_area.width, is_plan_prompt);
+    let note_height = editor_widget_height(
+        &prompt.note_editor_state,
+        inner.width,
+        NEEDS_INPUT_NOTE_MIN_HEIGHT,
+        NEEDS_INPUT_NOTE_MAX_HEIGHT,
+    );
 
     let mut constraints = vec![
         Constraint::Length(question_height),
         Constraint::Min(choice_height),
-        Constraint::Length(NEEDS_INPUT_NOTE_HEIGHT),
+        Constraint::Length(note_height),
     ];
     if prompt.error.is_some() {
         constraints.push(Constraint::Length(NEEDS_INPUT_ERROR_HEIGHT));
