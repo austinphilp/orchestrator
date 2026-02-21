@@ -2517,6 +2517,18 @@ impl UiShellState {
     }
 
     fn session_is_in_review_stage(&self, session_id: &WorkerSessionId) -> bool {
+        self.session_is_merge_reconcile_eligible(session_id)
+    }
+
+    fn session_is_merge_reconcile_eligible(&self, session_id: &WorkerSessionId) -> bool {
+        if !is_open_session_status(
+            self.domain
+                .sessions
+                .get(session_id)
+                .and_then(|session| session.status.as_ref()),
+        ) {
+            return false;
+        }
         self.domain
             .sessions
             .get(session_id)
