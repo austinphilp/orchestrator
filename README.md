@@ -87,6 +87,7 @@ harness_log_normalized_events = false
 opencode_binary = "opencode"
 opencode_server_base_url = "http://127.0.0.1:8787"
 codex_binary = "codex"
+pr_pipeline_poll_interval_secs = 15
 
 [ui]
 theme = "nord"

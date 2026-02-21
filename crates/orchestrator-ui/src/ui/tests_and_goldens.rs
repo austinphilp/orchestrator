@@ -3855,28 +3855,80 @@ mod tests {
         assert!(published[0].title.contains("harness is fixing"));
     }
 
-    #[test]
-    fn merge_reconcile_poll_runs_for_review_session_without_pr_artifact() {
+    #[tokio::test]
+    async fn confirm_review_merge_enqueues_provider_merge_request() {
+        #[derive(Default)]
+        struct RecordingMergeQueueProvider {
+            merge_requests: Arc<Mutex<Vec<WorkerSessionId>>>,
+            started: Arc<Mutex<u32>>,
+        }
+
+        #[async_trait]
+        impl TicketPickerProvider for RecordingMergeQueueProvider {
+            async fn list_unfinished_tickets(&self) -> Result<Vec<TicketSummary>, CoreError> {
+                Ok(Vec::new())
+            }
+
+            async fn start_or_resume_ticket(
+                &self,
+                _ticket: TicketSummary,
+                _repository_override: Option<PathBuf>,
+            ) -> Result<SelectedTicketFlowResult, CoreError> {
+                Err(CoreError::DependencyUnavailable("not used".to_owned()))
+            }
+
+            async fn create_ticket_from_brief(
+                &self,
+                _request: CreateTicketFromPickerRequest,
+            ) -> Result<TicketSummary, CoreError> {
+                Err(CoreError::DependencyUnavailable("not used".to_owned()))
+            }
+
+            async fn reload_projection(&self) -> Result<ProjectionState, CoreError> {
+                Ok(ProjectionState::default())
+            }
+
+            async fn start_pr_pipeline_polling(
+                &self,
+                _sender: mpsc::Sender<MergeQueueEvent>,
+            ) -> Result<(), CoreError> {
+                let mut guard = self.started.lock().expect("started lock");
+                *guard += 1;
+                Ok(())
+            }
+
+            async fn enqueue_pr_merge(&self, session_id: WorkerSessionId) -> Result<(), CoreError> {
+                self.merge_requests
+                    .lock()
+                    .expect("merge request lock")
+                    .push(session_id);
+                Ok(())
+            }
+        }
+
         let projection = review_projection_without_pr_artifact();
-        let dispatcher = Arc::new(TestSupervisorDispatcher::new(Vec::new()));
+        let provider = Arc::new(RecordingMergeQueueProvider::default());
         let mut shell_state = UiShellState::new_with_integrations(
             "ready".to_owned(),
             projection,
             None,
-            Some(dispatcher),
             None,
+            Some(provider.clone()),
             None,
         );
+        shell_state.review_merge_confirm_session = Some(WorkerSessionId::new("sess-review"));
 
-        shell_state.enqueue_merge_reconcile_polls();
+        shell_state.confirm_review_merge();
+        tokio::time::sleep(Duration::from_millis(20)).await;
 
-        assert_eq!(shell_state.merge_queue.len(), 1);
-        let request = shell_state
-            .merge_queue
-            .front()
-            .expect("merge reconcile request queued");
-        assert_eq!(request.kind, MergeQueueCommandKind::Reconcile);
-        assert_eq!(request.session_id.as_str(), "sess-review");
+        let merge_requests = provider
+            .merge_requests
+            .lock()
+            .expect("merge request lock")
+            .clone();
+        assert_eq!(merge_requests.len(), 1);
+        assert_eq!(merge_requests[0].as_str(), "sess-review");
+        assert_eq!(*provider.started.lock().expect("started lock"), 1);
     }
 
     #[test]

@@ -74,6 +74,7 @@ const DEFAULT_HARNESS_LOG_NORMALIZED_EVENTS: bool = false;
 const DEFAULT_OPENCODE_BINARY: &str = "opencode";
 const DEFAULT_OPENCODE_SERVER_BASE_URL: &str = "http://127.0.0.1:8787";
 const DEFAULT_CODEX_BINARY: &str = "codex";
+const DEFAULT_PR_PIPELINE_POLL_INTERVAL_SECS: u64 = 15;
 const DEFAULT_UI_THEME: &str = "nord";
 const DEFAULT_TICKET_PICKER_PRIORITY_STATES: &[&str] =
     &["In Progress", "Final Approval", "Todo", "Backlog"];
@@ -259,6 +260,8 @@ pub struct RuntimeConfigToml {
     pub opencode_server_base_url: String,
     #[serde(default = "default_codex_binary")]
     pub codex_binary: String,
+    #[serde(default = "default_pr_pipeline_poll_interval_secs")]
+    pub pr_pipeline_poll_interval_secs: u64,
 }
 
 impl Default for RuntimeConfigToml {
@@ -271,6 +274,7 @@ impl Default for RuntimeConfigToml {
             opencode_binary: default_opencode_binary(),
             opencode_server_base_url: default_opencode_server_base_url(),
             codex_binary: default_codex_binary(),
+            pr_pipeline_poll_interval_secs: default_pr_pipeline_poll_interval_secs(),
         }
     }
 }
@@ -369,6 +373,10 @@ fn default_opencode_server_base_url() -> String {
 
 fn default_codex_binary() -> String {
     DEFAULT_CODEX_BINARY.to_owned()
+}
+
+fn default_pr_pipeline_poll_interval_secs() -> u64 {
+    DEFAULT_PR_PIPELINE_POLL_INTERVAL_SECS
 }
 
 fn default_ui_theme() -> String {
@@ -672,6 +680,12 @@ fn normalize_config(config: &mut AppConfig) -> bool {
         default_opencode_server_base_url(),
     );
     changed |= normalize_non_empty_string(&mut config.runtime.codex_binary, default_codex_binary());
+    let normalized_pr_pipeline_poll_interval_secs =
+        config.runtime.pr_pipeline_poll_interval_secs.clamp(1, 300);
+    if normalized_pr_pipeline_poll_interval_secs != config.runtime.pr_pipeline_poll_interval_secs {
+        config.runtime.pr_pipeline_poll_interval_secs = normalized_pr_pipeline_poll_interval_secs;
+        changed = true;
+    }
 
     changed |= normalize_non_empty_string(&mut config.ui.theme, default_ui_theme());
     changed |= normalize_string_vec(&mut config.ui.ticket_picker_priority_states);
