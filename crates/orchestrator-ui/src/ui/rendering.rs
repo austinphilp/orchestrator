@@ -196,6 +196,7 @@ fn session_panel_line_metrics_from_rows(
     }
 }
 
+#[cfg(test)]
 fn render_sessions_panel_text_from_rows(
     session_rows: &[SessionPanelRow],
     selected_session_id: Option<&WorkerSessionId>,
