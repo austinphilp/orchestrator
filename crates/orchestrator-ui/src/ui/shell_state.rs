@@ -2634,11 +2634,6 @@ impl UiShellState {
         changed
     }
 
-    #[cfg(test)]
-    fn enqueue_progression_approval_reconcile_polls(&mut self) -> bool {
-        self.enqueue_progression_approval_reconcile_polls_at(Instant::now())
-    }
-
     fn ensure_review_sync_instruction(&mut self, session_id: &WorkerSessionId) -> bool {
         if self.review_sync_instructions_sent.contains(session_id) {
             return false;

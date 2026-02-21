@@ -3145,7 +3145,8 @@ mod tests {
             None,
         );
 
-        shell_state.enqueue_progression_approval_reconcile_polls();
+        shell_state.mark_all_eligible_reconcile_dirty();
+        shell_state.enqueue_event_driven_reconciles();
         tokio::time::sleep(Duration::from_millis(20)).await;
         shell_state.poll_ticket_picker_events();
 
@@ -3276,8 +3277,8 @@ mod tests {
                 to: WorkflowState::InReview,
                 instruction: None,
                 event: stored_event_for_test(
-                    "evt-test-workflow-fallback",
-                    1,
+                    "evt-test-workflow-inreview",
+                    2,
                     Some(WorkItemId::new("wi-1")),
                     Some(session_id.clone()),
                     OrchestrationEventPayload::WorkflowTransition(WorkflowTransitionPayload {
@@ -3311,13 +3312,15 @@ mod tests {
             session_id: session_id.clone(),
             warning: None,
             event: stored_event_for_test(
-                "evt-test-session-archived-fallback",
-                1,
+                "evt-test-session-archived",
+                2,
                 Some(WorkItemId::new("wi-1")),
                 Some(session_id.clone()),
-                OrchestrationEventPayload::SessionCompleted(SessionCompletedPayload {
-                    session_id: session_id.clone(),
-                    summary: Some("archived".to_owned()),
+                OrchestrationEventPayload::WorkflowTransition(WorkflowTransitionPayload {
+                    work_item_id: WorkItemId::new("wi-1"),
+                    from: WorkflowState::Implementing,
+                    to: WorkflowState::Abandoned,
+                    reason: Some(WorkflowTransitionReason::Cancelled),
                 }),
             ),
         });
