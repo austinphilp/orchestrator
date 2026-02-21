@@ -70,6 +70,9 @@ const MAX_MERGE_POLL_MAX_BACKOFF_SECS: u64 = 900;
 const DEFAULT_MERGE_POLL_BACKOFF_MULTIPLIER: u64 = 2;
 const MIN_MERGE_POLL_BACKOFF_MULTIPLIER: u64 = 1;
 const MAX_MERGE_POLL_BACKOFF_MULTIPLIER: u64 = 8;
+const DEFAULT_FULL_REDRAW_INTERVAL_SECS: u64 = 300;
+const MIN_FULL_REDRAW_INTERVAL_SECS: u64 = 60;
+const MAX_FULL_REDRAW_INTERVAL_SECS: u64 = 1800;
 const MERGE_REQUEST_RATE_LIMIT: Duration = Duration::from_secs(1);
 const TICKET_PICKER_CREATE_REFRESH_INTERVAL: Duration = Duration::from_secs(1);
 const BACKGROUND_SESSION_DEFERRED_OUTPUT_MAX_BYTES: usize = 64 * 1024;
@@ -89,6 +92,7 @@ struct UiRuntimeConfig {
     merge_poll_max_backoff_secs: u64,
     merge_poll_backoff_multiplier: u64,
     workflow_profiles: WorkflowInteractionProfilesConfig,
+    full_redraw_interval_secs: u64,
 }
 
 impl Default for UiRuntimeConfig {
@@ -107,6 +111,7 @@ impl Default for UiRuntimeConfig {
             merge_poll_max_backoff_secs: DEFAULT_MERGE_POLL_MAX_BACKOFF_SECS,
             merge_poll_backoff_multiplier: DEFAULT_MERGE_POLL_BACKOFF_MULTIPLIER,
             workflow_profiles: WorkflowInteractionProfilesConfig::default(),
+            full_redraw_interval_secs: DEFAULT_FULL_REDRAW_INTERVAL_SECS,
         }
     }
 }
@@ -128,6 +133,7 @@ pub fn set_ui_runtime_config(
     merge_poll_max_backoff_secs: u64,
     merge_poll_backoff_multiplier: u64,
     workflow_profiles: WorkflowInteractionProfilesConfig,
+    full_redraw_interval_secs: u64,
 ) {
     let mut parsed_states = ticket_picker_priority_states
         .into_iter()
@@ -180,6 +186,10 @@ pub fn set_ui_runtime_config(
             MAX_MERGE_POLL_BACKOFF_MULTIPLIER,
         ),
         workflow_profiles,
+        full_redraw_interval_secs: full_redraw_interval_secs.clamp(
+            MIN_FULL_REDRAW_INTERVAL_SECS,
+            MAX_FULL_REDRAW_INTERVAL_SECS,
+        ),
     };
 
     if let Ok(mut guard) = ui_runtime_config_store().write() {
@@ -288,6 +298,18 @@ fn merge_poll_backoff_multiplier_config_value() -> u64 {
             MIN_MERGE_POLL_BACKOFF_MULTIPLIER,
             MAX_MERGE_POLL_BACKOFF_MULTIPLIER,
         )
+}
+
+fn full_redraw_interval_config_value() -> Duration {
+    let secs = ui_runtime_config_store()
+        .read()
+        .map(|guard| guard.full_redraw_interval_secs)
+        .unwrap_or(DEFAULT_FULL_REDRAW_INTERVAL_SECS)
+        .clamp(
+            MIN_FULL_REDRAW_INTERVAL_SECS,
+            MAX_FULL_REDRAW_INTERVAL_SECS,
+        );
+    Duration::from_secs(secs)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

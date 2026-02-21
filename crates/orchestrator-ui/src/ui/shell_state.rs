@@ -5323,6 +5323,7 @@ impl UiShellState {
         now: Instant,
         animation_state: AnimationState,
         last_animation_frame: Instant,
+        full_redraw_deadline: Instant,
     ) -> Option<Instant> {
         let animation_deadline = match animation_state {
             AnimationState::ActiveTurn => Some(last_animation_frame + Duration::from_millis(200)),
@@ -5350,6 +5351,7 @@ impl UiShellState {
             summary_deadline,
             background_flush_deadline,
             merge_dispatch_deadline,
+            Some(full_redraw_deadline),
         ]
         .into_iter()
         .flatten()

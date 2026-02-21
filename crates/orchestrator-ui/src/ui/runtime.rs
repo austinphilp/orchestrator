@@ -68,6 +68,7 @@ impl Ui {
         );
         let mut force_draw = true;
         let mut last_animation_frame = Instant::now();
+        let mut last_full_redraw_at = Instant::now();
         let mut cached_ui_state: Option<UiState> = None;
         loop {
             let now = Instant::now();
@@ -90,16 +91,25 @@ impl Ui {
             let animation_frame_ready = animation_frame_interval
                 .map(|interval| now.duration_since(last_animation_frame) >= interval)
                 .unwrap_or(false);
+            let full_redraw_interval = full_redraw_interval_config_value();
+            let full_redraw_due = now.duration_since(last_full_redraw_at) >= full_redraw_interval;
             let should_draw = force_draw
                 || changed
+                || full_redraw_due
                 || (animation_frame_interval.is_some() && animation_frame_ready);
             let should_refresh_ui_state = changed
                 || cached_ui_state.is_none()
+                || full_redraw_due
                 || matches!(animation_state, AnimationState::ResolvedOnly) && animation_frame_ready;
 
             if should_draw {
                 if animation_frame_ready {
                     last_animation_frame = now;
+                }
+                if full_redraw_due {
+                    self.terminal.clear()?;
+                    shell_state.invalidate_draw_caches();
+                    cached_ui_state = None;
                 }
                 let ui_state = if should_refresh_ui_state {
                     let state = shell_state.ui_state_for_draw(now);
@@ -399,6 +409,9 @@ impl Ui {
                         );
                     }
                 })?;
+                if full_redraw_due {
+                    last_full_redraw_at = now;
+                }
 
                 if shell_state.ticket_picker_overlay.has_repository_prompt()
                     || shell_state.workflow_profiles_modal.renaming
@@ -422,8 +435,14 @@ impl Ui {
             } else {
                 Duration::from_secs(1)
             };
+            let full_redraw_deadline = last_full_redraw_at + full_redraw_interval;
             let wake_deadline =
-                shell_state.next_wake_deadline(now, animation_state, last_animation_frame);
+                shell_state.next_wake_deadline(
+                    now,
+                    animation_state,
+                    last_animation_frame,
+                    full_redraw_deadline,
+                );
             let poll_timeout = match wake_deadline {
                 Some(deadline) if deadline <= now => Duration::from_millis(0),
                 Some(deadline) => deadline.duration_since(now).min(event_scan_interval),
