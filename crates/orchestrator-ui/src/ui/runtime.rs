@@ -212,6 +212,7 @@ impl Ui {
                             terminal_area.height,
                             terminal_area.width,
                             active_needs_input.as_ref(),
+                            &shell_state.terminal_compose_editor,
                         );
                         let center_layout = Layout::vertical([
                             Constraint::Length(3),

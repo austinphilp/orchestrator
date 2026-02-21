@@ -6125,6 +6125,73 @@ mod tests {
     }
 
     #[test]
+    fn editor_widget_height_grows_and_clamps_with_content() {
+        let short = insert_mode_editor_state_with_text("ok");
+        assert_eq!(editor_widget_height(&short, 24, 4, 10), 4);
+
+        let long_line = insert_mode_editor_state_with_text(&"a".repeat(200));
+        let long_height = editor_widget_height(&long_line, 24, 4, 10);
+        assert!(long_height > 4);
+        assert!(long_height <= 10);
+
+        let many_lines = insert_mode_editor_state_with_text(
+            "1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n11\n12\n13",
+        );
+        assert_eq!(editor_widget_height(&many_lines, 24, 4, 10), 10);
+    }
+
+    #[test]
+    fn terminal_input_pane_height_autogrows_with_terminal_compose_editor() {
+        let short = insert_mode_editor_state_with_text("hello");
+        let short_height = terminal_input_pane_height(40, 60, None, &short);
+        assert_eq!(short_height, TERMINAL_COMPOSE_MIN_HEIGHT);
+
+        let tall = insert_mode_editor_state_with_text(
+            "line1\nline2\nline3\nline4\nline5\nline6\nline7\nline8\nline9\nline10\nline11\nline12",
+        );
+        let tall_height = terminal_input_pane_height(40, 60, None, &tall);
+        assert!(tall_height > short_height);
+        assert!(tall_height <= TERMINAL_COMPOSE_MAX_HEIGHT);
+    }
+
+    #[test]
+    fn terminal_input_pane_height_grows_with_needs_input_note_editor() {
+        let question = BackendNeedsInputQuestion {
+            id: "q1".to_owned(),
+            header: "Header".to_owned(),
+            question: "Question".to_owned(),
+            is_other: false,
+            is_secret: false,
+            options: None,
+        };
+        let mut prompt = NeedsInputComposerState::new(
+            "prompt-1".to_owned(),
+            vec![question],
+            true,
+            false,
+        );
+        set_editor_state_text(&mut prompt.note_editor_state, "short");
+        let compose = insert_mode_editor_state_with_text("compose");
+        let short_height = terminal_input_pane_height(40, 60, Some(&prompt), &compose);
+
+        set_editor_state_text(
+            &mut prompt.note_editor_state,
+            "a\nb\nc\nd\ne\nf\ng\nh\ni\nj\nk\nl\nm\nn",
+        );
+        let tall_height = terminal_input_pane_height(40, 60, Some(&prompt), &compose);
+        assert!(tall_height > short_height);
+    }
+
+    #[test]
+    fn terminal_input_pane_height_clamps_to_available_center_height() {
+        let tall = insert_mode_editor_state_with_text(
+            "line1\nline2\nline3\nline4\nline5\nline6\nline7\nline8\nline9\nline10\nline11\nline12",
+        );
+        let height = terminal_input_pane_height(10, 60, None, &tall);
+        assert_eq!(height, 6);
+    }
+
+    #[test]
     fn keyboard_shortcuts_ignore_control_modified_chars() {
         let mut shell_state = UiShellState::new("ready".to_owned(), triage_projection());
         let should_quit = handle_key_press(&mut shell_state, ctrl_key(KeyCode::Char('q')));
