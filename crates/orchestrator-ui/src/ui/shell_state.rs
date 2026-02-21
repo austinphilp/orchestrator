@@ -4409,13 +4409,30 @@ impl UiShellState {
     }
 
     fn move_terminal_needs_input_question(&mut self, delta: isize) {
-        let Some(prompt) = self.active_terminal_needs_input_mut() else {
+        let Some(session_id) = self.active_terminal_session_id().cloned() else {
+            return;
+        };
+        let planning_workflow = matches!(
+            self.workflow_state_for_session(&session_id),
+            Some(WorkflowState::Planning)
+        );
+        let Some(prompt) = self
+            .terminal_session_states
+            .get_mut(&session_id)
+            .and_then(|view| view.active_needs_input.as_mut())
+        else {
             return;
         };
         let current = prompt.current_question_index as isize;
         let upper = prompt.questions.len().saturating_sub(1) as isize;
         let next = (current + delta).clamp(0, upper) as usize;
+        let question_changed = next != prompt.current_question_index;
         prompt.move_to_question(next);
+        if planning_workflow && question_changed {
+            prompt.note_insert_mode = false;
+            prompt.note_editor_state.mode = EditorMode::Normal;
+            prompt.select_state.focused = prompt.current_question_requires_option_selection();
+        }
     }
 
     fn toggle_terminal_needs_input_note_insert_mode(&mut self, enabled: bool) {
