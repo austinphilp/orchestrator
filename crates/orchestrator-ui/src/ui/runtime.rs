@@ -75,19 +75,32 @@ impl Ui {
             changed |= shell_state.tick_ticket_picker_and_report();
             changed |= shell_state.tick_terminal_view_and_report();
             changed |= shell_state.ensure_startup_session_feed_opened_and_report();
+            if changed {
+                shell_state.invalidate_draw_caches();
+            }
 
-            let animation_active = shell_state.has_active_animated_indicator();
             let now = Instant::now();
-            let animation_frame_ready =
-                now.duration_since(last_animation_frame) >= Duration::from_millis(200);
-            let should_draw = force_draw || changed || (animation_active && animation_frame_ready);
+            let animation_state = shell_state.animation_state(now);
+            let animation_frame_interval = match animation_state {
+                AnimationState::ActiveTurn => Some(Duration::from_millis(200)),
+                AnimationState::ResolvedOnly => Some(Duration::from_millis(1_000)),
+                AnimationState::None => None,
+            };
+            let animation_frame_ready = animation_frame_interval
+                .map(|interval| now.duration_since(last_animation_frame) >= interval)
+                .unwrap_or(false);
+            let should_draw =
+                force_draw || changed || (animation_frame_interval.is_some() && animation_frame_ready);
+            let should_refresh_ui_state = changed
+                || cached_ui_state.is_none()
+                || matches!(animation_state, AnimationState::ResolvedOnly) && animation_frame_ready;
 
             if should_draw {
-                if animation_active && animation_frame_ready {
+                if animation_frame_ready {
                     last_animation_frame = now;
                 }
-                let ui_state = if changed || cached_ui_state.is_none() {
-                    let state = shell_state.ui_state();
+                let ui_state = if should_refresh_ui_state {
+                    let state = shell_state.ui_state_for_draw(now);
                     cached_ui_state = Some(state.clone());
                     state
                 } else {
@@ -106,10 +119,12 @@ impl Ui {
                         Layout::vertical([Constraint::Percentage(45), Constraint::Percentage(55)]);
                     let [sessions_area, inbox_area] = left_layout.areas(left_area);
 
-                    let sessions_text = render_sessions_panel_text(
-                        &shell_state.domain,
-                        &shell_state.terminal_session_states,
-                        shell_state.selected_session_id_for_panel().as_ref(),
+                    let session_rows = shell_state.session_panel_rows_for_draw();
+                    let selected_session_id =
+                        shell_state.selected_session_id_for_panel_from_rows(&session_rows);
+                    let sessions_text = render_sessions_panel_text_from_rows(
+                        &session_rows,
+                        selected_session_id.as_ref(),
                     );
                     let sessions_title = if shell_state.is_sessions_sidebar_focused() {
                         "sessions *"
@@ -373,13 +388,13 @@ impl Ui {
             }
 
             force_draw = false;
-            let poll_timeout = if shell_state.has_active_animated_indicator() {
-                Duration::from_millis(50)
-            } else {
-                Duration::from_millis(250)
+            let poll_timeout = match animation_state {
+                AnimationState::ActiveTurn => Duration::from_millis(50),
+                AnimationState::ResolvedOnly | AnimationState::None => Duration::from_millis(250),
             };
             if event::poll(poll_timeout)? {
                 if let Event::Key(key) = event::read()? {
+                    shell_state.invalidate_draw_caches();
                     if key.kind == KeyEventKind::Press && handle_key_press(&mut shell_state, key) {
                         break;
                     }

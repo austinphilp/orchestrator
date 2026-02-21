@@ -10,6 +10,13 @@ enum PaneFocus {
     Right,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AnimationState {
+    None,
+    ActiveTurn,
+    ResolvedOnly,
+}
+
 struct UiShellState {
     base_status: String,
     status_warning: Option<String>,
@@ -66,6 +73,10 @@ struct UiShellState {
     session_ci_status_cache: HashMap<WorkerSessionId, SessionCiStatusCache>,
     ci_failure_signatures_notified: HashMap<WorkerSessionId, String>,
     worktree_diff_modal: Option<WorktreeDiffModalState>,
+    draw_cache_epoch: u64,
+    attention_projection_cache: Option<AttentionProjectionCache>,
+    session_panel_rows_cache: Option<SessionPanelRowsCache>,
+    event_derived_label_cache: EventDerivedLabelCache,
 }
 
 impl UiShellState {
@@ -173,7 +184,15 @@ impl UiShellState {
             session_ci_status_cache: HashMap::new(),
             ci_failure_signatures_notified: HashMap::new(),
             worktree_diff_modal: None,
+            draw_cache_epoch: 0,
+            attention_projection_cache: None,
+            session_panel_rows_cache: None,
+            event_derived_label_cache: EventDerivedLabelCache::default(),
         }
+    }
+
+    fn invalidate_draw_caches(&mut self) {
+        self.draw_cache_epoch = self.draw_cache_epoch.wrapping_add(1);
     }
 
     fn ui_state(&self) -> UiState {
@@ -192,6 +211,53 @@ impl UiShellState {
         self.append_global_supervisor_chat_state(&mut ui_state);
         self.append_live_supervisor_chat(&mut ui_state);
         ui_state
+    }
+
+    fn ui_state_for_draw(&mut self, now: Instant) -> UiState {
+        let status = self.status_text();
+        let active_session_id = self.active_terminal_session_id().cloned();
+        let attention_projection = self.attention_projection_for_draw(now).clone();
+        let terminal_view_state = active_session_id
+            .as_ref()
+            .and_then(|session_id| self.terminal_session_states.get(session_id));
+        let mut ui_state = project_ui_state_with_attention(
+            status.as_str(),
+            &self.domain,
+            &self.view_stack,
+            self.selected_inbox_index,
+            self.selected_inbox_item_id.as_ref(),
+            terminal_view_state,
+            &attention_projection,
+        );
+        self.append_global_supervisor_chat_state(&mut ui_state);
+        self.append_live_supervisor_chat(&mut ui_state);
+        ui_state
+    }
+
+    fn attention_projection_for_draw(&mut self, now: Instant) -> &UiAttentionProjection {
+        let should_refresh = self
+            .attention_projection_cache
+            .as_ref()
+            .map(|cache| {
+                if cache.epoch != self.draw_cache_epoch {
+                    return true;
+                }
+                cache.projection.has_resolved_items
+                    && now.duration_since(cache.refreshed_at) >= RESOLVED_ANIMATION_REFRESH_INTERVAL
+            })
+            .unwrap_or(true);
+        if should_refresh {
+            self.attention_projection_cache = Some(AttentionProjectionCache {
+                projection: build_ui_attention_projection(&self.domain),
+                refreshed_at: now,
+                epoch: self.draw_cache_epoch,
+            });
+        }
+        &self
+            .attention_projection_cache
+            .as_ref()
+            .expect("attention projection cache should be present")
+            .projection
     }
 
     fn status_text(&self) -> String {
@@ -549,6 +615,27 @@ impl UiShellState {
         session_panel_rows(&self.domain, &self.terminal_session_states)
     }
 
+    fn session_panel_rows_for_draw(&mut self) -> Vec<SessionPanelRow> {
+        if let Some(cache) = self.session_panel_rows_cache.as_ref() {
+            if cache.epoch == self.draw_cache_epoch {
+                return cache.rows.clone();
+            }
+        }
+
+        self.event_derived_label_cache.refresh(&self.domain);
+        let rows = session_panel_rows_with_labels(
+            &self.domain,
+            &self.terminal_session_states,
+            &self.event_derived_label_cache.work_item_repo,
+            &self.event_derived_label_cache.ticket_labels,
+        );
+        self.session_panel_rows_cache = Some(SessionPanelRowsCache {
+            rows: rows.clone(),
+            epoch: self.draw_cache_epoch,
+        });
+        rows
+    }
+
     fn session_ids_for_navigation(&self) -> Vec<WorkerSessionId> {
         self.session_panel_rows()
             .into_iter()
@@ -558,6 +645,24 @@ impl UiShellState {
 
     fn selected_session_id_for_panel(&self) -> Option<WorkerSessionId> {
         let session_ids = self.session_ids_for_navigation();
+        self.selected_session_id_for_panel_from_ids(session_ids.as_slice())
+    }
+
+    fn selected_session_id_for_panel_from_rows(
+        &self,
+        rows: &[SessionPanelRow],
+    ) -> Option<WorkerSessionId> {
+        let session_ids = rows
+            .iter()
+            .map(|row| row.session_id.clone())
+            .collect::<Vec<_>>();
+        self.selected_session_id_for_panel_from_ids(session_ids.as_slice())
+    }
+
+    fn selected_session_id_for_panel_from_ids(
+        &self,
+        session_ids: &[WorkerSessionId],
+    ) -> Option<WorkerSessionId> {
         if session_ids.is_empty() {
             return None;
         }
@@ -3580,7 +3685,12 @@ impl UiShellState {
         changed
     }
 
-    fn has_active_animated_indicator(&self) -> bool {
+    #[cfg(test)]
+    fn has_active_animated_indicator(&mut self, now: Instant) -> bool {
+        !matches!(self.animation_state(now), AnimationState::None)
+    }
+
+    fn animation_state(&mut self, now: Instant) -> AnimationState {
         let has_active_terminal_turn = self
             .terminal_session_states
             .iter()
@@ -3595,13 +3705,14 @@ impl UiShellState {
                     )
             });
         if has_active_terminal_turn {
-            return true;
+            return AnimationState::ActiveTurn;
         }
 
-        attention_inbox_snapshot(&self.domain, &AttentionEngineConfig::default(), &[])
-            .items
-            .iter()
-            .any(|item| item.resolved)
+        if self.attention_projection_for_draw(now).has_resolved_items {
+            AnimationState::ResolvedOnly
+        } else {
+            AnimationState::None
+        }
     }
 
     fn append_live_supervisor_chat(&self, ui_state: &mut UiState) {

@@ -61,7 +61,20 @@ fn session_panel_rows(
 ) -> Vec<SessionPanelRow> {
     let work_item_repo = work_item_repository_labels(domain);
     let ticket_labels = ticket_labels_by_ticket_id(domain);
+    session_panel_rows_with_labels(
+        domain,
+        terminal_session_states,
+        &work_item_repo,
+        &ticket_labels,
+    )
+}
 
+fn session_panel_rows_with_labels(
+    domain: &ProjectionState,
+    terminal_session_states: &HashMap<WorkerSessionId, TerminalViewState>,
+    work_item_repo: &HashMap<WorkItemId, String>,
+    ticket_labels: &HashMap<String, String>,
+) -> Vec<SessionPanelRow> {
     let mut rows = Vec::new();
     for session in domain.sessions.values() {
         if !is_open_session_status(session.status.as_ref()) {
@@ -127,12 +140,20 @@ fn render_sessions_panel(
         .join("\n")
 }
 
+#[cfg(test)]
 fn render_sessions_panel_text(
     domain: &ProjectionState,
     terminal_session_states: &HashMap<WorkerSessionId, TerminalViewState>,
     selected_session_id: Option<&WorkerSessionId>,
 ) -> Text<'static> {
     let session_rows = session_panel_rows(domain, terminal_session_states);
+    render_sessions_panel_text_from_rows(&session_rows, selected_session_id)
+}
+
+fn render_sessions_panel_text_from_rows(
+    session_rows: &[SessionPanelRow],
+    selected_session_id: Option<&WorkerSessionId>,
+) -> Text<'static> {
     if session_rows.is_empty() {
         return Text::from("No open sessions.");
     }
@@ -171,7 +192,7 @@ fn render_sessions_panel_text(
         if row.group.is_other() {
             spans.push(Span::raw(format!("[{}] ", row.badge)));
         }
-        spans.push(Span::raw(row.ticket_label));
+        spans.push(Span::raw(row.ticket_label.clone()));
         lines.push(Line::from(spans));
     }
 
@@ -989,21 +1010,25 @@ fn ticket_labels_by_ticket_id(domain: &ProjectionState) -> HashMap<String, Strin
     let mut ticket_labels = HashMap::new();
     for event in &domain.events {
         if let OrchestrationEventPayload::TicketSynced(payload) = &event.payload {
-            let title = payload.title.trim();
-            let identifier = payload.identifier.trim();
-            let label = if title.is_empty() {
-                if identifier.is_empty() {
-                    payload.ticket_id.as_str().to_owned()
-                } else {
-                    identifier.to_owned()
-                }
-            } else {
-                title.to_owned()
-            };
+            let label = ticket_label_from_synced_event(payload);
             ticket_labels.insert(payload.ticket_id.as_str().to_owned(), label);
         }
     }
     ticket_labels
+}
+
+fn ticket_label_from_synced_event(payload: &orchestrator_core::TicketSyncedPayload) -> String {
+    let title = payload.title.trim();
+    let identifier = payload.identifier.trim();
+    if title.is_empty() {
+        if identifier.is_empty() {
+            payload.ticket_id.as_str().to_owned()
+        } else {
+            identifier.to_owned()
+        }
+    } else {
+        title.to_owned()
+    }
 }
 
 fn project_label_for_session(

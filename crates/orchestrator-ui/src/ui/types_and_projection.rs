@@ -14,9 +14,10 @@ use crossterm::ExecutableCommand;
 use edtui::{EditorEventHandler, EditorMode, EditorState, EditorTheme, EditorView, Lines};
 use orchestrator_core::{
     attention_inbox_snapshot, command_ids, ArtifactKind, ArtifactProjection, AttentionBatchKind,
-    AttentionEngineConfig, AttentionPriorityBand, Command, CommandRegistry, CoreError, InboxItemId,
-    InboxItemKind, LlmChatRequest, LlmFinishReason, LlmMessage, LlmProvider, LlmRateLimitState,
-    LlmResponseStream, LlmRole, LlmTokenUsage, OrchestrationEventPayload, ProjectId,
+    AttentionEngineConfig, AttentionInboxSnapshot, AttentionPriorityBand, Command, CommandRegistry,
+    CoreError, InboxItemId, InboxItemKind, LlmChatRequest, LlmFinishReason, LlmMessage,
+    LlmProvider, LlmRateLimitState, LlmResponseStream, LlmRole, LlmTokenUsage,
+    OrchestrationEventPayload, ProjectId,
     ProjectionState, SelectedTicketFlowResult, SessionProjection, SupervisorQueryArgs,
     SupervisorQueryContextArgs, TicketId, TicketSummary, UntypedCommandInvocation, WorkItemId,
     WorkerSessionId, WorkerSessionStatus, WorkflowState,
@@ -55,11 +56,12 @@ const DEFAULT_SUPERVISOR_MODEL: &str = "openai/gpt-4o-mini";
 const DEFAULT_BACKGROUND_SESSION_REFRESH_SECS: u64 = 15;
 const MIN_BACKGROUND_SESSION_REFRESH_SECS: u64 = 2;
 const MAX_BACKGROUND_SESSION_REFRESH_SECS: u64 = 15;
-const MERGE_POLL_INTERVAL: Duration = Duration::from_secs(60);
-const APPROVAL_RECONCILE_POLL_INTERVAL: Duration = Duration::from_secs(5);
+const MERGE_POLL_INTERVAL: Duration = Duration::from_secs(15);
+const APPROVAL_RECONCILE_POLL_INTERVAL: Duration = Duration::from_secs(15);
 const MERGE_REQUEST_RATE_LIMIT: Duration = Duration::from_secs(1);
 const TICKET_PICKER_CREATE_REFRESH_INTERVAL: Duration = Duration::from_secs(1);
 const BACKGROUND_SESSION_DEFERRED_OUTPUT_MAX_BYTES: usize = 64 * 1024;
+const RESOLVED_ANIMATION_REFRESH_INTERVAL: Duration = Duration::from_secs(1);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct UiRuntimeConfig {
@@ -511,6 +513,62 @@ impl UiState {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+struct UiAttentionProjection {
+    inbox_rows: Vec<UiInboxRow>,
+    inbox_batch_surfaces: Vec<UiBatchSurface>,
+    has_resolved_items: bool,
+}
+
+#[derive(Debug, Clone)]
+struct AttentionProjectionCache {
+    projection: UiAttentionProjection,
+    refreshed_at: Instant,
+    epoch: u64,
+}
+
+#[derive(Debug, Clone)]
+struct SessionPanelRowsCache {
+    rows: Vec<SessionPanelRow>,
+    epoch: u64,
+}
+
+#[derive(Debug, Clone, Default)]
+struct EventDerivedLabelCache {
+    processed_event_count: usize,
+    work_item_repo: HashMap<WorkItemId, String>,
+    ticket_labels: HashMap<String, String>,
+}
+
+impl EventDerivedLabelCache {
+    fn refresh(&mut self, domain: &ProjectionState) {
+        if self.processed_event_count > domain.events.len() {
+            self.processed_event_count = 0;
+            self.work_item_repo.clear();
+            self.ticket_labels.clear();
+        }
+
+        for event in domain.events.iter().skip(self.processed_event_count) {
+            match &event.payload {
+                OrchestrationEventPayload::WorktreeCreated(payload) => {
+                    self.work_item_repo.insert(
+                        payload.work_item_id.clone(),
+                        repository_name_from_path(payload.path.as_str()),
+                    );
+                }
+                OrchestrationEventPayload::TicketSynced(payload) => {
+                    self.ticket_labels.insert(
+                        payload.ticket_id.as_str().to_owned(),
+                        ticket_label_from_synced_event(payload),
+                    );
+                }
+                _ => {}
+            }
+        }
+        self.processed_event_count = domain.events.len();
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct SessionDisplayLabels {
     full_label: String,
     compact_label: String,
@@ -806,36 +864,29 @@ pub(crate) fn project_ui_state(
     preferred_selected_inbox_item_id: Option<&InboxItemId>,
     terminal_view_state: Option<&TerminalViewState>,
 ) -> UiState {
-    let attention_snapshot =
-        attention_inbox_snapshot(domain, &AttentionEngineConfig::default(), &[]);
-    let inbox_rows = attention_snapshot
-        .items
-        .into_iter()
-        .map(|item| UiInboxRow {
-            inbox_item_id: item.inbox_item_id,
-            work_item_id: item.work_item_id,
-            kind: item.kind,
-            priority_score: item.priority_score,
-            priority_band: item.priority_band,
-            batch_kind: item.batch_kind,
-            title: item.title,
-            resolved: item.resolved,
-            workflow_state: item.workflow_state,
-            session_id: item.session_id,
-            session_status: item.session_status,
-        })
-        .collect::<Vec<_>>();
-    let inbox_batch_surfaces = attention_snapshot
-        .batch_surfaces
-        .into_iter()
-        .map(|surface| UiBatchSurface {
-            kind: surface.kind,
-            unresolved_count: surface.unresolved_count,
-            total_count: surface.total_count,
-            first_unresolved_index: surface.first_unresolved_index,
-            first_any_index: surface.first_any_index,
-        })
-        .collect::<Vec<_>>();
+    let attention_projection = build_ui_attention_projection(domain);
+    project_ui_state_with_attention(
+        status,
+        domain,
+        view_stack,
+        preferred_selected_inbox,
+        preferred_selected_inbox_item_id,
+        terminal_view_state,
+        &attention_projection,
+    )
+}
+
+fn project_ui_state_with_attention(
+    status: &str,
+    domain: &ProjectionState,
+    view_stack: &ViewStack,
+    preferred_selected_inbox: Option<usize>,
+    preferred_selected_inbox_item_id: Option<&InboxItemId>,
+    terminal_view_state: Option<&TerminalViewState>,
+    attention_projection: &UiAttentionProjection,
+) -> UiState {
+    let inbox_rows = attention_projection.inbox_rows.clone();
+    let inbox_batch_surfaces = attention_projection.inbox_batch_surfaces.clone();
 
     let selected_inbox_index = resolve_selected_inbox(
         preferred_selected_inbox,
@@ -879,6 +930,50 @@ pub(crate) fn project_ui_state(
         selected_session_id,
         center_view_stack,
         center_pane,
+    }
+}
+
+fn build_ui_attention_projection(domain: &ProjectionState) -> UiAttentionProjection {
+    let snapshot = attention_inbox_snapshot(domain, &AttentionEngineConfig::default(), &[]);
+    build_ui_attention_projection_from_snapshot(snapshot)
+}
+
+fn build_ui_attention_projection_from_snapshot(
+    snapshot: AttentionInboxSnapshot,
+) -> UiAttentionProjection {
+    let has_resolved_items = snapshot.items.iter().any(|item| item.resolved);
+    let inbox_rows = snapshot
+        .items
+        .into_iter()
+        .map(|item| UiInboxRow {
+            inbox_item_id: item.inbox_item_id,
+            work_item_id: item.work_item_id,
+            kind: item.kind,
+            priority_score: item.priority_score,
+            priority_band: item.priority_band,
+            batch_kind: item.batch_kind,
+            title: item.title,
+            resolved: item.resolved,
+            workflow_state: item.workflow_state,
+            session_id: item.session_id,
+            session_status: item.session_status,
+        })
+        .collect::<Vec<_>>();
+    let inbox_batch_surfaces = snapshot
+        .batch_surfaces
+        .into_iter()
+        .map(|surface| UiBatchSurface {
+            kind: surface.kind,
+            unresolved_count: surface.unresolved_count,
+            total_count: surface.total_count,
+            first_unresolved_index: surface.first_unresolved_index,
+            first_any_index: surface.first_any_index,
+        })
+        .collect::<Vec<_>>();
+    UiAttentionProjection {
+        inbox_rows,
+        inbox_batch_surfaces,
+        has_resolved_items,
     }
 }
 

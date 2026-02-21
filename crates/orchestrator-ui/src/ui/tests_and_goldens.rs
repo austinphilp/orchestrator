@@ -1726,8 +1726,8 @@ mod tests {
             },
         ];
 
-        let shell_state = UiShellState::new("ready".to_owned(), projection);
-        assert!(shell_state.has_active_animated_indicator());
+        let mut shell_state = UiShellState::new("ready".to_owned(), projection);
+        assert!(shell_state.has_active_animated_indicator(Instant::now()));
     }
 
     #[test]
