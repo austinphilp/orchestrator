@@ -3890,7 +3890,7 @@ mod tests {
             Some(backend),
         );
         shell_state.open_terminal_and_enter_mode();
-        assert!(shell_state.is_right_pane_focused());
+        assert_eq!(shell_state.mode, UiMode::Terminal);
 
         let sender = shell_state
             .terminal_session_sender
@@ -4341,7 +4341,7 @@ mod tests {
     }
 
     #[test]
-    fn inline_needs_input_uses_tab_for_pane_focus_and_hl_for_question_navigation() {
+    fn inline_needs_input_uses_hl_for_question_navigation() {
         let backend = Arc::new(ManualTerminalBackend::default());
         let mut shell_state = UiShellState::new_with_integrations(
             "ready".to_owned(),
@@ -4405,10 +4405,6 @@ mod tests {
             })
             .expect("queue needs-input event");
         shell_state.poll_terminal_session_events();
-
-        let initially_left_focused = shell_state.is_left_pane_focused();
-        let _ = route_needs_input_modal_key(&mut shell_state, key(KeyCode::Tab));
-        assert_ne!(shell_state.is_left_pane_focused(), initially_left_focused);
 
         let prompt = shell_state
             .terminal_session_states
@@ -4927,7 +4923,7 @@ mod tests {
     fn session_info_background_summary_refresh_is_throttled() {
         let mut shell_state = UiShellState::new("ready".to_owned(), sample_projection(true));
         shell_state.open_terminal_and_enter_mode();
-        shell_state.cycle_pane_focus();
+        shell_state.enter_normal_mode();
         assert!(!shell_state.session_info_is_foreground());
         let session_id = shell_state
             .active_terminal_session_id()
@@ -4970,7 +4966,7 @@ mod tests {
     fn session_info_background_diff_load_is_throttled() {
         let mut shell_state = UiShellState::new("ready".to_owned(), sample_projection(true));
         shell_state.open_terminal_and_enter_mode();
-        shell_state.cycle_pane_focus();
+        shell_state.enter_normal_mode();
         assert!(!shell_state.session_info_is_foreground());
         let session_id = shell_state
             .active_terminal_session_id()
@@ -4995,7 +4991,7 @@ mod tests {
     fn entering_terminal_mode_reschedules_session_info_summary_refresh() {
         let mut shell_state = UiShellState::new("ready".to_owned(), sample_projection(true));
         shell_state.open_terminal_and_enter_mode();
-        shell_state.cycle_pane_focus();
+        shell_state.enter_normal_mode();
         shell_state.session_info_summary_deadline = None;
         shell_state.schedule_session_info_summary_refresh_for_active_session();
         let background_deadline = shell_state
@@ -5262,6 +5258,7 @@ mod tests {
             projection,
             None,
             Some(dispatcher),
+            None,
             None,
         );
         let session_id = WorkerSessionId::new("sess-review");
@@ -6282,20 +6279,6 @@ mod tests {
             .clone();
         assert_eq!(selected_kind, InboxItemKind::FYI);
 
-        handle_key_press(&mut shell_state, key(KeyCode::Char('g')));
-        let selected = shell_state.ui_state();
-        let selected_kind = selected.inbox_rows[selected.selected_inbox_index.expect("selected")]
-            .kind
-            .clone();
-        assert_eq!(selected_kind, InboxItemKind::NeedsDecision);
-
-        handle_key_press(&mut shell_state, key(KeyCode::Char('G')));
-        let selected = shell_state.ui_state();
-        let selected_kind = selected.inbox_rows[selected.selected_inbox_index.expect("selected")]
-            .kind
-            .clone();
-        assert_eq!(selected_kind, InboxItemKind::FYI);
-
         handle_key_press(&mut shell_state, key(KeyCode::Char('[')));
         let selected = shell_state.ui_state();
         let selected_kind = selected.inbox_rows[selected.selected_inbox_index.expect("selected")]
@@ -6305,7 +6288,7 @@ mod tests {
     }
 
     #[test]
-    fn tab_toggles_pane_focus_and_backtab_cycles_sidebar_focus() {
+    fn jk_navigates_sessions_and_shift_jk_scrolls_terminal_output() {
         let mut projection = sample_projection(true);
         let extra_work_item_id = WorkItemId::new("wi-extra");
         let extra_session_id = WorkerSessionId::new("sess-extra");
@@ -6333,19 +6316,7 @@ mod tests {
         );
         let mut shell_state = UiShellState::new("ready".to_owned(), projection);
         let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
-
-        let initial_inbox_index = shell_state.ui_state().selected_inbox_index;
-        assert!(shell_state.is_inbox_sidebar_focused());
-        assert!(shell_state.is_left_pane_focused());
-
-        handle_key_press(&mut shell_state, key(KeyCode::Tab));
-        assert!(shell_state.is_right_pane_focused());
-
-        handle_key_press(&mut shell_state, key(KeyCode::Tab));
-        assert!(shell_state.is_left_pane_focused());
-
-        handle_key_press(&mut shell_state, key(KeyCode::BackTab));
-        assert!(shell_state.is_sessions_sidebar_focused());
+        let shift_key = |code| KeyEvent::new(code, KeyModifiers::SHIFT);
 
         let before_session = shell_state
             .selected_session_id_for_panel()
@@ -6355,7 +6326,45 @@ mod tests {
             .selected_session_id_for_panel()
             .expect("selected session after move");
         assert_ne!(before_session, after_session);
-        assert_eq!(shell_state.ui_state().selected_inbox_index, initial_inbox_index);
+
+        shell_state.open_terminal_and_enter_mode();
+        handle_key_press(&mut shell_state, key(KeyCode::Esc));
+        assert_eq!(shell_state.mode, UiMode::Normal);
+        let session_id = shell_state
+            .active_terminal_session_id()
+            .expect("active terminal session")
+            .clone();
+        let view = shell_state
+            .terminal_session_states
+            .entry(session_id.clone())
+            .or_default();
+        view.entries.clear();
+        for line in 0..80 {
+            view.entries
+                .push(TerminalTranscriptEntry::Message(format!("line {line}")));
+        }
+        view.output_follow_tail = false;
+        view.output_scroll_line = 1;
+        shell_state.sync_terminal_output_viewport(80, 10);
+        let before_scroll = shell_state
+            .terminal_session_states
+            .get(&session_id)
+            .map(|state| state.output_scroll_line)
+            .unwrap_or(0);
+        handle_key_press(&mut shell_state, shift_key(KeyCode::Char('J')));
+        let after_down_scroll = shell_state
+            .terminal_session_states
+            .get(&session_id)
+            .map(|state| state.output_scroll_line)
+            .unwrap_or(0);
+        assert_eq!(after_down_scroll, before_scroll.saturating_add(1));
+        handle_key_press(&mut shell_state, shift_key(KeyCode::Char('K')));
+        let after_up_scroll = shell_state
+            .terminal_session_states
+            .get(&session_id)
+            .map(|state| state.output_scroll_line)
+            .unwrap_or(0);
+        assert_eq!(after_up_scroll, before_scroll);
     }
 
     #[test]
@@ -7563,14 +7572,6 @@ mod tests {
             command_ids::UI_FOCUS_NEXT_INBOX
         );
         assert_eq!(
-            command_id(UiCommand::CycleSidebarFocusNext),
-            "ui.sidebar.focus_next"
-        );
-        assert_eq!(
-            command_id(UiCommand::CycleSidebarFocusPrevious),
-            "ui.sidebar.focus_previous"
-        );
-        assert_eq!(
             command_id(UiCommand::AdvanceTerminalWorkflowStage),
             "ui.terminal.workflow.advance"
         );
@@ -7607,8 +7608,6 @@ mod tests {
             UiCommand::QuitShell,
             UiCommand::FocusNextInbox,
             UiCommand::FocusPreviousInbox,
-            UiCommand::CycleSidebarFocusNext,
-            UiCommand::CycleSidebarFocusPrevious,
             UiCommand::CycleBatchNext,
             UiCommand::CycleBatchPrevious,
             UiCommand::JumpFirstInbox,
@@ -7722,13 +7721,6 @@ mod tests {
         assert_eq!(shell_state.mode, UiMode::Normal);
         assert_eq!(shell_state.terminal_compose_editor.mode, EditorMode::Normal);
 
-        handle_key_press(&mut shell_state, key(KeyCode::Tab));
-        assert!(shell_state.is_left_pane_focused());
-        assert_eq!(shell_state.mode, UiMode::Normal);
-        handle_key_press(&mut shell_state, key(KeyCode::Tab));
-        assert!(shell_state.is_right_pane_focused());
-        assert_eq!(shell_state.mode, UiMode::Normal);
-
         handle_key_press(&mut shell_state, key(KeyCode::Char('i')));
         assert_eq!(shell_state.mode, UiMode::Terminal);
         assert_eq!(shell_state.terminal_compose_editor.mode, EditorMode::Insert);
@@ -7747,11 +7739,7 @@ mod tests {
         assert_eq!(shell_state.mode, UiMode::Normal);
 
         handle_key_press(&mut shell_state, key(KeyCode::Char('j')));
-        let selected = shell_state.ui_state();
-        let selected_kind = selected.inbox_rows[selected.selected_inbox_index.expect("selected")]
-            .kind
-            .clone();
-        assert_eq!(selected_kind, InboxItemKind::NeedsApproval);
+        assert_eq!(shell_state.mode, UiMode::Normal);
     }
 
     #[test]
@@ -7849,14 +7837,14 @@ mod tests {
 
         handle_key_press(&mut shell_state, key(KeyCode::Char('h')));
         handle_key_press(&mut shell_state, key(KeyCode::Char('i')));
-        handle_key_press(&mut shell_state, key(KeyCode::Enter));
+        handle_key_press(&mut shell_state, shift_key(KeyCode::Enter));
         handle_key_press(&mut shell_state, key(KeyCode::Char('!')));
 
         assert_eq!(editor_state_text(&shell_state.terminal_compose_editor), "hi\n!");
     }
 
     #[tokio::test]
-    async fn terminal_submit_success_returns_to_normal_mode() {
+    async fn terminal_submit_enter_success_returns_to_normal_mode() {
         let backend = Arc::new(ManualTerminalBackend::default());
         let mut shell_state = UiShellState::new_with_integrations(
             "ready".to_owned(),
@@ -7873,7 +7861,7 @@ mod tests {
         handle_key_press(&mut shell_state, key(KeyCode::Char('h')));
         handle_key_press(&mut shell_state, key(KeyCode::Char('i')));
         assert_eq!(editor_state_text(&shell_state.terminal_compose_editor), "hi");
-        handle_key_press(&mut shell_state, ctrl_key(KeyCode::Enter));
+        handle_key_press(&mut shell_state, key(KeyCode::Enter));
 
         assert_eq!(editor_state_text(&shell_state.terminal_compose_editor), "");
         assert_eq!(shell_state.mode, UiMode::Normal);
@@ -7918,7 +7906,7 @@ mod tests {
         shell_state.open_terminal_and_enter_mode();
         assert_eq!(shell_state.mode, UiMode::Terminal);
 
-        handle_key_press(&mut shell_state, ctrl_key(KeyCode::Enter));
+        handle_key_press(&mut shell_state, key(KeyCode::Enter));
 
         assert_eq!(shell_state.mode, UiMode::Terminal);
         assert!(shell_state
@@ -7977,7 +7965,7 @@ mod tests {
     }
 
     #[test]
-    fn terminal_stream_normal_mode_scrolls_with_jk_and_g() {
+    fn terminal_stream_normal_mode_scrolls_with_shift_jk() {
         let mut shell_state = UiShellState::new("ready".to_owned(), sample_projection(true));
         handle_key_press(&mut shell_state, key(KeyCode::Char('I')));
         assert_eq!(shell_state.mode, UiMode::Terminal);
@@ -8010,31 +7998,19 @@ mod tests {
             view.output_follow_tail = false;
         }
 
-        handle_key_press(&mut shell_state, key(KeyCode::Char('j')));
+        handle_key_press(&mut shell_state, shift_key(KeyCode::Char('J')));
         let view = shell_state
             .terminal_session_states
             .get_mut(&session_id)
             .expect("terminal view state");
         assert_eq!(view.output_scroll_line, 1);
 
-        handle_key_press(&mut shell_state, key(KeyCode::Char('k')));
+        handle_key_press(&mut shell_state, shift_key(KeyCode::Char('K')));
         let view = shell_state
             .terminal_session_states
             .get_mut(&session_id)
             .expect("terminal view state");
         assert_eq!(view.output_scroll_line, 0);
-
-        handle_key_press(&mut shell_state, key(KeyCode::Char('G')));
-        let view = shell_state
-            .terminal_session_states
-            .get_mut(&session_id)
-            .expect("terminal view state");
-        let rendered_line_count = render_terminal_transcript_entries(view).len();
-        assert_eq!(
-            view.output_scroll_line,
-            rendered_line_count.saturating_sub(view.output_viewport_rows)
-        );
-        assert!(view.output_follow_tail);
     }
 
     #[test]
@@ -8075,7 +8051,7 @@ mod tests {
             .expect("terminal view state");
         assert_eq!(view.output_scroll_line, 100);
 
-        handle_key_press(&mut shell_state, key(KeyCode::Char('k')));
+        handle_key_press(&mut shell_state, shift_key(KeyCode::Char('K')));
         let view = shell_state
             .terminal_session_states
             .get(&session_id)
@@ -8304,7 +8280,8 @@ mod tests {
     #[test]
     fn mode_help_normal_groups_and_consolidates_expected_hints() {
         let help = mode_help(UiMode::Normal);
-        assert!(help.contains("Navigate: j/k, g/G"));
+        assert!(help.contains("Navigate: j/k sessions"));
+        assert!(help.contains("Shift+J/K output"));
         assert!(help.contains("Views: i/I"));
         assert!(!help.contains("i: "));
         assert!(!help.contains("I: "));

@@ -699,11 +699,6 @@ fn route_needs_input_modal_key(shell_state: &mut UiShellState, key: KeyEvent) ->
         return RoutedInput::Ignore;
     }
 
-    if matches!(key.code, KeyCode::Tab) {
-        shell_state.cycle_pane_focus();
-        return RoutedInput::Ignore;
-    }
-
     if !shell_state.is_terminal_view_active() {
         return RoutedInput::Ignore;
     }

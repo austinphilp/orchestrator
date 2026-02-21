@@ -1,16 +1,4 @@
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum SidebarFocus {
-    Sessions,
-    Inbox,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum PaneFocus {
-    Left,
-    Right,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum AnimationState {
     None,
     ActiveTurn,
@@ -52,8 +40,6 @@ struct UiShellState {
     worker_backend: Option<Arc<dyn WorkerBackend>>,
     selected_session_index: Option<usize>,
     selected_session_id: Option<WorkerSessionId>,
-    sidebar_focus: SidebarFocus,
-    pane_focus: PaneFocus,
     terminal_session_sender: Option<mpsc::Sender<TerminalSessionEvent>>,
     terminal_session_receiver: Option<mpsc::Receiver<TerminalSessionEvent>>,
     session_info_summary_sender: Option<mpsc::Sender<SessionInfoSummaryEvent>>,
@@ -204,8 +190,6 @@ impl UiShellState {
             worker_backend,
             selected_session_index: None,
             selected_session_id: None,
-            sidebar_focus: SidebarFocus::Inbox,
-            pane_focus: PaneFocus::Left,
             terminal_session_sender,
             terminal_session_receiver,
             session_info_summary_sender,
@@ -343,76 +327,15 @@ impl UiShellState {
     }
 
     fn move_selection(&mut self, delta: isize) {
-        if !self.is_left_pane_focused() {
-            return;
-        }
-        if matches!(self.sidebar_focus, SidebarFocus::Sessions) {
-            let _ = self.move_session_selection(delta);
-            return;
-        }
-        let ui_state = self.ui_state();
-        if ui_state.inbox_rows.is_empty() {
-            self.set_selection(None, &ui_state.inbox_rows);
-            return;
-        }
-
-        let current = ui_state.selected_inbox_index.unwrap_or(0) as isize;
-        let upper_bound = ui_state.inbox_rows.len() as isize - 1;
-        let next = (current + delta).clamp(0, upper_bound) as usize;
-        self.set_selection(Some(next), &ui_state.inbox_rows);
+        let _ = self.move_session_selection(delta);
     }
 
     fn jump_to_first_item(&mut self) {
-        if !self.is_left_pane_focused() {
-            return;
-        }
-        if matches!(self.sidebar_focus, SidebarFocus::Sessions) {
-            let _ = self.move_to_first_session();
-            return;
-        }
-        let ui_state = self.ui_state();
-        if ui_state.inbox_rows.is_empty() {
-            self.set_selection(None, &ui_state.inbox_rows);
-            return;
-        }
-        self.set_selection(Some(0), &ui_state.inbox_rows);
+        let _ = self.move_to_first_session();
     }
 
     fn jump_to_last_item(&mut self) {
-        if !self.is_left_pane_focused() {
-            return;
-        }
-        if matches!(self.sidebar_focus, SidebarFocus::Sessions) {
-            let _ = self.move_to_last_session();
-            return;
-        }
-        let ui_state = self.ui_state();
-        if ui_state.inbox_rows.is_empty() {
-            self.set_selection(None, &ui_state.inbox_rows);
-            return;
-        }
-        self.set_selection(Some(ui_state.inbox_rows.len() - 1), &ui_state.inbox_rows);
-    }
-
-    fn cycle_sidebar_focus(&mut self, delta: isize) {
-        if !self.is_left_pane_focused() {
-            return;
-        }
-        if delta.rem_euclid(2) == 0 {
-            return;
-        }
-        self.sidebar_focus = match self.sidebar_focus {
-            SidebarFocus::Sessions => SidebarFocus::Inbox,
-            SidebarFocus::Inbox => SidebarFocus::Sessions,
-        };
-    }
-
-    fn cycle_pane_focus(&mut self) {
-        self.pane_focus = match self.pane_focus {
-            PaneFocus::Left => PaneFocus::Right,
-            PaneFocus::Right => PaneFocus::Left,
-        };
-        self.enter_normal_mode();
+        let _ = self.move_to_last_session();
     }
 
     fn jump_to_batch(&mut self, target: InboxBatchKind) {
@@ -484,7 +407,7 @@ impl UiShellState {
     }
 
     fn open_terminal_for_selected(&mut self) {
-        if self.open_selected_inbox_output(false, false) {
+        if self.open_selected_inbox_output(false) {
             return;
         }
 
@@ -521,17 +444,10 @@ impl UiShellState {
     }
 
     fn open_session_output_for_selected_inbox(&mut self) {
-        let _ = self.open_selected_inbox_output(true, true);
+        let _ = self.open_selected_inbox_output(true);
     }
 
-    fn open_selected_inbox_output(
-        &mut self,
-        acknowledge_selection: bool,
-        require_inbox_sidebar_focus: bool,
-    ) -> bool {
-        if require_inbox_sidebar_focus && !matches!(self.sidebar_focus, SidebarFocus::Inbox) {
-            return false;
-        }
+    fn open_selected_inbox_output(&mut self, acknowledge_selection: bool) -> bool {
         let ui_state = self.ui_state();
         let Some(selected_index) = ui_state.selected_inbox_index else {
             self.status_warning =
@@ -770,22 +686,6 @@ impl UiShellState {
         self.selected_session_id = session_ids.get(index).cloned();
     }
 
-    fn is_sessions_sidebar_focused(&self) -> bool {
-        self.is_left_pane_focused() && matches!(self.sidebar_focus, SidebarFocus::Sessions)
-    }
-
-    fn is_inbox_sidebar_focused(&self) -> bool {
-        self.is_left_pane_focused() && matches!(self.sidebar_focus, SidebarFocus::Inbox)
-    }
-
-    fn is_left_pane_focused(&self) -> bool {
-        matches!(self.pane_focus, PaneFocus::Left)
-    }
-
-    fn is_right_pane_focused(&self) -> bool {
-        matches!(self.pane_focus, PaneFocus::Right)
-    }
-
     fn should_show_session_info_sidebar(&self) -> bool {
         self.active_terminal_session_id().is_some()
     }
@@ -823,9 +723,7 @@ impl UiShellState {
     }
 
     fn session_info_is_foreground(&self) -> bool {
-        self.active_terminal_session_id().is_some()
-            && self.is_right_pane_focused()
-            && self.mode == UiMode::Terminal
+        self.active_terminal_session_id().is_some() && self.mode == UiMode::Terminal
     }
 
     fn session_info_diff_cache_for(
@@ -1535,23 +1433,6 @@ impl UiShellState {
         view.output_scroll_line = next;
         view.output_follow_tail = next == max_scroll;
         next != current
-    }
-
-    fn scroll_terminal_output_to_bottom(&mut self) -> bool {
-        let Some(view) = self.active_terminal_view_state_mut() else {
-            return false;
-        };
-        let rendered_line_count = terminal_output_line_count_for_scroll(view);
-        if rendered_line_count == 0 {
-            view.output_scroll_line = 0;
-            view.output_follow_tail = true;
-            return false;
-        }
-        let max_scroll = rendered_line_count.saturating_sub(view.output_viewport_rows.max(1));
-        let previous = view.output_scroll_line.min(max_scroll);
-        view.output_scroll_line = max_scroll;
-        view.output_follow_tail = true;
-        view.output_scroll_line != previous
     }
 
     fn terminal_session_handle(&self, session_id: &WorkerSessionId) -> Option<SessionHandle> {
@@ -3750,15 +3631,12 @@ impl UiShellState {
                 self.enter_normal_mode();
                 true
             }
-            KeyCode::Enter if key.modifiers == KeyModifiers::CONTROL => {
+            KeyCode::Enter if key.modifiers.is_empty() => {
                 self.submit_terminal_compose_input();
                 true
             }
-            KeyCode::Enter if key.modifiers.is_empty() => {
-                let enter = edtui_key_input(KeyCode::Enter, KeyModifiers::NONE)
-                    .expect("enter key conversion");
-                self.terminal_compose_event_handler
-                    .on_key_event(enter, &mut self.terminal_compose_editor);
+            KeyCode::Enter if key.modifiers == KeyModifiers::CONTROL => {
+                self.submit_terminal_compose_input();
                 true
             }
             KeyCode::Enter if key.modifiers == KeyModifiers::SHIFT => {
@@ -4394,7 +4272,7 @@ impl UiShellState {
         self.selected_inbox_item_id =
             valid_selected_index.map(|index| rows[index].inbox_item_id.clone());
         if self.selected_inbox_item_id.is_some() && self.selected_inbox_item_id != previous {
-            let _ = self.open_selected_inbox_output(false, false);
+            let _ = self.open_selected_inbox_output(false);
         }
     }
 
@@ -4423,7 +4301,7 @@ impl UiShellState {
     }
 
     fn enter_insert_mode_for_current_focus(&mut self) {
-        if self.is_right_pane_focused() && self.is_terminal_view_active() {
+        if self.is_terminal_view_active() {
             if self.terminal_session_has_any_needs_input() && !self.terminal_session_has_active_needs_input()
             {
                 let _ = self.activate_terminal_needs_input(true);
@@ -4432,12 +4310,22 @@ impl UiShellState {
             }
             return;
         }
+
+        if self.is_global_supervisor_chat_active() {
+            self.enter_insert_mode();
+            return;
+        }
+
+        if self.selected_session_id_for_panel().is_some() {
+            self.open_terminal_and_enter_mode();
+            return;
+        }
+
         self.enter_insert_mode();
     }
 
     fn enter_terminal_mode(&mut self) {
         if self.is_terminal_view_active() {
-            self.pane_focus = PaneFocus::Right;
             self.snap_active_terminal_output_to_bottom();
             self.apply_ui_mode(UiMode::Terminal);
             self.schedule_session_info_summary_refresh_for_active_session();

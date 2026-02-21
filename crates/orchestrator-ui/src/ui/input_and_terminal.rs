@@ -12,8 +12,6 @@ enum UiCommand {
     QuitShell,
     FocusNextInbox,
     FocusPreviousInbox,
-    CycleSidebarFocusNext,
-    CycleSidebarFocusPrevious,
     CycleBatchNext,
     CycleBatchPrevious,
     JumpFirstInbox,
@@ -38,7 +36,7 @@ enum UiCommand {
 }
 
 impl UiCommand {
-    const ALL: [Self; 35] = [
+    const ALL: [Self; 33] = [
         Self::EnterNormalMode,
         Self::EnterInsertMode,
         Self::ToggleGlobalSupervisorChat,
@@ -51,8 +49,6 @@ impl UiCommand {
         Self::QuitShell,
         Self::FocusNextInbox,
         Self::FocusPreviousInbox,
-        Self::CycleSidebarFocusNext,
-        Self::CycleSidebarFocusPrevious,
         Self::CycleBatchNext,
         Self::CycleBatchPrevious,
         Self::JumpFirstInbox,
@@ -90,8 +86,6 @@ impl UiCommand {
             Self::QuitShell => "ui.shell.quit",
             Self::FocusNextInbox => command_ids::UI_FOCUS_NEXT_INBOX,
             Self::FocusPreviousInbox => "ui.focus_previous_inbox",
-            Self::CycleSidebarFocusNext => "ui.sidebar.focus_next",
-            Self::CycleSidebarFocusPrevious => "ui.sidebar.focus_previous",
             Self::CycleBatchNext => "ui.cycle_batch_next",
             Self::CycleBatchPrevious => "ui.cycle_batch_previous",
             Self::JumpFirstInbox => "ui.jump_first_inbox",
@@ -128,10 +122,8 @@ impl UiCommand {
             Self::OpenChatInspectorForSelected => "Open chat inspector for selected item",
             Self::StartTerminalEscapeChord => "Terminal escape chord (Ctrl-\\ Ctrl-n)",
             Self::QuitShell => "Quit shell",
-            Self::FocusNextInbox => "Focus next inbox item",
-            Self::FocusPreviousInbox => "Focus previous inbox item",
-            Self::CycleSidebarFocusNext => "Focus next sidebar panel",
-            Self::CycleSidebarFocusPrevious => "Focus previous sidebar panel",
+            Self::FocusNextInbox => "Focus next session",
+            Self::FocusPreviousInbox => "Focus previous session",
             Self::CycleBatchNext => "Cycle to next inbox lane",
             Self::CycleBatchPrevious => "Cycle to previous inbox lane",
             Self::JumpFirstInbox => "Jump to first inbox item",
@@ -196,8 +188,6 @@ fn default_keymap_config() -> KeymapConfig {
                     binding(&["j"], UiCommand::FocusNextInbox),
                     binding(&["up"], UiCommand::FocusPreviousInbox),
                     binding(&["k"], UiCommand::FocusPreviousInbox),
-                    binding(&["tab"], UiCommand::CycleSidebarFocusPrevious),
-                    binding(&["backtab"], UiCommand::CycleSidebarFocusNext),
                     binding(&["]"], UiCommand::CycleBatchNext),
                     binding(&["["], UiCommand::CycleBatchPrevious),
                     binding(&["g"], UiCommand::JumpFirstInbox),
@@ -284,11 +274,7 @@ fn bottom_bar_hint_groups(mode: UiMode) -> &'static [BottomBarHintGroup] {
         UiMode::Normal => &[
             BottomBarHintGroup {
                 label: "Navigate:",
-                hints: &["j/k", "g/G", "1-4 or z{1-4}", "[ ]"],
-            },
-            BottomBarHintGroup {
-                label: "Focus:",
-                hints: &["Tab", "Shift+Tab"],
+                hints: &["j/k sessions", "Shift+J/K output", "g/G", "1-4 or z{1-4}", "[ ]"],
             },
             BottomBarHintGroup {
                 label: "Views:",
@@ -316,7 +302,7 @@ fn bottom_bar_hint_groups(mode: UiMode) -> &'static [BottomBarHintGroup] {
         UiMode::Terminal => &[
             BottomBarHintGroup {
                 label: "Terminal:",
-                hints: &["Type by default", "Ctrl+Enter send"],
+                hints: &["Type by default", "Enter send", "Shift+Enter newline"],
             },
             BottomBarHintGroup {
                 label: "Back:",
@@ -603,13 +589,12 @@ fn route_key_press(shell_state: &mut UiShellState, key: KeyEvent) -> RoutedInput
         return route_review_merge_confirm_key(shell_state, key);
     }
 
-    if shell_state.terminal_session_has_active_needs_input() && shell_state.is_right_pane_focused()
+    if shell_state.terminal_session_has_active_needs_input() && shell_state.is_terminal_view_active()
     {
         return route_needs_input_modal_key(shell_state, key);
     }
     if shell_state.terminal_session_has_any_needs_input()
         && !shell_state.terminal_session_has_active_needs_input()
-        && shell_state.is_right_pane_focused()
         && shell_state.is_terminal_view_active()
         && key.modifiers.is_empty()
         && is_needs_input_interaction_key(key.code)
@@ -618,26 +603,14 @@ fn route_key_press(shell_state: &mut UiShellState, key: KeyEvent) -> RoutedInput
         return route_needs_input_modal_key(shell_state, key);
     }
 
-    if matches!(key.code, KeyCode::Tab) {
-        shell_state.cycle_pane_focus();
-        return RoutedInput::Ignore;
-    }
-
-    if shell_state.mode == UiMode::Normal
-        && shell_state.is_right_pane_focused()
-        && shell_state.is_terminal_view_active()
-    {
-        match key.code {
-            KeyCode::Char('j') | KeyCode::Char('J') => {
+    if shell_state.mode == UiMode::Normal && shell_state.is_terminal_view_active() {
+        match (key.code, key.modifiers) {
+            (KeyCode::Char('J') | KeyCode::Char('j'), KeyModifiers::SHIFT) => {
                 shell_state.scroll_terminal_output_view(1);
                 return RoutedInput::Ignore;
             }
-            KeyCode::Char('k') | KeyCode::Char('K') => {
+            (KeyCode::Char('K') | KeyCode::Char('k'), KeyModifiers::SHIFT) => {
                 shell_state.scroll_terminal_output_view(-1);
-                return RoutedInput::Ignore;
-            }
-            KeyCode::Char('G') => {
-                shell_state.scroll_terminal_output_to_bottom();
                 return RoutedInput::Ignore;
             }
             _ => {}
@@ -691,8 +664,6 @@ fn is_needs_input_interaction_key(code: KeyCode) -> bool {
     matches!(
         code,
         KeyCode::Char('i')
-            | KeyCode::Tab
-            | KeyCode::BackTab
             | KeyCode::Right
             | KeyCode::Char('l')
             | KeyCode::Left
@@ -855,14 +826,6 @@ fn dispatch_command(shell_state: &mut UiShellState, command: UiCommand) -> bool 
         }
         UiCommand::FocusPreviousInbox => {
             shell_state.move_selection(-1);
-            false
-        }
-        UiCommand::CycleSidebarFocusNext => {
-            shell_state.cycle_sidebar_focus(1);
-            false
-        }
-        UiCommand::CycleSidebarFocusPrevious => {
-            shell_state.cycle_sidebar_focus(-1);
             false
         }
         UiCommand::CycleBatchNext => {
