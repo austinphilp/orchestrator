@@ -873,6 +873,55 @@ impl SqliteEventStore {
             .map_err(|err| CoreError::Persistence(err.to_string()))
     }
 
+    pub fn migrate_runtime_mapping_path(
+        &mut self,
+        work_item_id: &WorkItemId,
+        next_path: &str,
+    ) -> Result<(), CoreError> {
+        if next_path.trim().is_empty() {
+            return Err(CoreError::Persistence(
+                "runtime mapping path migration target cannot be empty".to_owned(),
+            ));
+        }
+
+        let tx = self
+            .conn
+            .transaction()
+            .map_err(|err| CoreError::Persistence(err.to_string()))?;
+
+        let updated_worktrees = tx
+            .execute(
+                "
+                UPDATE worktrees
+                SET path = ?1
+                WHERE work_item_id = ?2
+                ",
+                params![next_path, work_item_id.as_str()],
+            )
+            .map_err(|err| CoreError::Persistence(err.to_string()))?;
+        let updated_sessions = tx
+            .execute(
+                "
+                UPDATE sessions
+                SET workdir = ?1
+                WHERE work_item_id = ?2
+                ",
+                params![next_path, work_item_id.as_str()],
+            )
+            .map_err(|err| CoreError::Persistence(err.to_string()))?;
+
+        if updated_worktrees == 0 || updated_sessions == 0 {
+            return Err(CoreError::Persistence(format!(
+                "cannot migrate runtime mapping path for work_item_id '{}': missing worktree/session binding",
+                work_item_id.as_str()
+            )));
+        }
+
+        tx.commit()
+            .map_err(|err| CoreError::Persistence(err.to_string()))?;
+        Ok(())
+    }
+
     pub fn list_inflight_runtime_mappings(&self) -> Result<Vec<RuntimeMappingRecord>, CoreError> {
         let running = session_status_to_json(&WorkerSessionStatus::Running)?;
         let waiting_for_user = session_status_to_json(&WorkerSessionStatus::WaitingForUser)?;

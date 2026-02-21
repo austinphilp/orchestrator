@@ -19,7 +19,6 @@ const DEFAULT_BASE_BRANCH: &str = "main";
 const DEFAULT_PROJECT_ID: &str = "project-default";
 const DEFAULT_WORKTREE_SLUG: &str = "ticket";
 const DEFAULT_WORKTREE_TITLE_SLUG_LIMIT: usize = 48;
-const DEFAULT_WORKTREE_DIR: &str = ".orchestrator/worktrees";
 const WORKTREE_BRANCH_PREFIX: &str = "ap/";
 const ENV_HARNESS_SESSION_ID: &str = "ORCHESTRATOR_HARNESS_SESSION_ID";
 
@@ -35,11 +34,14 @@ pub struct SelectedTicketFlowConfig {
 }
 
 impl SelectedTicketFlowConfig {
-    pub fn from_workspace_root(workspace_root: impl Into<PathBuf>) -> Self {
+    pub fn from_workspace_and_worktrees_root(
+        workspace_root: impl Into<PathBuf>,
+        worktrees_root: impl Into<PathBuf>,
+    ) -> Self {
         let workspace_root = workspace_root.into();
         Self {
             repository_roots: vec![workspace_root.clone()],
-            worktrees_root: workspace_root.join(DEFAULT_WORKTREE_DIR),
+            worktrees_root: worktrees_root.into(),
             project_id: ProjectId::new(DEFAULT_PROJECT_ID),
             base_branch: DEFAULT_BASE_BRANCH.to_owned(),
             model: None,

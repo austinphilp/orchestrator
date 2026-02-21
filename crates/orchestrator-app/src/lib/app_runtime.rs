@@ -240,7 +240,10 @@ impl<S: Supervisor, G: GithubClient> App<S, G> {
         worker_backend: &dyn WorkerBackend,
     ) -> Result<SelectedTicketFlowResult, CoreError> {
         let mut store = open_event_store(&self.config.event_store_path)?;
-        let flow_config = SelectedTicketFlowConfig::from_workspace_root(&self.config.workspace);
+        let flow_config = SelectedTicketFlowConfig::from_workspace_and_worktrees_root(
+            &self.config.workspace,
+            &self.config.worktrees_root,
+        );
         let selected_ticket_description = self
             .ticketing
             .get_ticket(GetTicketRequest {

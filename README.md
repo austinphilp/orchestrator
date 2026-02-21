@@ -39,6 +39,7 @@ Example `config.toml`:
 
 ```toml
 workspace = "/home/user/.local/share/orchestrator/workspace"
+worktrees_root = "/home/user/.local/share/orchestrator/workspace"
 event_store_path = "/home/user/.local/share/orchestrator/orchestrator-events.db"
 ticketing_provider = "linear"
 harness_provider = "codex"
@@ -96,3 +97,8 @@ transcript_line_limit = 100
 background_session_refresh_secs = 15
 session_info_background_refresh_secs = 15
 ```
+
+Directory layout defaults:
+- Worktrees: `~/.local/share/orchestrator/workspace/<ticket-worktree>`
+- Event store + logs: `~/.local/share/orchestrator/`
+- Config: `~/.config/orchestrator/config.toml`
