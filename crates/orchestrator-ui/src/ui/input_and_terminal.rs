@@ -412,32 +412,6 @@ fn append_terminal_user_message(state: &mut TerminalViewState, message: &str) {
     }
 }
 
-fn append_terminal_system_message(state: &mut TerminalViewState, message: &str) {
-    flush_terminal_output_fragment(state);
-    let text = sanitize_terminal_display_text(message);
-    if text.trim().is_empty() {
-        return;
-    }
-    invalidate_terminal_render_cache(state);
-
-    for (index, line) in text.lines().enumerate() {
-        if line.is_empty() {
-            continue;
-        }
-        if index == 0 {
-            append_terminal_transcript_entry(
-                state,
-                TerminalTranscriptEntry::Message(format!("> system: {line}")),
-            );
-        } else {
-            append_terminal_transcript_entry(
-                state,
-                TerminalTranscriptEntry::Message(format!("> system: {line}")),
-            );
-        }
-    }
-}
-
 fn parse_terminal_meta_line_embedded(line: &str) -> Option<(String, TerminalFoldKind, String)> {
     const PREFIX: &str = "[[orchestrator-meta|";
     let start = line.find(PREFIX)?;

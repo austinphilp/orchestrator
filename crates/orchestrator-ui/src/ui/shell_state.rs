@@ -2897,7 +2897,6 @@ impl UiShellState {
             return;
         }
         if let Some(view) = self.terminal_session_states.get_mut(session_id) {
-            append_terminal_system_message(view, instruction);
             view.error = None;
         }
 

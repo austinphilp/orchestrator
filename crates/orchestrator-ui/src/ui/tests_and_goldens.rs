@@ -4715,6 +4715,85 @@ mod tests {
     }
 
     #[test]
+    fn terminal_instruction_does_not_optimistically_append_system_message() {
+        let backend = Arc::new(ManualTerminalBackend::default());
+        let mut shell_state = UiShellState::new_with_integrations(
+            "ready".to_owned(),
+            sample_projection(true),
+            None,
+            None,
+            None,
+            Some(backend),
+        );
+        shell_state.open_terminal_and_enter_mode();
+        let session_id = shell_state
+            .selected_session_id_for_terminal_action()
+            .expect("selected session");
+
+        shell_state.send_terminal_instruction_to_session(
+            &session_id,
+            "workflow transition approved",
+        );
+
+        let has_system_line = shell_state
+            .terminal_session_states
+            .get(&session_id)
+            .map(|view| {
+                render_terminal_transcript_entries(view)
+                    .into_iter()
+                    .any(|line| line.text == "> system: workflow transition approved")
+            })
+            .unwrap_or(false);
+        assert!(!has_system_line);
+    }
+
+    #[test]
+    fn terminal_instruction_system_message_renders_once_when_backend_echoes() {
+        let backend = Arc::new(ManualTerminalBackend::default());
+        let mut shell_state = UiShellState::new_with_integrations(
+            "ready".to_owned(),
+            sample_projection(true),
+            None,
+            None,
+            None,
+            Some(backend),
+        );
+        shell_state.open_terminal_and_enter_mode();
+        let session_id = shell_state
+            .selected_session_id_for_terminal_action()
+            .expect("selected session");
+
+        shell_state.send_terminal_instruction_to_session(
+            &session_id,
+            "workflow transition approved",
+        );
+        let sender = shell_state
+            .terminal_session_sender
+            .clone()
+            .expect("terminal sender");
+        sender
+            .try_send(TerminalSessionEvent::Output {
+                session_id: session_id.clone(),
+                output: BackendOutputEvent {
+                    stream: BackendOutputStream::Stdout,
+                    bytes: b"you: system: workflow transition approved\n".to_vec(),
+                },
+            })
+            .expect("queue output event");
+        shell_state.poll_terminal_session_events();
+
+        let view = shell_state
+            .terminal_session_states
+            .get(&session_id)
+            .expect("terminal view state");
+        let system_lines = render_terminal_transcript_entries(view)
+            .into_iter()
+            .filter(|line| line.text == "> system: workflow transition approved")
+            .count();
+        assert_eq!(system_lines, 1);
+    }
+
+    #[test]
     fn background_output_flushes_when_refresh_interval_elapses() {
         let backend = Arc::new(ManualTerminalBackend::default());
         let mut projection = sample_projection(true);
