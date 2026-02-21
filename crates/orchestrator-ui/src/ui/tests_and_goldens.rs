@@ -6658,10 +6658,14 @@ mod tests {
         });
 
         assert_eq!(shell_state.ui_state().selected_inbox_item_id, before);
-        assert!(matches!(
-            shell_state.view_stack.active_center(),
-            Some(CenterView::TerminalView { session_id }) if session_id.as_str() == "sess-c"
-        ));
+        assert_eq!(shell_state.mode, UiMode::Normal);
+        assert_eq!(
+            shell_state
+                .selected_session_id_for_panel()
+                .as_ref()
+                .map(|id| id.as_str()),
+            Some("sess-c")
+        );
     }
 
     #[test]
@@ -6699,10 +6703,14 @@ mod tests {
         });
 
         assert_eq!(shell_state.ui_state().selected_inbox_item_id, before);
-        assert!(matches!(
-            shell_state.view_stack.active_center(),
-            Some(CenterView::TerminalView { session_id }) if session_id.as_str() == "sess-3"
-        ));
+        assert_eq!(shell_state.mode, UiMode::Normal);
+        assert_eq!(
+            shell_state
+                .selected_session_id_for_panel()
+                .as_ref()
+                .map(|id| id.as_str()),
+            Some("sess-3")
+        );
     }
 
     #[test]

@@ -404,6 +404,7 @@ impl UiShellState {
             return;
         };
         self.set_selection(Some(next_index), &rows);
+        let _ = self.open_selected_inbox_output(false);
     }
 
     fn open_terminal_for_selected(&mut self) {
