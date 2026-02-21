@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -16,6 +17,7 @@ const DEFAULT_SESSION_EVENT_BUFFER: usize = 256;
 const DEFAULT_GLOBAL_EVENT_BUFFER: usize = 1_024;
 const DEFAULT_CHECKPOINT_PROMPT_INTERVAL_SECS: u64 = 120;
 const DEFAULT_CHECKPOINT_PROMPT_MESSAGE: &str = "Emit a checkpoint now.";
+const DEFAULT_PERF_METRICS_ENABLED: bool = true;
 
 #[derive(Debug, Clone)]
 pub struct WorkerManagerConfig {
@@ -23,6 +25,7 @@ pub struct WorkerManagerConfig {
     pub global_event_buffer: usize,
     pub checkpoint_prompt_interval: Option<Duration>,
     pub checkpoint_prompt_message: String,
+    pub perf_metrics_enabled: bool,
 }
 
 impl Default for WorkerManagerConfig {
@@ -34,6 +37,7 @@ impl Default for WorkerManagerConfig {
                 DEFAULT_CHECKPOINT_PROMPT_INTERVAL_SECS,
             )),
             checkpoint_prompt_message: DEFAULT_CHECKPOINT_PROMPT_MESSAGE.to_owned(),
+            perf_metrics_enabled: DEFAULT_PERF_METRICS_ENABLED,
         }
     }
 }
@@ -67,18 +71,246 @@ pub struct WorkerManagerEvent {
     pub event: BackendEvent,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct WorkerManagerPerfTotals {
+    pub checkpoint_ticks_total: u64,
+    pub checkpoint_skips_focused_total: u64,
+    pub checkpoint_send_attempts_total: u64,
+    pub checkpoint_send_failures_total: u64,
+    pub checkpoint_loop_read_lock_wait_nanos_total: u64,
+    pub checkpoint_send_nanos_total: u64,
+    pub events_received_total: u64,
+    pub events_forwarded_session_total: u64,
+    pub events_forwarded_global_total: u64,
+    pub event_clone_ops_total: u64,
+    pub event_dispatch_nanos_total: u64,
+    pub done_events_total: u64,
+    pub crashed_events_total: u64,
+    pub session_receiver_count_last: u64,
+    pub global_receiver_count_last: u64,
+    pub subscribe_session_calls_total: u64,
+    pub subscribe_global_calls_total: u64,
+    pub subscribe_session_failures_total: u64,
+    pub subscriber_lagged_errors_session_total: u64,
+    pub subscriber_lagged_errors_global_total: u64,
+    pub subscriber_closed_session_total: u64,
+    pub subscriber_closed_global_total: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkerManagerPerfSessionSnapshot {
+    pub session_id: RuntimeSessionId,
+    pub checkpoint_ticks_total: u64,
+    pub checkpoint_skips_focused_total: u64,
+    pub checkpoint_send_attempts_total: u64,
+    pub checkpoint_send_failures_total: u64,
+    pub checkpoint_loop_read_lock_wait_nanos_total: u64,
+    pub checkpoint_send_nanos_total: u64,
+    pub events_received_total: u64,
+    pub events_forwarded_session_total: u64,
+    pub events_forwarded_global_total: u64,
+    pub event_clone_ops_total: u64,
+    pub event_dispatch_nanos_total: u64,
+    pub done_events_total: u64,
+    pub crashed_events_total: u64,
+    pub session_receiver_count_last: u64,
+    pub global_receiver_count_last: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkerManagerPerfSnapshot {
+    pub metrics_enabled: bool,
+    pub captured_at_monotonic_nanos: u64,
+    pub session_count: usize,
+    pub totals: WorkerManagerPerfTotals,
+    pub sessions: Vec<WorkerManagerPerfSessionSnapshot>,
+}
+
+#[derive(Debug, Default)]
+struct SessionPerfCounters {
+    checkpoint_ticks_total: AtomicU64,
+    checkpoint_skips_focused_total: AtomicU64,
+    checkpoint_send_attempts_total: AtomicU64,
+    checkpoint_send_failures_total: AtomicU64,
+    checkpoint_loop_read_lock_wait_nanos_total: AtomicU64,
+    checkpoint_send_nanos_total: AtomicU64,
+    events_received_total: AtomicU64,
+    events_forwarded_session_total: AtomicU64,
+    events_forwarded_global_total: AtomicU64,
+    event_clone_ops_total: AtomicU64,
+    event_dispatch_nanos_total: AtomicU64,
+    done_events_total: AtomicU64,
+    crashed_events_total: AtomicU64,
+    session_receiver_count_last: AtomicU64,
+    global_receiver_count_last: AtomicU64,
+}
+
+impl SessionPerfCounters {
+    fn snapshot(&self, session_id: RuntimeSessionId) -> WorkerManagerPerfSessionSnapshot {
+        WorkerManagerPerfSessionSnapshot {
+            session_id,
+            checkpoint_ticks_total: self.checkpoint_ticks_total.load(Ordering::Relaxed),
+            checkpoint_skips_focused_total: self
+                .checkpoint_skips_focused_total
+                .load(Ordering::Relaxed),
+            checkpoint_send_attempts_total: self
+                .checkpoint_send_attempts_total
+                .load(Ordering::Relaxed),
+            checkpoint_send_failures_total: self
+                .checkpoint_send_failures_total
+                .load(Ordering::Relaxed),
+            checkpoint_loop_read_lock_wait_nanos_total: self
+                .checkpoint_loop_read_lock_wait_nanos_total
+                .load(Ordering::Relaxed),
+            checkpoint_send_nanos_total: self.checkpoint_send_nanos_total.load(Ordering::Relaxed),
+            events_received_total: self.events_received_total.load(Ordering::Relaxed),
+            events_forwarded_session_total: self
+                .events_forwarded_session_total
+                .load(Ordering::Relaxed),
+            events_forwarded_global_total: self
+                .events_forwarded_global_total
+                .load(Ordering::Relaxed),
+            event_clone_ops_total: self.event_clone_ops_total.load(Ordering::Relaxed),
+            event_dispatch_nanos_total: self.event_dispatch_nanos_total.load(Ordering::Relaxed),
+            done_events_total: self.done_events_total.load(Ordering::Relaxed),
+            crashed_events_total: self.crashed_events_total.load(Ordering::Relaxed),
+            session_receiver_count_last: self.session_receiver_count_last.load(Ordering::Relaxed),
+            global_receiver_count_last: self.global_receiver_count_last.load(Ordering::Relaxed),
+        }
+    }
+}
+
+#[derive(Debug)]
+struct WorkerManagerPerfCounters {
+    enabled: bool,
+    started_at: std::time::Instant,
+    totals: SessionPerfCounters,
+    subscribe_session_calls_total: AtomicU64,
+    subscribe_global_calls_total: AtomicU64,
+    subscribe_session_failures_total: AtomicU64,
+    subscriber_lagged_errors_session_total: AtomicU64,
+    subscriber_lagged_errors_global_total: AtomicU64,
+    subscriber_closed_session_total: AtomicU64,
+    subscriber_closed_global_total: AtomicU64,
+}
+
+impl WorkerManagerPerfCounters {
+    fn new(enabled: bool) -> Self {
+        Self {
+            enabled,
+            started_at: std::time::Instant::now(),
+            totals: SessionPerfCounters::default(),
+            subscribe_session_calls_total: AtomicU64::new(0),
+            subscribe_global_calls_total: AtomicU64::new(0),
+            subscribe_session_failures_total: AtomicU64::new(0),
+            subscriber_lagged_errors_session_total: AtomicU64::new(0),
+            subscriber_lagged_errors_global_total: AtomicU64::new(0),
+            subscriber_closed_session_total: AtomicU64::new(0),
+            subscriber_closed_global_total: AtomicU64::new(0),
+        }
+    }
+
+    fn maybe_add(counter: &AtomicU64, enabled: bool, amount: u64) {
+        if enabled && amount != 0 {
+            counter.fetch_add(amount, Ordering::Relaxed);
+        }
+    }
+
+    fn maybe_inc(counter: &AtomicU64, enabled: bool) {
+        if enabled {
+            counter.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    fn new_session(&self) -> Arc<SessionPerfCounters> {
+        Arc::new(SessionPerfCounters::default())
+    }
+
+    fn capture_totals(&self) -> WorkerManagerPerfTotals {
+        WorkerManagerPerfTotals {
+            checkpoint_ticks_total: self.totals.checkpoint_ticks_total.load(Ordering::Relaxed),
+            checkpoint_skips_focused_total: self
+                .totals
+                .checkpoint_skips_focused_total
+                .load(Ordering::Relaxed),
+            checkpoint_send_attempts_total: self
+                .totals
+                .checkpoint_send_attempts_total
+                .load(Ordering::Relaxed),
+            checkpoint_send_failures_total: self
+                .totals
+                .checkpoint_send_failures_total
+                .load(Ordering::Relaxed),
+            checkpoint_loop_read_lock_wait_nanos_total: self
+                .totals
+                .checkpoint_loop_read_lock_wait_nanos_total
+                .load(Ordering::Relaxed),
+            checkpoint_send_nanos_total: self
+                .totals
+                .checkpoint_send_nanos_total
+                .load(Ordering::Relaxed),
+            events_received_total: self.totals.events_received_total.load(Ordering::Relaxed),
+            events_forwarded_session_total: self
+                .totals
+                .events_forwarded_session_total
+                .load(Ordering::Relaxed),
+            events_forwarded_global_total: self
+                .totals
+                .events_forwarded_global_total
+                .load(Ordering::Relaxed),
+            event_clone_ops_total: self.totals.event_clone_ops_total.load(Ordering::Relaxed),
+            event_dispatch_nanos_total: self
+                .totals
+                .event_dispatch_nanos_total
+                .load(Ordering::Relaxed),
+            done_events_total: self.totals.done_events_total.load(Ordering::Relaxed),
+            crashed_events_total: self.totals.crashed_events_total.load(Ordering::Relaxed),
+            session_receiver_count_last: self
+                .totals
+                .session_receiver_count_last
+                .load(Ordering::Relaxed),
+            global_receiver_count_last: self
+                .totals
+                .global_receiver_count_last
+                .load(Ordering::Relaxed),
+            subscribe_session_calls_total: self
+                .subscribe_session_calls_total
+                .load(Ordering::Relaxed),
+            subscribe_global_calls_total: self.subscribe_global_calls_total.load(Ordering::Relaxed),
+            subscribe_session_failures_total: self
+                .subscribe_session_failures_total
+                .load(Ordering::Relaxed),
+            subscriber_lagged_errors_session_total: self
+                .subscriber_lagged_errors_session_total
+                .load(Ordering::Relaxed),
+            subscriber_lagged_errors_global_total: self
+                .subscriber_lagged_errors_global_total
+                .load(Ordering::Relaxed),
+            subscriber_closed_session_total: self
+                .subscriber_closed_session_total
+                .load(Ordering::Relaxed),
+            subscriber_closed_global_total: self
+                .subscriber_closed_global_total
+                .load(Ordering::Relaxed),
+        }
+    }
+}
+
 pub struct SessionEventSubscription {
     receiver: broadcast::Receiver<BackendEvent>,
+    perf: Arc<WorkerManagerPerfCounters>,
 }
 
 pub struct WorkerManagerEventSubscription {
     receiver: broadcast::Receiver<WorkerManagerEvent>,
+    perf: Arc<WorkerManagerPerfCounters>,
 }
 
 struct ManagedSession {
     handle: SessionHandle,
     status: ManagedSessionStatus,
     visibility: SessionVisibility,
+    perf: Arc<SessionPerfCounters>,
     event_tx: Option<broadcast::Sender<BackendEvent>>,
     event_task: Option<JoinHandle<()>>,
     checkpoint_task: Option<JoinHandle<()>>,
@@ -95,6 +327,7 @@ pub struct WorkerManager {
     sessions: Arc<RwLock<HashMap<RuntimeSessionId, SessionEntry>>>,
     global_event_tx: broadcast::Sender<WorkerManagerEvent>,
     config: WorkerManagerConfig,
+    perf: Arc<WorkerManagerPerfCounters>,
 }
 
 impl WorkerManager {
@@ -103,12 +336,14 @@ impl WorkerManager {
     }
 
     pub fn with_config(backend: Arc<dyn WorkerBackend>, config: WorkerManagerConfig) -> Self {
+        let perf = Arc::new(WorkerManagerPerfCounters::new(config.perf_metrics_enabled));
         let (global_event_tx, _) = broadcast::channel(config.global_event_buffer.max(1));
         Self {
             backend,
             sessions: Arc::new(RwLock::new(HashMap::new())),
             global_event_tx,
             config,
+            perf,
         }
     }
 
@@ -118,6 +353,27 @@ impl WorkerManager {
 
     pub fn backend_capabilities(&self) -> BackendCapabilities {
         self.backend.capabilities()
+    }
+
+    pub async fn perf_snapshot(&self) -> WorkerManagerPerfSnapshot {
+        let sessions = self.sessions.read().await;
+        let mut session_snapshots = sessions
+            .iter()
+            .filter_map(|(session_id, entry)| match entry {
+                SessionEntry::Managed(session) => Some(session.perf.snapshot(session_id.clone())),
+                SessionEntry::Starting => None,
+            })
+            .collect::<Vec<_>>();
+        session_snapshots
+            .sort_by(|left, right| left.session_id.as_str().cmp(right.session_id.as_str()));
+
+        WorkerManagerPerfSnapshot {
+            metrics_enabled: self.perf.enabled,
+            captured_at_monotonic_nanos: saturating_nanos_u64(self.perf.started_at.elapsed()),
+            session_count: sessions.len(),
+            totals: self.perf.capture_totals(),
+            sessions: session_snapshots,
+        }
     }
 
     pub async fn spawn(&self, spec: SpawnSpec) -> RuntimeResult<SessionHandle> {
@@ -159,6 +415,7 @@ impl WorkerManager {
         };
 
         let (event_tx, _) = broadcast::channel(self.config.session_event_buffer.max(1));
+        let session_perf = self.perf.new_session();
         if let Err(error) = self
             .install_session(
                 session_id.clone(),
@@ -166,6 +423,7 @@ impl WorkerManager {
                     handle: handle.clone(),
                     status: ManagedSessionStatus::Running,
                     visibility: SessionVisibility::Background,
+                    perf: Arc::clone(&session_perf),
                     event_tx: Some(event_tx.clone()),
                     event_task: None,
                     checkpoint_task: None,
@@ -184,6 +442,8 @@ impl WorkerManager {
             stream,
             event_tx,
             self.global_event_tx.clone(),
+            Arc::clone(&self.perf),
+            Arc::clone(&session_perf),
         );
         let checkpoint_task = self.periodic_checkpoint_prompt().map(|(interval, prompt)| {
             Self::spawn_periodic_checkpoint_task(
@@ -192,6 +452,8 @@ impl WorkerManager {
                 handle.clone(),
                 interval,
                 prompt,
+                Arc::clone(&self.perf),
+                Arc::clone(&session_perf),
             )
         });
 
@@ -270,14 +532,28 @@ impl WorkerManager {
         &self,
         session_id: &RuntimeSessionId,
     ) -> RuntimeResult<SessionEventSubscription> {
+        WorkerManagerPerfCounters::maybe_inc(
+            &self.perf.subscribe_session_calls_total,
+            self.perf.enabled,
+        );
         let sessions = self.sessions.read().await;
         match sessions.get(session_id) {
-            Some(SessionEntry::Starting) => Err(RuntimeError::Process(format!(
-                "worker session is still starting: {}",
-                session_id.as_str()
-            ))),
+            Some(SessionEntry::Starting) => {
+                WorkerManagerPerfCounters::maybe_inc(
+                    &self.perf.subscribe_session_failures_total,
+                    self.perf.enabled,
+                );
+                Err(RuntimeError::Process(format!(
+                    "worker session is still starting: {}",
+                    session_id.as_str()
+                )))
+            }
             Some(SessionEntry::Managed(session)) => {
                 let event_tx = session.event_tx.as_ref().ok_or_else(|| {
+                    WorkerManagerPerfCounters::maybe_inc(
+                        &self.perf.subscribe_session_failures_total,
+                        self.perf.enabled,
+                    );
                     RuntimeError::Process(format!(
                         "worker session output stream is closed: {}",
                         session_id.as_str()
@@ -285,17 +561,29 @@ impl WorkerManager {
                 })?;
                 Ok(SessionEventSubscription {
                     receiver: event_tx.subscribe(),
+                    perf: Arc::clone(&self.perf),
                 })
             }
-            None => Err(RuntimeError::SessionNotFound(
-                session_id.as_str().to_owned(),
-            )),
+            None => {
+                WorkerManagerPerfCounters::maybe_inc(
+                    &self.perf.subscribe_session_failures_total,
+                    self.perf.enabled,
+                );
+                Err(RuntimeError::SessionNotFound(
+                    session_id.as_str().to_owned(),
+                ))
+            }
         }
     }
 
     pub fn subscribe_all(&self) -> WorkerManagerEventSubscription {
+        WorkerManagerPerfCounters::maybe_inc(
+            &self.perf.subscribe_global_calls_total,
+            self.perf.enabled,
+        );
         WorkerManagerEventSubscription {
             receiver: self.global_event_tx.subscribe(),
+            perf: Arc::clone(&self.perf),
         }
     }
 
@@ -396,24 +684,112 @@ impl WorkerManager {
         mut stream: WorkerEventStream,
         event_tx: broadcast::Sender<BackendEvent>,
         global_event_tx: broadcast::Sender<WorkerManagerEvent>,
+        manager_perf: Arc<WorkerManagerPerfCounters>,
+        session_perf: Arc<SessionPerfCounters>,
     ) -> JoinHandle<()> {
         tokio::spawn(async move {
             loop {
                 match stream.next_event().await {
                     Ok(Some(event)) => {
+                        WorkerManagerPerfCounters::maybe_inc(
+                            &session_perf.events_received_total,
+                            manager_perf.enabled,
+                        );
+                        WorkerManagerPerfCounters::maybe_inc(
+                            &manager_perf.totals.events_received_total,
+                            manager_perf.enabled,
+                        );
+
+                        let dispatch_started = std::time::Instant::now();
                         let terminal_status = match &event {
                             BackendEvent::Done(_) => Some(ManagedSessionStatus::Done),
                             BackendEvent::Crashed(_) => Some(ManagedSessionStatus::Crashed),
                             _ => None,
                         };
 
+                        let session_receivers = event_tx.receiver_count() as u64;
+                        let global_receivers = global_event_tx.receiver_count() as u64;
+                        session_perf
+                            .session_receiver_count_last
+                            .store(session_receivers, Ordering::Relaxed);
+                        session_perf
+                            .global_receiver_count_last
+                            .store(global_receivers, Ordering::Relaxed);
+                        manager_perf
+                            .totals
+                            .session_receiver_count_last
+                            .store(session_receivers, Ordering::Relaxed);
+                        manager_perf
+                            .totals
+                            .global_receiver_count_last
+                            .store(global_receivers, Ordering::Relaxed);
+
+                        WorkerManagerPerfCounters::maybe_inc(
+                            &session_perf.event_clone_ops_total,
+                            manager_perf.enabled,
+                        );
+                        WorkerManagerPerfCounters::maybe_inc(
+                            &manager_perf.totals.event_clone_ops_total,
+                            manager_perf.enabled,
+                        );
                         let _ = event_tx.send(event.clone());
+                        WorkerManagerPerfCounters::maybe_inc(
+                            &session_perf.events_forwarded_session_total,
+                            manager_perf.enabled,
+                        );
+                        WorkerManagerPerfCounters::maybe_inc(
+                            &manager_perf.totals.events_forwarded_session_total,
+                            manager_perf.enabled,
+                        );
                         let _ = global_event_tx.send(WorkerManagerEvent {
                             session_id: session_id.clone(),
                             event,
                         });
+                        WorkerManagerPerfCounters::maybe_inc(
+                            &session_perf.events_forwarded_global_total,
+                            manager_perf.enabled,
+                        );
+                        WorkerManagerPerfCounters::maybe_inc(
+                            &manager_perf.totals.events_forwarded_global_total,
+                            manager_perf.enabled,
+                        );
+
+                        let dispatch_nanos = saturating_nanos_u64(dispatch_started.elapsed());
+                        WorkerManagerPerfCounters::maybe_add(
+                            &session_perf.event_dispatch_nanos_total,
+                            manager_perf.enabled,
+                            dispatch_nanos,
+                        );
+                        WorkerManagerPerfCounters::maybe_add(
+                            &manager_perf.totals.event_dispatch_nanos_total,
+                            manager_perf.enabled,
+                            dispatch_nanos,
+                        );
 
                         if let Some(status) = terminal_status {
+                            match status {
+                                ManagedSessionStatus::Done => {
+                                    WorkerManagerPerfCounters::maybe_inc(
+                                        &session_perf.done_events_total,
+                                        manager_perf.enabled,
+                                    );
+                                    WorkerManagerPerfCounters::maybe_inc(
+                                        &manager_perf.totals.done_events_total,
+                                        manager_perf.enabled,
+                                    );
+                                }
+                                ManagedSessionStatus::Crashed => {
+                                    WorkerManagerPerfCounters::maybe_inc(
+                                        &session_perf.crashed_events_total,
+                                        manager_perf.enabled,
+                                    );
+                                    WorkerManagerPerfCounters::maybe_inc(
+                                        &manager_perf.totals.crashed_events_total,
+                                        manager_perf.enabled,
+                                    );
+                                }
+                                _ => {}
+                            }
                             Self::mark_session_finished(&sessions, &session_id, status).await;
                             break;
                         }
@@ -425,6 +801,14 @@ impl WorkerManager {
                             session_id: session_id.clone(),
                             event: done_event,
                         });
+                        WorkerManagerPerfCounters::maybe_inc(
+                            &session_perf.done_events_total,
+                            manager_perf.enabled,
+                        );
+                        WorkerManagerPerfCounters::maybe_inc(
+                            &manager_perf.totals.done_events_total,
+                            manager_perf.enabled,
+                        );
                         Self::mark_session_finished(
                             &sessions,
                             &session_id,
@@ -442,6 +826,14 @@ impl WorkerManager {
                             session_id: session_id.clone(),
                             event: crashed_event,
                         });
+                        WorkerManagerPerfCounters::maybe_inc(
+                            &session_perf.crashed_events_total,
+                            manager_perf.enabled,
+                        );
+                        WorkerManagerPerfCounters::maybe_inc(
+                            &manager_perf.totals.crashed_events_total,
+                            manager_perf.enabled,
+                        );
                         Self::mark_session_finished(
                             &sessions,
                             &session_id,
@@ -483,6 +875,8 @@ impl WorkerManager {
         handle: SessionHandle,
         interval: Duration,
         prompt: Vec<u8>,
+        manager_perf: Arc<WorkerManagerPerfCounters>,
+        session_perf: Arc<SessionPerfCounters>,
     ) -> JoinHandle<()> {
         tokio::spawn(async move {
             let mut ticker = tokio::time::interval(interval);
@@ -491,9 +885,31 @@ impl WorkerManager {
 
             loop {
                 ticker.tick().await;
+                WorkerManagerPerfCounters::maybe_inc(
+                    &session_perf.checkpoint_ticks_total,
+                    manager_perf.enabled,
+                );
+                WorkerManagerPerfCounters::maybe_inc(
+                    &manager_perf.totals.checkpoint_ticks_total,
+                    manager_perf.enabled,
+                );
 
                 let visibility = {
+                    let wait_started = std::time::Instant::now();
                     let sessions = sessions.read().await;
+                    let wait_nanos = saturating_nanos_u64(wait_started.elapsed());
+                    WorkerManagerPerfCounters::maybe_add(
+                        &session_perf.checkpoint_loop_read_lock_wait_nanos_total,
+                        manager_perf.enabled,
+                        wait_nanos,
+                    );
+                    WorkerManagerPerfCounters::maybe_add(
+                        &manager_perf
+                            .totals
+                            .checkpoint_loop_read_lock_wait_nanos_total,
+                        manager_perf.enabled,
+                        wait_nanos,
+                    );
                     match sessions.get(&handle.session_id) {
                         Some(SessionEntry::Managed(session))
                             if session.status == ManagedSessionStatus::Running =>
@@ -507,10 +923,48 @@ impl WorkerManager {
                     break;
                 };
                 if visibility == SessionVisibility::Focused {
+                    WorkerManagerPerfCounters::maybe_inc(
+                        &session_perf.checkpoint_skips_focused_total,
+                        manager_perf.enabled,
+                    );
+                    WorkerManagerPerfCounters::maybe_inc(
+                        &manager_perf.totals.checkpoint_skips_focused_total,
+                        manager_perf.enabled,
+                    );
                     continue;
                 }
 
-                if backend.send_input(&handle, &prompt).await.is_err() {
+                WorkerManagerPerfCounters::maybe_inc(
+                    &session_perf.checkpoint_send_attempts_total,
+                    manager_perf.enabled,
+                );
+                WorkerManagerPerfCounters::maybe_inc(
+                    &manager_perf.totals.checkpoint_send_attempts_total,
+                    manager_perf.enabled,
+                );
+                let send_started = std::time::Instant::now();
+                let send_result = backend.send_input(&handle, &prompt).await;
+                let send_nanos = saturating_nanos_u64(send_started.elapsed());
+                WorkerManagerPerfCounters::maybe_add(
+                    &session_perf.checkpoint_send_nanos_total,
+                    manager_perf.enabled,
+                    send_nanos,
+                );
+                WorkerManagerPerfCounters::maybe_add(
+                    &manager_perf.totals.checkpoint_send_nanos_total,
+                    manager_perf.enabled,
+                    send_nanos,
+                );
+
+                if send_result.is_err() {
+                    WorkerManagerPerfCounters::maybe_inc(
+                        &session_perf.checkpoint_send_failures_total,
+                        manager_perf.enabled,
+                    );
+                    WorkerManagerPerfCounters::maybe_inc(
+                        &manager_perf.totals.checkpoint_send_failures_total,
+                        manager_perf.enabled,
+                    );
                     break;
                 }
             }
@@ -605,10 +1059,22 @@ impl SessionEventSubscription {
     pub async fn next_event(&mut self) -> RuntimeResult<Option<BackendEvent>> {
         match self.receiver.recv().await {
             Ok(event) => Ok(Some(event)),
-            Err(broadcast::error::RecvError::Closed) => Ok(None),
-            Err(broadcast::error::RecvError::Lagged(skipped)) => Err(RuntimeError::Process(
-                format!("worker session subscriber lagged; dropped {skipped} events"),
-            )),
+            Err(broadcast::error::RecvError::Closed) => {
+                WorkerManagerPerfCounters::maybe_inc(
+                    &self.perf.subscriber_closed_session_total,
+                    self.perf.enabled,
+                );
+                Ok(None)
+            }
+            Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                WorkerManagerPerfCounters::maybe_inc(
+                    &self.perf.subscriber_lagged_errors_session_total,
+                    self.perf.enabled,
+                );
+                Err(RuntimeError::Process(format!(
+                    "worker session subscriber lagged; dropped {skipped} events"
+                )))
+            }
         }
     }
 }
@@ -617,12 +1083,32 @@ impl WorkerManagerEventSubscription {
     pub async fn next_event(&mut self) -> RuntimeResult<Option<WorkerManagerEvent>> {
         match self.receiver.recv().await {
             Ok(event) => Ok(Some(event)),
-            Err(broadcast::error::RecvError::Closed) => Ok(None),
-            Err(broadcast::error::RecvError::Lagged(skipped)) => Err(RuntimeError::Process(
-                format!("worker manager subscriber lagged; dropped {skipped} events"),
-            )),
+            Err(broadcast::error::RecvError::Closed) => {
+                WorkerManagerPerfCounters::maybe_inc(
+                    &self.perf.subscriber_closed_global_total,
+                    self.perf.enabled,
+                );
+                Ok(None)
+            }
+            Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                WorkerManagerPerfCounters::maybe_inc(
+                    &self.perf.subscriber_lagged_errors_global_total,
+                    self.perf.enabled,
+                );
+                Err(RuntimeError::Process(format!(
+                    "worker manager subscriber lagged; dropped {skipped} events"
+                )))
+            }
         }
     }
+}
+
+fn saturating_nanos_u64(duration: Duration) -> u64 {
+    duration
+        .as_nanos()
+        .min(u128::from(u64::MAX))
+        .try_into()
+        .unwrap_or(u64::MAX)
 }
 
 #[cfg(test)]
@@ -631,6 +1117,7 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use async_trait::async_trait;
+    use serde_json::json;
     use tokio::sync::mpsc;
     use tokio::time::{sleep, timeout};
 
@@ -935,6 +1422,43 @@ mod tests {
         })
         .await
         .expect("stable checkpoint prompt window timeout");
+    }
+
+    async fn kill_all_sessions(manager: &WorkerManager, session_ids: &[RuntimeSessionId]) {
+        for session_id in session_ids {
+            let _ = manager.kill(session_id).await;
+        }
+    }
+
+    fn print_perf_metrics_line(
+        scenario: &str,
+        session_count: usize,
+        elapsed: Duration,
+        snapshot: &WorkerManagerPerfSnapshot,
+    ) {
+        let metrics = json!({
+            "scenario": scenario,
+            "session_count": session_count,
+            "elapsed_ms": elapsed.as_millis(),
+            "session_count_snapshot": snapshot.session_count,
+            "checkpoint_ticks_total": snapshot.totals.checkpoint_ticks_total,
+            "checkpoint_send_attempts_total": snapshot.totals.checkpoint_send_attempts_total,
+            "checkpoint_send_failures_total": snapshot.totals.checkpoint_send_failures_total,
+            "events_received_total": snapshot.totals.events_received_total,
+            "events_forwarded_session_total": snapshot.totals.events_forwarded_session_total,
+            "events_forwarded_global_total": snapshot.totals.events_forwarded_global_total,
+            "event_dispatch_nanos_total": snapshot.totals.event_dispatch_nanos_total,
+            "subscribe_session_calls_total": snapshot.totals.subscribe_session_calls_total,
+            "subscribe_global_calls_total": snapshot.totals.subscribe_global_calls_total,
+            "subscriber_lagged_errors_session_total": snapshot.totals.subscriber_lagged_errors_session_total,
+            "subscriber_lagged_errors_global_total": snapshot.totals.subscriber_lagged_errors_global_total,
+            "checkpoint_ticks_per_session": if session_count > 0 {
+                snapshot.totals.checkpoint_ticks_total / session_count as u64
+            } else {
+                0
+            },
+        });
+        println!("{metrics}");
     }
 
     fn make_manager(backend: Arc<MockBackend>, config: WorkerManagerConfig) -> WorkerManager {
@@ -1345,5 +1869,169 @@ mod tests {
         );
 
         wait_for_status(&manager, &session_id, ManagedSessionStatus::Done).await;
+    }
+
+    #[tokio::test]
+    async fn worker_manager_perf_snapshot_tracks_checkpoint_and_event_counters() {
+        let backend = Arc::new(MockBackend::default());
+        let manager = make_manager(
+            Arc::clone(&backend),
+            WorkerManagerConfig {
+                checkpoint_prompt_interval: Some(Duration::from_millis(30)),
+                ..WorkerManagerConfig::default()
+            },
+        );
+        let session_id = RuntimeSessionId::new("wm-perf-snapshot");
+        manager
+            .spawn(spawn_spec(session_id.as_str()))
+            .await
+            .expect("spawn session");
+        let _global = manager.subscribe_all();
+
+        backend.emit_event(
+            &session_id,
+            BackendEvent::Output(BackendOutputEvent {
+                stream: BackendOutputStream::Stdout,
+                bytes: b"perf".to_vec(),
+            }),
+        );
+        sleep(Duration::from_millis(80)).await;
+
+        let snapshot = manager.perf_snapshot().await;
+        assert!(snapshot.metrics_enabled);
+        assert!(snapshot.totals.events_received_total >= 1);
+        assert!(snapshot.totals.events_forwarded_global_total >= 1);
+        assert!(snapshot.totals.checkpoint_ticks_total >= 1);
+        assert_eq!(snapshot.sessions.len(), 1);
+
+        let _ = manager.kill(&session_id).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "perf investigation scenario"]
+    async fn perf_checkpoint_overhead_10_20_30_sessions() {
+        let session_counts = [10_usize, 20, 30];
+        for session_count in session_counts {
+            let backend = Arc::new(MockBackend::default());
+            let manager = make_manager(
+                Arc::clone(&backend),
+                WorkerManagerConfig {
+                    checkpoint_prompt_interval: Some(Duration::from_millis(25)),
+                    ..WorkerManagerConfig::default()
+                },
+            );
+            let mut session_ids = Vec::with_capacity(session_count);
+            for index in 0..session_count {
+                let session_id =
+                    RuntimeSessionId::new(format!("wm-perf-ckpt-{session_count}-{index}"));
+                manager
+                    .spawn(spawn_spec(session_id.as_str()))
+                    .await
+                    .expect("spawn session");
+                session_ids.push(session_id);
+            }
+
+            let started = std::time::Instant::now();
+            sleep(Duration::from_millis(180)).await;
+            let elapsed = started.elapsed();
+            let snapshot = manager.perf_snapshot().await;
+            print_perf_metrics_line("checkpoint_overhead", session_count, elapsed, &snapshot);
+            assert!(snapshot.totals.checkpoint_ticks_total > 0);
+
+            kill_all_sessions(&manager, &session_ids).await;
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "perf investigation scenario"]
+    async fn perf_fanout_overhead_10_20_30_sessions() {
+        let session_counts = [10_usize, 20, 30];
+        for session_count in session_counts {
+            let backend = Arc::new(MockBackend::default());
+            let manager = make_manager(
+                Arc::clone(&backend),
+                WorkerManagerConfig {
+                    checkpoint_prompt_interval: None,
+                    ..WorkerManagerConfig::default()
+                },
+            );
+            let mut session_ids = Vec::with_capacity(session_count);
+            for index in 0..session_count {
+                let session_id =
+                    RuntimeSessionId::new(format!("wm-perf-fanout-{session_count}-{index}"));
+                manager
+                    .spawn(spawn_spec(session_id.as_str()))
+                    .await
+                    .expect("spawn session");
+                session_ids.push(session_id);
+            }
+            let _global = manager.subscribe_all();
+
+            let started = std::time::Instant::now();
+            for _ in 0..40 {
+                for session_id in &session_ids {
+                    backend.emit_event(
+                        session_id,
+                        BackendEvent::Output(BackendOutputEvent {
+                            stream: BackendOutputStream::Stdout,
+                            bytes: b"fanout".to_vec(),
+                        }),
+                    );
+                }
+            }
+            sleep(Duration::from_millis(120)).await;
+            let elapsed = started.elapsed();
+            let snapshot = manager.perf_snapshot().await;
+            print_perf_metrics_line("fanout_overhead", session_count, elapsed, &snapshot);
+            assert!(snapshot.totals.events_received_total > 0);
+            assert!(snapshot.totals.events_forwarded_session_total > 0);
+            assert!(snapshot.totals.events_forwarded_global_total > 0);
+
+            kill_all_sessions(&manager, &session_ids).await;
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "perf investigation scenario"]
+    async fn perf_subscription_lifecycle_churn() {
+        let session_count = 10_usize;
+        let backend = Arc::new(MockBackend::default());
+        let manager = make_manager(
+            Arc::clone(&backend),
+            WorkerManagerConfig {
+                checkpoint_prompt_interval: None,
+                session_event_buffer: 8,
+                ..WorkerManagerConfig::default()
+            },
+        );
+        let mut session_ids = Vec::with_capacity(session_count);
+        for index in 0..session_count {
+            let session_id = RuntimeSessionId::new(format!("wm-perf-sub-{index}"));
+            manager
+                .spawn(spawn_spec(session_id.as_str()))
+                .await
+                .expect("spawn session");
+            session_ids.push(session_id);
+        }
+
+        let started = std::time::Instant::now();
+        for _ in 0..50 {
+            let _global = manager.subscribe_all();
+            for session_id in &session_ids {
+                let _session_sub = manager.subscribe(session_id).await.expect("subscribe");
+            }
+        }
+        let elapsed = started.elapsed();
+        let snapshot = manager.perf_snapshot().await;
+        print_perf_metrics_line(
+            "subscription_lifecycle_churn",
+            session_count,
+            elapsed,
+            &snapshot,
+        );
+        assert!(snapshot.totals.subscribe_session_calls_total >= (session_count * 50) as u64);
+        assert!(snapshot.totals.subscribe_global_calls_total >= 50);
+
+        kill_all_sessions(&manager, &session_ids).await;
     }
 }
