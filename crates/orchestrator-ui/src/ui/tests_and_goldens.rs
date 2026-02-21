@@ -4867,6 +4867,28 @@ mod tests {
     }
 
     #[test]
+    fn session_info_sidebar_title_prefers_ticket_title() {
+        let projection = session_info_projection();
+        let session_id = WorkerSessionId::new("sess-inspector");
+
+        assert_eq!(
+            session_info_sidebar_title(&projection, &session_id),
+            "Add right sidebar"
+        );
+    }
+
+    #[test]
+    fn session_info_sidebar_title_falls_back_without_ticket_metadata() {
+        let projection = inspector_projection();
+        let session_id = WorkerSessionId::new("sess-inspector");
+
+        assert_eq!(
+            session_info_sidebar_title(&projection, &session_id),
+            "session info"
+        );
+    }
+
+    #[test]
     fn session_info_open_inbox_strips_status_prefixes_from_title_display() {
         let mut projection = session_info_projection();
         projection
@@ -5231,59 +5253,92 @@ mod tests {
         assert!(published[0].title.contains("harness is fixing"));
     }
 
-    #[tokio::test]
-    async fn confirm_review_merge_enqueues_provider_merge_request() {
-        #[derive(Default)]
-        struct RecordingMergeQueueProvider {
-            merge_requests: Arc<Mutex<Vec<WorkerSessionId>>>,
-            started: Arc<Mutex<u32>>,
-        }
-
-        #[async_trait]
-        impl TicketPickerProvider for RecordingMergeQueueProvider {
-            async fn list_unfinished_tickets(&self) -> Result<Vec<TicketSummary>, CoreError> {
-                Ok(Vec::new())
-            }
-
-            async fn start_or_resume_ticket(
-                &self,
-                _ticket: TicketSummary,
-                _repository_override: Option<PathBuf>,
-            ) -> Result<SelectedTicketFlowResult, CoreError> {
-                Err(CoreError::DependencyUnavailable("not used".to_owned()))
-            }
-
-            async fn create_ticket_from_brief(
-                &self,
-                _request: CreateTicketFromPickerRequest,
-            ) -> Result<TicketSummary, CoreError> {
-                Err(CoreError::DependencyUnavailable("not used".to_owned()))
-            }
-
-            async fn reload_projection(&self) -> Result<ProjectionState, CoreError> {
-                Ok(ProjectionState::default())
-            }
-
-            async fn start_pr_pipeline_polling(
-                &self,
-                _sender: mpsc::Sender<MergeQueueEvent>,
-            ) -> Result<(), CoreError> {
-                let mut guard = self.started.lock().expect("started lock");
-                *guard += 1;
-                Ok(())
-            }
-
-            async fn enqueue_pr_merge(&self, session_id: WorkerSessionId) -> Result<(), CoreError> {
-                self.merge_requests
-                    .lock()
-                    .expect("merge request lock")
-                    .push(session_id);
-                Ok(())
-            }
-        }
-
+    #[test]
+    fn merge_reconcile_event_trigger_runs_for_queued_idle_review_session_without_pr_artifact() {
         let projection = review_projection_without_pr_artifact();
-        let provider = Arc::new(RecordingMergeQueueProvider::default());
+        let dispatcher = Arc::new(TestSupervisorDispatcher::new(Vec::new()));
+        let mut shell_state = UiShellState::new_with_integrations(
+            "ready".to_owned(),
+            projection,
+            None,
+            Some(dispatcher),
+            None,
+        );
+        let session_id = WorkerSessionId::new("sess-review");
+        shell_state.domain.session_runtime.insert(
+            session_id.clone(),
+            SessionRuntimeProjection { is_working: false },
+        );
+        let now = Instant::now();
+        shell_state.merge_pending_sessions.insert(session_id.clone());
+        shell_state.merge_poll_states.insert(
+            session_id.clone(),
+            MergeReconcilePollState {
+                next_poll_at: now - Duration::from_millis(1),
+                backoff: Duration::from_secs(15),
+                consecutive_failures: 0,
+                last_poll_started_at: None,
+                last_api_error_signature: None,
+            },
+        );
+
+        let _ = shell_state.mark_reconcile_dirty_for_session(&session_id);
+        assert!(shell_state.enqueue_event_driven_reconciles());
+
+        assert_eq!(shell_state.merge_queue.len(), 1);
+        let request = shell_state
+            .merge_queue
+            .front()
+            .expect("merge reconcile request queued");
+        assert_eq!(request.kind, MergeQueueCommandKind::Reconcile);
+        assert_eq!(request.session_id, session_id);
+    }
+
+    #[test]
+    fn merge_reconcile_poll_skips_queued_session_when_active() {
+        let projection = review_projection_without_pr_artifact();
+        let dispatcher = Arc::new(TestSupervisorDispatcher::new(Vec::new()));
+        let mut shell_state = UiShellState::new_with_integrations(
+            "ready".to_owned(),
+            projection,
+            None,
+            Some(dispatcher),
+            None,
+            None,
+        );
+        let session_id = WorkerSessionId::new("sess-review");
+        let now = Instant::now();
+        shell_state.merge_pending_sessions.insert(session_id.clone());
+        shell_state
+            .terminal_session_states
+            .entry(session_id.clone())
+            .or_default()
+            .turn_active = true;
+        shell_state.merge_poll_states.insert(
+            session_id,
+            MergeReconcilePollState {
+                next_poll_at: now - Duration::from_millis(1),
+                backoff: Duration::from_secs(15),
+                consecutive_failures: 0,
+                last_poll_started_at: None,
+                last_api_error_signature: None,
+            },
+        );
+
+        shell_state.enqueue_merge_reconcile_polls_at(Instant::now());
+
+        assert!(shell_state.merge_queue.is_empty());
+    }
+
+    #[tokio::test]
+    async fn merge_reconcile_ci_status_error_notification_is_deduplicated() {
+        let mut projection = sample_projection(true);
+        projection
+            .work_items
+            .get_mut(&WorkItemId::new("wi-1"))
+            .expect("work item")
+            .workflow_state = Some(WorkflowState::InReview);
+        let provider = Arc::new(RecordingTicketPickerProvider::default());
         let mut shell_state = UiShellState::new_with_integrations(
             "ready".to_owned(),
             projection,
@@ -5292,19 +5347,33 @@ mod tests {
             Some(provider.clone()),
             None,
         );
-        shell_state.review_merge_confirm_session = Some(WorkerSessionId::new("sess-review"));
+        let session_id = WorkerSessionId::new("sess-1");
+        let (sender, receiver) = mpsc::channel(4);
+        shell_state.merge_event_receiver = Some(receiver);
 
-        shell_state.confirm_review_merge();
+        for _ in 0..2 {
+            sender
+                .try_send(MergeQueueEvent::Completed {
+                    session_id: session_id.clone(),
+                    kind: MergeQueueCommandKind::Reconcile,
+                    completed: false,
+                    merge_conflict: false,
+                    base_branch: Some("main".to_owned()),
+                    head_branch: Some("ap/AP-281-reconcile".to_owned()),
+                    ci_checks: Vec::new(),
+                    ci_failures: Vec::new(),
+                    ci_has_failures: false,
+                    ci_status_error: Some("github timeout".to_owned()),
+                    error: None,
+                })
+                .expect("send merge event");
+            shell_state.poll_merge_queue_events();
+        }
+
         tokio::time::sleep(Duration::from_millis(20)).await;
-
-        let merge_requests = provider
-            .merge_requests
-            .lock()
-            .expect("merge request lock")
-            .clone();
-        assert_eq!(merge_requests.len(), 1);
-        assert_eq!(merge_requests[0].as_str(), "sess-review");
-        assert_eq!(*provider.started.lock().expect("started lock"), 1);
+        let published = provider.published_inbox_requests();
+        assert_eq!(published.len(), 1);
+        assert_eq!(published[0].coalesce_key, "error-merge-reconcile-api-error");
     }
 
     #[test]
@@ -6678,6 +6747,7 @@ mod tests {
         let mut prompt = NeedsInputComposerState::new(
             "prompt-1".to_owned(),
             vec![question],
+            vec![None],
             true,
             false,
         );

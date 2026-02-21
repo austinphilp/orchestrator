@@ -44,7 +44,7 @@ ticketing_provider = "linear"
 harness_provider = "codex"
 
 [supervisor]
-model = "openai/gpt-4o-mini"
+model = "c/claude-haiku-4.5"
 openrouter_base_url = "https://openrouter.ai/api/v1"
 
 [linear]

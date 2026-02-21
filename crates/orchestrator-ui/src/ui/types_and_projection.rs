@@ -52,7 +52,7 @@ const TERMINAL_STREAM_EVENT_CHANNEL_CAPACITY: usize = 128;
 const TICKET_PICKER_PRIORITY_STATES_DEFAULT: &[&str] =
     &["In Progress", "Final Approval", "Todo", "Backlog"];
 const DEFAULT_UI_THEME: &str = "nord";
-const DEFAULT_SUPERVISOR_MODEL: &str = "openai/gpt-4o-mini";
+const DEFAULT_SUPERVISOR_MODEL: &str = "c/claude-haiku-4.5";
 const DEFAULT_BACKGROUND_SESSION_REFRESH_SECS: u64 = 15;
 const DEFAULT_TRANSCRIPT_LINE_LIMIT: usize = 100;
 const MIN_BACKGROUND_SESSION_REFRESH_SECS: u64 = 2;
@@ -60,6 +60,15 @@ const MAX_BACKGROUND_SESSION_REFRESH_SECS: u64 = 15;
 const DEFAULT_SESSION_INFO_BACKGROUND_REFRESH_SECS: u64 = 15;
 const MIN_SESSION_INFO_BACKGROUND_REFRESH_SECS: u64 = 15;
 const RECONCILE_SPARSE_FALLBACK_INTERVAL: Duration = Duration::from_secs(120);
+const DEFAULT_MERGE_POLL_BASE_INTERVAL_SECS: u64 = 15;
+const MIN_MERGE_POLL_BASE_INTERVAL_SECS: u64 = 5;
+const MAX_MERGE_POLL_BASE_INTERVAL_SECS: u64 = 300;
+const DEFAULT_MERGE_POLL_MAX_BACKOFF_SECS: u64 = 120;
+const MIN_MERGE_POLL_MAX_BACKOFF_SECS: u64 = 15;
+const MAX_MERGE_POLL_MAX_BACKOFF_SECS: u64 = 900;
+const DEFAULT_MERGE_POLL_BACKOFF_MULTIPLIER: u64 = 2;
+const MIN_MERGE_POLL_BACKOFF_MULTIPLIER: u64 = 1;
+const MAX_MERGE_POLL_BACKOFF_MULTIPLIER: u64 = 8;
 const MERGE_REQUEST_RATE_LIMIT: Duration = Duration::from_secs(1);
 const APPROVAL_RECONCILE_POLL_INTERVAL: Duration = Duration::from_secs(15);
 const TICKET_PICKER_CREATE_REFRESH_INTERVAL: Duration = Duration::from_secs(1);
@@ -76,6 +85,9 @@ struct UiRuntimeConfig {
     transcript_line_limit: usize,
     background_session_refresh_secs: u64,
     session_info_background_refresh_secs: u64,
+    merge_poll_base_interval_secs: u64,
+    merge_poll_max_backoff_secs: u64,
+    merge_poll_backoff_multiplier: u64,
 }
 
 impl Default for UiRuntimeConfig {
@@ -90,6 +102,9 @@ impl Default for UiRuntimeConfig {
             transcript_line_limit: DEFAULT_TRANSCRIPT_LINE_LIMIT,
             background_session_refresh_secs: DEFAULT_BACKGROUND_SESSION_REFRESH_SECS,
             session_info_background_refresh_secs: DEFAULT_SESSION_INFO_BACKGROUND_REFRESH_SECS,
+            merge_poll_base_interval_secs: DEFAULT_MERGE_POLL_BASE_INTERVAL_SECS,
+            merge_poll_max_backoff_secs: DEFAULT_MERGE_POLL_MAX_BACKOFF_SECS,
+            merge_poll_backoff_multiplier: DEFAULT_MERGE_POLL_BACKOFF_MULTIPLIER,
         }
     }
 }
@@ -107,6 +122,9 @@ pub fn set_ui_runtime_config(
     transcript_line_limit: usize,
     background_session_refresh_secs: u64,
     session_info_background_refresh_secs: u64,
+    merge_poll_base_interval_secs: u64,
+    merge_poll_max_backoff_secs: u64,
+    merge_poll_backoff_multiplier: u64,
 ) {
     let mut parsed_states = ticket_picker_priority_states
         .into_iter()
@@ -146,6 +164,18 @@ pub fn set_ui_runtime_config(
             ),
         session_info_background_refresh_secs: session_info_background_refresh_secs
             .max(MIN_SESSION_INFO_BACKGROUND_REFRESH_SECS),
+        merge_poll_base_interval_secs: merge_poll_base_interval_secs.clamp(
+            MIN_MERGE_POLL_BASE_INTERVAL_SECS,
+            MAX_MERGE_POLL_BASE_INTERVAL_SECS,
+        ),
+        merge_poll_max_backoff_secs: merge_poll_max_backoff_secs.clamp(
+            MIN_MERGE_POLL_MAX_BACKOFF_SECS,
+            MAX_MERGE_POLL_MAX_BACKOFF_SECS,
+        ),
+        merge_poll_backoff_multiplier: merge_poll_backoff_multiplier.clamp(
+            MIN_MERGE_POLL_BACKOFF_MULTIPLIER,
+            MAX_MERGE_POLL_BACKOFF_MULTIPLIER,
+        ),
     };
 
     if let Ok(mut guard) = ui_runtime_config_store().write() {
@@ -206,6 +236,41 @@ fn session_info_background_refresh_interval_config_value() -> Duration {
         .unwrap_or(DEFAULT_SESSION_INFO_BACKGROUND_REFRESH_SECS)
         .max(MIN_SESSION_INFO_BACKGROUND_REFRESH_SECS);
     Duration::from_secs(secs)
+}
+
+fn merge_poll_base_interval_config_value() -> Duration {
+    let secs = ui_runtime_config_store()
+        .read()
+        .map(|guard| guard.merge_poll_base_interval_secs)
+        .unwrap_or(DEFAULT_MERGE_POLL_BASE_INTERVAL_SECS)
+        .clamp(
+            MIN_MERGE_POLL_BASE_INTERVAL_SECS,
+            MAX_MERGE_POLL_BASE_INTERVAL_SECS,
+        );
+    Duration::from_secs(secs)
+}
+
+fn merge_poll_max_backoff_config_value() -> Duration {
+    let secs = ui_runtime_config_store()
+        .read()
+        .map(|guard| guard.merge_poll_max_backoff_secs)
+        .unwrap_or(DEFAULT_MERGE_POLL_MAX_BACKOFF_SECS)
+        .clamp(
+            MIN_MERGE_POLL_MAX_BACKOFF_SECS,
+            MAX_MERGE_POLL_MAX_BACKOFF_SECS,
+        );
+    Duration::from_secs(secs)
+}
+
+fn merge_poll_backoff_multiplier_config_value() -> u64 {
+    ui_runtime_config_store()
+        .read()
+        .map(|guard| guard.merge_poll_backoff_multiplier)
+        .unwrap_or(DEFAULT_MERGE_POLL_BACKOFF_MULTIPLIER)
+        .clamp(
+            MIN_MERGE_POLL_BACKOFF_MULTIPLIER,
+            MAX_MERGE_POLL_BACKOFF_MULTIPLIER,
+        )
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -731,6 +796,31 @@ fn session_display_labels(domain: &ProjectionState, session_id: &WorkerSessionId
     SessionDisplayLabels {
         full_label,
         compact_label,
+    }
+}
+
+fn session_info_sidebar_title(domain: &ProjectionState, session_id: &WorkerSessionId) -> String {
+    let Some(work_item_id) = domain
+        .sessions
+        .get(session_id)
+        .and_then(|session| session.work_item_id.as_ref())
+    else {
+        return "session info".to_owned();
+    };
+    let Some(work_item) = domain.work_items.get(work_item_id) else {
+        return "session info".to_owned();
+    };
+    let Some(ticket_id) = work_item.ticket_id.as_ref() else {
+        return "session info".to_owned();
+    };
+    let Some(metadata) = latest_ticket_metadata(domain, ticket_id) else {
+        return "session info".to_owned();
+    };
+    let title = metadata.title.trim();
+    if title.is_empty() {
+        "session info".to_owned()
+    } else {
+        compact_focus_card_text(title)
     }
 }
 

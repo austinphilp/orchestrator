@@ -85,6 +85,7 @@ struct UiShellState {
     review_reconcile_eligible_sessions: HashSet<WorkerSessionId>,
     approval_reconcile_candidate_sessions: HashSet<WorkerSessionId>,
     merge_pending_sessions: HashSet<WorkerSessionId>,
+    merge_poll_states: HashMap<WorkerSessionId, MergeReconcilePollState>,
     merge_finalizing_sessions: HashSet<WorkerSessionId>,
     review_sync_instructions_sent: HashSet<WorkerSessionId>,
     dirty_review_reconcile_sessions: HashSet<WorkerSessionId>,
@@ -102,6 +103,28 @@ struct UiShellState {
     incremental_domain_event_applies: u64,
     attention_projection_recomputes: u64,
     last_projection_perf_log_at: Option<Instant>,
+}
+
+#[derive(Debug, Clone)]
+struct MergeReconcilePollState {
+    next_poll_at: Instant,
+    backoff: Duration,
+    consecutive_failures: u32,
+    last_poll_started_at: Option<Instant>,
+    last_api_error_signature: Option<String>,
+}
+
+impl MergeReconcilePollState {
+    fn new(now: Instant) -> Self {
+        let base = merge_poll_base_interval_config_value();
+        Self {
+            next_poll_at: now + base,
+            backoff: base,
+            consecutive_failures: 0,
+            last_poll_started_at: None,
+            last_api_error_signature: None,
+        }
+    }
 }
 
 impl UiShellState {
@@ -214,6 +237,7 @@ impl UiShellState {
             review_reconcile_eligible_sessions: HashSet::new(),
             approval_reconcile_candidate_sessions: HashSet::new(),
             merge_pending_sessions: HashSet::new(),
+            merge_poll_states: HashMap::new(),
             merge_finalizing_sessions: HashSet::new(),
             review_sync_instructions_sent: HashSet::new(),
             dirty_review_reconcile_sessions: HashSet::new(),
@@ -2254,6 +2278,59 @@ impl UiShellState {
         had_events || changed
     }
 
+    fn reset_merge_poll_backoff(&mut self, session_id: &WorkerSessionId, now: Instant) {
+        let base = merge_poll_base_interval_config_value();
+        let state = self
+            .merge_poll_states
+            .entry(session_id.clone())
+            .or_insert_with(|| MergeReconcilePollState::new(now));
+        if state.consecutive_failures > 0 {
+            tracing::info!(
+                session_id = session_id.as_str(),
+                consecutive_failures = state.consecutive_failures,
+                "merge reconcile polling recovered; resetting backoff"
+            );
+        }
+        state.consecutive_failures = 0;
+        state.backoff = base;
+        state.next_poll_at = now + base;
+        state.last_poll_started_at = Some(now);
+        state.last_api_error_signature = None;
+    }
+
+    fn register_merge_poll_failure(
+        &mut self,
+        session_id: &WorkerSessionId,
+        signature: &str,
+        now: Instant,
+    ) -> bool {
+        let base = merge_poll_base_interval_config_value();
+        let max_backoff = merge_poll_max_backoff_config_value();
+        let multiplier = merge_poll_backoff_multiplier_config_value().max(1);
+        let state = self
+            .merge_poll_states
+            .entry(session_id.clone())
+            .or_insert_with(|| MergeReconcilePollState::new(now));
+        state.consecutive_failures = state.consecutive_failures.saturating_add(1);
+        let mut next_secs = state.backoff.as_secs().max(base.as_secs());
+        next_secs = next_secs.saturating_mul(multiplier).max(base.as_secs());
+        let max_secs = max_backoff.as_secs().max(base.as_secs());
+        state.backoff = Duration::from_secs(next_secs.min(max_secs));
+        state.next_poll_at = now + state.backoff;
+        state.last_poll_started_at = Some(now);
+        let should_notify = state.last_api_error_signature.as_deref() != Some(signature);
+        if should_notify {
+            state.last_api_error_signature = Some(signature.to_owned());
+        }
+        tracing::warn!(
+            session_id = session_id.as_str(),
+            consecutive_failures = state.consecutive_failures,
+            backoff_secs = state.backoff.as_secs(),
+            "merge reconcile polling failed; scheduling retry with backoff"
+        );
+        should_notify
+    }
+
     fn poll_merge_queue_events(&mut self) -> bool {
         let mut events = Vec::new();
         {
@@ -2361,14 +2438,20 @@ impl UiShellState {
                     }
 
                     if let Some(error) = error {
-                        self.publish_error_for_session(&session_id, "merge-queue", error.as_str());
-                        if kind == MergeQueueCommandKind::Merge {
-                            self.merge_pending_sessions.remove(&session_id);
+                        let signature =
+                            format!("merge-queue:{}", sanitize_terminal_display_text(error.as_str()));
+                        let should_notify = self.register_merge_poll_failure(
+                            &session_id,
+                            signature.as_str(),
+                            Instant::now(),
+                        );
+                        if should_notify {
+                            self.publish_error_for_session(&session_id, "merge-queue", error.as_str());
+                            self.status_warning = Some(format!(
+                                "workflow merge check failed: {}",
+                                sanitize_terminal_display_text(error.as_str())
+                            ));
                         }
-                        self.status_warning = Some(format!(
-                            "workflow merge check failed: {}",
-                            sanitize_terminal_display_text(error.as_str())
-                        ));
                         continue;
                     }
 
@@ -2415,6 +2498,34 @@ impl UiShellState {
                         view.last_merge_conflict_signature = None;
                     }
 
+                    if let Some(message) = ci_status_error
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|entry| !entry.is_empty())
+                    {
+                        let signature = format!("ci-status:{message}");
+                        let should_notify = self.register_merge_poll_failure(
+                            &session_id,
+                            signature.as_str(),
+                            Instant::now(),
+                        );
+                        if should_notify {
+                            self.publish_error_for_session(
+                                &session_id,
+                                "merge-reconcile-api-error",
+                                message,
+                            );
+                            let labels = session_display_labels(&self.domain, &session_id);
+                            self.status_warning = Some(format!(
+                                "merge reconcile status unavailable for {}: {}",
+                                labels.compact_label,
+                                compact_focus_card_text(message)
+                            ));
+                        }
+                    } else {
+                        self.reset_merge_poll_backoff(&session_id, Instant::now());
+                    }
+
                     if completed {
                         self.publish_inbox_for_session(
                             &session_id,
@@ -2426,6 +2537,7 @@ impl UiShellState {
                             "merge-completed",
                         );
                         self.merge_pending_sessions.remove(&session_id);
+                        self.merge_poll_states.remove(&session_id);
                         if let Some(session) = self.domain.sessions.get_mut(&session_id) {
                             session.status = Some(WorkerSessionStatus::Done);
                         }
@@ -2652,6 +2764,7 @@ impl UiShellState {
             changed |= self.dirty_review_reconcile_sessions.remove(&session_id);
             changed |= self.review_sync_instructions_sent.remove(&session_id);
             changed |= self.merge_pending_sessions.remove(&session_id);
+            changed |= self.merge_poll_states.remove(&session_id).is_some();
             changed |= self.merge_finalizing_sessions.remove(&session_id);
             changed |= self.session_ci_status_cache.remove(&session_id).is_some();
             changed |= self.ci_failure_signatures_notified.remove(&session_id).is_some();
@@ -2713,13 +2826,67 @@ impl UiShellState {
             return changed;
         }
 
+        let active_review_sessions = self
+            .review_reconcile_eligible_sessions
+            .iter()
+            .cloned()
+            .collect::<HashSet<_>>();
+        let pending_len_before = self.merge_pending_sessions.len();
+        self.merge_pending_sessions
+            .retain(|session_id| active_review_sessions.contains(session_id));
+        changed |= self.merge_pending_sessions.len() != pending_len_before;
+        let poll_len_before = self.merge_poll_states.len();
+        self.merge_poll_states
+            .retain(|session_id, _| self.merge_pending_sessions.contains(session_id));
+        changed |= self.merge_poll_states.len() != poll_len_before;
+        let finalizing_len_before = self.merge_finalizing_sessions.len();
+        self.merge_finalizing_sessions
+            .retain(|session_id| active_review_sessions.contains(session_id));
+        changed |= self.merge_finalizing_sessions.len() != finalizing_len_before;
+        let ci_cache_len_before = self.session_ci_status_cache.len();
+        self.session_ci_status_cache
+            .retain(|session_id, _| active_review_sessions.contains(session_id));
+        changed |= self.session_ci_status_cache.len() != ci_cache_len_before;
+        let ci_notified_len_before = self.ci_failure_signatures_notified.len();
+        self.ci_failure_signatures_notified
+            .retain(|session_id, _| active_review_sessions.contains(session_id));
+        changed |= self.ci_failure_signatures_notified.len() != ci_notified_len_before;
+        let queue_len_before = self.merge_queue.len();
+        self.merge_queue
+            .retain(|request| active_review_sessions.contains(&request.session_id));
+        changed |= self.merge_queue.len() != queue_len_before;
+
         let review_dirty = self.dirty_review_reconcile_sessions.drain().collect::<Vec<_>>();
+        let now = Instant::now();
         for session_id in review_dirty {
             if !self.review_reconcile_eligible_sessions.contains(&session_id) {
                 continue;
             }
             self.publish_review_idle_inbox_for_session(&session_id);
             changed |= self.ensure_review_sync_instruction(&session_id);
+            if !self.merge_pending_sessions.contains(&session_id) {
+                continue;
+            }
+            if self.session_is_actively_working(&session_id) {
+                tracing::debug!(
+                    session_id = session_id.as_str(),
+                    "skipping merge reconcile poll because session is actively working"
+                );
+                continue;
+            }
+            let state = self
+                .merge_poll_states
+                .entry(session_id.clone())
+                .or_insert_with(|| MergeReconcilePollState::new(now));
+            if now < state.next_poll_at {
+                tracing::debug!(
+                    session_id = session_id.as_str(),
+                    "skipping merge reconcile poll due to backoff window"
+                );
+                continue;
+            }
+            state.last_poll_started_at = Some(now);
+            state.next_poll_at = now + merge_poll_base_interval_config_value();
             changed |=
                 self.enqueue_merge_queue_request(session_id, MergeQueueCommandKind::Reconcile);
         }
@@ -2763,15 +2930,14 @@ impl UiShellState {
             changed = true;
             if self.supervisor_command_dispatcher.is_some() {
                 for session_id in self
-                    .review_reconcile_eligible_sessions
+                    .merge_pending_sessions
                     .iter()
                     .cloned()
                     .collect::<Vec<_>>()
                 {
-                    self.publish_review_idle_inbox_for_session(&session_id);
-                    changed |= self.ensure_review_sync_instruction(&session_id);
-                    changed |= self
-                        .enqueue_merge_queue_request(session_id, MergeQueueCommandKind::Reconcile);
+                    if self.review_reconcile_eligible_sessions.contains(&session_id) {
+                        changed |= self.mark_reconcile_dirty_for_session(&session_id);
+                    }
                 }
             }
         }
@@ -3444,6 +3610,7 @@ impl UiShellState {
                 self.session_info_summary_last_refresh_at.remove(&session_id);
                 self.terminal_session_streamed.remove(&session_id);
                 self.merge_pending_sessions.remove(&session_id);
+                self.merge_poll_states.remove(&session_id);
                 self.merge_finalizing_sessions.remove(&session_id);
                 self.review_sync_instructions_sent.remove(&session_id);
                 if self.active_terminal_session_id() == Some(&session_id) {
@@ -5378,30 +5545,16 @@ impl UiShellState {
         let Some(session_id) = self.review_merge_confirm_session.take() else {
             return;
         };
+        let now = Instant::now();
         self.merge_pending_sessions.insert(session_id.clone());
-        self.enqueue_pr_merge_request(session_id.clone());
+        self.merge_poll_states
+            .insert(session_id.clone(), MergeReconcilePollState::new(now));
+        let _ = self.enqueue_merge_queue_request(session_id.clone(), MergeQueueCommandKind::Merge);
         let labels = session_display_labels(&self.domain, &session_id);
         self.status_warning = Some(format!(
             "merge queued for review {}",
             labels.compact_label
         ));
-    }
-
-    fn enqueue_pr_merge_request(&mut self, session_id: WorkerSessionId) {
-        let Some(provider) = self.ticket_picker_provider.clone() else {
-            return;
-        };
-        match TokioHandle::try_current() {
-            Ok(runtime) => {
-                runtime.spawn(async move {
-                    let _ = provider.enqueue_pr_merge(session_id).await;
-                });
-            }
-            Err(_) => {
-                self.status_warning =
-                    Some("workflow merge unavailable: tokio runtime unavailable".to_owned());
-            }
-        }
     }
 
     fn refresh_which_key_overlay(&mut self) {

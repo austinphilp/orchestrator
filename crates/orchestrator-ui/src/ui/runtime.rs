@@ -319,9 +319,13 @@ impl Ui {
                                 shell_state.session_info_summary_cache_for(&session_id),
                                 shell_state.session_ci_status_cache_for(&session_id),
                             );
+                            let session_info_title =
+                                session_info_sidebar_title(&shell_state.domain, &session_id);
                             frame.render_widget(
                                 Paragraph::new(sidebar_text).block(
-                                    Block::default().title("session info").borders(Borders::ALL),
+                                    Block::default()
+                                        .title(session_info_title)
+                                        .borders(Borders::ALL),
                                 ),
                                 sidebar_area,
                             );
