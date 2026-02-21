@@ -105,7 +105,6 @@ fn default_linear_sync_states() -> Vec<String> {
 fn default_linear_workflow_state_map() -> Vec<WorkflowStateMapEntry> {
     vec![
         WorkflowStateMapEntry::new("Implementing", "In Progress"),
-        WorkflowStateMapEntry::new("Testing", "In Progress"),
         WorkflowStateMapEntry::new("PRDrafted", "In Review"),
         WorkflowStateMapEntry::new("AwaitingYourReview", "In Review"),
         WorkflowStateMapEntry::new("ReadyForReview", "In Review"),

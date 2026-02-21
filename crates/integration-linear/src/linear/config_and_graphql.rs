@@ -234,10 +234,6 @@ impl Default for LinearWorkflowSyncConfig {
                     linear_state: "In Progress".to_owned(),
                 },
                 WorkflowStateMapping {
-                    workflow_state: WorkflowState::Testing,
-                    linear_state: "In Progress".to_owned(),
-                },
-                WorkflowStateMapping {
                     workflow_state: WorkflowState::PRDrafted,
                     linear_state: "In Review".to_owned(),
                 },
@@ -443,7 +439,7 @@ fn parse_workflow_state_name(value: &str) -> Result<WorkflowState, CoreError> {
         "new" => Ok(WorkflowState::New),
         "planning" => Ok(WorkflowState::Planning),
         "implementing" => Ok(WorkflowState::Implementing),
-        "testing" => Ok(WorkflowState::Testing),
+        "testing" => Ok(WorkflowState::Implementing),
         "prdrafted" => Ok(WorkflowState::PRDrafted),
         "awaitingyourreview" => Ok(WorkflowState::AwaitingYourReview),
         "readyforreview" => Ok(WorkflowState::ReadyForReview),
@@ -470,7 +466,6 @@ fn workflow_state_key(value: &WorkflowState) -> String {
         WorkflowState::New => "new",
         WorkflowState::Planning => "planning",
         WorkflowState::Implementing => "implementing",
-        WorkflowState::Testing => "testing",
         WorkflowState::PRDrafted => "prdrafted",
         WorkflowState::AwaitingYourReview => "awaitingyourreview",
         WorkflowState::ReadyForReview => "readyforreview",

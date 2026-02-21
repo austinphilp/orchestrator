@@ -504,7 +504,6 @@ mod tests {
         assert!(!is_past_planning_state(&WorkflowState::New));
         assert!(!is_past_planning_state(&WorkflowState::Planning));
         assert!(is_past_planning_state(&WorkflowState::Implementing));
-        assert!(is_past_planning_state(&WorkflowState::Testing));
         assert!(is_past_planning_state(&WorkflowState::PRDrafted));
     }
 
@@ -518,7 +517,7 @@ mod tests {
 
     #[test]
     fn post_planning_nudge_requests_exit_from_planning_mode_when_interrupted() {
-        let nudge = startup_rehydrate_nudge(&WorkflowState::Testing, true);
+        let nudge = startup_rehydrate_nudge(&WorkflowState::Implementing, true);
         assert!(nudge.contains("End planning mode now."));
         assert!(nudge.contains(STARTUP_RESUME_NUDGE));
     }
@@ -532,7 +531,7 @@ mod tests {
 
     #[test]
     fn startup_rehydrate_nudge_omits_interruption_message_when_not_working() {
-        let post_planning = startup_rehydrate_nudge(&WorkflowState::Testing, false);
+        let post_planning = startup_rehydrate_nudge(&WorkflowState::Implementing, false);
         assert!(post_planning.contains("End planning mode now."));
         assert!(!post_planning.contains(STARTUP_RESUME_NUDGE));
 

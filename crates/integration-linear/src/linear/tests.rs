@@ -1435,7 +1435,7 @@ mod tests {
         provider
             .sync_workflow_transition(LinearWorkflowTransitionSyncRequest {
                 ticket_id: TicketId::from("linear:issue-903"),
-                from: WorkflowState::Testing,
+                from: WorkflowState::Implementing,
                 to: WorkflowState::ReadyForReview,
                 summary: Some("All tests are green; ready for reviewer handoff.".to_owned()),
                 pull_request_url: Some("https://github.com/example/repo/pull/903".to_owned()),
@@ -1515,6 +1515,17 @@ mod tests {
     }
 
     #[test]
+    fn parse_workflow_state_map_normalizes_legacy_testing_to_implementing() {
+        let mappings = parse_workflow_state_map_settings(&[WorkflowStateMapSetting {
+            workflow_state: "testing".to_owned(),
+            linear_state: "In Progress".to_owned(),
+        }])
+        .expect("legacy testing mapping should parse");
+        assert_eq!(mappings.len(), 1);
+        assert_eq!(mappings[0].workflow_state, WorkflowState::Implementing);
+    }
+
+    #[test]
     fn parse_workflow_state_map_rejects_duplicate_workflow_states() {
         let error = parse_workflow_state_map_settings(&[
             WorkflowStateMapSetting {
@@ -1527,6 +1538,22 @@ mod tests {
             },
         ])
         .expect_err("duplicate workflow states should fail");
+        assert!(error.to_string().contains("duplicate mapping"));
+    }
+
+    #[test]
+    fn parse_workflow_state_map_rejects_legacy_testing_and_implementing_duplicates() {
+        let error = parse_workflow_state_map_settings(&[
+            WorkflowStateMapSetting {
+                workflow_state: "Implementing".to_owned(),
+                linear_state: "In Progress".to_owned(),
+            },
+            WorkflowStateMapSetting {
+                workflow_state: "testing".to_owned(),
+                linear_state: "In Progress".to_owned(),
+            },
+        ])
+        .expect_err("testing and implementing should be treated as duplicates");
         assert!(error.to_string().contains("duplicate mapping"));
     }
 

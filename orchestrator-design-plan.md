@@ -421,7 +421,6 @@ This is a **workflow FSM** (finite state machine) operating per WorkItem.
 - `New`
 - `Planning`
 - `Implementing`
-- `Testing`
 - `PRDrafted`
 - `AwaitingYourReview`
 - `ReadyForReview`

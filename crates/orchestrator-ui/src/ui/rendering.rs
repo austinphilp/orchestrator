@@ -1068,7 +1068,7 @@ fn session_state_group_for_session(
         .and_then(|work_item| work_item.workflow_state.as_ref());
     match workflow_state {
         Some(WorkflowState::New | WorkflowState::Planning) => SessionStateGroup::Planning,
-        Some(WorkflowState::Implementing | WorkflowState::Testing | WorkflowState::PRDrafted) => {
+        Some(WorkflowState::Implementing | WorkflowState::PRDrafted) => {
             SessionStateGroup::Implementation
         }
         Some(
@@ -1095,7 +1095,7 @@ fn session_turn_is_running(
 fn workflow_state_to_badge_label(state: &WorkflowState) -> String {
     match state {
         WorkflowState::New | WorkflowState::Planning => "planning",
-        WorkflowState::Implementing | WorkflowState::Testing | WorkflowState::PRDrafted => {
+        WorkflowState::Implementing | WorkflowState::PRDrafted => {
             "implementation"
         }
         WorkflowState::AwaitingYourReview
