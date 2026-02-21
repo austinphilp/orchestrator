@@ -1016,6 +1016,78 @@ mod tests {
         projection
     }
 
+    fn selection_focus_projection() -> ProjectionState {
+        let mut projection = ProjectionState::default();
+        let rows = vec![
+            (
+                "wi-decision",
+                "inbox-decision",
+                Some("sess-decision"),
+                InboxItemKind::NeedsDecision,
+                "Choose release approach",
+            ),
+            (
+                "wi-approval",
+                "inbox-approval",
+                Some("sess-approval"),
+                InboxItemKind::NeedsApproval,
+                "Approve release candidate",
+            ),
+            (
+                "wi-fyi",
+                "inbox-fyi",
+                None,
+                InboxItemKind::FYI,
+                "Background update",
+            ),
+        ];
+
+        for (work_item_raw, inbox_item_raw, session_raw, kind, title) in rows {
+            let work_item_id = WorkItemId::new(work_item_raw);
+            let inbox_item_id = InboxItemId::new(inbox_item_raw);
+            let session_id = session_raw.map(WorkerSessionId::new);
+
+            projection.work_items.insert(
+                work_item_id.clone(),
+                WorkItemProjection {
+                    id: work_item_id.clone(),
+                    ticket_id: None,
+                    project_id: None,
+                    workflow_state: Some(WorkflowState::Implementing),
+                    session_id: session_id.clone(),
+                    worktree_id: None,
+                    inbox_items: vec![inbox_item_id.clone()],
+                    artifacts: vec![],
+                },
+            );
+
+            if let Some(session_id) = session_id {
+                projection.sessions.insert(
+                    session_id.clone(),
+                    SessionProjection {
+                        id: session_id,
+                        work_item_id: Some(work_item_id.clone()),
+                        status: Some(WorkerSessionStatus::Running),
+                        latest_checkpoint: None,
+                    },
+                );
+            }
+
+            projection.inbox_items.insert(
+                inbox_item_id.clone(),
+                InboxItemProjection {
+                    id: inbox_item_id,
+                    work_item_id,
+                    kind,
+                    title: title.to_owned(),
+                    resolved: false,
+                },
+            );
+        }
+
+        projection
+    }
+
     fn sample_worktree_diff_content(additions: usize) -> String {
         let mut lines = vec![
             "diff --git a/src/demo.rs b/src/demo.rs".to_owned(),
@@ -6365,6 +6437,79 @@ mod tests {
             .map(|state| state.output_scroll_line)
             .unwrap_or(0);
         assert_eq!(after_up_scroll, before_scroll);
+    }
+
+    #[test]
+    fn selecting_needs_decision_item_focuses_terminal_pane() {
+        let mut shell_state = UiShellState::new("ready".to_owned(), selection_focus_projection());
+        let rows = shell_state.ui_state().inbox_rows;
+        let decision_index = rows
+            .iter()
+            .position(|row| row.kind == InboxItemKind::NeedsDecision)
+            .expect("needs decision row");
+
+        shell_state.set_selection(Some(decision_index), &rows);
+
+        assert!(shell_state.is_right_pane_focused());
+        assert!(matches!(
+            shell_state.view_stack.active_center(),
+            Some(CenterView::TerminalView { session_id }) if session_id.as_str() == "sess-decision"
+        ));
+        assert_eq!(shell_state.mode, UiMode::Terminal);
+    }
+
+    #[test]
+    fn selecting_non_decision_item_focuses_sessions_and_highlights_session() {
+        let mut shell_state = UiShellState::new("ready".to_owned(), selection_focus_projection());
+        let rows = shell_state.ui_state().inbox_rows;
+        let approval_index = rows
+            .iter()
+            .position(|row| row.kind == InboxItemKind::NeedsApproval)
+            .expect("needs approval row");
+
+        shell_state.set_selection(Some(approval_index), &rows);
+
+        assert!(shell_state.is_left_pane_focused());
+        assert!(shell_state.is_sessions_sidebar_focused());
+        assert_eq!(shell_state.mode, UiMode::Normal);
+        assert_eq!(
+            shell_state
+                .selected_session_id_for_panel()
+                .as_ref()
+                .map(|id| id.as_str()),
+            Some("sess-approval")
+        );
+    }
+
+    #[test]
+    fn selecting_non_decision_item_without_session_keeps_prior_session_highlight() {
+        let mut shell_state = UiShellState::new("ready".to_owned(), selection_focus_projection());
+        let rows = shell_state.ui_state().inbox_rows;
+        let approval_index = rows
+            .iter()
+            .position(|row| row.kind == InboxItemKind::NeedsApproval)
+            .expect("needs approval row");
+        let fyi_index = rows
+            .iter()
+            .position(|row| row.kind == InboxItemKind::FYI)
+            .expect("fyi row");
+
+        shell_state.set_selection(Some(approval_index), &rows);
+        shell_state.set_selection(Some(fyi_index), &rows);
+
+        assert!(shell_state.is_left_pane_focused());
+        assert!(shell_state.is_sessions_sidebar_focused());
+        assert_eq!(
+            shell_state
+                .selected_session_id_for_panel()
+                .as_ref()
+                .map(|id| id.as_str()),
+            Some("sess-approval")
+        );
+        assert!(!shell_state
+            .ui_state()
+            .status
+            .contains("selected inbox item has no active session"));
     }
 
     #[test]

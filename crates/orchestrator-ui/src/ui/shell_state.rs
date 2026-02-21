@@ -4272,7 +4272,32 @@ impl UiShellState {
         self.selected_inbox_item_id =
             valid_selected_index.map(|index| rows[index].inbox_item_id.clone());
         if self.selected_inbox_item_id.is_some() && self.selected_inbox_item_id != previous {
+            if let Some(index) = self.selected_inbox_index {
+                self.apply_selection_focus_policy(&rows[index]);
+            }
+        }
+    }
+
+    fn apply_selection_focus_policy(&mut self, selected_row: &UiInboxRow) {
+        if selected_row.kind == InboxItemKind::NeedsDecision {
             let _ = self.open_selected_inbox_output(false);
+            return;
+        }
+
+        self.pane_focus = PaneFocus::Left;
+        self.sidebar_focus = SidebarFocus::Sessions;
+        self.enter_normal_mode();
+
+        let Some(session_id) = selected_row.session_id.clone() else {
+            return;
+        };
+        if let Some(index) = self
+            .session_ids_for_navigation()
+            .iter()
+            .position(|candidate| candidate == &session_id)
+        {
+            self.selected_session_index = Some(index);
+            self.selected_session_id = Some(session_id);
         }
     }
 
