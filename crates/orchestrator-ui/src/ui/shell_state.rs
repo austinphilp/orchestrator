@@ -2431,6 +2431,101 @@ impl UiShellState {
             .extend(self.review_reconcile_eligible_sessions.iter().cloned());
     }
 
+    fn refresh_reconcile_eligibility_for_all_sessions(&mut self) -> bool {
+        let open_sessions = self
+            .domain
+            .sessions
+            .iter()
+            .filter_map(|(session_id, session)| {
+                if is_open_session_status(session.status.as_ref()) {
+                    Some(session_id.clone())
+                } else {
+                    None
+                }
+            })
+            .collect::<HashSet<_>>();
+
+        let mut changed = false;
+        let stale_review = self
+            .review_reconcile_eligible_sessions
+            .iter()
+            .filter(|session_id| !open_sessions.contains(*session_id))
+            .cloned()
+            .collect::<Vec<_>>();
+        for session_id in stale_review {
+            changed |= self.set_review_eligible(session_id, false);
+        }
+        let stale_approval = self
+            .approval_reconcile_candidate_sessions
+            .iter()
+            .filter(|session_id| !open_sessions.contains(*session_id))
+            .cloned()
+            .collect::<Vec<_>>();
+        for session_id in stale_approval {
+            changed |= self.set_approval_eligible(session_id, false);
+        }
+
+        for session_id in open_sessions {
+            changed |= self.refresh_reconcile_eligibility_for_session(&session_id);
+        }
+        changed
+    }
+
+    fn refresh_reconcile_eligibility_for_session(&mut self, session_id: &WorkerSessionId) -> bool {
+        let session_is_open = self
+            .domain
+            .sessions
+            .get(session_id)
+            .map(|session| is_open_session_status(session.status.as_ref()))
+            .unwrap_or(false);
+        if !session_is_open {
+            let mut changed = false;
+            changed |= self.set_approval_eligible(session_id.clone(), false);
+            changed |= self.set_review_eligible(session_id.clone(), false);
+            return changed;
+        }
+
+        let is_approval_eligible = matches!(
+            self.workflow_state_for_session(session_id),
+            Some(WorkflowState::Planning | WorkflowState::Implementing)
+        );
+        let is_review_eligible = self.session_is_in_review_stage(session_id);
+
+        let mut changed = false;
+        changed |= self.set_approval_eligible(session_id.clone(), is_approval_eligible);
+        changed |= self.set_review_eligible(session_id.clone(), is_review_eligible);
+        changed
+    }
+
+    fn set_approval_eligible(&mut self, session_id: WorkerSessionId, eligible: bool) -> bool {
+        if eligible {
+            self.approval_reconcile_candidate_sessions.insert(session_id)
+        } else {
+            let mut changed = self.approval_reconcile_candidate_sessions.remove(&session_id);
+            changed |= self.dirty_approval_reconcile_sessions.remove(&session_id);
+            changed
+        }
+    }
+
+    fn set_review_eligible(&mut self, session_id: WorkerSessionId, eligible: bool) -> bool {
+        if eligible {
+            self.review_reconcile_eligible_sessions.insert(session_id)
+        } else {
+            let mut changed = self.review_reconcile_eligible_sessions.remove(&session_id);
+            changed |= self.dirty_review_reconcile_sessions.remove(&session_id);
+            changed |= self.review_sync_instructions_sent.remove(&session_id);
+            changed |= self.merge_pending_sessions.remove(&session_id);
+            changed |= self.merge_finalizing_sessions.remove(&session_id);
+            changed |= self.session_ci_status_cache.remove(&session_id).is_some();
+            changed |= self.ci_failure_signatures_notified.remove(&session_id).is_some();
+            if let Some(view) = self.terminal_session_states.get_mut(&session_id) {
+                if view.last_merge_conflict_signature.take().is_some() {
+                    changed = true;
+                }
+            }
+            changed
+        }
+    }
     fn mark_reconcile_dirty_for_session(&mut self, session_id: &WorkerSessionId) -> bool {
         self.refresh_reconcile_eligibility_for_session(session_id);
         let mut changed = false;
@@ -2443,11 +2538,6 @@ impl UiShellState {
             changed |= self.dirty_review_reconcile_sessions.insert(session_id.clone());
         }
         changed
-    }
-
-    #[cfg(test)]
-    fn enqueue_merge_reconcile_polls(&mut self) -> bool {
-        self.enqueue_merge_reconcile_polls_at(Instant::now())
     }
 
     fn enqueue_merge_reconcile_polls_at(&mut self, _now: Instant) -> bool {
@@ -2631,102 +2721,6 @@ impl UiShellState {
                 )
             })
             .unwrap_or(false)
-    }
-
-    fn refresh_reconcile_eligibility_for_all_sessions(&mut self) -> bool {
-        let open_sessions = self
-            .domain
-            .sessions
-            .iter()
-            .filter_map(|(session_id, session)| {
-                if is_open_session_status(session.status.as_ref()) {
-                    Some(session_id.clone())
-                } else {
-                    None
-                }
-            })
-            .collect::<HashSet<_>>();
-
-        let mut changed = false;
-        let stale_review = self
-            .review_reconcile_eligible_sessions
-            .iter()
-            .filter(|session_id| !open_sessions.contains(*session_id))
-            .cloned()
-            .collect::<Vec<_>>();
-        for session_id in stale_review {
-            changed |= self.set_review_eligible(session_id, false);
-        }
-        let stale_approval = self
-            .approval_reconcile_candidate_sessions
-            .iter()
-            .filter(|session_id| !open_sessions.contains(*session_id))
-            .cloned()
-            .collect::<Vec<_>>();
-        for session_id in stale_approval {
-            changed |= self.set_approval_eligible(session_id, false);
-        }
-
-        for session_id in open_sessions {
-            changed |= self.refresh_reconcile_eligibility_for_session(&session_id);
-        }
-        changed
-    }
-
-    fn refresh_reconcile_eligibility_for_session(&mut self, session_id: &WorkerSessionId) -> bool {
-        let session_is_open = self
-            .domain
-            .sessions
-            .get(session_id)
-            .map(|session| is_open_session_status(session.status.as_ref()))
-            .unwrap_or(false);
-        if !session_is_open {
-            let mut changed = false;
-            changed |= self.set_approval_eligible(session_id.clone(), false);
-            changed |= self.set_review_eligible(session_id.clone(), false);
-            return changed;
-        }
-
-        let is_approval_eligible = matches!(
-            self.workflow_state_for_session(session_id),
-            Some(WorkflowState::Planning | WorkflowState::Implementing)
-        );
-        let is_review_eligible = self.session_is_in_review_stage(session_id);
-
-        let mut changed = false;
-        changed |= self.set_approval_eligible(session_id.clone(), is_approval_eligible);
-        changed |= self.set_review_eligible(session_id.clone(), is_review_eligible);
-        changed
-    }
-
-    fn set_approval_eligible(&mut self, session_id: WorkerSessionId, eligible: bool) -> bool {
-        if eligible {
-            self.approval_reconcile_candidate_sessions.insert(session_id)
-        } else {
-            let mut changed = self.approval_reconcile_candidate_sessions.remove(&session_id);
-            changed |= self.dirty_approval_reconcile_sessions.remove(&session_id);
-            changed
-        }
-    }
-
-    fn set_review_eligible(&mut self, session_id: WorkerSessionId, eligible: bool) -> bool {
-        if eligible {
-            self.review_reconcile_eligible_sessions.insert(session_id)
-        } else {
-            let mut changed = self.review_reconcile_eligible_sessions.remove(&session_id);
-            changed |= self.dirty_review_reconcile_sessions.remove(&session_id);
-            changed |= self.review_sync_instructions_sent.remove(&session_id);
-            changed |= self.merge_pending_sessions.remove(&session_id);
-            changed |= self.merge_finalizing_sessions.remove(&session_id);
-            changed |= self.session_ci_status_cache.remove(&session_id).is_some();
-            changed |= self.ci_failure_signatures_notified.remove(&session_id).is_some();
-            if let Some(view) = self.terminal_session_states.get_mut(&session_id) {
-                if view.last_merge_conflict_signature.take().is_some() {
-                    changed = true;
-                }
-            }
-            changed
-        }
     }
 
     fn rebuild_reconcile_eligibility_indexes(&mut self) {
