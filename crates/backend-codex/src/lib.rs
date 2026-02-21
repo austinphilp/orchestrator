@@ -117,6 +117,11 @@ impl CodexSession {
         self.set_collaboration_mode(self.default_collaboration_mode.clone());
     }
 
+    fn planning_mode_active(&self) -> bool {
+        let mode = self.collaboration_mode();
+        collaboration_mode_is_plan(mode.as_ref())
+    }
+
     fn record_event(&self, event: &BackendEvent) {
         if let Ok(mut history) = self.event_history.lock() {
             history.push_back(event.clone());
@@ -669,6 +674,14 @@ impl SessionLifecycle for CodexBackend {
                 .restore_pending_user_input_request(prompt_id.to_owned(), pending)
                 .await;
             return Err(error);
+        }
+        if session.planning_mode_active() {
+            session.exit_planning_mode();
+            emit_codex_meta_output(
+                &session,
+                "workflow",
+                "planning input complete; switched to default collaboration mode",
+            );
         }
         emit_codex_meta_output(&session, "tool-call", "tool user input submitted");
         Ok(())
@@ -1757,6 +1770,16 @@ fn disables_planning_mode(input_text: &str) -> bool {
         || normalized.contains(END_PLANNING_MODE_MARKER)
 }
 
+fn collaboration_mode_is_plan(mode: Option<&Value>) -> bool {
+    mode.and_then(|value| value.get("mode"))
+        .and_then(Value::as_str)
+        .is_some_and(|entry| {
+            entry
+                .trim()
+                .eq_ignore_ascii_case(PLAN_COLLABORATION_MODE_KIND)
+        })
+}
+
 fn is_collaboration_mode_error(error: &RuntimeError) -> bool {
     let message = error.to_string().to_ascii_lowercase();
     message.contains("collaborationmode")
@@ -1980,5 +2003,34 @@ mod tests {
         assert!(!disables_planning_mode(
             "Workflow transition approved: New -> Planning. Begin planning mode."
         ));
+    }
+
+    #[test]
+    fn collaboration_mode_plan_is_detected() {
+        assert!(collaboration_mode_is_plan(Some(&json!({
+            "mode": "plan",
+            "settings": {
+                "model": "gpt-5-codex"
+            }
+        }))));
+    }
+
+    #[test]
+    fn collaboration_mode_default_is_not_plan() {
+        assert!(!collaboration_mode_is_plan(Some(&json!({
+            "mode": "default",
+            "settings": {
+                "model": "gpt-5-codex"
+            }
+        }))));
+    }
+
+    #[test]
+    fn collaboration_mode_missing_mode_is_not_plan() {
+        assert!(!collaboration_mode_is_plan(Some(&json!({
+            "settings": {
+                "model": "gpt-5-codex"
+            }
+        }))));
     }
 }
