@@ -455,6 +455,115 @@ mod tests {
         projection
     }
 
+    fn workflow_auto_advance_projection() -> ProjectionState {
+        let mut projection = ProjectionState::default();
+        let rows = vec![
+            ("wi-1", "inbox-1", Some("sess-1")),
+            ("wi-2", "inbox-2", None),
+            ("wi-3", "inbox-3", Some("sess-3")),
+            ("wi-4", "inbox-4", None),
+        ];
+
+        for (work_item_raw, inbox_item_raw, session_raw) in rows {
+            let work_item_id = WorkItemId::new(work_item_raw);
+            let inbox_item_id = InboxItemId::new(inbox_item_raw);
+            let session_id = session_raw.map(WorkerSessionId::new);
+
+            projection.work_items.insert(
+                work_item_id.clone(),
+                WorkItemProjection {
+                    id: work_item_id.clone(),
+                    ticket_id: None,
+                    project_id: None,
+                    workflow_state: Some(WorkflowState::Implementing),
+                    session_id: session_id.clone(),
+                    worktree_id: None,
+                    inbox_items: vec![inbox_item_id.clone()],
+                    artifacts: vec![],
+                },
+            );
+
+            if let Some(session_id) = session_id {
+                projection.sessions.insert(
+                    session_id.clone(),
+                    SessionProjection {
+                        id: session_id,
+                        work_item_id: Some(work_item_id.clone()),
+                        status: Some(WorkerSessionStatus::Running),
+                        latest_checkpoint: None,
+                    },
+                );
+            }
+
+            projection.inbox_items.insert(
+                inbox_item_id.clone(),
+                InboxItemProjection {
+                    id: inbox_item_id,
+                    work_item_id,
+                    kind: InboxItemKind::NeedsApproval,
+                    title: format!("Item {inbox_item_raw}"),
+                    resolved: false,
+                },
+            );
+        }
+
+        projection
+    }
+
+    fn workflow_last_item_projection() -> ProjectionState {
+        let mut projection = ProjectionState::default();
+        let rows = vec![
+            ("wi-a", "inbox-a", Some("sess-a")),
+            ("wi-b", "inbox-b", None),
+            ("wi-c", "inbox-c", Some("sess-c")),
+        ];
+
+        for (work_item_raw, inbox_item_raw, session_raw) in rows {
+            let work_item_id = WorkItemId::new(work_item_raw);
+            let inbox_item_id = InboxItemId::new(inbox_item_raw);
+            let session_id = session_raw.map(WorkerSessionId::new);
+
+            projection.work_items.insert(
+                work_item_id.clone(),
+                WorkItemProjection {
+                    id: work_item_id.clone(),
+                    ticket_id: None,
+                    project_id: None,
+                    workflow_state: Some(WorkflowState::Implementing),
+                    session_id: session_id.clone(),
+                    worktree_id: None,
+                    inbox_items: vec![inbox_item_id.clone()],
+                    artifacts: vec![],
+                },
+            );
+
+            if let Some(session_id) = session_id {
+                projection.sessions.insert(
+                    session_id.clone(),
+                    SessionProjection {
+                        id: session_id,
+                        work_item_id: Some(work_item_id.clone()),
+                        status: Some(WorkerSessionStatus::Running),
+                        latest_checkpoint: None,
+                    },
+                );
+            }
+
+            projection.inbox_items.insert(
+                inbox_item_id.clone(),
+                InboxItemProjection {
+                    id: inbox_item_id,
+                    work_item_id,
+                    kind: InboxItemKind::NeedsApproval,
+                    title: format!("Item {inbox_item_raw}"),
+                    resolved: false,
+                },
+            );
+        }
+
+        projection
+    }
+
     fn sample_worktree_diff_content(additions: usize) -> String {
         let mut lines = vec![
             "diff --git a/src/demo.rs b/src/demo.rs".to_owned(),
@@ -4284,6 +4393,117 @@ mod tests {
                 .map(|item| item.resolved)
                 .unwrap_or(false)
         );
+    }
+
+    #[test]
+    fn workflow_advance_event_auto_advances_to_next_inbox_session() {
+        let mut shell_state = UiShellState::new("ready".to_owned(), workflow_auto_advance_projection());
+
+        shell_state.apply_ticket_picker_event(TicketPickerEvent::SessionWorkflowAdvanced {
+            outcome: SessionWorkflowAdvanceOutcome {
+                session_id: WorkerSessionId::new("sess-1"),
+                work_item_id: WorkItemId::new("wi-1"),
+                from: WorkflowState::Implementing,
+                to: WorkflowState::PRDrafted,
+                instruction: None,
+            },
+            projection: None,
+        });
+
+        let ui_state = shell_state.ui_state();
+        assert_eq!(
+            ui_state
+                .selected_inbox_item_id
+                .as_ref()
+                .map(|item| item.as_str()),
+            Some("inbox-3")
+        );
+        assert!(matches!(
+            shell_state.view_stack.active_center(),
+            Some(CenterView::TerminalView { session_id }) if session_id.as_str() == "sess-3"
+        ));
+    }
+
+    #[test]
+    fn workflow_advance_event_skips_immediate_row_without_session() {
+        let mut shell_state = UiShellState::new("ready".to_owned(), workflow_auto_advance_projection());
+
+        shell_state.apply_ticket_picker_event(TicketPickerEvent::SessionWorkflowAdvanced {
+            outcome: SessionWorkflowAdvanceOutcome {
+                session_id: WorkerSessionId::new("sess-1"),
+                work_item_id: WorkItemId::new("wi-1"),
+                from: WorkflowState::Implementing,
+                to: WorkflowState::PRDrafted,
+                instruction: None,
+            },
+            projection: None,
+        });
+
+        let status = shell_state.ui_state().status;
+        assert!(!status.contains("selected inbox item has no active session"));
+        assert_eq!(
+            shell_state
+                .selected_session_id_for_panel()
+                .as_ref()
+                .map(|id| id.as_str()),
+            Some("sess-3")
+        );
+    }
+
+    #[test]
+    fn workflow_advance_event_on_last_inbox_item_keeps_current_selection() {
+        let mut shell_state = UiShellState::new("ready".to_owned(), workflow_last_item_projection());
+        let rows = shell_state.ui_state().inbox_rows;
+        shell_state.set_selection(Some(rows.len() - 1), &rows);
+
+        let before = shell_state.ui_state().selected_inbox_item_id;
+
+        shell_state.apply_ticket_picker_event(TicketPickerEvent::SessionWorkflowAdvanced {
+            outcome: SessionWorkflowAdvanceOutcome {
+                session_id: WorkerSessionId::new("sess-c"),
+                work_item_id: WorkItemId::new("wi-c"),
+                from: WorkflowState::Implementing,
+                to: WorkflowState::PRDrafted,
+                instruction: None,
+            },
+            projection: None,
+        });
+
+        assert_eq!(shell_state.ui_state().selected_inbox_item_id, before);
+        assert!(matches!(
+            shell_state.view_stack.active_center(),
+            Some(CenterView::TerminalView { session_id }) if session_id.as_str() == "sess-c"
+        ));
+    }
+
+    #[test]
+    fn workflow_advance_event_with_no_later_session_rows_keeps_current_selection() {
+        let mut shell_state = UiShellState::new("ready".to_owned(), workflow_auto_advance_projection());
+        let rows = shell_state.ui_state().inbox_rows;
+        let session_row_index = rows
+            .iter()
+            .position(|row| row.session_id.as_ref().is_some_and(|id| id.as_str() == "sess-3"))
+            .expect("session row should exist");
+        shell_state.set_selection(Some(session_row_index), &rows);
+
+        let before = shell_state.ui_state().selected_inbox_item_id;
+
+        shell_state.apply_ticket_picker_event(TicketPickerEvent::SessionWorkflowAdvanced {
+            outcome: SessionWorkflowAdvanceOutcome {
+                session_id: WorkerSessionId::new("sess-3"),
+                work_item_id: WorkItemId::new("wi-3"),
+                from: WorkflowState::Implementing,
+                to: WorkflowState::PRDrafted,
+                instruction: None,
+            },
+            projection: None,
+        });
+
+        assert_eq!(shell_state.ui_state().selected_inbox_item_id, before);
+        assert!(matches!(
+            shell_state.view_stack.active_center(),
+            Some(CenterView::TerminalView { session_id }) if session_id.as_str() == "sess-3"
+        ));
     }
 
     #[test]

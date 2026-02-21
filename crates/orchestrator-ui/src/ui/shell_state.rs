@@ -314,6 +314,35 @@ impl UiShellState {
         }
     }
 
+    fn find_next_inbox_session_selection_index(
+        &self,
+        session_id: &WorkerSessionId,
+    ) -> Option<(usize, Vec<UiInboxRow>)> {
+        let ui_state = self.ui_state();
+        let current_index = ui_state
+            .inbox_rows
+            .iter()
+            .position(|row| row.session_id.as_ref() == Some(session_id))?;
+        let next_index = ui_state
+            .inbox_rows
+            .iter()
+            .enumerate()
+            .skip(current_index + 1)
+            .find_map(|(index, row)| row.session_id.as_ref().map(|_| index))?;
+        Some((next_index, ui_state.inbox_rows))
+    }
+
+    fn auto_advance_inbox_selection_after_workflow_progression(
+        &mut self,
+        session_id: &WorkerSessionId,
+    ) {
+        let Some((next_index, rows)) = self.find_next_inbox_session_selection_index(session_id)
+        else {
+            return;
+        };
+        self.set_selection(Some(next_index), &rows);
+    }
+
     fn open_terminal_for_selected(&mut self) {
         if self.open_selected_inbox_output(false, false) {
             return;
@@ -2460,7 +2489,7 @@ impl UiShellState {
         had_events
     }
 
-fn apply_ticket_picker_event(&mut self, event: TicketPickerEvent) {
+    fn apply_ticket_picker_event(&mut self, event: TicketPickerEvent) {
         match event {
             TicketPickerEvent::TicketsLoaded { tickets, projects } => {
                 self.ticket_picker_overlay.loading = false;
@@ -2506,6 +2535,7 @@ fn apply_ticket_picker_event(&mut self, event: TicketPickerEvent) {
                     );
                 }
                 self.reconcile_progression_approval_inbox_for_session(&outcome.session_id);
+                self.auto_advance_inbox_selection_after_workflow_progression(&outcome.session_id);
 
                 let labels = session_display_labels(&self.domain, &outcome.session_id);
                 self.status_warning = Some(format!(
