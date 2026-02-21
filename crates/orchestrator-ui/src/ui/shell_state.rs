@@ -1283,15 +1283,6 @@ impl UiShellState {
         }
     }
 
-    fn minimize_center_view(&mut self) {
-        if !self.view_stack.pop_center() {
-            self.view_stack.clear_center();
-        }
-        if !self.is_terminal_view_active() {
-            self.enter_normal_mode();
-        }
-    }
-
     fn open_ticket_picker(&mut self) {
         if self.ticket_picker_provider.is_none() {
             self.status_warning =

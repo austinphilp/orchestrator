@@ -32,12 +32,11 @@ enum UiCommand {
     ToggleWorktreeDiffModal,
     AdvanceTerminalWorkflowStage,
     ArchiveSelectedSession,
-    MinimizeCenterView,
     OpenSessionOutputForSelectedInbox,
 }
 
 impl UiCommand {
-    const ALL: [Self; 34] = [
+    const ALL: [Self; 33] = [
         Self::EnterNormalMode,
         Self::EnterInsertMode,
         Self::ToggleGlobalSupervisorChat,
@@ -70,7 +69,6 @@ impl UiCommand {
         Self::ToggleWorktreeDiffModal,
         Self::AdvanceTerminalWorkflowStage,
         Self::ArchiveSelectedSession,
-        Self::MinimizeCenterView,
         Self::OpenSessionOutputForSelectedInbox,
     ];
 
@@ -108,7 +106,6 @@ impl UiCommand {
             Self::ToggleWorktreeDiffModal => "ui.worktree.diff.toggle",
             Self::AdvanceTerminalWorkflowStage => "ui.terminal.workflow.advance",
             Self::ArchiveSelectedSession => "ui.terminal.archive_selected_session",
-            Self::MinimizeCenterView => "ui.center.pop",
             Self::OpenSessionOutputForSelectedInbox => {
                 "ui.open_session_output_for_selected_inbox"
             }
@@ -149,7 +146,6 @@ impl UiCommand {
             Self::ToggleWorktreeDiffModal => "Toggle worktree diff modal for selected session",
             Self::AdvanceTerminalWorkflowStage => "Advance terminal workflow stage",
             Self::ArchiveSelectedSession => "Archive selected terminal session",
-            Self::MinimizeCenterView => "Minimize active center view",
             Self::OpenSessionOutputForSelectedInbox => {
                 "Open session output for selected inbox item"
             }
@@ -212,7 +208,6 @@ fn default_keymap_config() -> KeymapConfig {
                     binding(&["D"], UiCommand::ToggleWorktreeDiffModal),
                     binding(&["w", "n"], UiCommand::AdvanceTerminalWorkflowStage),
                     binding(&["x"], UiCommand::ArchiveSelectedSession),
-                    binding(&["backspace"], UiCommand::MinimizeCenterView),
                     binding(&["z", "1"], UiCommand::JumpBatchDecideOrUnblock),
                     binding(&["z", "2"], UiCommand::JumpBatchApprovals),
                     binding(&["z", "3"], UiCommand::JumpBatchReviewReady),
@@ -884,14 +879,6 @@ fn dispatch_command(shell_state: &mut UiShellState, command: UiCommand) -> bool 
         }
         UiCommand::ArchiveSelectedSession => {
             shell_state.begin_archive_selected_session_confirmation();
-            false
-        }
-        UiCommand::MinimizeCenterView => {
-            if shell_state.is_global_supervisor_chat_active() {
-                shell_state.close_global_supervisor_chat();
-            } else {
-                shell_state.minimize_center_view();
-            }
             false
         }
         UiCommand::OpenSessionOutputForSelectedInbox => {

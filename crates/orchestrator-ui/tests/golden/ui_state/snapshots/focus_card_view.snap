@@ -34,7 +34,6 @@ Evidence:
 - PR artifact 'Draft PR #138' -> https://github.com/example/orchestrator/pull/138
 
 Shortcuts: v d diff | v t tests | v p PR | v c chat
-Backspace: minimize top view
 
 [which-key]
 (none)
