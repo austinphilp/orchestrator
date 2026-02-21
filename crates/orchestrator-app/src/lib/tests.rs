@@ -1275,11 +1275,15 @@ mod tests {
             spawn_calls: Mutex::new(Vec::new()),
         };
 
-        let warning = app
+        let outcome = app
             .archive_session(&session_id, &backend)
             .await
             .expect("archive session");
-        assert!(warning.is_none());
+        assert!(outcome.warning.is_none());
+        assert!(matches!(
+            outcome.event.payload,
+            OrchestrationEventPayload::SessionCompleted(_)
+        ));
 
         let store = SqliteEventStore::open(temp_db.path()).expect("open store");
         let mapping = store

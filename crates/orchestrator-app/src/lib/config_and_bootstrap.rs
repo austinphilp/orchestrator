@@ -5,13 +5,14 @@ use orchestrator_core::{
     LlmProvider, NewEventEnvelope, OrchestrationEventPayload, ProjectionState, RuntimeSessionId,
     SelectedTicketFlowConfig, SelectedTicketFlowResult, SessionCompletedPayload,
     SessionCrashedPayload, SessionHandle, SqliteEventStore, Supervisor, TicketSummary,
-    TicketingProvider, UntypedCommandInvocation, VcsProvider, WorkItemId, WorkerBackend,
-    WorkerSessionId, WorkerSessionStatus, WorkflowGuardContext, WorkflowState,
+    StoredEventEnvelope, TicketingProvider, UntypedCommandInvocation, VcsProvider, WorkItemId,
+    WorkerBackend, WorkerSessionId, WorkerSessionStatus, WorkflowGuardContext, WorkflowState,
     WorkflowTransitionPayload, WorkflowTransitionReason, DOMAIN_EVENT_SCHEMA_VERSION,
     SessionRuntimeProjection,
 };
 use orchestrator_ui::{
-    InboxPublishRequest, InboxResolveRequest, SessionWorkflowAdvanceOutcome, SupervisorCommandContext,
+    InboxPublishRequest, InboxResolveRequest, SessionArchiveOutcome,
+    SessionMergeFinalizeOutcome, SessionWorkflowAdvanceOutcome, SupervisorCommandContext,
     SupervisorCommandDispatcher,
 };
 use serde::{Deserialize, Serialize};

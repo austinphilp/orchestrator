@@ -637,7 +637,6 @@ enum TicketPickerEvent {
     },
     SessionWorkflowAdvanced {
         outcome: SessionWorkflowAdvanceOutcome,
-        projection: Option<ProjectionState>,
     },
     SessionWorkflowAdvanceFailed {
         session_id: WorkerSessionId,
@@ -665,7 +664,6 @@ enum TicketPickerEvent {
     TicketCreated {
         created_ticket: TicketSummary,
         submit_mode: TicketCreateSubmitMode,
-        projection: Option<ProjectionState>,
         tickets: Option<Vec<TicketSummary>>,
         warning: Option<String>,
     },
@@ -690,20 +688,20 @@ enum TicketPickerEvent {
     SessionArchived {
         session_id: WorkerSessionId,
         warning: Option<String>,
-        projection: Option<ProjectionState>,
+        event: StoredEventEnvelope,
     },
     SessionArchiveFailed {
         session_id: WorkerSessionId,
         message: String,
     },
     InboxItemPublished {
-        projection: ProjectionState,
+        event: StoredEventEnvelope,
     },
     InboxItemPublishFailed {
         message: String,
     },
     InboxItemResolved {
-        projection: ProjectionState,
+        event: Option<StoredEventEnvelope>,
     },
     InboxItemResolveFailed {
         message: String,
@@ -760,7 +758,7 @@ enum MergeQueueEvent {
     },
     SessionFinalized {
         session_id: WorkerSessionId,
-        projection: Option<ProjectionState>,
+        event: StoredEventEnvelope,
     },
     SessionFinalizeFailed {
         session_id: WorkerSessionId,

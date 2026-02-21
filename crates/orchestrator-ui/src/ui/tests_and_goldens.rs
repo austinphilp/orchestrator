@@ -8,11 +8,13 @@ mod tests {
     use async_trait::async_trait;
     use orchestrator_core::{
         ArtifactId, ArtifactKind, ArtifactProjection, CoreError, InboxItemProjection,
-        LlmProviderKind, LlmResponseStream, LlmResponseSubscription, LlmStreamChunk,
-        OrchestrationEventPayload, OrchestrationEventType, SessionBlockedPayload,
-        SessionCheckpointPayload, SessionNeedsInputPayload, SessionProjection,
+        InboxItemCreatedPayload, LlmProviderKind, LlmResponseStream, LlmResponseSubscription,
+        LlmStreamChunk, OrchestrationEventPayload, OrchestrationEventType, SessionBlockedPayload,
+        SessionCheckpointPayload,
+        SessionCompletedPayload, SessionNeedsInputPayload, SessionProjection,
         SessionRuntimeProjection, StoredEventEnvelope, SupervisorQueryFinishedPayload,
-        TicketProvider, UserRespondedPayload, WorkItemProjection, WorkflowState,
+        TicketProvider, UserRespondedPayload, WorkItemProjection, WorkflowTransitionPayload,
+        WorkflowTransitionReason, WorkflowState,
     };
     use orchestrator_runtime::{
         BackendCapabilities, BackendEvent, BackendKind, BackendNeedsInputEvent,
@@ -199,13 +201,43 @@ mod tests {
 
         async fn archive_session(
             &self,
-            _session_id: WorkerSessionId,
-        ) -> Result<Option<String>, CoreError> {
-            Ok(None)
+            session_id: WorkerSessionId,
+        ) -> Result<SessionArchiveOutcome, CoreError> {
+            Ok(SessionArchiveOutcome {
+                warning: None,
+                event: stored_event_for_test(
+                    "evt-test-session-archived",
+                    1,
+                    None,
+                    Some(session_id.clone()),
+                    OrchestrationEventPayload::SessionCompleted(SessionCompletedPayload {
+                        session_id,
+                        summary: Some("archived".to_owned()),
+                    }),
+                ),
+            })
         }
 
         async fn reload_projection(&self) -> Result<ProjectionState, CoreError> {
             Ok(ProjectionState::default())
+        }
+
+        async fn complete_session_after_merge(
+            &self,
+            session_id: WorkerSessionId,
+        ) -> Result<SessionMergeFinalizeOutcome, CoreError> {
+            Ok(SessionMergeFinalizeOutcome {
+                event: stored_event_for_test(
+                    "evt-test-session-merged",
+                    2,
+                    None,
+                    Some(session_id.clone()),
+                    OrchestrationEventPayload::SessionCompleted(SessionCompletedPayload {
+                        session_id,
+                        summary: Some("merged".to_owned()),
+                    }),
+                ),
+            })
         }
     }
 
@@ -263,12 +295,30 @@ mod tests {
         async fn publish_inbox_item(
             &self,
             request: InboxPublishRequest,
-        ) -> Result<ProjectionState, CoreError> {
+        ) -> Result<StoredEventEnvelope, CoreError> {
             self.published_inbox_requests
                 .lock()
                 .expect("published inbox requests lock")
                 .push(request);
-            Ok(ProjectionState::default())
+            let request = self
+                .published_inbox_requests
+                .lock()
+                .expect("published inbox requests lock")
+                .last()
+                .cloned()
+                .expect("request recorded");
+            Ok(stored_event_for_test(
+                "evt-test-inbox-published",
+                1,
+                Some(request.work_item_id.clone()),
+                request.session_id.clone(),
+                OrchestrationEventPayload::InboxItemCreated(InboxItemCreatedPayload {
+                    inbox_item_id: InboxItemId::new("inbox-test"),
+                    work_item_id: request.work_item_id,
+                    kind: request.kind,
+                    title: request.title,
+                }),
+            ))
         }
 
         async fn resolve_inbox_item(
@@ -355,6 +405,66 @@ mod tests {
             priority: Some(0),
             labels: Vec::new(),
             updated_at: "2026-02-19T00:00:00Z".to_owned(),
+        }
+    }
+
+    fn stored_event_for_test(
+        event_id: &str,
+        sequence: u64,
+        work_item_id: Option<WorkItemId>,
+        session_id: Option<WorkerSessionId>,
+        payload: OrchestrationEventPayload,
+    ) -> StoredEventEnvelope {
+        let event_type = match &payload {
+            OrchestrationEventPayload::TicketSynced(_) => OrchestrationEventType::TicketSynced,
+            OrchestrationEventPayload::TicketDetailsSynced(_) => {
+                OrchestrationEventType::TicketDetailsSynced
+            }
+            OrchestrationEventPayload::WorkItemCreated(_) => OrchestrationEventType::WorkItemCreated,
+            OrchestrationEventPayload::WorktreeCreated(_) => OrchestrationEventType::WorktreeCreated,
+            OrchestrationEventPayload::SessionSpawned(_) => OrchestrationEventType::SessionSpawned,
+            OrchestrationEventPayload::SessionCheckpoint(_) => {
+                OrchestrationEventType::SessionCheckpoint
+            }
+            OrchestrationEventPayload::SessionNeedsInput(_) => {
+                OrchestrationEventType::SessionNeedsInput
+            }
+            OrchestrationEventPayload::SessionBlocked(_) => OrchestrationEventType::SessionBlocked,
+            OrchestrationEventPayload::SessionCompleted(_) => {
+                OrchestrationEventType::SessionCompleted
+            }
+            OrchestrationEventPayload::SessionCrashed(_) => OrchestrationEventType::SessionCrashed,
+            OrchestrationEventPayload::ArtifactCreated(_) => OrchestrationEventType::ArtifactCreated,
+            OrchestrationEventPayload::WorkflowTransition(_) => {
+                OrchestrationEventType::WorkflowTransition
+            }
+            OrchestrationEventPayload::InboxItemCreated(_) => OrchestrationEventType::InboxItemCreated,
+            OrchestrationEventPayload::InboxItemResolved(_) => {
+                OrchestrationEventType::InboxItemResolved
+            }
+            OrchestrationEventPayload::UserResponded(_) => OrchestrationEventType::UserResponded,
+            OrchestrationEventPayload::SupervisorQueryStarted(_) => {
+                OrchestrationEventType::SupervisorQueryStarted
+            }
+            OrchestrationEventPayload::SupervisorQueryChunk(_) => {
+                OrchestrationEventType::SupervisorQueryChunk
+            }
+            OrchestrationEventPayload::SupervisorQueryCancelled(_) => {
+                OrchestrationEventType::SupervisorQueryCancelled
+            }
+            OrchestrationEventPayload::SupervisorQueryFinished(_) => {
+                OrchestrationEventType::SupervisorQueryFinished
+            }
+        };
+        StoredEventEnvelope {
+            event_id: event_id.to_owned(),
+            sequence,
+            occurred_at: "2026-02-21T00:00:00Z".to_owned(),
+            work_item_id,
+            session_id,
+            event_type,
+            payload,
+            schema_version: 1,
         }
     }
 
@@ -5621,8 +5731,19 @@ mod tests {
                 from: WorkflowState::Implementing,
                 to: WorkflowState::PRDrafted,
                 instruction: None,
+                event: stored_event_for_test(
+                    "evt-test-workflow-1",
+                    1,
+                    Some(WorkItemId::new("wi-1")),
+                    Some(WorkerSessionId::new("sess-1")),
+                    OrchestrationEventPayload::WorkflowTransition(WorkflowTransitionPayload {
+                        work_item_id: WorkItemId::new("wi-1"),
+                        from: WorkflowState::Implementing,
+                        to: WorkflowState::PRDrafted,
+                        reason: Some(WorkflowTransitionReason::PlanCommitted),
+                    }),
+                ),
             },
-            projection: None,
         });
 
         let ui_state = shell_state.ui_state();
@@ -5650,8 +5771,19 @@ mod tests {
                 from: WorkflowState::Implementing,
                 to: WorkflowState::PRDrafted,
                 instruction: None,
+                event: stored_event_for_test(
+                    "evt-test-workflow-2",
+                    1,
+                    Some(WorkItemId::new("wi-1")),
+                    Some(WorkerSessionId::new("sess-1")),
+                    OrchestrationEventPayload::WorkflowTransition(WorkflowTransitionPayload {
+                        work_item_id: WorkItemId::new("wi-1"),
+                        from: WorkflowState::Implementing,
+                        to: WorkflowState::PRDrafted,
+                        reason: Some(WorkflowTransitionReason::PlanCommitted),
+                    }),
+                ),
             },
-            projection: None,
         });
 
         let status = shell_state.ui_state().status;
@@ -5680,8 +5812,19 @@ mod tests {
                 from: WorkflowState::Implementing,
                 to: WorkflowState::PRDrafted,
                 instruction: None,
+                event: stored_event_for_test(
+                    "evt-test-workflow-3",
+                    1,
+                    Some(WorkItemId::new("wi-c")),
+                    Some(WorkerSessionId::new("sess-c")),
+                    OrchestrationEventPayload::WorkflowTransition(WorkflowTransitionPayload {
+                        work_item_id: WorkItemId::new("wi-c"),
+                        from: WorkflowState::Implementing,
+                        to: WorkflowState::PRDrafted,
+                        reason: Some(WorkflowTransitionReason::PlanCommitted),
+                    }),
+                ),
             },
-            projection: None,
         });
 
         assert_eq!(shell_state.ui_state().selected_inbox_item_id, before);
@@ -5710,8 +5853,19 @@ mod tests {
                 from: WorkflowState::Implementing,
                 to: WorkflowState::PRDrafted,
                 instruction: None,
+                event: stored_event_for_test(
+                    "evt-test-workflow-4",
+                    1,
+                    Some(WorkItemId::new("wi-3")),
+                    Some(WorkerSessionId::new("sess-3")),
+                    OrchestrationEventPayload::WorkflowTransition(WorkflowTransitionPayload {
+                        work_item_id: WorkItemId::new("wi-3"),
+                        from: WorkflowState::Implementing,
+                        to: WorkflowState::PRDrafted,
+                        reason: Some(WorkflowTransitionReason::PlanCommitted),
+                    }),
+                ),
             },
-            projection: None,
         });
 
         assert_eq!(shell_state.ui_state().selected_inbox_item_id, before);
@@ -6075,13 +6229,11 @@ mod tests {
             TicketPickerEvent::TicketCreated {
                 created_ticket,
                 submit_mode,
-                projection,
                 tickets,
                 warning,
             } => {
                 assert_eq!(created_ticket.identifier, created.identifier);
                 assert_eq!(submit_mode, TicketCreateSubmitMode::CreateOnly);
-                assert!(projection.is_some());
                 assert_eq!(tickets.unwrap_or_default(), refreshed);
                 assert!(warning
                     .as_deref()
@@ -6111,7 +6263,6 @@ mod tests {
         shell_state.apply_ticket_picker_event(TicketPickerEvent::TicketCreated {
             created_ticket: created.clone(),
             submit_mode: TicketCreateSubmitMode::CreateOnly,
-            projection: None,
             tickets: Some(vec![
                 sample_ticket_summary("issue-401", "AP-401", "Todo"),
                 created,
@@ -6140,7 +6291,6 @@ mod tests {
         shell_state.apply_ticket_picker_event(TicketPickerEvent::TicketCreated {
             created_ticket: created,
             submit_mode: TicketCreateSubmitMode::CreateAndStart,
-            projection: None,
             tickets: Some(vec![sample_ticket_summary("issue-401", "AP-401", "Todo")]),
             warning: None,
         });
@@ -6168,7 +6318,6 @@ mod tests {
         shell_state.apply_ticket_picker_event(TicketPickerEvent::TicketCreated {
             created_ticket: created,
             submit_mode: TicketCreateSubmitMode::CreateOnly,
-            projection: None,
             tickets: Some(vec![sample_ticket_summary("issue-501", "AP-501", "Todo")]),
             warning: None,
         });
@@ -6364,10 +6513,10 @@ mod tests {
         match event {
             MergeQueueEvent::SessionFinalized {
                 session_id: event_session_id,
-                projection,
+                event,
             } => {
                 assert_eq!(event_session_id, session_id);
-                assert!(projection.is_some());
+                assert_eq!(event.event_id, "evt-test-session-merged");
             }
             _ => panic!("expected merge finalize success event"),
         }
@@ -6405,7 +6554,7 @@ mod tests {
             async fn complete_session_after_merge(
                 &self,
                 _session_id: WorkerSessionId,
-            ) -> Result<(), CoreError> {
+            ) -> Result<SessionMergeFinalizeOutcome, CoreError> {
                 Err(CoreError::DependencyUnavailable(
                     "merge finalize failed in test".to_owned(),
                 ))
@@ -6447,11 +6596,11 @@ mod tests {
             TicketPickerEvent::SessionArchived {
                 session_id: event_session_id,
                 warning,
-                projection,
+                event,
             } => {
                 assert_eq!(event_session_id, session_id);
                 assert!(warning.is_none());
-                assert!(projection.is_some());
+                assert_eq!(event.event_id, "evt-test-session-archived");
             }
             _ => panic!("expected session archived event"),
         }
@@ -6485,7 +6634,7 @@ mod tests {
             async fn archive_session(
                 &self,
                 _session_id: WorkerSessionId,
-            ) -> Result<Option<String>, CoreError> {
+            ) -> Result<SessionArchiveOutcome, CoreError> {
                 Err(CoreError::DependencyUnavailable(
                     "session archive failed in test".to_owned(),
                 ))
