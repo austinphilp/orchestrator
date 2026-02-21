@@ -728,40 +728,9 @@ enum DiffPaneFocus {
     Diff,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum MergeQueueCommandKind {
-    Reconcile,
-    Merge,
-}
-
 #[derive(Debug, Clone)]
 struct MergeQueueRequest {
     session_id: WorkerSessionId,
-    context: SupervisorCommandContext,
+    _context: SupervisorCommandContext,
     kind: MergeQueueCommandKind,
-}
-
-#[derive(Debug, Clone)]
-enum MergeQueueEvent {
-    Completed {
-        session_id: WorkerSessionId,
-        kind: MergeQueueCommandKind,
-        completed: bool,
-        merge_conflict: bool,
-        base_branch: Option<String>,
-        head_branch: Option<String>,
-        ci_checks: Vec<CiCheckStatus>,
-        ci_failures: Vec<String>,
-        ci_has_failures: bool,
-        ci_status_error: Option<String>,
-        error: Option<String>,
-    },
-    SessionFinalized {
-        session_id: WorkerSessionId,
-        event: StoredEventEnvelope,
-    },
-    SessionFinalizeFailed {
-        session_id: WorkerSessionId,
-        message: String,
-    },
 }

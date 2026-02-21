@@ -79,6 +79,7 @@ struct UiShellState {
     merge_last_dispatched_at: Option<Instant>,
     review_fallback_last_sweep_at: Option<Instant>,
     approval_fallback_last_sweep_at: Option<Instant>,
+    approval_reconcile_last_poll_at: Option<Instant>,
     merge_event_sender: Option<mpsc::Sender<MergeQueueEvent>>,
     merge_event_receiver: Option<mpsc::Receiver<MergeQueueEvent>>,
     review_reconcile_eligible_sessions: HashSet<WorkerSessionId>,
@@ -167,15 +168,14 @@ impl UiShellState {
             } else {
                 (None, None)
             };
-        let (merge_event_sender, merge_event_receiver) = if supervisor_command_dispatcher.is_some()
-        {
+        let (merge_event_sender, merge_event_receiver) = if ticket_picker_provider.is_some() {
             let (sender, receiver) = mpsc::channel(TERMINAL_STREAM_EVENT_CHANNEL_CAPACITY);
             (Some(sender), Some(receiver))
         } else {
             (None, None)
         };
 
-        let mut state = Self {
+        let mut shell = Self {
             base_status: status,
             status_warning: None,
             domain,
@@ -231,7 +231,8 @@ impl UiShellState {
             merge_last_dispatched_at: None,
             review_fallback_last_sweep_at: None,
             approval_fallback_last_sweep_at: None,
-            merge_event_sender,
+            approval_reconcile_last_poll_at: None,
+            merge_event_sender: merge_event_sender.clone(),
             merge_event_receiver,
             review_reconcile_eligible_sessions: HashSet::new(),
             approval_reconcile_candidate_sessions: HashSet::new(),
@@ -255,9 +256,10 @@ impl UiShellState {
             attention_projection_recomputes: 0,
             last_projection_perf_log_at: None,
         };
-        state.refresh_reconcile_eligibility_for_all_sessions();
-        state.mark_all_eligible_reconcile_dirty();
-        state
+        shell.refresh_reconcile_eligibility_for_all_sessions();
+        shell.mark_all_eligible_reconcile_dirty();
+        shell.start_pr_pipeline_polling(merge_event_sender.clone());
+        shell
     }
 
     fn invalidate_draw_caches(&mut self) {
@@ -1985,71 +1987,33 @@ impl UiShellState {
             return false;
         }
 
+        let now = Instant::now();
         let mut changed = false;
-        changed |= self.ensure_terminal_streams_for_open_sessions();
-
-        let open_session_ids = self
-            .domain
-            .sessions
-            .iter()
-            .filter_map(|(session_id, session)| {
-                is_open_session_status(session.status.as_ref()).then_some(session_id.clone())
-            })
-            .collect::<Vec<_>>();
-        let open_set = open_session_ids.iter().cloned().collect::<HashSet<_>>();
-        self.autopilot_advancing_sessions
-            .retain(|session_id| open_set.contains(session_id));
-        self.autopilot_archiving_sessions
-            .retain(|session_id| open_set.contains(session_id));
-
-        for session_id in open_session_ids {
-            changed |= self.autopilot_handle_needs_input_for_session(&session_id);
-
-            if self.session_requires_progression_approval(&session_id)
-                && self
-                    .autopilot_advancing_sessions
-                    .insert(session_id.clone())
-            {
-                self.spawn_session_workflow_advance(session_id.clone());
-                changed = true;
-            }
-
-            if self.session_is_in_review_stage(&session_id)
-                && !self.merge_pending_sessions.contains(&session_id)
-                && !self.merge_finalizing_sessions.contains(&session_id)
-            {
-                if self.enqueue_merge_queue_request(session_id.clone(), MergeQueueCommandKind::Merge)
-                {
-                    self.merge_pending_sessions.insert(session_id.clone());
-                    changed = true;
-                }
-            }
-
-            if matches!(
-                self.workflow_state_for_session(&session_id),
-                Some(WorkflowState::Done | WorkflowState::Abandoned)
-            ) && self.autopilot_archiving_sessions.insert(session_id.clone())
-            {
-                self.spawn_session_archive(session_id);
-                changed = true;
-            }
-        }
-
-        changed
-    }
-
-    fn ensure_terminal_streams_for_open_sessions(&mut self) -> bool {
-        let session_ids = self
-            .domain
-            .sessions
-            .iter()
-            .filter_map(|(session_id, session)| {
-                is_open_session_status(session.status.as_ref()).then_some(session_id.clone())
-            })
-            .collect::<Vec<_>>();
-        let mut changed = false;
-        for session_id in session_ids {
+        changed |= self.poll_terminal_session_events();
+        changed |= self.flush_background_terminal_output_and_report_at(now);
+        changed |= self.enqueue_progression_approval_reconcile_polls_at(now);
+        changed |= self.poll_merge_queue_events();
+        changed |= self.poll_session_info_summary_events();
+        changed |= self.tick_session_info_summary_refresh_at(now);
+        changed |= self.refresh_review_stage_tracking();
+        changed |= self.ensure_session_info_diff_loaded_for_active_session();
+        if let Some(session_id) = self.active_terminal_session_id().cloned() {
+            changed |= self.flush_deferred_terminal_output_for_session(&session_id);
             changed |= self.ensure_terminal_stream_and_report(session_id);
+        }
+        let pending_needs_input_sessions = self
+            .terminal_session_states
+            .iter()
+            .filter_map(|(session_id, view)| {
+                if view.active_needs_input.is_some() {
+                    Some(session_id.clone())
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>();
+        for session_id in pending_needs_input_sessions {
+            changed |= self.autopilot_handle_needs_input_for_session(&session_id);
         }
         changed
     }
@@ -2630,6 +2594,53 @@ impl UiShellState {
         had_events
     }
 
+    fn refresh_review_stage_tracking(&mut self) -> bool {
+        let mut changed = false;
+        let session_ids = self
+            .domain
+            .sessions
+            .iter()
+            .filter_map(|(session_id, session)| {
+                if !is_open_session_status(session.status.as_ref()) {
+                    return None;
+                }
+                if self.session_is_in_review_stage(session_id) {
+                    Some(session_id.clone())
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>();
+
+        let active_review_sessions = session_ids.iter().cloned().collect::<HashSet<_>>();
+        let review_len_before = self.review_sync_instructions_sent.len();
+        self.review_sync_instructions_sent
+            .retain(|session_id| active_review_sessions.contains(session_id));
+        changed |= self.review_sync_instructions_sent.len() != review_len_before;
+        let pending_len_before = self.merge_pending_sessions.len();
+        self.merge_pending_sessions
+            .retain(|session_id| active_review_sessions.contains(session_id));
+        changed |= self.merge_pending_sessions.len() != pending_len_before;
+        let finalizing_len_before = self.merge_finalizing_sessions.len();
+        self.merge_finalizing_sessions
+            .retain(|session_id| active_review_sessions.contains(session_id));
+        changed |= self.merge_finalizing_sessions.len() != finalizing_len_before;
+        let ci_cache_len_before = self.session_ci_status_cache.len();
+        self.session_ci_status_cache
+            .retain(|session_id, _| active_review_sessions.contains(session_id));
+        changed |= self.session_ci_status_cache.len() != ci_cache_len_before;
+        let ci_notified_len_before = self.ci_failure_signatures_notified.len();
+        self.ci_failure_signatures_notified
+            .retain(|session_id, _| active_review_sessions.contains(session_id));
+        changed |= self.ci_failure_signatures_notified.len() != ci_notified_len_before;
+
+        for session_id in session_ids {
+            self.publish_review_idle_inbox_for_session(&session_id);
+            changed |= self.ensure_review_sync_instruction(&session_id);
+        }
+        changed
+    }
+
     fn mark_all_eligible_reconcile_dirty(&mut self) {
         self.dirty_approval_reconcile_sessions
             .extend(self.approval_reconcile_candidate_sessions.iter().cloned());
@@ -2675,6 +2686,38 @@ impl UiShellState {
             changed |= self.refresh_reconcile_eligibility_for_session(&session_id);
         }
         changed
+    }
+
+    fn enqueue_merge_queue_request(
+        &mut self,
+        session_id: WorkerSessionId,
+        kind: MergeQueueCommandKind,
+    ) -> bool {
+        let Some(context) = self.supervisor_context_for_session(&session_id) else {
+            return false;
+        };
+        if self
+            .merge_queue
+            .iter()
+            .any(|queued| queued.session_id == session_id && queued.kind == kind)
+        {
+            return false;
+        }
+        let request = MergeQueueRequest {
+            session_id,
+            _context: context,
+            kind,
+        };
+        if kind == MergeQueueCommandKind::Merge {
+            self.merge_queue.push_front(request);
+        } else {
+            self.merge_queue.push_back(request);
+        }
+        true
+    }
+
+    fn dispatch_merge_queue_requests_at(&mut self, _now: Instant) -> bool {
+        false
     }
 
     fn refresh_reconcile_eligibility_for_session(&mut self, session_id: &WorkerSessionId) -> bool {
@@ -2752,7 +2795,15 @@ impl UiShellState {
         self.enqueue_event_driven_reconciles()
     }
 
-    fn enqueue_progression_approval_reconcile_polls_at(&mut self, _now: Instant) -> bool {
+    fn enqueue_progression_approval_reconcile_polls_at(&mut self, now: Instant) -> bool {
+        if self
+            .approval_reconcile_last_poll_at
+            .map(|previous| now.duration_since(previous) < APPROVAL_RECONCILE_POLL_INTERVAL)
+            .unwrap_or(false)
+        {
+            return false;
+        }
+        self.approval_reconcile_last_poll_at = Some(now);
         self.mark_all_eligible_reconcile_dirty();
         self.enqueue_event_driven_reconciles()
     }
@@ -2907,46 +2958,6 @@ impl UiShellState {
         true
     }
 
-    fn dispatch_merge_queue_requests_at(&mut self, now: Instant) -> bool {
-        if self.supervisor_command_dispatcher.is_none() {
-            return false;
-        }
-        if self.merge_queue.is_empty() {
-            return false;
-        }
-        if self
-            .merge_last_dispatched_at
-            .map(|previous| now.duration_since(previous) < MERGE_REQUEST_RATE_LIMIT)
-            .unwrap_or(false)
-        {
-            return false;
-        }
-        let Some(dispatcher) = self.supervisor_command_dispatcher.clone() else {
-            return false;
-        };
-        let Some(sender) = self.merge_event_sender.clone() else {
-            return false;
-        };
-        let Some(request) = self.merge_queue.pop_front() else {
-            return false;
-        };
-
-        match TokioHandle::try_current() {
-            Ok(runtime) => {
-                self.merge_last_dispatched_at = Some(now);
-                runtime.spawn(async move {
-                    run_merge_queue_command_task(dispatcher, request, sender).await;
-                });
-                true
-            }
-            Err(_) => {
-                self.status_warning =
-                    Some("workflow merge queue unavailable: tokio runtime unavailable".to_owned());
-                true
-            }
-        }
-    }
-
     fn session_is_in_review_stage(&self, session_id: &WorkerSessionId) -> bool {
         self.session_is_merge_reconcile_eligible(session_id)
     }
@@ -2976,6 +2987,22 @@ impl UiShellState {
                 )
             })
             .unwrap_or(false)
+    }
+
+    fn supervisor_context_for_session(
+        &self,
+        session_id: &WorkerSessionId,
+    ) -> Option<SupervisorCommandContext> {
+        let session = self.domain.sessions.get(session_id)?;
+        let work_item_id = session
+            .work_item_id
+            .as_ref()
+            .map(|id| id.as_str().to_owned());
+        Some(SupervisorCommandContext {
+            selected_work_item_id: work_item_id,
+            selected_session_id: Some(session_id.as_str().to_owned()),
+            scope: Some(format!("session:{}", session_id.as_str())),
+        })
     }
 
     fn rebuild_reconcile_eligibility_indexes(&mut self) {
@@ -3100,48 +3127,25 @@ impl UiShellState {
         }
     }
 
-    fn enqueue_merge_queue_request(
-        &mut self,
-        session_id: WorkerSessionId,
-        kind: MergeQueueCommandKind,
-    ) -> bool {
-        let Some(context) = self.supervisor_context_for_session(&session_id) else {
-            return false;
+    fn start_pr_pipeline_polling(&mut self, sender: Option<mpsc::Sender<MergeQueueEvent>>) {
+        let Some(provider) = self.ticket_picker_provider.clone() else {
+            return;
         };
-        if self
-            .merge_queue
-            .iter()
-            .any(|queued| queued.session_id == session_id && queued.kind == kind)
-        {
-            return false;
-        }
-        let request = MergeQueueRequest {
-            session_id,
-            context,
-            kind,
+        let Some(sender) = sender else {
+            return;
         };
-        if kind == MergeQueueCommandKind::Merge {
-            self.merge_queue.push_front(request);
-        } else {
-            self.merge_queue.push_back(request);
+        match TokioHandle::try_current() {
+            Ok(runtime) => {
+                runtime.spawn(async move {
+                    let _ = provider.start_pr_pipeline_polling(sender).await;
+                });
+            }
+            Err(_) => {
+                self.status_warning = Some(
+                    "workflow polling unavailable: tokio runtime unavailable".to_owned(),
+                );
+            }
         }
-        true
-    }
-
-    fn supervisor_context_for_session(
-        &self,
-        session_id: &WorkerSessionId,
-    ) -> Option<SupervisorCommandContext> {
-        let session = self.domain.sessions.get(session_id)?;
-        let work_item_id = session
-            .work_item_id
-            .as_ref()
-            .map(|id| id.as_str().to_owned());
-        Some(SupervisorCommandContext {
-            selected_work_item_id: work_item_id,
-            selected_session_id: Some(session_id.as_str().to_owned()),
-            scope: Some(format!("session:{}", session_id.as_str())),
-        })
     }
 
     fn ensure_terminal_stream(&mut self, session_id: WorkerSessionId) {
@@ -5581,6 +5585,19 @@ impl UiShellState {
             group_label: prefix_hint_view.label,
             hints,
         });
+    }
+}
+
+impl Drop for UiShellState {
+    fn drop(&mut self) {
+        let Some(provider) = self.ticket_picker_provider.clone() else {
+            return;
+        };
+        if let Ok(runtime) = TokioHandle::try_current() {
+            runtime.spawn(async move {
+                let _ = provider.stop_pr_pipeline_polling().await;
+            });
+        }
     }
 }
 

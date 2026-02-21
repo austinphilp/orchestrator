@@ -1,18 +1,21 @@
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use orchestrator_core::{
-    ArchiveTicketRequest, CoreError, CreateTicketRequest, GithubClient, LlmChatRequest,
-    LlmMessage, LlmProvider, LlmRole, ProjectionState, SelectedTicketFlowResult,
-    StoredEventEnvelope, Supervisor, TicketQuery, TicketSummary, TicketingProvider, VcsProvider,
-    WorkerBackend, WorkerSessionId,
+    ArchiveTicketRequest, CodeHostProvider, Command, CommandRegistry, CoreError, CreateTicketRequest,
+    GithubClient, LlmChatRequest, LlmMessage, LlmProvider, LlmRole, ProjectionState,
+    SelectedTicketFlowResult, StoredEventEnvelope, Supervisor, TicketQuery, TicketSummary, TicketingProvider,
+    VcsProvider, WorkerBackend, WorkerSessionId, WorkerSessionStatus, WorkflowState,
 };
 use orchestrator_ui::{
-    CreateTicketFromPickerRequest, InboxPublishRequest, InboxResolveRequest, SessionWorktreeDiff,
-    SessionArchiveOutcome, SessionMergeFinalizeOutcome, SessionWorkflowAdvanceOutcome,
-    TicketPickerProvider,
+    CiCheckStatus, CreateTicketFromPickerRequest, InboxPublishRequest, InboxResolveRequest,
+    MergeQueueCommandKind, MergeQueueEvent, SessionArchiveOutcome, SessionMergeFinalizeOutcome,
+    SessionWorktreeDiff, SessionWorkflowAdvanceOutcome, SupervisorCommandContext,
+    SupervisorCommandDispatcher, TicketPickerProvider,
 };
 use std::path::PathBuf;
+use tokio::sync::{mpsc, watch, Mutex};
 use tracing::warn;
 
 use crate::App;
@@ -27,6 +30,13 @@ where
     ticketing: Arc<dyn TicketingProvider + Send + Sync>,
     vcs: Arc<V>,
     worker_backend: Arc<dyn WorkerBackend + Send + Sync>,
+    pr_pipeline_polling: Mutex<Option<PrPipelinePollingControl>>,
+}
+
+struct PrPipelinePollingControl {
+    merge_request_sender: mpsc::Sender<WorkerSessionId>,
+    shutdown_sender: watch::Sender<bool>,
+    task: tokio::task::JoinHandle<()>,
 }
 
 impl<S, G, V> AppTicketPickerProvider<S, G, V>
@@ -46,6 +56,7 @@ where
             ticketing,
             vcs,
             worker_backend,
+            pr_pipeline_polling: Mutex::new(None),
         }
     }
 }
@@ -54,7 +65,7 @@ where
 impl<S, G, V> TicketPickerProvider for AppTicketPickerProvider<S, G, V>
 where
     S: Supervisor + LlmProvider + Send + Sync + 'static,
-    G: GithubClient + Send + Sync + 'static,
+    G: GithubClient + CodeHostProvider + Send + Sync + 'static,
     V: VcsProvider + Send + Sync + 'static,
 {
     async fn list_unfinished_tickets(&self) -> Result<Vec<TicketSummary>, CoreError> {
@@ -308,6 +319,422 @@ where
                 ))
             })?
     }
+
+    async fn start_pr_pipeline_polling(
+        &self,
+        sender: mpsc::Sender<MergeQueueEvent>,
+    ) -> Result<(), CoreError> {
+        let mut guard = self.pr_pipeline_polling.lock().await;
+        if guard.is_some() {
+            return Ok(());
+        }
+        let (merge_request_sender, merge_request_receiver) = mpsc::channel(32);
+        let (shutdown_sender, shutdown_receiver) = watch::channel(false);
+        let poll_interval = Duration::from_secs(
+            self.app
+                .config
+                .runtime
+                .pr_pipeline_poll_interval_secs
+                .max(1),
+        );
+        let app = self.app.clone();
+        let task = tokio::spawn(async move {
+            run_pr_pipeline_polling_task(
+                app,
+                sender,
+                merge_request_receiver,
+                shutdown_receiver,
+                poll_interval,
+            )
+            .await;
+        });
+        *guard = Some(PrPipelinePollingControl {
+            merge_request_sender,
+            shutdown_sender,
+            task,
+        });
+        Ok(())
+    }
+
+    async fn stop_pr_pipeline_polling(&self) -> Result<(), CoreError> {
+        let control = {
+            let mut guard = self.pr_pipeline_polling.lock().await;
+            guard.take()
+        };
+        if let Some(control) = control {
+            let _ = control.shutdown_sender.send(true);
+            let _ = control.task.await;
+        }
+        Ok(())
+    }
+
+    async fn enqueue_pr_merge(&self, session_id: WorkerSessionId) -> Result<(), CoreError> {
+        let sender = {
+            let guard = self.pr_pipeline_polling.lock().await;
+            guard
+                .as_ref()
+                .map(|control| control.merge_request_sender.clone())
+        }
+        .ok_or_else(|| {
+            CoreError::DependencyUnavailable(
+                "PR merge queue is unavailable: polling service is not running".to_owned(),
+            )
+        })?;
+        sender
+            .send(session_id)
+            .await
+            .map_err(|error| CoreError::DependencyUnavailable(format!("PR merge queue closed: {error}")))
+    }
+}
+
+async fn run_pr_pipeline_polling_task<S, G>(
+    app: Arc<App<S, G>>,
+    sender: mpsc::Sender<MergeQueueEvent>,
+    mut merge_request_receiver: mpsc::Receiver<WorkerSessionId>,
+    mut shutdown_receiver: watch::Receiver<bool>,
+    poll_interval: Duration,
+) where
+    S: Supervisor + LlmProvider + Send + Sync + 'static,
+    G: GithubClient + CodeHostProvider + Send + Sync + 'static,
+{
+    let mut ticker = tokio::time::interval(poll_interval);
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        tokio::select! {
+            _ = shutdown_receiver.changed() => {
+                break;
+            }
+            maybe_session_id = merge_request_receiver.recv() => {
+                let Some(session_id) = maybe_session_id else {
+                    break;
+                };
+                match load_projection_state(app.clone()).await {
+                    Ok(projection) => {
+                        if let Some(context) = supervisor_context_for_session(&projection, &session_id) {
+                            dispatch_merge_queue_command(app.clone(), sender.clone(), session_id, MergeQueueCommandKind::Merge, context).await;
+                        } else {
+                            send_merge_queue_error(
+                                &sender,
+                                session_id,
+                                MergeQueueCommandKind::Merge,
+                                "workflow.merge_pr requires an active session context",
+                            ).await;
+                        }
+                    }
+                    Err(error) => {
+                        send_merge_queue_error(
+                            &sender,
+                            session_id,
+                            MergeQueueCommandKind::Merge,
+                            error.to_string().as_str(),
+                        ).await;
+                    }
+                }
+            }
+            _ = ticker.tick() => {
+                match load_projection_state(app.clone()).await {
+                    Ok(projection) => {
+                        for (session_id, context) in review_session_contexts(&projection) {
+                            dispatch_merge_queue_command(
+                                app.clone(),
+                                sender.clone(),
+                                session_id,
+                                MergeQueueCommandKind::Reconcile,
+                                context,
+                            ).await;
+                        }
+                    }
+                    Err(error) => {
+                        warn!(error = %error, "failed to load projection for PR/pipeline polling");
+                    }
+                }
+            }
+        }
+    }
+}
+
+async fn load_projection_state<S, G>(app: Arc<App<S, G>>) -> Result<ProjectionState, CoreError>
+where
+    S: Supervisor + LlmProvider + Send + Sync + 'static,
+    G: GithubClient + CodeHostProvider + Send + Sync + 'static,
+{
+    tokio::task::spawn_blocking(move || app.projection_state())
+        .await
+        .map_err(|error| CoreError::Configuration(format!("projection polling task failed: {error}")))?
+}
+
+fn review_session_contexts(projection: &ProjectionState) -> Vec<(WorkerSessionId, SupervisorCommandContext)> {
+    projection
+        .sessions
+        .iter()
+        .filter_map(|(session_id, session)| {
+            if !is_open_session_status(session.status.as_ref()) {
+                return None;
+            }
+            if !session_is_in_review_stage(projection, session_id) {
+                return None;
+            }
+            supervisor_context_for_session(projection, session_id).map(|context| (session_id.clone(), context))
+        })
+        .collect()
+}
+
+fn supervisor_context_for_session(
+    projection: &ProjectionState,
+    session_id: &WorkerSessionId,
+) -> Option<SupervisorCommandContext> {
+    let session = projection.sessions.get(session_id)?;
+    let work_item_id = session
+        .work_item_id
+        .as_ref()
+        .map(|id| id.as_str().to_owned());
+    Some(SupervisorCommandContext {
+        selected_work_item_id: work_item_id,
+        selected_session_id: Some(session_id.as_str().to_owned()),
+        scope: Some(format!("session:{}", session_id.as_str())),
+    })
+}
+
+fn session_is_in_review_stage(projection: &ProjectionState, session_id: &WorkerSessionId) -> bool {
+    projection
+        .sessions
+        .get(session_id)
+        .and_then(|session| session.work_item_id.as_ref())
+        .and_then(|work_item_id| projection.work_items.get(work_item_id))
+        .and_then(|work_item| work_item.workflow_state.as_ref())
+        .map(|state| {
+            matches!(
+                state,
+                WorkflowState::AwaitingYourReview
+                    | WorkflowState::ReadyForReview
+                    | WorkflowState::InReview
+                    | WorkflowState::PendingMerge
+            )
+        })
+        .unwrap_or(false)
+}
+
+fn is_open_session_status(status: Option<&WorkerSessionStatus>) -> bool {
+    !matches!(
+        status,
+        Some(WorkerSessionStatus::Done) | Some(WorkerSessionStatus::Crashed)
+    )
+}
+
+async fn dispatch_merge_queue_command<S, G>(
+    app: Arc<App<S, G>>,
+    sender: mpsc::Sender<MergeQueueEvent>,
+    session_id: WorkerSessionId,
+    kind: MergeQueueCommandKind,
+    context: SupervisorCommandContext,
+) where
+    S: Supervisor + LlmProvider + Send + Sync + 'static,
+    G: GithubClient + CodeHostProvider + Send + Sync + 'static,
+{
+    let command = match kind {
+        MergeQueueCommandKind::Reconcile => Command::WorkflowReconcilePrMerge,
+        MergeQueueCommandKind::Merge => Command::WorkflowMergePr,
+    };
+    let invocation = match CommandRegistry::default().to_untyped_invocation(&command) {
+        Ok(invocation) => invocation,
+        Err(error) => {
+            send_merge_queue_error(&sender, session_id, kind, error.to_string().as_str()).await;
+            return;
+        }
+    };
+
+    let (_, mut stream) = match SupervisorCommandDispatcher::dispatch_supervisor_command(
+        app.as_ref(),
+        invocation,
+        context,
+    )
+    .await
+    {
+        Ok(response) => response,
+        Err(error) => {
+            send_merge_queue_error(&sender, session_id, kind, error.to_string().as_str()).await;
+            return;
+        }
+    };
+
+    let mut output = String::new();
+    loop {
+        match stream.next_chunk().await {
+            Ok(Some(chunk)) => output.push_str(chunk.delta.as_str()),
+            Ok(None) => break,
+            Err(error) => {
+                send_merge_queue_error(&sender, session_id, kind, error.to_string().as_str()).await;
+                return;
+            }
+        }
+    }
+
+    let parsed = parse_merge_queue_response(output.as_str());
+    let _ = sender
+        .send(MergeQueueEvent::Completed {
+            session_id,
+            kind,
+            completed: parsed.completed,
+            merge_conflict: parsed.merge_conflict,
+            base_branch: parsed.base_branch,
+            head_branch: parsed.head_branch,
+            ci_checks: parsed.ci_checks,
+            ci_failures: parsed.ci_failures,
+            ci_has_failures: parsed.ci_has_failures,
+            ci_status_error: parsed.ci_status_error,
+            error: None,
+        })
+        .await;
+}
+
+async fn send_merge_queue_error(
+    sender: &mpsc::Sender<MergeQueueEvent>,
+    session_id: WorkerSessionId,
+    kind: MergeQueueCommandKind,
+    detail: &str,
+) {
+    let _ = sender
+        .send(MergeQueueEvent::Completed {
+            session_id,
+            kind,
+            completed: false,
+            merge_conflict: false,
+            base_branch: None,
+            head_branch: None,
+            ci_checks: Vec::new(),
+            ci_failures: Vec::new(),
+            ci_has_failures: false,
+            ci_status_error: None,
+            error: Some(sanitize_terminal_display_text(detail)),
+        })
+        .await;
+}
+
+#[derive(Debug, Default)]
+struct MergeQueueResponse {
+    completed: bool,
+    merge_conflict: bool,
+    base_branch: Option<String>,
+    head_branch: Option<String>,
+    ci_checks: Vec<CiCheckStatus>,
+    ci_failures: Vec<String>,
+    ci_has_failures: bool,
+    ci_status_error: Option<String>,
+}
+
+fn parse_merge_queue_response(output: &str) -> MergeQueueResponse {
+    let trimmed = output.trim();
+    if trimmed.is_empty() {
+        return MergeQueueResponse::default();
+    }
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(trimmed) else {
+        return MergeQueueResponse::default();
+    };
+
+    MergeQueueResponse {
+        completed: value
+            .get("completed")
+            .and_then(|entry| entry.as_bool())
+            .unwrap_or(false),
+        merge_conflict: value
+            .get("merge_conflict")
+            .and_then(|entry| entry.as_bool())
+            .unwrap_or(false),
+        base_branch: value
+            .get("base_branch")
+            .and_then(|entry| entry.as_str())
+            .map(|entry| entry.trim().to_owned())
+            .filter(|entry| !entry.is_empty()),
+        head_branch: value
+            .get("head_branch")
+            .and_then(|entry| entry.as_str())
+            .map(|entry| entry.trim().to_owned())
+            .filter(|entry| !entry.is_empty()),
+        ci_checks: value
+            .get("ci_statuses")
+            .and_then(|entry| entry.as_array())
+            .map(|rows| {
+                rows.iter()
+                    .filter_map(|row| {
+                        let name = row
+                            .get("name")
+                            .and_then(|entry| entry.as_str())
+                            .map(str::trim)
+                            .filter(|entry| !entry.is_empty())
+                            .map(str::to_owned)?;
+                        let workflow = row
+                            .get("workflow")
+                            .and_then(|entry| entry.as_str())
+                            .map(str::trim)
+                            .filter(|entry| !entry.is_empty())
+                            .map(str::to_owned);
+                        let bucket = row
+                            .get("bucket")
+                            .and_then(|entry| entry.as_str())
+                            .map(str::trim)
+                            .filter(|entry| !entry.is_empty())
+                            .map(str::to_ascii_lowercase)
+                            .unwrap_or_else(|| "unknown".to_owned());
+                        let state = row
+                            .get("state")
+                            .and_then(|entry| entry.as_str())
+                            .map(str::trim)
+                            .filter(|entry| !entry.is_empty())
+                            .map(str::to_owned)
+                            .unwrap_or_else(|| bucket.clone());
+                        let link = row
+                            .get("link")
+                            .and_then(|entry| entry.as_str())
+                            .map(str::trim)
+                            .filter(|entry| !entry.is_empty())
+                            .map(str::to_owned);
+                        Some(CiCheckStatus {
+                            name,
+                            workflow,
+                            bucket,
+                            state,
+                            link,
+                        })
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default(),
+        ci_failures: value
+            .get("ci_failures")
+            .and_then(|entry| entry.as_array())
+            .map(|rows| {
+                rows.iter()
+                    .filter_map(|entry| entry.as_str())
+                    .map(str::trim)
+                    .filter(|entry| !entry.is_empty())
+                    .map(str::to_owned)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default(),
+        ci_has_failures: value
+            .get("ci_has_failures")
+            .and_then(|entry| entry.as_bool())
+            .unwrap_or(false),
+        ci_status_error: value
+            .get("ci_status_error")
+            .and_then(|entry| entry.as_str())
+            .map(str::trim)
+            .filter(|entry| !entry.is_empty())
+            .map(str::to_owned),
+    }
+}
+
+fn sanitize_terminal_display_text(input: &str) -> String {
+    let mut output = String::with_capacity(input.len());
+    for ch in input.chars() {
+        match ch {
+            '\n' | '\t' => output.push(ch),
+            '\r' => output.push('\n'),
+            _ if ch.is_control() => {}
+            _ => output.push(ch),
+        }
+    }
+    output
 }
 
 const MAX_GENERATED_TITLE_LEN: usize = 180;
@@ -473,6 +900,7 @@ fn supervisor_model_from_env() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use orchestrator_core::{SessionProjection, WorkItemProjection};
 
     #[test]
     fn parse_ticket_draft_extracts_title_and_description_sections() {
@@ -505,6 +933,115 @@ Allow creating tickets with n.
         let (title, description) = parse_ticket_draft("Description:\nNo title", "fallback brief");
         assert_eq!(title, "fallback brief");
         assert_eq!(description, "No title");
+    }
+
+    #[test]
+    fn parse_merge_queue_response_extracts_ci_status_payload() {
+        let parsed = parse_merge_queue_response(
+            r#"{
+                "completed": false,
+                "merge_conflict": true,
+                "base_branch": "main",
+                "head_branch": "ap/AP-278",
+                "ci_statuses": [
+                    {"name":"tests","workflow":"CI","bucket":"fail","state":"FAILURE","link":"https://example.com"}
+                ],
+                "ci_failures": ["CI / tests"],
+                "ci_has_failures": true,
+                "ci_status_error": null
+            }"#,
+        );
+        assert!(!parsed.completed);
+        assert!(parsed.merge_conflict);
+        assert_eq!(parsed.base_branch.as_deref(), Some("main"));
+        assert_eq!(parsed.head_branch.as_deref(), Some("ap/AP-278"));
+        assert_eq!(parsed.ci_checks.len(), 1);
+        assert_eq!(parsed.ci_checks[0].name, "tests");
+        assert_eq!(parsed.ci_failures, vec!["CI / tests".to_owned()]);
+        assert!(parsed.ci_has_failures);
+    }
+
+    #[test]
+    fn review_session_contexts_filters_non_review_or_closed_sessions() {
+        let review_session_id = WorkerSessionId::new("sess-review");
+        let review_work_item_id = orchestrator_core::WorkItemId::new("wi-review");
+        let done_session_id = WorkerSessionId::new("sess-done");
+        let done_work_item_id = orchestrator_core::WorkItemId::new("wi-done");
+        let planning_session_id = WorkerSessionId::new("sess-planning");
+        let planning_work_item_id = orchestrator_core::WorkItemId::new("wi-planning");
+
+        let mut projection = ProjectionState::default();
+        projection.work_items.insert(
+            review_work_item_id.clone(),
+            WorkItemProjection {
+                id: review_work_item_id.clone(),
+                ticket_id: None,
+                project_id: None,
+                workflow_state: Some(WorkflowState::InReview),
+                session_id: Some(review_session_id.clone()),
+                worktree_id: None,
+                inbox_items: Vec::new(),
+                artifacts: Vec::new(),
+            },
+        );
+        projection.work_items.insert(
+            done_work_item_id.clone(),
+            WorkItemProjection {
+                id: done_work_item_id.clone(),
+                ticket_id: None,
+                project_id: None,
+                workflow_state: Some(WorkflowState::InReview),
+                session_id: Some(done_session_id.clone()),
+                worktree_id: None,
+                inbox_items: Vec::new(),
+                artifacts: Vec::new(),
+            },
+        );
+        projection.work_items.insert(
+            planning_work_item_id.clone(),
+            WorkItemProjection {
+                id: planning_work_item_id.clone(),
+                ticket_id: None,
+                project_id: None,
+                workflow_state: Some(WorkflowState::Planning),
+                session_id: Some(planning_session_id.clone()),
+                worktree_id: None,
+                inbox_items: Vec::new(),
+                artifacts: Vec::new(),
+            },
+        );
+        projection.sessions.insert(
+            review_session_id.clone(),
+            SessionProjection {
+                id: review_session_id.clone(),
+                work_item_id: Some(review_work_item_id),
+                status: Some(WorkerSessionStatus::Running),
+                latest_checkpoint: None,
+            },
+        );
+        projection.sessions.insert(
+            done_session_id.clone(),
+            SessionProjection {
+                id: done_session_id.clone(),
+                work_item_id: Some(done_work_item_id),
+                status: Some(WorkerSessionStatus::Done),
+                latest_checkpoint: None,
+            },
+        );
+        projection.sessions.insert(
+            planning_session_id.clone(),
+            SessionProjection {
+                id: planning_session_id,
+                work_item_id: Some(planning_work_item_id),
+                status: Some(WorkerSessionStatus::Running),
+                latest_checkpoint: None,
+            },
+        );
+
+        let sessions = review_session_contexts(&projection);
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].0, review_session_id);
+        assert_eq!(sessions[0].1.scope.as_deref(), Some("session:sess-review"));
     }
 }
 

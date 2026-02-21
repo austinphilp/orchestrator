@@ -77,6 +77,7 @@ const DEFAULT_OPENCODE_SERVER_BASE_URL: &str = "http://127.0.0.1:8787";
 const DEFAULT_CODEX_BINARY: &str = "codex";
 const DEFAULT_EVENT_RETENTION_DAYS: u64 = 14;
 const DEFAULT_EVENT_PRUNE_ENABLED: bool = true;
+const DEFAULT_PR_PIPELINE_POLL_INTERVAL_SECS: u64 = 15;
 const DEFAULT_UI_THEME: &str = "nord";
 const DEFAULT_UI_TRANSCRIPT_LINE_LIMIT: usize = 100;
 const DEFAULT_TICKET_PICKER_PRIORITY_STATES: &[&str] =
@@ -267,6 +268,8 @@ pub struct RuntimeConfigToml {
     pub event_retention_days: u64,
     #[serde(default = "default_event_prune_enabled")]
     pub event_prune_enabled: bool,
+    #[serde(default = "default_pr_pipeline_poll_interval_secs")]
+    pub pr_pipeline_poll_interval_secs: u64,
 }
 
 impl Default for RuntimeConfigToml {
@@ -281,6 +284,7 @@ impl Default for RuntimeConfigToml {
             codex_binary: default_codex_binary(),
             event_retention_days: default_event_retention_days(),
             event_prune_enabled: default_event_prune_enabled(),
+            pr_pipeline_poll_interval_secs: default_pr_pipeline_poll_interval_secs(),
         }
     }
 }
@@ -402,6 +406,10 @@ fn default_event_retention_days() -> u64 {
 
 fn default_event_prune_enabled() -> bool {
     DEFAULT_EVENT_PRUNE_ENABLED
+}
+
+fn default_pr_pipeline_poll_interval_secs() -> u64 {
+    DEFAULT_PR_PIPELINE_POLL_INTERVAL_SECS
 }
 
 fn default_ui_theme() -> String {
@@ -727,6 +735,12 @@ fn normalize_config(config: &mut AppConfig) -> bool {
     changed |= normalize_non_empty_string(&mut config.runtime.codex_binary, default_codex_binary());
     if config.runtime.event_retention_days == 0 {
         config.runtime.event_retention_days = default_event_retention_days();
+        changed = true;
+    }
+    let normalized_pr_pipeline_poll_interval_secs =
+        config.runtime.pr_pipeline_poll_interval_secs.clamp(1, 300);
+    if normalized_pr_pipeline_poll_interval_secs != config.runtime.pr_pipeline_poll_interval_secs {
+        config.runtime.pr_pipeline_poll_interval_secs = normalized_pr_pipeline_poll_interval_secs;
         changed = true;
     }
 

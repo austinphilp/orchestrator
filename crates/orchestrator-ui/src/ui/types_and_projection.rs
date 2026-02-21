@@ -70,6 +70,7 @@ const DEFAULT_MERGE_POLL_BACKOFF_MULTIPLIER: u64 = 2;
 const MIN_MERGE_POLL_BACKOFF_MULTIPLIER: u64 = 1;
 const MAX_MERGE_POLL_BACKOFF_MULTIPLIER: u64 = 8;
 const MERGE_REQUEST_RATE_LIMIT: Duration = Duration::from_secs(1);
+const APPROVAL_RECONCILE_POLL_INTERVAL: Duration = Duration::from_secs(15);
 const TICKET_PICKER_CREATE_REFRESH_INTERVAL: Duration = Duration::from_secs(1);
 const BACKGROUND_SESSION_DEFERRED_OUTPUT_MAX_BYTES: usize = 64 * 1024;
 const RESOLVED_ANIMATION_REFRESH_INTERVAL: Duration = Duration::from_secs(1);
@@ -379,6 +380,20 @@ pub trait TicketPickerProvider: Send + Sync {
             "inbox resolution is not supported by this ticket provider".to_owned(),
         ))
     }
+    async fn start_pr_pipeline_polling(
+        &self,
+        _sender: mpsc::Sender<MergeQueueEvent>,
+    ) -> Result<(), CoreError> {
+        Ok(())
+    }
+    async fn stop_pr_pipeline_polling(&self) -> Result<(), CoreError> {
+        Ok(())
+    }
+    async fn enqueue_pr_merge(&self, _session_id: WorkerSessionId) -> Result<(), CoreError> {
+        Err(CoreError::DependencyUnavailable(
+            "PR merge queueing is not supported by this ticket provider".to_owned(),
+        ))
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -411,6 +426,37 @@ pub struct SessionWorkflowAdvanceOutcome {
     pub to: WorkflowState,
     pub instruction: Option<String>,
     pub event: StoredEventEnvelope,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MergeQueueCommandKind {
+    Reconcile,
+    Merge,
+}
+
+#[derive(Debug, Clone)]
+pub enum MergeQueueEvent {
+    Completed {
+        session_id: WorkerSessionId,
+        kind: MergeQueueCommandKind,
+        completed: bool,
+        merge_conflict: bool,
+        base_branch: Option<String>,
+        head_branch: Option<String>,
+        ci_checks: Vec<CiCheckStatus>,
+        ci_failures: Vec<String>,
+        ci_has_failures: bool,
+        ci_status_error: Option<String>,
+        error: Option<String>,
+    },
+    SessionFinalized {
+        session_id: WorkerSessionId,
+        event: StoredEventEnvelope,
+    },
+    SessionFinalizeFailed {
+        session_id: WorkerSessionId,
+        message: String,
+    },
 }
 
 pub type SupervisorCommandContext = SupervisorQueryContextArgs;
@@ -875,12 +921,12 @@ struct SessionCiStatusCache {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct CiCheckStatus {
-    name: String,
-    workflow: Option<String>,
-    bucket: String,
-    state: String,
-    link: Option<String>,
+pub struct CiCheckStatus {
+    pub name: String,
+    pub workflow: Option<String>,
+    pub bucket: String,
+    pub state: String,
+    pub link: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
