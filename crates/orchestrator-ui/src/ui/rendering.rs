@@ -45,14 +45,39 @@ fn render_inbox_panel(ui_state: &UiState) -> String {
                 " "
             };
             let resolved = if row.resolved { "x" } else { " " };
+            let display_title = sanitize_inbox_display_title(&row.title);
             lines.push(format!(
-                "{selected} [{resolved}] {:?}: {}",
-                row.kind, row.title
+                "{selected} [{resolved}] {}",
+                display_title
             ));
         }
     }
 
     lines.join("\n")
+}
+
+fn sanitize_inbox_display_title(title: &str) -> String {
+    let trimmed = title.trim_start();
+    let Some((raw_prefix, remainder)) = trimmed.split_once(':') else {
+        return title.to_owned();
+    };
+    let prefix = raw_prefix.trim();
+    let is_status_prefix = [
+        "NeedsDecision",
+        "NeedsReview",
+        "NeedsApproval",
+        "ReadyForReview",
+        "Blocked",
+        "FYI",
+    ]
+    .iter()
+    .any(|candidate| prefix.eq_ignore_ascii_case(candidate));
+
+    if !is_status_prefix {
+        return title.to_owned();
+    }
+
+    remainder.trim_start().to_owned()
 }
 
 fn session_panel_rows(
@@ -459,10 +484,10 @@ fn render_session_info_panel(
                 continue;
             }
             has_open = true;
+            let display_title = sanitize_inbox_display_title(item.title.as_str());
             lines.push(format!(
-                "- {:?}: {}",
-                item.kind,
-                compact_focus_card_text(item.title.as_str())
+                "- {}",
+                compact_focus_card_text(display_title.as_str())
             ));
         }
         if !has_open {

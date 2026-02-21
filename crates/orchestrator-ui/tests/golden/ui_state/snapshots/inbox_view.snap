@@ -9,16 +9,16 @@ center_title: Terminal
 Batch lanes: [1] Decide / Unblock 1 | [2] Approvals 1 | [3] PR Reviews 1 | [4] FYI Digest 1
 
 󰞋 Decide / Unblock:
-> [ ] NeedsDecision: Choose parser migration strategy
+> [ ] Choose parser migration strategy
 
 󰄬 Approvals:
-  [ ] NeedsApproval: Approve PR-ready transition
+  [ ] Approve PR-ready transition
 
 󰳴 PR Reviews:
-  [ ] ReadyForReview: Review implementation evidence
+  [ ] Review implementation evidence
 
 󰋼 FYI Digest:
-  [ ] FYI: FYI: background agent progress
+  [ ] background agent progress
 
 [center]
 Stack: Terminal

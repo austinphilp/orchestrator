@@ -4400,6 +4400,28 @@ mod tests {
     }
 
     #[test]
+    fn session_info_open_inbox_strips_status_prefixes_from_title_display() {
+        let mut projection = session_info_projection();
+        projection
+            .inbox_items
+            .get_mut(&InboxItemId::new("inbox-inspector"))
+            .expect("inbox item")
+            .title = "NeedsApproval: Inspect generated artifacts".to_owned();
+
+        let rendered = render_session_info_panel(
+            &projection,
+            &WorkerSessionId::new("sess-inspector"),
+            None,
+            None,
+            None,
+        );
+
+        assert!(rendered.contains("Open inbox:"));
+        assert!(rendered.contains("- Inspect generated artifacts"));
+        assert!(!rendered.contains("- NeedsApproval: Inspect generated artifacts"));
+    }
+
+    #[test]
     fn session_info_sidebar_visibility_follows_terminal_view() {
         let mut shell_state = UiShellState::new("ready".to_owned(), sample_projection(true));
         assert!(!shell_state.should_show_session_info_sidebar());
@@ -5688,6 +5710,72 @@ mod tests {
         assert!(!rendered.contains("Urgent:"));
         assert!(!rendered.contains("Attention:"));
         assert!(!rendered.contains("Background:"));
+    }
+
+    #[test]
+    fn inbox_display_title_sanitizer_strips_known_status_prefixes() {
+        assert_eq!(
+            sanitize_inbox_display_title("NeedsDecision: Choose parser migration strategy"),
+            "Choose parser migration strategy"
+        );
+        assert_eq!(
+            sanitize_inbox_display_title("needsapproval: approve PR-ready transition"),
+            "approve PR-ready transition"
+        );
+        assert_eq!(
+            sanitize_inbox_display_title(" FYI: background agent progress"),
+            "background agent progress"
+        );
+        assert_eq!(
+            sanitize_inbox_display_title("ReadyForReview: NeedsApproval: review this"),
+            "NeedsApproval: review this"
+        );
+        assert_eq!(
+            sanitize_inbox_display_title("UnrelatedPrefix: keep as-is"),
+            "UnrelatedPrefix: keep as-is"
+        );
+    }
+
+    #[test]
+    fn inbox_panel_omits_kind_prefix_and_sanitizes_prefixed_titles() {
+        let mut projection = ProjectionState::default();
+        let work_item_id = WorkItemId::new("wi-prefixed");
+        let inbox_item_id = InboxItemId::new("inbox-prefixed");
+        projection.work_items.insert(
+            work_item_id.clone(),
+            WorkItemProjection {
+                id: work_item_id.clone(),
+                ticket_id: None,
+                project_id: None,
+                workflow_state: Some(WorkflowState::Planning),
+                session_id: None,
+                worktree_id: None,
+                inbox_items: vec![inbox_item_id.clone()],
+                artifacts: vec![],
+            },
+        );
+        projection.inbox_items.insert(
+            inbox_item_id.clone(),
+            InboxItemProjection {
+                id: inbox_item_id.clone(),
+                work_item_id,
+                kind: InboxItemKind::NeedsDecision,
+                title: "NeedsDecision: Choose parser migration strategy".to_owned(),
+                resolved: false,
+            },
+        );
+
+        let ui_state = project_ui_state(
+            "ready",
+            &projection,
+            &ViewStack::default(),
+            Some(0),
+            Some(&inbox_item_id),
+            None,
+        );
+        let rendered = render_inbox_panel(&ui_state);
+        assert!(rendered.contains("> [ ] Choose parser migration strategy"));
+        assert!(!rendered.contains("NeedsDecision:"));
     }
 
     #[test]
