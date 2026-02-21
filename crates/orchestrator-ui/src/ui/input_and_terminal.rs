@@ -33,10 +33,12 @@ enum UiCommand {
     AdvanceTerminalWorkflowStage,
     ArchiveSelectedSession,
     OpenSessionOutputForSelectedInbox,
+    SetApplicationModeAutopilot,
+    SetApplicationModeManual,
 }
 
 impl UiCommand {
-    const ALL: [Self; 33] = [
+    const ALL: [Self; 35] = [
         Self::EnterNormalMode,
         Self::EnterInsertMode,
         Self::ToggleGlobalSupervisorChat,
@@ -70,6 +72,8 @@ impl UiCommand {
         Self::AdvanceTerminalWorkflowStage,
         Self::ArchiveSelectedSession,
         Self::OpenSessionOutputForSelectedInbox,
+        Self::SetApplicationModeAutopilot,
+        Self::SetApplicationModeManual,
     ];
 
     const fn id(self) -> &'static str {
@@ -107,6 +111,8 @@ impl UiCommand {
             Self::AdvanceTerminalWorkflowStage => "ui.terminal.workflow.advance",
             Self::ArchiveSelectedSession => "ui.terminal.archive_selected_session",
             Self::OpenSessionOutputForSelectedInbox => "ui.open_session_output_for_selected_inbox",
+            Self::SetApplicationModeAutopilot => "ui.app_mode.autopilot",
+            Self::SetApplicationModeManual => "ui.app_mode.manual",
         }
     }
 
@@ -147,6 +153,8 @@ impl UiCommand {
             Self::OpenSessionOutputForSelectedInbox => {
                 "Open session output for selected inbox item"
             }
+            Self::SetApplicationModeAutopilot => "Set application mode to autopilot",
+            Self::SetApplicationModeManual => "Set application mode to manual",
         }
     }
 
@@ -214,6 +222,8 @@ fn default_keymap_config() -> KeymapConfig {
                     binding(&["v", "t"], UiCommand::OpenTestInspectorForSelected),
                     binding(&["v", "p"], UiCommand::OpenPrInspectorForSelected),
                     binding(&["v", "c"], UiCommand::OpenChatInspectorForSelected),
+                    binding(&["m", "a"], UiCommand::SetApplicationModeAutopilot),
+                    binding(&["m", "m"], UiCommand::SetApplicationModeManual),
                 ],
                 prefixes: vec![
                     KeyPrefixConfig {
@@ -227,6 +237,10 @@ fn default_keymap_config() -> KeymapConfig {
                     KeyPrefixConfig {
                         keys: vec!["w".to_owned()],
                         label: "Workflow Actions".to_owned(),
+                    },
+                    KeyPrefixConfig {
+                        keys: vec!["m".to_owned()],
+                        label: "Application modes".to_owned(),
                     },
                 ],
             },
@@ -283,6 +297,10 @@ fn bottom_bar_hint_groups(mode: UiMode) -> &'static [BottomBarHintGroup] {
             BottomBarHintGroup {
                 label: "Workflow:",
                 hints: &["w n", "x", "q"],
+            },
+            BottomBarHintGroup {
+                label: "Modes:",
+                hints: &["m a", "m m"],
             },
         ],
         UiMode::Insert => &[
@@ -921,6 +939,14 @@ fn dispatch_command(shell_state: &mut UiShellState, command: UiCommand) -> bool 
         }
         UiCommand::OpenSessionOutputForSelectedInbox => {
             shell_state.open_session_output_for_selected_inbox();
+            false
+        }
+        UiCommand::SetApplicationModeAutopilot => {
+            shell_state.set_application_mode_autopilot();
+            false
+        }
+        UiCommand::SetApplicationModeManual => {
+            shell_state.set_application_mode_manual();
             false
         }
     }

@@ -24,8 +24,8 @@ use orchestrator_core::{
 };
 use orchestrator_runtime::{
     BackendEvent, BackendKind, BackendNeedsInputAnswer, BackendNeedsInputEvent,
-    BackendNeedsInputQuestion, BackendOutputEvent, BackendTurnStateEvent, RuntimeError,
-    RuntimeResult, RuntimeSessionId, SessionHandle, SpawnSpec, WorkerBackend,
+    BackendNeedsInputOption, BackendNeedsInputQuestion, BackendOutputEvent, BackendTurnStateEvent,
+    RuntimeError, RuntimeResult, RuntimeSessionId, SessionHandle, SpawnSpec, WorkerBackend,
 };
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Layout, Rect};
@@ -438,6 +438,22 @@ impl UiMode {
             Self::Normal => "Normal",
             Self::Insert => "Insert",
             Self::Terminal => "Terminal",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum ApplicationMode {
+    #[default]
+    Manual,
+    Autopilot,
+}
+
+impl ApplicationMode {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Manual => "Manual",
+            Self::Autopilot => "Autopilot",
         }
     }
 }
@@ -1260,6 +1276,7 @@ impl TerminalViewState {
             self.active_needs_input = Some(NeedsInputComposerState::new(
                 prompt.prompt_id,
                 prompt.questions,
+                prompt.default_option_labels,
                 !prompt.requires_manual_activation,
                 prompt.is_structured_plan_request,
             ));
@@ -1322,6 +1339,7 @@ struct NeedsInputAnswerDraft {
 struct NeedsInputPromptState {
     prompt_id: String,
     questions: Vec<BackendNeedsInputQuestion>,
+    default_option_labels: Vec<Option<String>>,
     requires_manual_activation: bool,
     is_structured_plan_request: bool,
 }
@@ -1330,6 +1348,7 @@ struct NeedsInputPromptState {
 struct NeedsInputComposerState {
     prompt_id: String,
     questions: Vec<BackendNeedsInputQuestion>,
+    default_option_labels: Vec<Option<String>>,
     answer_drafts: Vec<NeedsInputAnswerDraft>,
     current_question_index: usize,
     select_state: SelectState,
@@ -1346,6 +1365,7 @@ impl std::fmt::Debug for NeedsInputComposerState {
             .field("prompt_id", &self.prompt_id)
             .field("questions", &self.questions)
             .field("answer_drafts", &self.answer_drafts)
+            .field("default_option_labels", &self.default_option_labels)
             .field("current_question_index", &self.current_question_index)
             .field("select_state", &self.select_state)
             .field("note_editor_mode", &self.note_editor_state.mode)
@@ -1362,13 +1382,19 @@ impl NeedsInputComposerState {
     fn new(
         prompt_id: String,
         questions: Vec<BackendNeedsInputQuestion>,
+        default_option_labels: Vec<Option<String>>,
         interaction_active: bool,
         is_structured_plan_request: bool,
     ) -> Self {
         let answer_drafts = vec![NeedsInputAnswerDraft::default(); questions.len()];
+        let mut normalized_default_option_labels = default_option_labels;
+        if normalized_default_option_labels.len() != questions.len() {
+            normalized_default_option_labels.resize(questions.len(), None);
+        }
         let mut state = Self {
             prompt_id,
             questions,
+            default_option_labels: normalized_default_option_labels,
             answer_drafts,
             current_question_index: 0,
             select_state: SelectState::new(0),
@@ -1395,14 +1421,21 @@ impl NeedsInputComposerState {
     }
 
     fn refresh_controls_from_current_question(&mut self) {
-        let Some(question) = self.current_question() else {
+        let Some((options_len, options)) = self
+            .current_question()
+            .map(|question| {
+                (
+                    question.options.as_ref().map(Vec::len).unwrap_or(0),
+                    question.options.clone(),
+                )
+            })
+        else {
             self.select_state = SelectState::new(0);
             clear_editor_state(&mut self.note_editor_state);
             self.note_insert_mode = false;
             return;
         };
 
-        let options_len = question.options.as_ref().map(Vec::len).unwrap_or(0);
         let draft = self
             .answer_drafts
             .get(self.current_question_index)
@@ -1413,6 +1446,18 @@ impl NeedsInputComposerState {
         if let Some(index) = draft.selected_option_index.filter(|index| *index < options_len) {
             self.select_state.selected_index = Some(index);
             self.select_state.highlighted_index = index;
+        } else if let Some(default_label) = self
+            .default_option_labels
+            .get(self.current_question_index)
+            .and_then(|value| value.as_deref())
+        {
+            if let Some(default_index) = options
+                .as_ref()
+                .and_then(|entries| entries.iter().position(|option| option.label == default_label))
+            {
+                self.select_state.selected_index = Some(default_index);
+                self.select_state.highlighted_index = default_index;
+            }
         }
         set_editor_state_text(&mut self.note_editor_state, draft.note.as_str());
         self.note_editor_state.mode =

@@ -400,6 +400,110 @@ mod tests {
         }
     }
 
+    #[derive(Default)]
+    struct AutopilotRecordingProvider {
+        advanced_sessions: Arc<Mutex<Vec<WorkerSessionId>>>,
+        archived_sessions: Arc<Mutex<Vec<WorkerSessionId>>>,
+    }
+
+    impl AutopilotRecordingProvider {
+        fn advanced_sessions(&self) -> Vec<WorkerSessionId> {
+            self.advanced_sessions
+                .lock()
+                .expect("advanced sessions lock")
+                .clone()
+        }
+
+        fn archived_sessions(&self) -> Vec<WorkerSessionId> {
+            self.archived_sessions
+                .lock()
+                .expect("archived sessions lock")
+                .clone()
+        }
+    }
+
+    #[async_trait]
+    impl TicketPickerProvider for AutopilotRecordingProvider {
+        async fn list_unfinished_tickets(&self) -> Result<Vec<TicketSummary>, CoreError> {
+            Ok(Vec::new())
+        }
+
+        async fn start_or_resume_ticket(
+            &self,
+            _ticket: TicketSummary,
+            _repository_override: Option<PathBuf>,
+        ) -> Result<SelectedTicketFlowResult, CoreError> {
+            Err(CoreError::DependencyUnavailable(
+                "not used in autopilot recording provider".to_owned(),
+            ))
+        }
+
+        async fn create_ticket_from_brief(
+            &self,
+            _request: CreateTicketFromPickerRequest,
+        ) -> Result<TicketSummary, CoreError> {
+            Err(CoreError::DependencyUnavailable(
+                "not used in autopilot recording provider".to_owned(),
+            ))
+        }
+
+        async fn archive_session(
+            &self,
+            session_id: WorkerSessionId,
+        ) -> Result<SessionArchiveOutcome, CoreError> {
+            self.archived_sessions
+                .lock()
+                .expect("archived sessions lock")
+                .push(session_id.clone());
+            Ok(SessionArchiveOutcome {
+                warning: None,
+                event: stored_event_for_test(
+                    "evt-autopilot-session-archived",
+                    1,
+                    None,
+                    Some(session_id.clone()),
+                    OrchestrationEventPayload::SessionCompleted(SessionCompletedPayload {
+                        session_id,
+                        summary: Some("autopilot archive".to_owned()),
+                    }),
+                ),
+            })
+        }
+
+        async fn reload_projection(&self) -> Result<ProjectionState, CoreError> {
+            Ok(ProjectionState::default())
+        }
+
+        async fn advance_session_workflow(
+            &self,
+            session_id: WorkerSessionId,
+        ) -> Result<SessionWorkflowAdvanceOutcome, CoreError> {
+            self.advanced_sessions
+                .lock()
+                .expect("advanced sessions lock")
+                .push(session_id.clone());
+            Ok(SessionWorkflowAdvanceOutcome {
+                session_id: session_id.clone(),
+                work_item_id: WorkItemId::new("wi-autopilot"),
+                from: WorkflowState::Implementing,
+                to: WorkflowState::PRDrafted,
+                instruction: None,
+                event: stored_event_for_test(
+                    "evt-autopilot-workflow-advanced",
+                    2,
+                    Some(WorkItemId::new("wi-autopilot")),
+                    Some(session_id),
+                    OrchestrationEventPayload::WorkflowTransition(WorkflowTransitionPayload {
+                        work_item_id: WorkItemId::new("wi-autopilot"),
+                        from: WorkflowState::Implementing,
+                        to: WorkflowState::PRDrafted,
+                        reason: None,
+                    }),
+                ),
+            })
+        }
+    }
+
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
     }
@@ -2497,6 +2601,71 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn autopilot_auto_submits_recommended_planning_option() {
+        let backend = Arc::new(ManualTerminalBackend::default());
+        let mut projection = sample_projection(true);
+        projection
+            .work_items
+            .get_mut(&WorkItemId::new("wi-1"))
+            .expect("work item")
+            .workflow_state = Some(WorkflowState::Planning);
+        let mut shell_state = UiShellState::new_with_integrations(
+            "ready".to_owned(),
+            projection,
+            None,
+            None,
+            None,
+            Some(backend),
+        );
+        shell_state.open_terminal_and_enter_mode();
+
+        let sender = shell_state
+            .terminal_session_sender
+            .clone()
+            .expect("terminal sender");
+        sender
+            .try_send(TerminalSessionEvent::NeedsInput {
+                session_id: WorkerSessionId::new("sess-1"),
+                needs_input: BackendNeedsInputEvent {
+                    prompt_id: "prompt-planning-autopilot".to_owned(),
+                    question: "pick plan mode".to_owned(),
+                    options: Vec::new(),
+                    default_option: None,
+                    questions: vec![BackendNeedsInputQuestion {
+                        id: "mode".to_owned(),
+                        header: "Mode".to_owned(),
+                        question: "Choose mode".to_owned(),
+                        is_other: false,
+                        is_secret: false,
+                        options: Some(vec![
+                            BackendNeedsInputOption {
+                                label: "Manual".to_owned(),
+                                description: String::new(),
+                            },
+                            BackendNeedsInputOption {
+                                label: "Autopilot (Recommended)".to_owned(),
+                                description: String::new(),
+                            },
+                        ]),
+                    }],
+                },
+            })
+            .expect("queue needs-input event");
+        shell_state.poll_terminal_session_events();
+        shell_state.set_application_mode_autopilot();
+
+        let _ = shell_state.tick_autopilot_and_report();
+        tokio::task::yield_now().await;
+
+        let prompt_active = shell_state
+            .terminal_session_states
+            .get(&WorkerSessionId::new("sess-1"))
+            .and_then(|view| view.active_needs_input.as_ref())
+            .is_some();
+        assert!(!prompt_active);
+    }
+
     #[test]
     fn planning_needs_input_option_navigation_activates_from_normal_mode() {
         let backend = Arc::new(ManualTerminalBackend::default());
@@ -2764,6 +2933,105 @@ mod tests {
                 "Plan input request"
             ))
         );
+    }
+
+    #[tokio::test]
+    async fn autopilot_controls_all_open_sessions_for_advance_and_archive() {
+        let provider = Arc::new(AutopilotRecordingProvider::default());
+        let mut projection = ProjectionState::default();
+
+        projection.work_items.insert(
+            WorkItemId::new("wi-1"),
+            WorkItemProjection {
+                id: WorkItemId::new("wi-1"),
+                ticket_id: None,
+                project_id: None,
+                workflow_state: Some(WorkflowState::Implementing),
+                session_id: Some(WorkerSessionId::new("sess-1")),
+                worktree_id: None,
+                inbox_items: vec![InboxItemId::new("inbox-1")],
+                artifacts: vec![],
+            },
+        );
+        projection.sessions.insert(
+            WorkerSessionId::new("sess-1"),
+            SessionProjection {
+                id: WorkerSessionId::new("sess-1"),
+                work_item_id: Some(WorkItemId::new("wi-1")),
+                status: Some(WorkerSessionStatus::Running),
+                latest_checkpoint: None,
+            },
+        );
+        projection.inbox_items.insert(
+            InboxItemId::new("inbox-1"),
+            InboxItemProjection {
+                id: InboxItemId::new("inbox-1"),
+                work_item_id: WorkItemId::new("wi-1"),
+                kind: InboxItemKind::NeedsApproval,
+                title: "advance".to_owned(),
+                resolved: false,
+            },
+        );
+
+        projection.work_items.insert(
+            WorkItemId::new("wi-2"),
+            WorkItemProjection {
+                id: WorkItemId::new("wi-2"),
+                ticket_id: None,
+                project_id: None,
+                workflow_state: Some(WorkflowState::Done),
+                session_id: Some(WorkerSessionId::new("sess-2")),
+                worktree_id: None,
+                inbox_items: vec![InboxItemId::new("inbox-2")],
+                artifacts: vec![],
+            },
+        );
+        projection.sessions.insert(
+            WorkerSessionId::new("sess-2"),
+            SessionProjection {
+                id: WorkerSessionId::new("sess-2"),
+                work_item_id: Some(WorkItemId::new("wi-2")),
+                status: Some(WorkerSessionStatus::Running),
+                latest_checkpoint: None,
+            },
+        );
+        projection.inbox_items.insert(
+            InboxItemId::new("inbox-2"),
+            InboxItemProjection {
+                id: InboxItemId::new("inbox-2"),
+                work_item_id: WorkItemId::new("wi-2"),
+                kind: InboxItemKind::FYI,
+                title: "done".to_owned(),
+                resolved: false,
+            },
+        );
+
+        projection.session_runtime.insert(
+            WorkerSessionId::new("sess-1"),
+            SessionRuntimeProjection { is_working: false },
+        );
+        projection.session_runtime.insert(
+            WorkerSessionId::new("sess-2"),
+            SessionRuntimeProjection { is_working: false },
+        );
+
+        let mut shell_state = UiShellState::new_with_integrations(
+            "ready".to_owned(),
+            projection,
+            None,
+            None,
+            Some(provider.clone()),
+            None,
+        );
+        shell_state.set_application_mode_autopilot();
+
+        assert!(shell_state.tick_autopilot_and_report());
+        tokio::task::yield_now().await;
+
+        let advanced = provider.advanced_sessions();
+        let archived = provider.archived_sessions();
+        assert!(advanced.iter().any(|session_id| session_id.as_str() == "sess-1"));
+        assert!(archived.iter().any(|session_id| session_id.as_str() == "sess-2"));
     }
 
     #[test]
@@ -6046,6 +6314,32 @@ mod tests {
         let rendered = render_which_key_overlay_text(overlay);
         assert!(rendered.contains("w  (Workflow Actions)"));
         assert!(rendered.contains("n  Advance terminal workflow stage"));
+
+        handle_key_press(&mut shell_state, key(KeyCode::Char('m')));
+        let overlay = shell_state
+            .which_key_overlay
+            .as_ref()
+            .expect("overlay is shown for app modes prefix");
+        let rendered = render_which_key_overlay_text(overlay);
+        assert!(rendered.contains("m  (Application modes)"));
+        assert!(rendered.contains("a  Set application mode to autopilot"));
+        assert!(rendered.contains("m  Set application mode to manual"));
+    }
+
+    #[test]
+    fn app_mode_bindings_switch_between_autopilot_and_manual() {
+        let mut shell_state = UiShellState::new("ready".to_owned(), triage_projection());
+        let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
+
+        assert_eq!(shell_state.application_mode_label(), "Manual");
+
+        handle_key_press(&mut shell_state, key(KeyCode::Char('m')));
+        handle_key_press(&mut shell_state, key(KeyCode::Char('a')));
+        assert_eq!(shell_state.application_mode_label(), "Autopilot");
+
+        handle_key_press(&mut shell_state, key(KeyCode::Char('m')));
+        handle_key_press(&mut shell_state, key(KeyCode::Char('m')));
+        assert_eq!(shell_state.application_mode_label(), "Manual");
     }
 
     #[test]
@@ -6934,6 +7228,14 @@ mod tests {
             command_id(UiCommand::OpenSessionOutputForSelectedInbox),
             "ui.open_session_output_for_selected_inbox"
         );
+        assert_eq!(
+            command_id(UiCommand::SetApplicationModeAutopilot),
+            "ui.app_mode.autopilot"
+        );
+        assert_eq!(
+            command_id(UiCommand::SetApplicationModeManual),
+            "ui.app_mode.manual"
+        );
     }
 
     #[test]
@@ -6964,6 +7266,8 @@ mod tests {
             UiCommand::AdvanceTerminalWorkflowStage,
             UiCommand::ArchiveSelectedSession,
             UiCommand::OpenSessionOutputForSelectedInbox,
+            UiCommand::SetApplicationModeAutopilot,
+            UiCommand::SetApplicationModeManual,
         ];
 
         for command in all_commands {
