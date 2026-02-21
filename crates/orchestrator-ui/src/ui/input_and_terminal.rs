@@ -327,6 +327,7 @@ fn append_terminal_output(state: &mut TerminalViewState, bytes: Vec<u8>) {
     if chunk.is_empty() {
         return;
     }
+    invalidate_terminal_render_cache(state);
 
     let mut combined = String::new();
     combined.push_str(state.output_fragment.as_str());
@@ -387,6 +388,7 @@ fn append_terminal_user_message(state: &mut TerminalViewState, message: &str) {
     if text.trim().is_empty() {
         return;
     }
+    invalidate_terminal_render_cache(state);
 
     for (index, line) in text.lines().enumerate() {
         if line.is_empty() {
@@ -405,6 +407,7 @@ fn append_terminal_system_message(state: &mut TerminalViewState, message: &str) 
     if text.trim().is_empty() {
         return;
     }
+    invalidate_terminal_render_cache(state);
 
     for (index, line) in text.lines().enumerate() {
         if line.is_empty() {
@@ -444,6 +447,7 @@ fn append_terminal_foldable_content(
     kind: TerminalFoldKind,
     content: &str,
 ) {
+    invalidate_terminal_render_cache(state);
     let entry_content = if content.trim().is_empty() {
         "(no details)"
     } else {
@@ -482,6 +486,7 @@ fn flush_terminal_output_fragment(state: &mut TerminalViewState) {
     if line.trim().is_empty() {
         return;
     }
+    invalidate_terminal_render_cache(state);
 
     if let Some((before, kind, content)) = parse_terminal_meta_line_embedded(line) {
         let before = before.trim();
@@ -517,6 +522,11 @@ fn normalize_outgoing_user_line(line: &str) -> &str {
     line.strip_prefix("you: ")
         .or_else(|| line.strip_prefix("user: "))
         .unwrap_or(line)
+}
+
+fn invalidate_terminal_render_cache(state: &mut TerminalViewState) {
+    state.render_cache.invalidate_all();
+    state.output_rendered_line_count = 0;
 }
 
 fn handle_key_press(shell_state: &mut UiShellState, key: KeyEvent) -> bool {

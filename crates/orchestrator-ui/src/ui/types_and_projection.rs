@@ -1118,6 +1118,7 @@ struct TerminalViewState {
     entries: Vec<TerminalTranscriptEntry>,
     error: Option<String>,
     output_fragment: String,
+    render_cache: TerminalRenderCache,
     deferred_output: Vec<u8>,
     last_background_flush_at: Option<Instant>,
     output_rendered_line_count: usize,
@@ -1136,6 +1137,7 @@ impl Default for TerminalViewState {
             entries: Vec::new(),
             error: None,
             output_fragment: String::new(),
+            render_cache: TerminalRenderCache::default(),
             deferred_output: Vec::new(),
             last_background_flush_at: None,
             output_rendered_line_count: 0,
@@ -1147,6 +1149,36 @@ impl Default for TerminalViewState {
             active_needs_input: None,
             last_merge_conflict_signature: None,
         }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct TerminalRenderCache {
+    transcript_lines: Vec<String>,
+    rendered_row_counts: Vec<usize>,
+    rendered_prefix_sums: Vec<usize>,
+    width: u16,
+    transcript_stale: bool,
+    metrics_stale: bool,
+}
+
+impl Default for TerminalRenderCache {
+    fn default() -> Self {
+        Self {
+            transcript_lines: Vec::new(),
+            rendered_row_counts: Vec::new(),
+            rendered_prefix_sums: Vec::new(),
+            width: 0,
+            transcript_stale: true,
+            metrics_stale: true,
+        }
+    }
+}
+
+impl TerminalRenderCache {
+    fn invalidate_all(&mut self) {
+        self.transcript_stale = true;
+        self.metrics_stale = true;
     }
 }
 
