@@ -901,6 +901,17 @@ impl UiShellState {
         if self
             .terminal_session_states
             .get(session_id)
+            .map(|state| {
+                state.active_needs_input.is_some() || !state.pending_needs_input_prompts.is_empty()
+            })
+            .unwrap_or(false)
+        {
+            return false;
+        }
+
+        if self
+            .terminal_session_states
+            .get(session_id)
             .map(|state| state.turn_active)
             .unwrap_or(false)
         {
