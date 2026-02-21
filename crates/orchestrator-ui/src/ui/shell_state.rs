@@ -3576,13 +3576,7 @@ impl UiShellState {
 
         match key.code {
             KeyCode::Esc if key.modifiers.is_empty() => {
-                if self.terminal_compose_editor.mode == EditorMode::Normal {
-                    return false;
-                }
-                if let Some(key_input) = map_edtui_key_input(key) {
-                    self.terminal_compose_event_handler
-                        .on_key_event(key_input, &mut self.terminal_compose_editor);
-                }
+                self.enter_normal_mode();
                 true
             }
             KeyCode::Enter if key.modifiers == KeyModifiers::CONTROL => {
@@ -3590,14 +3584,10 @@ impl UiShellState {
                 true
             }
             KeyCode::Enter if key.modifiers.is_empty() => {
-                if self.terminal_compose_editor.mode == EditorMode::Normal {
-                    self.submit_terminal_compose_input();
-                } else {
-                    let enter = edtui_key_input(KeyCode::Enter, KeyModifiers::NONE)
-                        .expect("enter key conversion");
-                    self.terminal_compose_event_handler
-                        .on_key_event(enter, &mut self.terminal_compose_editor);
-                }
+                let enter = edtui_key_input(KeyCode::Enter, KeyModifiers::NONE)
+                    .expect("enter key conversion");
+                self.terminal_compose_event_handler
+                    .on_key_event(enter, &mut self.terminal_compose_editor);
                 true
             }
             KeyCode::Enter if key.modifiers == KeyModifiers::SHIFT => {
@@ -4252,18 +4242,12 @@ impl UiShellState {
     }
 
     fn enter_normal_mode(&mut self) {
-        self.mode = UiMode::Normal;
-        self.mode_key_buffer.clear();
-        self.which_key_overlay = None;
-        self.terminal_escape_pending = false;
+        self.apply_ui_mode(UiMode::Normal);
     }
 
     fn enter_insert_mode(&mut self) {
         if !self.is_terminal_view_active() {
-            self.mode = UiMode::Insert;
-            self.mode_key_buffer.clear();
-            self.which_key_overlay = None;
-            self.terminal_escape_pending = false;
+            self.apply_ui_mode(UiMode::Insert);
         }
     }
 
@@ -4284,13 +4268,20 @@ impl UiShellState {
         if self.is_terminal_view_active() {
             self.pane_focus = PaneFocus::Right;
             self.snap_active_terminal_output_to_bottom();
-            self.terminal_compose_editor.mode = EditorMode::Insert;
-            self.mode = UiMode::Terminal;
-            self.mode_key_buffer.clear();
-            self.which_key_overlay = None;
-            self.terminal_escape_pending = false;
+            self.apply_ui_mode(UiMode::Terminal);
             self.schedule_session_info_summary_refresh_for_active_session();
         }
+    }
+
+    fn apply_ui_mode(&mut self, mode: UiMode) {
+        self.mode = mode;
+        self.mode_key_buffer.clear();
+        self.which_key_overlay = None;
+        self.terminal_escape_pending = false;
+        self.terminal_compose_editor.mode = match mode {
+            UiMode::Normal => EditorMode::Normal,
+            UiMode::Insert | UiMode::Terminal => EditorMode::Insert,
+        };
     }
 
     fn open_terminal_and_enter_mode(&mut self) {
@@ -4436,53 +4427,75 @@ impl UiShellState {
     }
 
     fn toggle_terminal_needs_input_note_insert_mode(&mut self, enabled: bool) {
-        let Some(prompt) = self.active_terminal_needs_input_mut() else {
-            return;
-        };
-        if !prompt.interaction_active {
-            return;
+        {
+            let Some(prompt) = self.active_terminal_needs_input_mut() else {
+                return;
+            };
+            if !prompt.interaction_active {
+                return;
+            }
+            prompt.note_insert_mode = enabled;
+            prompt.note_editor_state.mode = if enabled {
+                EditorMode::Insert
+            } else {
+                EditorMode::Normal
+            };
+            prompt.select_state.focused =
+                !enabled && prompt.current_question_requires_option_selection();
         }
-        prompt.note_insert_mode = enabled;
-        prompt.note_editor_state.mode = if enabled {
-            EditorMode::Insert
+        if enabled {
+            self.apply_ui_mode(UiMode::Insert);
         } else {
-            EditorMode::Normal
-        };
-        prompt.select_state.focused = !enabled && prompt.current_question_requires_option_selection();
+            self.apply_ui_mode(UiMode::Normal);
+        }
     }
 
     fn apply_terminal_needs_input_note_key(&mut self, key: KeyEvent) -> bool {
-        let Some(prompt) = self.active_terminal_needs_input_mut() else {
-            return false;
-        };
-        if !prompt.interaction_active || !prompt.note_insert_mode {
+        if self.mode != UiMode::Insert {
             return false;
         }
+        let mut exit_to_normal_mode = false;
+        let handled = {
+            let Some(prompt) = self.active_terminal_needs_input_mut() else {
+                return false;
+            };
+            if !prompt.interaction_active || !prompt.note_insert_mode {
+                return false;
+            }
 
-        match key.code {
-            KeyCode::Esc if key.modifiers.is_empty() => {
-                prompt.note_insert_mode = false;
-                prompt.note_editor_state.mode = EditorMode::Normal;
-                prompt.select_state.focused = prompt.current_question_requires_option_selection();
-                true
-            }
-            KeyCode::Enter if key.modifiers == KeyModifiers::SHIFT => {
-                let enter = edtui_key_input(KeyCode::Enter, KeyModifiers::NONE)
-                    .expect("enter key conversion");
-                EditorEventHandler::default().on_key_event(enter, &mut prompt.note_editor_state);
-                true
-            }
-            KeyCode::Enter if key.modifiers.is_empty() || key.modifiers == KeyModifiers::CONTROL => {
-                false
-            }
-            _ => {
-                if let Some(key_input) = map_edtui_key_input(key) {
-                    EditorEventHandler::default()
-                        .on_key_event(key_input, &mut prompt.note_editor_state);
+            match key.code {
+                KeyCode::Esc if key.modifiers.is_empty() => {
+                    prompt.note_insert_mode = false;
+                    prompt.note_editor_state.mode = EditorMode::Normal;
+                    prompt.select_state.focused =
+                        prompt.current_question_requires_option_selection();
+                    exit_to_normal_mode = true;
+                    true
                 }
-                true
+                KeyCode::Enter if key.modifiers == KeyModifiers::SHIFT => {
+                    let enter = edtui_key_input(KeyCode::Enter, KeyModifiers::NONE)
+                        .expect("enter key conversion");
+                    EditorEventHandler::default().on_key_event(enter, &mut prompt.note_editor_state);
+                    true
+                }
+                KeyCode::Enter
+                    if key.modifiers.is_empty() || key.modifiers == KeyModifiers::CONTROL =>
+                {
+                    false
+                }
+                _ => {
+                    if let Some(key_input) = map_edtui_key_input(key) {
+                        EditorEventHandler::default()
+                            .on_key_event(key_input, &mut prompt.note_editor_state);
+                    }
+                    true
+                }
             }
+        };
+        if exit_to_normal_mode {
+            self.apply_ui_mode(UiMode::Normal);
         }
+        handled
     }
 
     fn submit_terminal_needs_input_response(&mut self) {
