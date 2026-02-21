@@ -3145,7 +3145,8 @@ mod tests {
             None,
         );
 
-        shell_state.enqueue_progression_approval_reconcile_polls();
+        shell_state.mark_all_eligible_reconcile_dirty();
+        shell_state.enqueue_event_driven_reconciles();
         tokio::time::sleep(Duration::from_millis(20)).await;
         shell_state.poll_ticket_picker_events();
 
@@ -3276,8 +3277,8 @@ mod tests {
                 to: WorkflowState::InReview,
                 instruction: None,
                 event: stored_event_for_test(
-                    "evt-test-workflow-fallback",
-                    1,
+                    "evt-test-workflow-inreview",
+                    2,
                     Some(WorkItemId::new("wi-1")),
                     Some(session_id.clone()),
                     OrchestrationEventPayload::WorkflowTransition(WorkflowTransitionPayload {
@@ -3311,13 +3312,15 @@ mod tests {
             session_id: session_id.clone(),
             warning: None,
             event: stored_event_for_test(
-                "evt-test-session-archived-fallback",
-                1,
+                "evt-test-session-archived",
+                2,
                 Some(WorkItemId::new("wi-1")),
                 Some(session_id.clone()),
-                OrchestrationEventPayload::SessionCompleted(SessionCompletedPayload {
-                    session_id: session_id.clone(),
-                    summary: Some("archived".to_owned()),
+                OrchestrationEventPayload::WorkflowTransition(WorkflowTransitionPayload {
+                    work_item_id: WorkItemId::new("wi-1"),
+                    from: WorkflowState::Implementing,
+                    to: WorkflowState::Abandoned,
+                    reason: Some(WorkflowTransitionReason::Cancelled),
                 }),
             ),
         });
@@ -4729,7 +4732,7 @@ mod tests {
     }
 
     #[test]
-    fn merge_reconcile_poll_runs_for_review_session_without_pr_artifact() {
+    fn merge_reconcile_event_trigger_runs_for_review_session_without_pr_artifact() {
         let projection = review_projection_without_pr_artifact();
         let dispatcher = Arc::new(TestSupervisorDispatcher::new(Vec::new()));
         let mut shell_state = UiShellState::new_with_integrations(
@@ -4741,7 +4744,9 @@ mod tests {
             None,
         );
 
-        shell_state.enqueue_merge_reconcile_polls();
+        let session_id = WorkerSessionId::new("sess-review");
+        let _ = shell_state.mark_reconcile_dirty_for_session(&session_id);
+        assert!(shell_state.enqueue_event_driven_reconciles());
 
         assert_eq!(shell_state.merge_queue.len(), 1);
         let request = shell_state
@@ -4749,11 +4754,91 @@ mod tests {
             .front()
             .expect("merge reconcile request queued");
         assert_eq!(request.kind, MergeQueueCommandKind::Reconcile);
-        assert_eq!(request.session_id.as_str(), "sess-review");
+        assert_eq!(request.session_id, session_id);
     }
 
     #[test]
-    fn merge_reconcile_poll_only_scans_review_eligible_sessions() {
+    fn sparse_reconcile_fallback_enqueues_only_review_eligible_sessions() {
+        let mut projection = review_projection_without_pr_artifact();
+        let work_item_id = WorkItemId::new("wi-impl");
+        let session_id = WorkerSessionId::new("sess-impl");
+        projection.work_items.insert(
+            work_item_id.clone(),
+            WorkItemProjection {
+                id: work_item_id.clone(),
+                ticket_id: None,
+                project_id: None,
+                workflow_state: Some(WorkflowState::Implementing),
+                session_id: Some(session_id.clone()),
+                worktree_id: None,
+                inbox_items: vec![],
+                artifacts: vec![],
+            },
+        );
+        projection.sessions.insert(
+            session_id.clone(),
+            SessionProjection {
+                id: session_id,
+                work_item_id: Some(work_item_id),
+                status: Some(WorkerSessionStatus::Running),
+                latest_checkpoint: None,
+            },
+        );
+
+        let dispatcher = Arc::new(TestSupervisorDispatcher::new(Vec::new()));
+        let mut shell_state = UiShellState::new_with_integrations(
+            "ready".to_owned(),
+            projection,
+            None,
+            Some(dispatcher),
+            None,
+            None,
+        );
+        shell_state.merge_queue.clear();
+        shell_state.dirty_review_reconcile_sessions.clear();
+        shell_state.dirty_approval_reconcile_sessions.clear();
+        shell_state.review_fallback_last_sweep_at =
+            Some(Instant::now() - RECONCILE_SPARSE_FALLBACK_INTERVAL - Duration::from_secs(1));
+        shell_state.approval_fallback_last_sweep_at =
+            Some(Instant::now() - RECONCILE_SPARSE_FALLBACK_INTERVAL - Duration::from_secs(1));
+
+        assert!(shell_state.run_sparse_reconcile_fallbacks());
+        assert_eq!(shell_state.merge_queue.len(), 1);
+        assert_eq!(
+            shell_state
+                .merge_queue
+                .front()
+                .expect("review reconcile request")
+                .session_id
+                .as_str(),
+            "sess-review"
+        );
+    }
+
+    #[test]
+    fn sparse_reconcile_fallback_skips_when_interval_not_elapsed() {
+        let projection = review_projection_without_pr_artifact();
+        let dispatcher = Arc::new(TestSupervisorDispatcher::new(Vec::new()));
+        let mut shell_state = UiShellState::new_with_integrations(
+            "ready".to_owned(),
+            projection,
+            None,
+            Some(dispatcher),
+            None,
+            None,
+        );
+        shell_state.merge_queue.clear();
+        shell_state.dirty_review_reconcile_sessions.clear();
+        shell_state.dirty_approval_reconcile_sessions.clear();
+        shell_state.review_fallback_last_sweep_at = Some(Instant::now());
+        shell_state.approval_fallback_last_sweep_at = Some(Instant::now());
+
+        assert!(!shell_state.run_sparse_reconcile_fallbacks());
+        assert!(shell_state.merge_queue.is_empty());
+    }
+
+    #[test]
+    fn sparse_reconcile_fallback_scans_only_review_eligible_sessions() {
         let projection = mixed_reconcile_projection();
         let dispatcher = Arc::new(TestSupervisorDispatcher::new(Vec::new()));
         let mut shell_state = UiShellState::new_with_integrations(
@@ -4764,8 +4849,15 @@ mod tests {
             None,
             None,
         );
+        shell_state.merge_queue.clear();
+        shell_state.dirty_review_reconcile_sessions.clear();
+        shell_state.dirty_approval_reconcile_sessions.clear();
+        shell_state.review_fallback_last_sweep_at =
+            Some(Instant::now() - RECONCILE_SPARSE_FALLBACK_INTERVAL - Duration::from_secs(1));
+        shell_state.approval_fallback_last_sweep_at =
+            Some(Instant::now() - RECONCILE_SPARSE_FALLBACK_INTERVAL - Duration::from_secs(1));
 
-        shell_state.enqueue_merge_reconcile_polls();
+        assert!(shell_state.run_sparse_reconcile_fallbacks());
 
         let mut queued_session_ids = shell_state
             .merge_queue
