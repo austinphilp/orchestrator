@@ -58,6 +58,9 @@ struct UiShellState {
     terminal_session_streamed: HashSet<WorkerSessionId>,
     terminal_compose_editor: EditorState,
     terminal_compose_event_handler: EditorEventHandler,
+    session_panel_scroll_line: usize,
+    session_panel_viewport_rows: usize,
+    session_panel_rendered_line_count: usize,
     archive_session_confirm_session: Option<WorkerSessionId>,
     archiving_session_id: Option<WorkerSessionId>,
     review_merge_confirm_session: Option<WorkerSessionId>,
@@ -169,6 +172,9 @@ impl UiShellState {
             terminal_session_streamed: HashSet::new(),
             terminal_compose_editor: insert_mode_editor_state(),
             terminal_compose_event_handler: EditorEventHandler::default(),
+            session_panel_scroll_line: 0,
+            session_panel_viewport_rows: 1,
+            session_panel_rendered_line_count: 0,
             archive_session_confirm_session: None,
             archiving_session_id: None,
             review_merge_confirm_session: None,
@@ -725,6 +731,38 @@ impl UiShellState {
 
     fn should_show_session_info_sidebar(&self) -> bool {
         self.active_terminal_session_id().is_some()
+    }
+
+    fn sync_session_panel_viewport(
+        &mut self,
+        rendered_line_count: usize,
+        selected_line: Option<usize>,
+        viewport_rows: usize,
+    ) {
+        self.session_panel_rendered_line_count = rendered_line_count;
+        self.session_panel_viewport_rows = viewport_rows.max(1);
+        if rendered_line_count == 0 {
+            self.session_panel_scroll_line = 0;
+            return;
+        }
+
+        let max_scroll = rendered_line_count.saturating_sub(self.session_panel_viewport_rows);
+        let mut next_scroll = self.session_panel_scroll_line.min(max_scroll);
+        if let Some(selected_line) = selected_line {
+            if selected_line < next_scroll {
+                next_scroll = selected_line;
+            } else if selected_line >= next_scroll + self.session_panel_viewport_rows {
+                next_scroll = selected_line
+                    .saturating_add(1)
+                    .saturating_sub(self.session_panel_viewport_rows)
+                    .min(max_scroll);
+            }
+        }
+        self.session_panel_scroll_line = next_scroll;
+    }
+
+    fn session_panel_scroll_line(&self) -> usize {
+        self.session_panel_scroll_line
     }
 
     fn session_info_diff_cache_for(

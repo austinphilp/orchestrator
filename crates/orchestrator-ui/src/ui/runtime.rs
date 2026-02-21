@@ -119,12 +119,25 @@ impl Ui {
                         Layout::vertical([Constraint::Percentage(45), Constraint::Percentage(55)]);
                     let [sessions_area, inbox_area] = left_layout.areas(left_area);
 
+                    let sessions_viewport_rows =
+                        usize::from(sessions_area.height.saturating_sub(2).max(1));
                     let session_rows = shell_state.session_panel_rows_for_draw();
                     let selected_session_id =
                         shell_state.selected_session_id_for_panel_from_rows(&session_rows);
-                    let sessions_text = render_sessions_panel_text_from_rows(
+                    let session_metrics = session_panel_line_metrics_from_rows(
                         &session_rows,
                         selected_session_id.as_ref(),
+                    );
+                    shell_state.sync_session_panel_viewport(
+                        session_metrics.total_lines,
+                        session_metrics.selected_line,
+                        sessions_viewport_rows,
+                    );
+                    let sessions_text = render_sessions_panel_text_virtualized_from_rows(
+                        &session_rows,
+                        selected_session_id.as_ref(),
+                        shell_state.session_panel_scroll_line(),
+                        sessions_viewport_rows,
                     );
                     let sessions_title = if shell_state.is_sessions_sidebar_focused() {
                         "sessions *"

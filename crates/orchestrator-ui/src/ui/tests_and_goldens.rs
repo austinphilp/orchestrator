@@ -1667,6 +1667,107 @@ mod tests {
     }
 
     #[test]
+    fn session_panel_line_metrics_tracks_selected_row_line() {
+        let rows = vec![
+            SessionPanelRow {
+                session_id: WorkerSessionId::new("sess-a-1"),
+                project: "Alpha".to_owned(),
+                group: SessionStateGroup::Planning,
+                ticket_label: "Alpha planning".to_owned(),
+                badge: "planning".to_owned(),
+                activity: SessionRowActivity::Idle,
+            },
+            SessionPanelRow {
+                session_id: WorkerSessionId::new("sess-a-2"),
+                project: "Alpha".to_owned(),
+                group: SessionStateGroup::Implementation,
+                ticket_label: "Alpha implementation".to_owned(),
+                badge: "implementing".to_owned(),
+                activity: SessionRowActivity::Idle,
+            },
+            SessionPanelRow {
+                session_id: WorkerSessionId::new("sess-b-1"),
+                project: "Beta".to_owned(),
+                group: SessionStateGroup::Review,
+                ticket_label: "Beta review".to_owned(),
+                badge: "review".to_owned(),
+                activity: SessionRowActivity::Idle,
+            },
+        ];
+
+        let selected = WorkerSessionId::new("sess-b-1");
+        let metrics = session_panel_line_metrics_from_rows(&rows, Some(&selected));
+        assert_eq!(metrics.total_lines, 9);
+        assert_eq!(metrics.selected_line, Some(8));
+    }
+
+    #[test]
+    fn session_panel_virtualization_renders_only_visible_lines() {
+        let rows = vec![
+            SessionPanelRow {
+                session_id: WorkerSessionId::new("sess-a-1"),
+                project: "Alpha".to_owned(),
+                group: SessionStateGroup::Planning,
+                ticket_label: "Ticket A1".to_owned(),
+                badge: "planning".to_owned(),
+                activity: SessionRowActivity::Idle,
+            },
+            SessionPanelRow {
+                session_id: WorkerSessionId::new("sess-a-2"),
+                project: "Alpha".to_owned(),
+                group: SessionStateGroup::Planning,
+                ticket_label: "Ticket A2".to_owned(),
+                badge: "planning".to_owned(),
+                activity: SessionRowActivity::Idle,
+            },
+            SessionPanelRow {
+                session_id: WorkerSessionId::new("sess-a-3"),
+                project: "Alpha".to_owned(),
+                group: SessionStateGroup::Implementation,
+                ticket_label: "Ticket A3".to_owned(),
+                badge: "implementing".to_owned(),
+                activity: SessionRowActivity::Idle,
+            },
+            SessionPanelRow {
+                session_id: WorkerSessionId::new("sess-b-1"),
+                project: "Beta".to_owned(),
+                group: SessionStateGroup::Planning,
+                ticket_label: "Ticket B1".to_owned(),
+                badge: "planning".to_owned(),
+                activity: SessionRowActivity::Idle,
+            },
+        ];
+
+        let rendered = render_sessions_panel_text_virtualized_from_rows(&rows, None, 3, 4);
+        let lines = rendered
+            .lines
+            .iter()
+            .map(render_plain_text_line)
+            .collect::<Vec<_>>();
+        assert_eq!(lines.len(), 4);
+        assert!(lines[0].contains("Ticket A2"));
+        assert_eq!(lines[1], "  Implementation:");
+        assert!(lines[2].contains("Ticket A3"));
+        assert_eq!(lines[3], "");
+    }
+
+    #[test]
+    fn session_panel_viewport_sync_keeps_selected_visible() {
+        let mut shell_state = UiShellState::new("ready".to_owned(), ProjectionState::default());
+        shell_state.sync_session_panel_viewport(30, Some(0), 5);
+        assert_eq!(shell_state.session_panel_scroll_line(), 0);
+
+        shell_state.sync_session_panel_viewport(30, Some(8), 5);
+        assert_eq!(shell_state.session_panel_scroll_line(), 4);
+
+        shell_state.sync_session_panel_viewport(30, Some(3), 5);
+        assert_eq!(shell_state.session_panel_scroll_line(), 3);
+
+        shell_state.sync_session_panel_viewport(3, Some(2), 5);
+        assert_eq!(shell_state.session_panel_scroll_line(), 0);
+    }
+
+    #[test]
     fn resolved_inbox_rows_keep_animation_tick_active_until_auto_dismiss() {
         let mut projection = sample_projection(true);
         let work_item_id = WorkItemId::new("wi-1");
