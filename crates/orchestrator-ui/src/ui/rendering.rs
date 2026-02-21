@@ -120,7 +120,13 @@ fn session_panel_rows_with_labels(
         let ticket = ticket_label_for_session(session, domain, &ticket_labels);
         let badge = workflow_badge_for_session(session, domain);
         let group = session_state_group_for_session(session, domain, badge.as_str());
-        let activity = if session_turn_is_running(terminal_session_states, session) {
+        let activity = if session_waiting_for_planning_needs_input(
+            domain,
+            terminal_session_states,
+            &session.id,
+        ) {
+            SessionRowActivity::Idle
+        } else if session_turn_is_running(terminal_session_states, session) {
             SessionRowActivity::Active
         } else {
             SessionRowActivity::Idle
@@ -1177,13 +1183,22 @@ fn suppress_working_indicator_for_planning_prompt(
     terminal_session_states: &HashMap<WorkerSessionId, TerminalViewState>,
     session_id: &WorkerSessionId,
 ) -> bool {
+    session_waiting_for_planning_needs_input(domain, terminal_session_states, session_id)
+}
+
+fn session_waiting_for_planning_needs_input(
+    domain: &ProjectionState,
+    terminal_session_states: &HashMap<WorkerSessionId, TerminalViewState>,
+    session_id: &WorkerSessionId,
+) -> bool {
     if !session_is_in_workflow_state(domain, session_id, WorkflowState::Planning) {
         return false;
     }
     terminal_session_states
         .get(session_id)
-        .and_then(|state| state.active_needs_input.as_ref())
-        .map(|prompt| prompt.is_structured_plan_request)
+        .map(|state| {
+            state.active_needs_input.is_some() || !state.pending_needs_input_prompts.is_empty()
+        })
         .unwrap_or(false)
 }
 
