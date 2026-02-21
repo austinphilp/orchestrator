@@ -92,5 +92,7 @@ pr_pipeline_poll_interval_secs = 15
 [ui]
 theme = "nord"
 ticket_picker_priority_states = ["In Progress", "Final Approval", "Todo", "Backlog"]
+transcript_line_limit = 100
 background_session_refresh_secs = 15
+session_info_background_refresh_secs = 15
 ```

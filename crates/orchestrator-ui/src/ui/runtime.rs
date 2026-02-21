@@ -12,16 +12,16 @@ impl Ui {
         enable_raw_mode()?;
         let mut stdout = io::stdout();
         stdout.execute(EnterAlternateScreen)?;
-        let keyboard_enhancement_enabled = match crossterm::terminal::supports_keyboard_enhancement()
-        {
-            Ok(true) => stdout
-                .execute(crossterm::event::PushKeyboardEnhancementFlags(
-                    crossterm::event::KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
-                        | crossterm::event::KeyboardEnhancementFlags::REPORT_EVENT_TYPES,
-                ))
-                .is_ok(),
-            _ => false,
-        };
+        let keyboard_enhancement_enabled =
+            match crossterm::terminal::supports_keyboard_enhancement() {
+                Ok(true) => stdout
+                    .execute(crossterm::event::PushKeyboardEnhancementFlags(
+                        crossterm::event::KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
+                            | crossterm::event::KeyboardEnhancementFlags::REPORT_EVENT_TYPES,
+                    ))
+                    .is_ok(),
+                _ => false,
+            };
         let backend = CrosstermBackend::new(stdout);
         let terminal = Terminal::new(backend)?;
         Ok(Self {
@@ -70,16 +70,17 @@ impl Ui {
         let mut last_animation_frame = Instant::now();
         let mut cached_ui_state: Option<UiState> = None;
         loop {
+            let now = Instant::now();
             let mut changed = false;
-            changed |= shell_state.tick_supervisor_stream_and_report();
-            changed |= shell_state.tick_ticket_picker_and_report();
-            changed |= shell_state.tick_terminal_view_and_report();
+            changed |= shell_state.drain_async_events_and_report();
+            changed |= shell_state.run_due_periodic_tasks_and_report(now);
+            changed |= shell_state.maintain_active_terminal_view_and_report();
             changed |= shell_state.ensure_startup_session_feed_opened_and_report();
             if changed {
                 shell_state.invalidate_draw_caches();
             }
 
-            let now = Instant::now();
+            shell_state.maybe_emit_projection_perf_log(now);
             let animation_state = shell_state.animation_state(now);
             let animation_frame_interval = match animation_state {
                 AnimationState::ActiveTurn => Some(Duration::from_millis(200)),
@@ -89,8 +90,9 @@ impl Ui {
             let animation_frame_ready = animation_frame_interval
                 .map(|interval| now.duration_since(last_animation_frame) >= interval)
                 .unwrap_or(false);
-            let should_draw =
-                force_draw || changed || (animation_frame_interval.is_some() && animation_frame_ready);
+            let should_draw = force_draw
+                || changed
+                || (animation_frame_interval.is_some() && animation_frame_ready);
             let should_refresh_ui_state = changed
                 || cached_ui_state.is_none()
                 || matches!(animation_state, AnimationState::ResolvedOnly) && animation_frame_ready;
@@ -112,28 +114,63 @@ impl Ui {
                     let area = frame.area();
                     let layout = Layout::vertical([Constraint::Min(1), Constraint::Length(4)]);
                     let [main, footer] = layout.areas(area);
-                    let main_layout =
-                        Layout::horizontal([Constraint::Percentage(35), Constraint::Percentage(65)]);
+                    let main_layout = Layout::horizontal([
+                        Constraint::Percentage(35),
+                        Constraint::Percentage(65),
+                    ]);
                     let [left_area, center_area] = main_layout.areas(main);
                     let left_layout =
                         Layout::vertical([Constraint::Percentage(45), Constraint::Percentage(55)]);
                     let [sessions_area, inbox_area] = left_layout.areas(left_area);
 
-                    let session_rows = shell_state.session_panel_rows_for_draw();
-                    let selected_session_id =
-                        shell_state.selected_session_id_for_panel_from_rows(&session_rows);
-                    let sessions_text = render_sessions_panel_text_from_rows(
-                        &session_rows,
-                        selected_session_id.as_ref(),
+                    let sessions_viewport_rows =
+                        usize::from(sessions_area.height.saturating_sub(2).max(1));
+                    let selected_session_index = shell_state.selected_session_index;
+                    let selected_session_id_hint = shell_state.selected_session_id.clone();
+                    let session_panel_scroll_line = shell_state.session_panel_scroll_line();
+                    let (session_metrics, sessions_text) = {
+                        let session_rows = shell_state.session_panel_rows_for_draw();
+                        let selected_session_id = if session_rows.is_empty() {
+                            None
+                        } else if let Some(selected_session_id) = selected_session_id_hint.as_ref() {
+                            if session_rows
+                                .iter()
+                                .any(|row| &row.session_id == selected_session_id)
+                            {
+                                Some(selected_session_id.clone())
+                            } else {
+                                let index = selected_session_index.unwrap_or(0).min(session_rows.len() - 1);
+                                session_rows.get(index).map(|row| row.session_id.clone())
+                            }
+                        } else {
+                            let index = selected_session_index.unwrap_or(0).min(session_rows.len() - 1);
+                            session_rows.get(index).map(|row| row.session_id.clone())
+                        };
+                        let metrics =
+                            session_panel_line_metrics_from_rows(session_rows, selected_session_id.as_ref());
+                        let text = render_sessions_panel_text_virtualized_from_rows(
+                            session_rows,
+                            selected_session_id.as_ref(),
+                            session_panel_scroll_line,
+                            sessions_viewport_rows,
+                        );
+                        (metrics, text)
+                    };
+                    shell_state.sync_session_panel_viewport(
+                        session_metrics.total_lines,
+                        session_metrics.selected_line,
+                        sessions_viewport_rows,
                     );
                     let sessions_title = if shell_state.is_sessions_sidebar_focused() {
                         "sessions *"
                     } else {
                         "sessions"
                     };
-                    let mut sessions_block = Block::default().title(sessions_title).borders(Borders::ALL);
+                    let mut sessions_block =
+                        Block::default().title(sessions_title).borders(Borders::ALL);
                     if shell_state.is_sessions_sidebar_focused() {
-                        sessions_block = sessions_block.border_style(Style::default().fg(Color::LightBlue));
+                        sessions_block =
+                            sessions_block.border_style(Style::default().fg(Color::LightBlue));
                     }
                     frame.render_widget(
                         Paragraph::new(sessions_text).block(sessions_block),
@@ -148,14 +185,11 @@ impl Ui {
                     };
                     let mut inbox_block = Block::default().title(inbox_title).borders(Borders::ALL);
                     if shell_state.is_inbox_sidebar_focused() {
-                        inbox_block = inbox_block.border_style(Style::default().fg(Color::LightBlue));
+                        inbox_block =
+                            inbox_block.border_style(Style::default().fg(Color::LightBlue));
                     }
-                    frame.render_widget(
-                        Paragraph::new(inbox_text).block(inbox_block),
-                        inbox_area,
-                    );
+                    frame.render_widget(Paragraph::new(inbox_text).block(inbox_block), inbox_area);
 
-                    let center_text = render_center_panel(&ui_state);
                     let center_focused_style = shell_state
                         .is_right_pane_focused()
                         .then_some(Style::default().fg(Color::LightBlue));
@@ -178,6 +212,7 @@ impl Ui {
                             terminal_area.height,
                             terminal_area.width,
                             active_needs_input.as_ref(),
+                            &shell_state.terminal_compose_editor,
                         );
                         let center_layout = Layout::vertical([
                             Constraint::Length(3),
@@ -186,8 +221,15 @@ impl Ui {
                         ]);
                         let [terminal_meta_area, terminal_output_area, terminal_input_area] =
                             center_layout.areas(terminal_area);
-                        let meta_text = render_terminal_top_bar(&shell_state.domain, &session_id);
-                        let mut terminal_meta_block = Block::default().title("terminal").borders(Borders::ALL);
+                        let terminal_view_state =
+                            shell_state.terminal_session_states.get(&session_id);
+                        let meta_text = render_terminal_top_bar(
+                            &shell_state.domain,
+                            &session_id,
+                            terminal_view_state,
+                        );
+                        let mut terminal_meta_block =
+                            Block::default().title("terminal").borders(Borders::ALL);
                         if let Some(style) = center_focused_style {
                             terminal_meta_block = terminal_meta_block.border_style(style);
                         }
@@ -196,41 +238,53 @@ impl Ui {
                             terminal_meta_area,
                         );
 
-                        let output_text = render_terminal_output_panel(
-                            &ui_state,
-                            terminal_output_area.width.saturating_sub(2),
-                        );
-                        let output_text = append_terminal_loading_indicator(
-                            output_text,
-                            terminal_activity_indicator(
-                                &shell_state.domain,
-                                &shell_state.terminal_session_states,
-                                &session_id,
-                            ),
-                        );
-                        let content_height =
-                            estimate_wrapped_line_count(&output_text, terminal_output_area.width);
+                        const TERMINAL_VIEWPORT_OVERSCAN_ROWS: usize = 8;
+                        let output_width = terminal_output_area.width.saturating_sub(2).max(1);
                         let viewport_height = terminal_output_area.height.saturating_sub(2).max(1);
+                        let indicator = terminal_activity_indicator(
+                            &shell_state.domain,
+                            &shell_state.terminal_session_states,
+                            &session_id,
+                        );
+                        let total_rows = shell_state
+                            .terminal_total_rendered_rows_for_session(
+                                &session_id,
+                                output_width,
+                                indicator,
+                            )
+                            .max(1);
                         shell_state.sync_terminal_output_viewport(
-                            output_text.lines.len(),
+                            total_rows,
                             usize::from(viewport_height),
                         );
-                        let scroll_y = shell_state
-                            .terminal_session_states
-                            .get(&session_id)
-                            .map(|view| {
-                                let max_scroll = content_height.saturating_sub(viewport_height);
-                                (view.output_scroll_line as u16).min(max_scroll)
-                            })
-                            .unwrap_or(0);
-                        let mut terminal_output_block = Block::default().title("output").borders(Borders::ALL);
+                        let output_render = shell_state
+                            .render_terminal_output_viewport_for_session(
+                                &session_id,
+                                TerminalViewportRequest {
+                                    width: output_width,
+                                    scroll_top: shell_state
+                                        .terminal_session_states
+                                        .get(&session_id)
+                                        .map(|view| view.output_scroll_line)
+                                        .unwrap_or(0),
+                                    viewport_rows: usize::from(viewport_height),
+                                    overscan_rows: TERMINAL_VIEWPORT_OVERSCAN_ROWS,
+                                    indicator,
+                                },
+                            )
+                            .unwrap_or_else(|| TerminalViewportRender {
+                                text: Text::raw("No terminal output available yet."),
+                                local_scroll_top: 0,
+                            });
+                        let mut terminal_output_block =
+                            Block::default().title("output").borders(Borders::ALL);
                         if let Some(style) = center_focused_style {
                             terminal_output_block = terminal_output_block.border_style(style);
                         }
                         frame.render_widget(
-                            Paragraph::new(output_text)
+                            Paragraph::new(output_render.text)
                                 .wrap(Wrap { trim: false })
-                                .scroll((scroll_y, 0))
+                                .scroll((output_render.local_scroll_top, 0))
                                 .block(terminal_output_block),
                             terminal_output_area,
                         );
@@ -246,12 +300,12 @@ impl Ui {
                             );
                         } else {
                             frame.render_widget(
-                                        EditorView::new(&mut shell_state.terminal_compose_editor)
-                                            .theme(nord_editor_theme(
-                                                Block::default()
-                                                    .title("input (Esc+Enter send | Ctrl+Enter send)")
-                                                    .borders(Borders::ALL),
-                                            ))
+                                EditorView::new(&mut shell_state.terminal_compose_editor)
+                                    .theme(nord_editor_theme(
+                                        Block::default()
+                                            .title("input (Ctrl+Enter send)")
+                                            .borders(Borders::ALL),
+                                    ))
                                     .wrap(true),
                                 terminal_input_area,
                             );
@@ -267,20 +321,17 @@ impl Ui {
                             );
                             frame.render_widget(
                                 Paragraph::new(sidebar_text).block(
-                                    Block::default()
-                                        .title("session info")
-                                        .borders(Borders::ALL),
+                                    Block::default().title("session info").borders(Borders::ALL),
                                 ),
                                 sidebar_area,
                             );
                         }
                     } else {
+                        let center_text = render_center_panel(&ui_state);
                         if shell_state.is_global_supervisor_chat_active() {
-                            let [chat_output_area, chat_input_area] = Layout::vertical([
-                                Constraint::Min(3),
-                                Constraint::Length(3),
-                            ])
-                            .areas(center_area);
+                            let [chat_output_area, chat_input_area] =
+                                Layout::vertical([Constraint::Min(3), Constraint::Length(3)])
+                                    .areas(center_area);
                             frame.render_widget(
                                 Paragraph::new(center_text).block({
                                     let mut block = Block::default()
@@ -318,22 +369,21 @@ impl Ui {
                     let footer_style = bottom_bar_style(shell_state.mode);
                     let footer_text = Text::from(vec![
                         Line::from(format!(
-                            "status: {} | mode: {}",
+                            "status: {} | mode: {} | app: {}",
                             ui_state.status,
-                            shell_state.mode.label()
+                            shell_state.mode.label(),
+                            shell_state.application_mode_label()
                         )),
                         Line::from(mode_help(shell_state.mode)),
                     ]);
                     frame.render_widget(
-                        Paragraph::new(footer_text)
-                            .style(footer_style)
-                            .block(
-                                Block::default()
-                                    .title("shell")
-                                    .borders(Borders::ALL)
-                                    .border_style(footer_style)
-                                    .style(footer_style),
-                            ),
+                        Paragraph::new(footer_text).style(footer_style).block(
+                            Block::default()
+                                .title("shell")
+                                .borders(Borders::ALL)
+                                .border_style(footer_style)
+                                .style(footer_style),
+                        ),
                         footer,
                     );
 
@@ -377,7 +427,8 @@ impl Ui {
 
                 if shell_state.ticket_picker_overlay.has_repository_prompt()
                     || shell_state.terminal_needs_input_is_note_insert_mode()
-                    || (shell_state.mode == UiMode::Terminal && shell_state.is_terminal_view_active())
+                    || (shell_state.mode == UiMode::Terminal
+                        && shell_state.is_terminal_view_active())
                 {
                     let _ = io::stdout()
                         .execute(Show)
@@ -388,9 +439,19 @@ impl Ui {
             }
 
             force_draw = false;
-            let poll_timeout = match animation_state {
-                AnimationState::ActiveTurn => Duration::from_millis(50),
-                AnimationState::ResolvedOnly | AnimationState::None => Duration::from_millis(250),
+            let event_scan_interval = if matches!(animation_state, AnimationState::ActiveTurn)
+                || shell_state.has_pending_async_activity()
+            {
+                Duration::from_millis(50)
+            } else {
+                Duration::from_secs(1)
+            };
+            let wake_deadline =
+                shell_state.next_wake_deadline(now, animation_state, last_animation_frame);
+            let poll_timeout = match wake_deadline {
+                Some(deadline) if deadline <= now => Duration::from_millis(0),
+                Some(deadline) => deadline.duration_since(now).min(event_scan_interval),
+                None => event_scan_interval,
             };
             if event::poll(poll_timeout)? {
                 if let Event::Key(key) = event::read()? {

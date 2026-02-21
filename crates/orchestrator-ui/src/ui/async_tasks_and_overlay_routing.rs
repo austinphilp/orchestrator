@@ -51,12 +51,11 @@ async fn run_session_merge_finalize_task(
         .complete_session_after_merge(session_id.clone())
         .await
     {
-        Ok(()) => {
-            let projection = provider.reload_projection().await.ok();
+        Ok(outcome) => {
             let _ = sender
                 .send(MergeQueueEvent::SessionFinalized {
                     session_id,
-                    projection,
+                    event: outcome.event,
                 })
                 .await;
         }
@@ -77,13 +76,12 @@ async fn run_session_archive_task(
     sender: mpsc::Sender<TicketPickerEvent>,
 ) {
     match provider.archive_session(session_id.clone()).await {
-        Ok(warning) => {
-            let projection = provider.reload_projection().await.ok();
+        Ok(outcome) => {
             let _ = sender
                 .send(TicketPickerEvent::SessionArchived {
                     session_id,
-                    warning,
-                    projection,
+                    warning: outcome.warning,
+                    event: outcome.event,
                 })
                 .await;
         }
@@ -114,9 +112,9 @@ async fn run_publish_inbox_item_task(
     sender: mpsc::Sender<TicketPickerEvent>,
 ) {
     match provider.publish_inbox_item(request).await {
-        Ok(projection) => {
+        Ok(event) => {
             let _ = sender
-                .send(TicketPickerEvent::InboxItemPublished { projection })
+                .send(TicketPickerEvent::InboxItemPublished { event })
                 .await;
         }
         Err(error) => {
@@ -135,9 +133,9 @@ async fn run_resolve_inbox_item_task(
     sender: mpsc::Sender<TicketPickerEvent>,
 ) {
     match provider.resolve_inbox_item(request).await {
-        Ok(projection) => {
+        Ok(event) => {
             let _ = sender
-                .send(TicketPickerEvent::InboxItemResolved { projection })
+                .send(TicketPickerEvent::InboxItemResolved { event })
                 .await;
         }
         Err(error) => {
@@ -263,12 +261,8 @@ async fn run_session_workflow_advance_task(
 ) {
     match provider.advance_session_workflow(session_id.clone()).await {
         Ok(outcome) => {
-            let projection = provider.reload_projection().await.ok();
             let _ = sender
-                .send(TicketPickerEvent::SessionWorkflowAdvanced {
-                    outcome,
-                    projection,
-                })
+                .send(TicketPickerEvent::SessionWorkflowAdvanced { outcome })
                 .await;
         }
         Err(error) => {
@@ -454,13 +448,6 @@ async fn run_ticket_picker_create_task(
     };
 
     let mut warning = Vec::new();
-    let projection = match provider.reload_projection().await {
-        Ok(projection) => Some(projection),
-        Err(error) => {
-            warning.push(format!("failed to reload projection: {error}"));
-            None
-        }
-    };
     let tickets = match provider.list_unfinished_tickets().await {
         Ok(tickets) => Some(tickets),
         Err(error) => {
@@ -478,7 +465,6 @@ async fn run_ticket_picker_create_task(
         .send(TicketPickerEvent::TicketCreated {
             created_ticket,
             submit_mode,
-            projection,
             tickets,
             warning: (!warning.is_empty()).then(|| warning.join("; ")),
         })
@@ -705,6 +691,7 @@ fn route_needs_input_modal_key(shell_state: &mut UiShellState, key: KeyEvent) ->
         && shell_state.active_terminal_session_requires_manual_needs_input_activation()
     {
         let _ = shell_state.deactivate_terminal_needs_input_interaction();
+        shell_state.enter_normal_mode();
         return RoutedInput::Ignore;
     }
 

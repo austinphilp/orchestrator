@@ -176,7 +176,7 @@ where
     async fn archive_session(
         &self,
         session_id: WorkerSessionId,
-    ) -> Result<Option<String>, CoreError> {
+    ) -> Result<SessionArchiveOutcome, CoreError> {
         let app = self.app.clone();
         let worker_backend = self.worker_backend.clone();
         tokio::task::spawn_blocking(move || {
@@ -265,7 +265,7 @@ where
     async fn complete_session_after_merge(
         &self,
         session_id: WorkerSessionId,
-    ) -> Result<(), CoreError> {
+    ) -> Result<SessionMergeFinalizeOutcome, CoreError> {
         let app = self.app.clone();
         let worker_backend = self.worker_backend.clone();
         tokio::task::spawn_blocking(move || {
@@ -294,7 +294,7 @@ where
     async fn publish_inbox_item(
         &self,
         request: InboxPublishRequest,
-    ) -> Result<ProjectionState, CoreError> {
+    ) -> Result<StoredEventEnvelope, CoreError> {
         let app = self.app.clone();
         tokio::task::spawn_blocking(move || app.publish_inbox_item(&request))
             .await
@@ -308,7 +308,7 @@ where
     async fn resolve_inbox_item(
         &self,
         request: InboxResolveRequest,
-    ) -> Result<ProjectionState, CoreError> {
+    ) -> Result<Option<StoredEventEnvelope>, CoreError> {
         let app = self.app.clone();
         tokio::task::spawn_blocking(move || app.resolve_inbox_item(&request))
             .await
