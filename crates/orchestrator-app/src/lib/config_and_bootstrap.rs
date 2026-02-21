@@ -297,6 +297,12 @@ pub struct UiConfigToml {
     pub background_session_refresh_secs: u64,
     #[serde(default = "default_ui_session_info_background_refresh_secs")]
     pub session_info_background_refresh_secs: u64,
+    #[serde(default = "default_ui_merge_poll_base_interval_secs")]
+    pub merge_poll_base_interval_secs: u64,
+    #[serde(default = "default_ui_merge_poll_max_backoff_secs")]
+    pub merge_poll_max_backoff_secs: u64,
+    #[serde(default = "default_ui_merge_poll_backoff_multiplier")]
+    pub merge_poll_backoff_multiplier: u64,
 }
 
 impl Default for UiConfigToml {
@@ -307,6 +313,9 @@ impl Default for UiConfigToml {
             transcript_line_limit: default_ui_transcript_line_limit(),
             background_session_refresh_secs: default_ui_background_session_refresh_secs(),
             session_info_background_refresh_secs: default_ui_session_info_background_refresh_secs(),
+            merge_poll_base_interval_secs: default_ui_merge_poll_base_interval_secs(),
+            merge_poll_max_backoff_secs: default_ui_merge_poll_max_backoff_secs(),
+            merge_poll_backoff_multiplier: default_ui_merge_poll_backoff_multiplier(),
         }
     }
 }
@@ -409,6 +418,18 @@ fn default_ui_session_info_background_refresh_secs() -> u64 {
 
 fn default_ui_transcript_line_limit() -> usize {
     DEFAULT_UI_TRANSCRIPT_LINE_LIMIT
+}
+
+fn default_ui_merge_poll_base_interval_secs() -> u64 {
+    15
+}
+
+fn default_ui_merge_poll_max_backoff_secs() -> u64 {
+    120
+}
+
+fn default_ui_merge_poll_backoff_multiplier() -> u64 {
+    2
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -735,6 +756,21 @@ fn normalize_config(config: &mut AppConfig) -> bool {
     {
         config.ui.session_info_background_refresh_secs =
             normalized_session_info_background_refresh_secs;
+        changed = true;
+    }
+    let normalized_merge_poll_base_interval_secs = config.ui.merge_poll_base_interval_secs.clamp(5, 300);
+    if normalized_merge_poll_base_interval_secs != config.ui.merge_poll_base_interval_secs {
+        config.ui.merge_poll_base_interval_secs = normalized_merge_poll_base_interval_secs;
+        changed = true;
+    }
+    let normalized_merge_poll_max_backoff_secs = config.ui.merge_poll_max_backoff_secs.clamp(15, 900);
+    if normalized_merge_poll_max_backoff_secs != config.ui.merge_poll_max_backoff_secs {
+        config.ui.merge_poll_max_backoff_secs = normalized_merge_poll_max_backoff_secs;
+        changed = true;
+    }
+    let normalized_merge_poll_backoff_multiplier = config.ui.merge_poll_backoff_multiplier.clamp(1, 8);
+    if normalized_merge_poll_backoff_multiplier != config.ui.merge_poll_backoff_multiplier {
+        config.ui.merge_poll_backoff_multiplier = normalized_merge_poll_backoff_multiplier;
         changed = true;
     }
 

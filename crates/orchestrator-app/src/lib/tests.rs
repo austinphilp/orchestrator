@@ -531,6 +531,9 @@ mod tests {
                 assert_eq!(config.ui.transcript_line_limit, 100);
                 assert_eq!(config.ui.background_session_refresh_secs, 15);
                 assert_eq!(config.ui.session_info_background_refresh_secs, 15);
+                assert_eq!(config.ui.merge_poll_base_interval_secs, 15);
+                assert_eq!(config.ui.merge_poll_max_backoff_secs, 120);
+                assert_eq!(config.ui.merge_poll_backoff_multiplier, 2);
                 assert!(Path::new(&config.workspace).is_absolute());
                 assert!(Path::new(&config.event_store_path).is_absolute());
                 assert_eq!(
@@ -548,6 +551,9 @@ mod tests {
                 assert_eq!(parsed.ui.transcript_line_limit, 100);
                 assert_eq!(parsed.ui.background_session_refresh_secs, 15);
                 assert_eq!(parsed.ui.session_info_background_refresh_secs, 15);
+                assert_eq!(parsed.ui.merge_poll_base_interval_secs, 15);
+                assert_eq!(parsed.ui.merge_poll_max_backoff_secs, 120);
+                assert_eq!(parsed.ui.merge_poll_backoff_multiplier, 2);
             },
         );
 
@@ -583,6 +589,9 @@ mod tests {
                 assert_eq!(config.ui.transcript_line_limit, 100);
                 assert_eq!(config.ui.background_session_refresh_secs, 15);
                 assert_eq!(config.ui.session_info_background_refresh_secs, 15);
+                assert_eq!(config.ui.merge_poll_base_interval_secs, 15);
+                assert_eq!(config.ui.merge_poll_max_backoff_secs, 120);
+                assert_eq!(config.ui.merge_poll_backoff_multiplier, 2);
                 assert!(expected.exists());
                 let contents = std::fs::read_to_string(expected.clone()).unwrap();
                 let parsed: AppConfig = toml::from_str(&contents).unwrap();
@@ -594,6 +603,9 @@ mod tests {
                 assert_eq!(parsed.ui.transcript_line_limit, 100);
                 assert_eq!(parsed.ui.background_session_refresh_secs, 15);
                 assert_eq!(parsed.ui.session_info_background_refresh_secs, 15);
+                assert_eq!(parsed.ui.merge_poll_base_interval_secs, 15);
+                assert_eq!(parsed.ui.merge_poll_max_backoff_secs, 120);
+                assert_eq!(parsed.ui.merge_poll_backoff_multiplier, 2);
             },
         );
 
@@ -619,6 +631,9 @@ mod tests {
                 assert_eq!(config.ui.transcript_line_limit, 100);
                 assert_eq!(config.ui.background_session_refresh_secs, 15);
                 assert_eq!(config.ui.session_info_background_refresh_secs, 15);
+                assert_eq!(config.ui.merge_poll_base_interval_secs, 15);
+                assert_eq!(config.ui.merge_poll_max_backoff_secs, 120);
+                assert_eq!(config.ui.merge_poll_backoff_multiplier, 2);
             },
         );
 
@@ -811,6 +826,22 @@ mod tests {
             || {
                 let config = AppConfig::from_env().expect("parse and preserve config");
                 assert_eq!(config.ui.transcript_line_limit, 250);
+            },
+        );
+
+        write_config_file(
+            &config_path,
+            "workspace = '/tmp/work'\nevent_store_path = '/tmp/events.db'\n[ui]\nmerge_poll_base_interval_secs = 1\nmerge_poll_max_backoff_secs = 9999\nmerge_poll_backoff_multiplier = 0\n",
+        );
+
+        with_env_var(
+            "ORCHESTRATOR_CONFIG",
+            Some(config_path.to_str().unwrap()),
+            || {
+                let config = AppConfig::from_env().expect("parse and normalize merge poll config");
+                assert_eq!(config.ui.merge_poll_base_interval_secs, 5);
+                assert_eq!(config.ui.merge_poll_max_backoff_secs, 900);
+                assert_eq!(config.ui.merge_poll_backoff_multiplier, 1);
             },
         );
 

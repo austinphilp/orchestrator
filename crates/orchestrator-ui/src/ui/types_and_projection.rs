@@ -60,6 +60,15 @@ const MAX_BACKGROUND_SESSION_REFRESH_SECS: u64 = 15;
 const DEFAULT_SESSION_INFO_BACKGROUND_REFRESH_SECS: u64 = 15;
 const MIN_SESSION_INFO_BACKGROUND_REFRESH_SECS: u64 = 15;
 const RECONCILE_SPARSE_FALLBACK_INTERVAL: Duration = Duration::from_secs(120);
+const DEFAULT_MERGE_POLL_BASE_INTERVAL_SECS: u64 = 15;
+const MIN_MERGE_POLL_BASE_INTERVAL_SECS: u64 = 5;
+const MAX_MERGE_POLL_BASE_INTERVAL_SECS: u64 = 300;
+const DEFAULT_MERGE_POLL_MAX_BACKOFF_SECS: u64 = 120;
+const MIN_MERGE_POLL_MAX_BACKOFF_SECS: u64 = 15;
+const MAX_MERGE_POLL_MAX_BACKOFF_SECS: u64 = 900;
+const DEFAULT_MERGE_POLL_BACKOFF_MULTIPLIER: u64 = 2;
+const MIN_MERGE_POLL_BACKOFF_MULTIPLIER: u64 = 1;
+const MAX_MERGE_POLL_BACKOFF_MULTIPLIER: u64 = 8;
 const MERGE_REQUEST_RATE_LIMIT: Duration = Duration::from_secs(1);
 const TICKET_PICKER_CREATE_REFRESH_INTERVAL: Duration = Duration::from_secs(1);
 const BACKGROUND_SESSION_DEFERRED_OUTPUT_MAX_BYTES: usize = 64 * 1024;
@@ -75,6 +84,9 @@ struct UiRuntimeConfig {
     transcript_line_limit: usize,
     background_session_refresh_secs: u64,
     session_info_background_refresh_secs: u64,
+    merge_poll_base_interval_secs: u64,
+    merge_poll_max_backoff_secs: u64,
+    merge_poll_backoff_multiplier: u64,
 }
 
 impl Default for UiRuntimeConfig {
@@ -89,6 +101,9 @@ impl Default for UiRuntimeConfig {
             transcript_line_limit: DEFAULT_TRANSCRIPT_LINE_LIMIT,
             background_session_refresh_secs: DEFAULT_BACKGROUND_SESSION_REFRESH_SECS,
             session_info_background_refresh_secs: DEFAULT_SESSION_INFO_BACKGROUND_REFRESH_SECS,
+            merge_poll_base_interval_secs: DEFAULT_MERGE_POLL_BASE_INTERVAL_SECS,
+            merge_poll_max_backoff_secs: DEFAULT_MERGE_POLL_MAX_BACKOFF_SECS,
+            merge_poll_backoff_multiplier: DEFAULT_MERGE_POLL_BACKOFF_MULTIPLIER,
         }
     }
 }
@@ -106,6 +121,9 @@ pub fn set_ui_runtime_config(
     transcript_line_limit: usize,
     background_session_refresh_secs: u64,
     session_info_background_refresh_secs: u64,
+    merge_poll_base_interval_secs: u64,
+    merge_poll_max_backoff_secs: u64,
+    merge_poll_backoff_multiplier: u64,
 ) {
     let mut parsed_states = ticket_picker_priority_states
         .into_iter()
@@ -145,6 +163,18 @@ pub fn set_ui_runtime_config(
             ),
         session_info_background_refresh_secs: session_info_background_refresh_secs
             .max(MIN_SESSION_INFO_BACKGROUND_REFRESH_SECS),
+        merge_poll_base_interval_secs: merge_poll_base_interval_secs.clamp(
+            MIN_MERGE_POLL_BASE_INTERVAL_SECS,
+            MAX_MERGE_POLL_BASE_INTERVAL_SECS,
+        ),
+        merge_poll_max_backoff_secs: merge_poll_max_backoff_secs.clamp(
+            MIN_MERGE_POLL_MAX_BACKOFF_SECS,
+            MAX_MERGE_POLL_MAX_BACKOFF_SECS,
+        ),
+        merge_poll_backoff_multiplier: merge_poll_backoff_multiplier.clamp(
+            MIN_MERGE_POLL_BACKOFF_MULTIPLIER,
+            MAX_MERGE_POLL_BACKOFF_MULTIPLIER,
+        ),
     };
 
     if let Ok(mut guard) = ui_runtime_config_store().write() {
@@ -205,6 +235,41 @@ fn session_info_background_refresh_interval_config_value() -> Duration {
         .unwrap_or(DEFAULT_SESSION_INFO_BACKGROUND_REFRESH_SECS)
         .max(MIN_SESSION_INFO_BACKGROUND_REFRESH_SECS);
     Duration::from_secs(secs)
+}
+
+fn merge_poll_base_interval_config_value() -> Duration {
+    let secs = ui_runtime_config_store()
+        .read()
+        .map(|guard| guard.merge_poll_base_interval_secs)
+        .unwrap_or(DEFAULT_MERGE_POLL_BASE_INTERVAL_SECS)
+        .clamp(
+            MIN_MERGE_POLL_BASE_INTERVAL_SECS,
+            MAX_MERGE_POLL_BASE_INTERVAL_SECS,
+        );
+    Duration::from_secs(secs)
+}
+
+fn merge_poll_max_backoff_config_value() -> Duration {
+    let secs = ui_runtime_config_store()
+        .read()
+        .map(|guard| guard.merge_poll_max_backoff_secs)
+        .unwrap_or(DEFAULT_MERGE_POLL_MAX_BACKOFF_SECS)
+        .clamp(
+            MIN_MERGE_POLL_MAX_BACKOFF_SECS,
+            MAX_MERGE_POLL_MAX_BACKOFF_SECS,
+        );
+    Duration::from_secs(secs)
+}
+
+fn merge_poll_backoff_multiplier_config_value() -> u64 {
+    ui_runtime_config_store()
+        .read()
+        .map(|guard| guard.merge_poll_backoff_multiplier)
+        .unwrap_or(DEFAULT_MERGE_POLL_BACKOFF_MULTIPLIER)
+        .clamp(
+            MIN_MERGE_POLL_BACKOFF_MULTIPLIER,
+            MAX_MERGE_POLL_BACKOFF_MULTIPLIER,
+        )
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
