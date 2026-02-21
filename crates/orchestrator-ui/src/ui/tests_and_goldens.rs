@@ -3321,7 +3321,7 @@ mod tests {
     }
 
     #[test]
-    fn minimize_after_open_terminal_clears_center_view_and_returns_normal_mode() {
+    fn backspace_does_not_minimize_terminal_view_in_normal_mode() {
         let mut shell_state = UiShellState::new("ready".to_owned(), sample_projection(true));
         shell_state.open_terminal_and_enter_mode();
         assert_eq!(shell_state.mode, UiMode::Terminal);
@@ -3330,10 +3330,17 @@ mod tests {
             Some(CenterView::TerminalView { session_id }) if session_id.as_str() == "sess-1"
         ));
 
-        shell_state.minimize_center_view();
+        handle_key_press(&mut shell_state, key(KeyCode::Esc));
+        handle_key_press(&mut shell_state, key(KeyCode::Esc));
         assert_eq!(shell_state.mode, UiMode::Normal);
-        assert_eq!(shell_state.view_stack.center_views().len(), 0);
-        assert!(shell_state.view_stack.active_center().is_none());
+
+        handle_key_press(&mut shell_state, key(KeyCode::Backspace));
+        assert_eq!(shell_state.mode, UiMode::Normal);
+        assert_eq!(shell_state.view_stack.center_views().len(), 1);
+        assert!(matches!(
+            shell_state.view_stack.active_center(),
+            Some(CenterView::TerminalView { session_id }) if session_id.as_str() == "sess-1"
+        ));
     }
 
     #[test]
@@ -3524,7 +3531,8 @@ mod tests {
         shell_state.open_terminal_for_selected();
         assert!(shell_state.should_show_session_info_sidebar());
 
-        shell_state.minimize_center_view();
+        shell_state.view_stack.clear_center();
+        shell_state.enter_normal_mode();
         assert!(!shell_state.should_show_session_info_sidebar());
     }
 
@@ -4347,7 +4355,6 @@ mod tests {
             })
         ));
 
-        shell_state.minimize_center_view();
         handle_key_press(&mut shell_state, key(KeyCode::Char('v')));
         handle_key_press(&mut shell_state, key(KeyCode::Char('c')));
         assert!(matches!(
@@ -5748,7 +5755,6 @@ mod tests {
             UiCommand::JumpBatchFyiDigest,
             UiCommand::AdvanceTerminalWorkflowStage,
             UiCommand::ArchiveSelectedSession,
-            UiCommand::MinimizeCenterView,
             UiCommand::OpenSessionOutputForSelectedInbox,
         ];
 

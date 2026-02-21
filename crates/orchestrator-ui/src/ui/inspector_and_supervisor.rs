@@ -18,9 +18,6 @@ fn project_artifact_inspector_pane(
             lines.extend(project_chat_inspector_lines(work_item_id, domain));
         }
     }
-    lines.push(String::new());
-    lines.push("Backspace: minimize to previous view".to_owned());
-
     CenterPaneState {
         title: format!("{} {}", inspector.pane_title(), work_item_id.as_str()),
         lines,

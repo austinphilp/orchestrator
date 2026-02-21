@@ -72,7 +72,6 @@ fn project_focus_card_pane(
         }
         lines.push(String::new());
         lines.push("Shortcuts: v d diff | v t tests | v p PR | v c chat".to_owned());
-        lines.push("Backspace: minimize top view".to_owned());
         CenterPaneState {
             title: format!("Focus Card {}", inbox_item_id.as_str()),
             lines,
