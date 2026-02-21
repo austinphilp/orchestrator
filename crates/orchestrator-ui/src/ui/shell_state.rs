@@ -436,7 +436,6 @@ impl UiShellState {
         if let Some(session_id) = terminal_session_id {
             self.ensure_terminal_stream(session_id.clone());
             let _ = self.flush_deferred_terminal_output_for_session(&session_id);
-            self.pane_focus = PaneFocus::Right;
             self.schedule_session_info_summary_refresh_for_active_session();
         }
     }
@@ -476,7 +475,6 @@ impl UiShellState {
         });
         self.ensure_terminal_stream(session_id.clone());
         let _ = self.flush_deferred_terminal_output_for_session(&session_id);
-        self.pane_focus = PaneFocus::Right;
         self.status_warning = None;
 
         if acknowledge_selection {
@@ -721,9 +719,7 @@ impl UiShellState {
     }
 
     fn session_info_is_foreground(&self) -> bool {
-        self.active_terminal_session_id().is_some()
-            && self.is_right_pane_focused()
-            && self.mode == UiMode::Insert
+        self.active_terminal_session_id().is_some() && self.mode == UiMode::Insert
     }
 
     fn session_info_diff_cache_for(
@@ -849,7 +845,6 @@ impl UiShellState {
 
         self.ensure_terminal_stream(session_id.clone());
         let _ = self.flush_deferred_terminal_output_for_session(&session_id);
-        self.pane_focus = PaneFocus::Right;
         self.schedule_session_info_summary_refresh_for_active_session();
     }
 
@@ -3378,7 +3373,6 @@ impl UiShellState {
                     session_id: new_session_id,
                 });
                 self.ensure_terminal_stream(started_session);
-                self.pane_focus = PaneFocus::Right;
                 let labels = session_display_labels(&self.domain, session_id);
                 self.status_warning = Some(format!(
                     "terminal {} was not found; opened a fresh terminal",

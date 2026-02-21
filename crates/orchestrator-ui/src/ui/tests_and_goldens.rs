@@ -4077,7 +4077,7 @@ mod tests {
             Some(backend),
         );
         shell_state.open_terminal_and_enter_mode();
-        assert_eq!(shell_state.mode, UiMode::Terminal);
+        assert_eq!(shell_state.mode, UiMode::Insert);
 
         let sender = shell_state
             .terminal_session_sender
