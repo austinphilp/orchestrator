@@ -2546,6 +2546,131 @@ mod tests {
     }
 
     #[test]
+    fn reconcile_eligibility_indexes_initialize_from_projection() {
+        let mut projection = sample_projection(true);
+        let planning_work_item_id = WorkItemId::new("wi-plan");
+        let planning_session_id = WorkerSessionId::new("sess-plan");
+        let review_work_item_id = WorkItemId::new("wi-review");
+        let review_session_id = WorkerSessionId::new("sess-review");
+
+        projection.work_items.insert(
+            planning_work_item_id.clone(),
+            WorkItemProjection {
+                id: planning_work_item_id.clone(),
+                ticket_id: None,
+                project_id: None,
+                workflow_state: Some(WorkflowState::Planning),
+                session_id: Some(planning_session_id.clone()),
+                worktree_id: None,
+                inbox_items: vec![],
+                artifacts: vec![],
+            },
+        );
+        projection.sessions.insert(
+            planning_session_id.clone(),
+            SessionProjection {
+                id: planning_session_id.clone(),
+                work_item_id: Some(planning_work_item_id),
+                status: Some(WorkerSessionStatus::Running),
+                latest_checkpoint: None,
+            },
+        );
+        projection.work_items.insert(
+            review_work_item_id.clone(),
+            WorkItemProjection {
+                id: review_work_item_id.clone(),
+                ticket_id: None,
+                project_id: None,
+                workflow_state: Some(WorkflowState::InReview),
+                session_id: Some(review_session_id.clone()),
+                worktree_id: None,
+                inbox_items: vec![],
+                artifacts: vec![],
+            },
+        );
+        projection.sessions.insert(
+            review_session_id.clone(),
+            SessionProjection {
+                id: review_session_id.clone(),
+                work_item_id: Some(review_work_item_id),
+                status: Some(WorkerSessionStatus::Running),
+                latest_checkpoint: None,
+            },
+        );
+
+        let shell_state = UiShellState::new("ready".to_owned(), projection);
+        assert!(shell_state
+            .approval_reconcile_candidate_sessions
+            .contains(&WorkerSessionId::new("sess-1")));
+        assert!(shell_state
+            .approval_reconcile_candidate_sessions
+            .contains(&planning_session_id));
+        assert!(!shell_state
+            .approval_reconcile_candidate_sessions
+            .contains(&review_session_id));
+        assert!(shell_state
+            .review_reconcile_eligible_sessions
+            .contains(&review_session_id));
+        assert!(!shell_state
+            .review_reconcile_eligible_sessions
+            .contains(&WorkerSessionId::new("sess-1")));
+    }
+
+    #[test]
+    fn reconcile_eligibility_indexes_update_on_workflow_transition_fallback() {
+        let mut shell_state = UiShellState::new("ready".to_owned(), sample_projection(true));
+        let session_id = WorkerSessionId::new("sess-1");
+
+        assert!(shell_state
+            .approval_reconcile_candidate_sessions
+            .contains(&session_id));
+        assert!(!shell_state
+            .review_reconcile_eligible_sessions
+            .contains(&session_id));
+
+        shell_state.apply_ticket_picker_event(TicketPickerEvent::SessionWorkflowAdvanced {
+            outcome: SessionWorkflowAdvanceOutcome {
+                session_id: session_id.clone(),
+                work_item_id: WorkItemId::new("wi-1"),
+                from: WorkflowState::Implementing,
+                to: WorkflowState::InReview,
+                instruction: None,
+            },
+            projection: None,
+        });
+
+        assert!(!shell_state
+            .approval_reconcile_candidate_sessions
+            .contains(&session_id));
+        assert!(shell_state
+            .review_reconcile_eligible_sessions
+            .contains(&session_id));
+    }
+
+    #[test]
+    fn reconcile_eligibility_indexes_update_on_archive_fallback() {
+        let mut shell_state = UiShellState::new("ready".to_owned(), sample_projection(true));
+        let session_id = WorkerSessionId::new("sess-1");
+
+        assert!(shell_state
+            .approval_reconcile_candidate_sessions
+            .contains(&session_id));
+
+        shell_state.apply_ticket_picker_event(TicketPickerEvent::SessionArchived {
+            session_id: session_id.clone(),
+            warning: None,
+            projection: None,
+        });
+
+        assert!(!shell_state
+            .approval_reconcile_candidate_sessions
+            .contains(&session_id));
+        assert!(!shell_state
+            .review_reconcile_eligible_sessions
+            .contains(&session_id));
+    }
+
+    #[test]
     fn planning_structured_prompt_hides_working_indicator() {
         let backend = Arc::new(ManualTerminalBackend::default());
         let mut projection = sample_projection(true);
@@ -3877,6 +4002,56 @@ mod tests {
             .expect("merge reconcile request queued");
         assert_eq!(request.kind, MergeQueueCommandKind::Reconcile);
         assert_eq!(request.session_id.as_str(), "sess-review");
+    }
+
+    #[test]
+    fn merge_reconcile_poll_queues_only_review_eligible_sessions() {
+        let dispatcher = Arc::new(TestSupervisorDispatcher::new(Vec::new()));
+        let mut projection = sample_projection(true);
+        let review_work_item_id = WorkItemId::new("wi-review");
+        let review_session_id = WorkerSessionId::new("sess-review");
+
+        projection.work_items.insert(
+            review_work_item_id.clone(),
+            WorkItemProjection {
+                id: review_work_item_id.clone(),
+                ticket_id: None,
+                project_id: None,
+                workflow_state: Some(WorkflowState::InReview),
+                session_id: Some(review_session_id.clone()),
+                worktree_id: None,
+                inbox_items: vec![],
+                artifacts: vec![],
+            },
+        );
+        projection.sessions.insert(
+            review_session_id.clone(),
+            SessionProjection {
+                id: review_session_id.clone(),
+                work_item_id: Some(review_work_item_id),
+                status: Some(WorkerSessionStatus::Running),
+                latest_checkpoint: None,
+            },
+        );
+
+        let mut shell_state = UiShellState::new_with_integrations(
+            "ready".to_owned(),
+            projection,
+            None,
+            Some(dispatcher),
+            None,
+            None,
+        );
+
+        shell_state.enqueue_merge_reconcile_polls();
+
+        assert_eq!(shell_state.merge_queue.len(), 1);
+        let request = shell_state
+            .merge_queue
+            .front()
+            .expect("merge reconcile request queued");
+        assert_eq!(request.session_id, review_session_id);
+        assert_eq!(request.kind, MergeQueueCommandKind::Reconcile);
     }
 
     #[test]

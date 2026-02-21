@@ -67,6 +67,8 @@ struct UiShellState {
     approval_reconcile_last_poll_at: Option<Instant>,
     merge_event_sender: Option<mpsc::Sender<MergeQueueEvent>>,
     merge_event_receiver: Option<mpsc::Receiver<MergeQueueEvent>>,
+    review_reconcile_eligible_sessions: HashSet<WorkerSessionId>,
+    approval_reconcile_candidate_sessions: HashSet<WorkerSessionId>,
     merge_pending_sessions: HashSet<WorkerSessionId>,
     merge_finalizing_sessions: HashSet<WorkerSessionId>,
     review_sync_instructions_sent: HashSet<WorkerSessionId>,
@@ -128,7 +130,7 @@ impl UiShellState {
             (None, None)
         };
 
-        Self {
+        let mut state = Self {
             base_status: status,
             status_warning: None,
             domain,
@@ -178,6 +180,8 @@ impl UiShellState {
             approval_reconcile_last_poll_at: None,
             merge_event_sender,
             merge_event_receiver,
+            review_reconcile_eligible_sessions: HashSet::new(),
+            approval_reconcile_candidate_sessions: HashSet::new(),
             merge_pending_sessions: HashSet::new(),
             merge_finalizing_sessions: HashSet::new(),
             review_sync_instructions_sent: HashSet::new(),
@@ -188,7 +192,9 @@ impl UiShellState {
             attention_projection_cache: None,
             session_panel_rows_cache: None,
             event_derived_label_cache: EventDerivedLabelCache::default(),
-        }
+        };
+        state.rebuild_reconcile_eligibility_indexes();
+        state
     }
 
     fn invalidate_draw_caches(&mut self) {
@@ -2202,6 +2208,7 @@ impl UiShellState {
                                 work_item.workflow_state = Some(WorkflowState::Done);
                             }
                         }
+                        self.refresh_reconcile_eligibility_for_session(&session_id);
                         let labels = session_display_labels(&self.domain, &session_id);
                         self.status_warning = Some(format!(
                             "merge completed for review {}",
@@ -2221,7 +2228,7 @@ impl UiShellState {
                     projection,
                 } => {
                     if let Some(projection) = projection {
-                        self.domain = projection;
+                        self.replace_domain_projection(projection);
                     }
                     self.merge_finalizing_sessions.remove(&session_id);
                 }
@@ -2259,19 +2266,9 @@ impl UiShellState {
         self.merge_last_poll_at = Some(now);
 
         let session_ids = self
-            .domain
-            .sessions
+            .review_reconcile_eligible_sessions
             .iter()
-            .filter_map(|(session_id, session)| {
-                if !is_open_session_status(session.status.as_ref()) {
-                    return None;
-                }
-                if self.session_is_in_review_stage(session_id) {
-                    Some(session_id.clone())
-                } else {
-                    None
-                }
-            })
+            .cloned()
             .collect::<Vec<_>>();
 
         let active_review_sessions = session_ids.iter().cloned().collect::<HashSet<_>>();
@@ -2316,16 +2313,9 @@ impl UiShellState {
         self.approval_reconcile_last_poll_at = Some(now);
 
         let session_ids = self
-            .domain
-            .sessions
+            .approval_reconcile_candidate_sessions
             .iter()
-            .filter_map(|(session_id, session)| {
-                if is_open_session_status(session.status.as_ref()) {
-                    Some(session_id.clone())
-                } else {
-                    None
-                }
-            })
+            .cloned()
             .collect::<Vec<_>>();
 
         let mut changed = false;
@@ -2406,6 +2396,59 @@ impl UiShellState {
                 )
             })
             .unwrap_or(false)
+    }
+
+    fn session_is_approval_reconcile_candidate(
+        &self,
+        session_id: &WorkerSessionId,
+    ) -> bool {
+        is_open_session_status(
+            self.domain
+                .sessions
+                .get(session_id)
+                .and_then(|session| session.status.as_ref()),
+        ) && matches!(
+            self.workflow_state_for_session(session_id),
+            Some(WorkflowState::Planning | WorkflowState::Implementing)
+        )
+    }
+
+    fn refresh_reconcile_eligibility_for_session(&mut self, session_id: &WorkerSessionId) {
+        let review_eligible = is_open_session_status(
+            self.domain
+                .sessions
+                .get(session_id)
+                .and_then(|session| session.status.as_ref()),
+        ) && self.session_is_in_review_stage(session_id);
+
+        if review_eligible {
+            self.review_reconcile_eligible_sessions
+                .insert(session_id.clone());
+        } else {
+            self.review_reconcile_eligible_sessions.remove(session_id);
+        }
+
+        if self.session_is_approval_reconcile_candidate(session_id) {
+            self.approval_reconcile_candidate_sessions
+                .insert(session_id.clone());
+        } else {
+            self.approval_reconcile_candidate_sessions.remove(session_id);
+        }
+    }
+
+    fn rebuild_reconcile_eligibility_indexes(&mut self) {
+        self.review_reconcile_eligible_sessions.clear();
+        self.approval_reconcile_candidate_sessions.clear();
+
+        let session_ids = self.domain.sessions.keys().cloned().collect::<Vec<_>>();
+        for session_id in session_ids {
+            self.refresh_reconcile_eligibility_for_session(&session_id);
+        }
+    }
+
+    fn replace_domain_projection(&mut self, projection: ProjectionState) {
+        self.domain = projection;
+        self.rebuild_reconcile_eligibility_indexes();
     }
 
     fn session_requires_manual_needs_input_activation(&self, session_id: &WorkerSessionId) -> bool {
@@ -2712,10 +2755,11 @@ impl UiShellState {
                 projection,
             } => {
                 if let Some(projection) = projection {
-                    self.domain = projection;
+                    self.replace_domain_projection(projection);
                 } else if let Some(work_item) = self.domain.work_items.get_mut(&outcome.work_item_id)
                 {
                     work_item.workflow_state = Some(outcome.to.clone());
+                    self.refresh_reconcile_eligibility_for_session(&outcome.session_id);
                 }
 
                 if let Some(instruction) = outcome.instruction.as_deref() {
@@ -2770,7 +2814,7 @@ impl UiShellState {
                 self.ticket_picker_overlay.cancel_repository_prompt();
                 self.ticket_picker_overlay.error = None;
                 if let Some(projection) = projection {
-                    self.domain = projection;
+                    self.replace_domain_projection(projection);
                 }
                 if let Some(tickets) = tickets {
                     let tickets = self.filtered_ticket_picker_tickets(tickets);
@@ -2862,7 +2906,7 @@ impl UiShellState {
                 self.ticket_picker_create_refresh_deadline = None;
                 self.ticket_picker_overlay.error = None;
                 if let Some(projection) = projection {
-                    self.domain = projection;
+                    self.replace_domain_projection(projection);
                 }
                 let mut display_tickets = tickets
                     .unwrap_or_else(|| self.ticket_picker_overlay.tickets_snapshot());
@@ -2975,9 +3019,10 @@ impl UiShellState {
                 self.archiving_session_id = None;
                 self.archive_session_confirm_session = None;
                 if let Some(projection) = projection {
-                    self.domain = projection;
+                    self.replace_domain_projection(projection);
                 } else if let Some(session) = self.domain.sessions.get_mut(&session_id) {
                     session.status = Some(WorkerSessionStatus::Done);
+                    self.refresh_reconcile_eligibility_for_session(&session_id);
                 }
                 self.terminal_session_states.remove(&session_id);
                 self.session_info_diff_cache.remove(&session_id);
@@ -3013,7 +3058,7 @@ impl UiShellState {
                 ));
             }
             TicketPickerEvent::InboxItemPublished { projection } => {
-                self.domain = projection;
+                self.replace_domain_projection(projection);
                 self.schedule_session_info_summary_refresh_for_active_session();
             }
             TicketPickerEvent::InboxItemPublishFailed { message } => {
@@ -3023,7 +3068,7 @@ impl UiShellState {
                 ));
             }
             TicketPickerEvent::InboxItemResolved { projection } => {
-                self.domain = projection;
+                self.replace_domain_projection(projection);
                 self.schedule_session_info_summary_refresh_for_active_session();
             }
             TicketPickerEvent::InboxItemResolveFailed { message } => {
