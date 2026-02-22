@@ -6,24 +6,31 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use orchestrator_core::{
-    apply_workflow_transition, AddTicketCommentRequest, ArtifactId, ArtifactKind, ArtifactRecord,
-    CodeHostProvider, CoreError, EventStore, GetTicketRequest, LlmChatRequest, LlmFinishReason,
-    LlmMessage, LlmProvider, LlmResponseStream, LlmResponseSubscription, LlmRole, LlmStreamChunk,
-    LlmTokenUsage, LlmTool, LlmToolCall, LlmToolCallOutput, LlmToolFunction, PullRequestRef,
-    RepositoryRef, RetrievalScope, RuntimeMappingRecord, TicketAttachment, TicketId, TicketQuery,
-    TicketingProvider, UpdateTicketDescriptionRequest, UpdateTicketStateRequest, UrlOpener,
-    WorkItemId, WorkerSessionId, WorkflowGuardContext, WorkflowState, WorkflowTransitionReason,
+    apply_workflow_transition, ArtifactId, ArtifactKind, ArtifactRecord, CoreError, EventStore,
+    LlmChatRequest, LlmFinishReason, LlmMessage, LlmProvider, LlmResponseStream,
+    LlmResponseSubscription, LlmRole, LlmStreamChunk, LlmTokenUsage, LlmTool, LlmToolCall,
+    LlmToolCallOutput, LlmToolFunction, PullRequestRef, RepositoryRef, RetrievalScope,
+    RuntimeMappingRecord, WorkItemId, WorkerSessionId, WorkflowGuardContext, WorkflowState,
+    WorkflowTransitionReason,
 };
 use orchestrator_supervisor::{
     build_freeform_messages, build_template_messages_with_variables, SupervisorQueryEngine,
 };
+use orchestrator_ticketing::{
+    AddTicketCommentRequest, GetTicketRequest, TicketAttachment, TicketId, TicketQuery,
+    TicketingProvider, UpdateTicketDescriptionRequest, UpdateTicketStateRequest,
+};
 use orchestrator_ui::SupervisorCommandContext;
-use orchestrator_vcs_repos::default_system_url_opener;
+use orchestrator_vcs_repos::{default_system_url_opener, CodeHostProvider, UrlOpener};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tracing::warn;
 
+use super::{
+    open_event_store, open_owned_event_store, supervisor_chunk_event_flush_interval,
+    supervisor_model_from_env, AppEventStore,
+};
 use crate::{
     commands::{
         ids as command_ids, resolve_supervisor_query_scope, Command, CommandRegistry,
@@ -36,8 +43,6 @@ use crate::{
         SupervisorQueryStartedPayload, WorkflowTransitionPayload,
     },
     normalization::DOMAIN_EVENT_SCHEMA_VERSION,
-    open_event_store, open_owned_event_store, supervisor_chunk_event_flush_interval,
-    supervisor_model_from_env, AppEventStore,
 };
 
 const MAX_TOOL_LOOP_ITERATIONS: usize = 8;

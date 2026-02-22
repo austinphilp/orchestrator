@@ -84,7 +84,6 @@ impl From<VcsRepoProviderError> for AppError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::error::Error as _;
 
     #[test]
     fn runtime_error_conversion_preserves_runtime_variant() {
@@ -165,6 +164,9 @@ mod tests {
             "tag parse failed".to_owned(),
         )));
 
-        assert!(error.source().is_some());
+        assert!(matches!(
+            error.as_core(),
+            CoreError::Runtime(RuntimeError::Protocol(reason)) if reason == "tag parse failed"
+        ));
     }
 }

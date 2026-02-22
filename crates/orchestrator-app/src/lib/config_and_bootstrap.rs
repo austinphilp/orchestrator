@@ -4,7 +4,6 @@ use crate::events::{
 };
 use crate::normalization::DOMAIN_EVENT_SCHEMA_VERSION;
 use crate::projection::{rebuild_projection, ProjectionState, SessionRuntimeProjection};
-use crate::commands::UntypedCommandInvocation;
 use orchestrator_core::{
     apply_workflow_transition, CoreError, EventStore, InboxItemId, RuntimeSessionId,
     SelectedTicketFlowConfig, SelectedTicketFlowResult, SessionHandle, SqliteEventStore,
@@ -1085,7 +1084,7 @@ pub(crate) fn supervisor_chunk_event_flush_interval() -> Duration {
     Duration::from_millis(config.chunk_event_flush_ms)
 }
 
-fn open_event_store(path: &str) -> Result<AppEventStore, CoreError> {
+pub(crate) fn open_event_store(path: &str) -> Result<AppEventStore, CoreError> {
     ensure_event_store_parent_dir(path)?;
     let config = database_runtime_config();
     let pool = {
@@ -1107,7 +1106,7 @@ fn open_event_store(path: &str) -> Result<AppEventStore, CoreError> {
     Ok(SqliteEventStore::from_initialized_connection(conn))
 }
 
-fn open_owned_event_store(path: &str) -> Result<SqliteEventStore, CoreError> {
+pub(crate) fn open_owned_event_store(path: &str) -> Result<SqliteEventStore, CoreError> {
     ensure_event_store_parent_dir(path)?;
     SqliteEventStore::open(path)
 }

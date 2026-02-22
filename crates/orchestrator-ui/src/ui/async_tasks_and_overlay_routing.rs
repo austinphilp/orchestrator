@@ -235,11 +235,6 @@ async fn run_ticket_picker_load_task(
 ) {
     match provider.list_unfinished_tickets().await {
         Ok(tickets) => {
-            let ticket_ids = tickets.iter().map(|ticket| ticket.ticket_id.clone()).collect();
-            let profile_overrides = provider
-                .list_ticket_profile_overrides(ticket_ids)
-                .await
-                .unwrap_or_default();
             let projects = match provider.list_projects().await {
                 Ok(projects) => projects,
                 Err(_) => Vec::new(),
@@ -248,7 +243,6 @@ async fn run_ticket_picker_load_task(
                 .send(TicketPickerEvent::TicketsLoaded {
                     tickets,
                     projects,
-                    profile_overrides,
                 })
                 .await;
         }
@@ -277,56 +271,6 @@ async fn run_session_workflow_advance_task(
             let _ = sender
                 .send(TicketPickerEvent::SessionWorkflowAdvanceFailed {
                     session_id,
-                    message: error.to_string(),
-                })
-                .await;
-        }
-    }
-}
-
-async fn run_ticket_profile_override_update_task(
-    provider: Arc<dyn TicketPickerProvider>,
-    ticket_id: TicketId,
-    profile_name: Option<String>,
-    sender: mpsc::Sender<TicketPickerEvent>,
-) {
-    match provider
-        .set_ticket_profile_override(ticket_id.clone(), profile_name.clone())
-        .await
-    {
-        Ok(()) => {
-            let _ = sender
-                .send(TicketPickerEvent::TicketProfileOverrideUpdated {
-                    ticket_id,
-                    profile_name,
-                })
-                .await;
-        }
-        Err(error) => {
-            let _ = sender
-                .send(TicketPickerEvent::TicketProfileOverrideUpdateFailed {
-                    ticket_id,
-                    message: error.to_string(),
-                })
-                .await;
-        }
-    }
-}
-
-async fn run_workflow_profiles_save_task(
-    provider: Arc<dyn TicketPickerProvider>,
-    config: WorkflowInteractionProfilesConfig,
-    sender: mpsc::Sender<TicketPickerEvent>,
-) {
-    match provider.save_workflow_interaction_profiles(config).await {
-        Ok(config) => {
-            let _ = sender
-                .send(TicketPickerEvent::WorkflowProfilesSaved { config })
-                .await;
-        }
-        Err(error) => {
-            let _ = sender
-                .send(TicketPickerEvent::WorkflowProfilesSaveFailed {
                     message: error.to_string(),
                 })
                 .await;
@@ -410,13 +354,12 @@ async fn run_ticket_picker_start_task(
     provider: Arc<dyn TicketPickerProvider>,
     ticket: TicketSummary,
     repository_override: Option<PathBuf>,
-    profile_override: Option<String>,
     sender: mpsc::Sender<TicketPickerEvent>,
 ) {
     let started_ticket = ticket.clone();
 
     let result = match provider
-        .start_or_resume_ticket(ticket, repository_override, profile_override)
+        .start_or_resume_ticket(ticket, repository_override)
         .await
     {
         Ok(result) => result,
@@ -473,23 +416,12 @@ async fn run_ticket_picker_start_task(
             None
         }
     };
-    let profile_overrides = match tickets.as_ref() {
-        Some(tickets) => {
-            let ticket_ids = tickets.iter().map(|ticket| ticket.ticket_id.clone()).collect();
-            provider
-                .list_ticket_profile_overrides(ticket_ids)
-                .await
-                .ok()
-        }
-        None => None,
-    };
 
     let _ = sender
         .send(TicketPickerEvent::TicketStarted {
             started_session_id: result.mapping.session.session_id,
             projection,
             tickets,
-            profile_overrides,
             warning: (!warning.is_empty()).then(|| warning.join("; ")),
         })
         .await;
@@ -614,7 +546,6 @@ fn resolve_shell_home() -> Option<String> {
 }
 
 fn render_ticket_picker_overlay_text(overlay: &TicketPickerOverlayState) -> String {
-    let default_profile = workflow_profiles_config_value().default_profile;
     let mut lines = if overlay.new_ticket_mode {
         vec![
             "Describe ticket | Vim editor (i/Esc) | Enter: create | Shift+Enter: create + start | Esc: cancel"
@@ -622,7 +553,7 @@ fn render_ticket_picker_overlay_text(overlay: &TicketPickerOverlayState) -> Stri
         ]
     } else {
         vec![
-            "j/k or arrows: move | h/Left: fold | l/Right: unfold | Enter: start | p: cycle profile | x: archive | n: new ticket | `: profiles | Esc: close"
+            "j/k or arrows: move | h/Left: fold | l/Right: unfold | Enter: start | x: archive | n: new ticket | Esc: close"
                 .to_owned(),
         ]
     };
@@ -744,13 +675,9 @@ fn render_ticket_picker_overlay_text(overlay: &TicketPickerOverlayState) -> Stri
                     "[x]"
                 };
                 lines.push(format!(
-                    "{selected_prefix}{starting_prefix} {archive_marker} {}: {}{}",
+                    "{selected_prefix}{starting_prefix} {archive_marker} {}: {}",
                     ticket.identifier,
                     compact_focus_card_text(ticket.title.as_str()),
-                    overlay.ticket_override_for(&ticket.ticket_id).map_or_else(
-                        || format!(" [profile: {}]", default_profile),
-                        |profile| format!(" [profile: {profile}]"),
-                    )
                 ));
             }
         }
@@ -983,14 +910,6 @@ fn route_ticket_picker_key(shell_state: &mut UiShellState, key: KeyEvent) -> Rou
         }
         KeyCode::Char('n') => {
             shell_state.begin_create_ticket_from_picker();
-            RoutedInput::Ignore
-        }
-        KeyCode::Char('`') => {
-            shell_state.open_workflow_profiles_modal();
-            RoutedInput::Ignore
-        }
-        KeyCode::Char('p') => {
-            shell_state.cycle_selected_ticket_profile_override();
             RoutedInput::Ignore
         }
         _ => RoutedInput::Ignore,

@@ -13,7 +13,8 @@ use orchestrator_core::{
     BackendBlockedEvent, BackendDoneEvent, BackendEvent, BackendNeedsInputEvent,
     BackendOutputEvent, InboxItemId, InboxItemKind, WorkItemId, WorkerSessionId,
 };
-use orchestrator_worker_protocol::backend::WorkerOutputStream as BackendOutputStream;
+#[cfg(test)]
+use orchestrator_worker_protocol::WorkerOutputStream as BackendOutputStream;
 
 pub const DOMAIN_EVENT_SCHEMA_VERSION: u32 = 1;
 

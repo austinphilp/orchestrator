@@ -1,3 +1,42 @@
+struct CoreVcsProviderAdapter<'a> {
+    inner: &'a dyn VcsProvider,
+}
+
+#[async_trait::async_trait]
+impl orchestrator_core::VcsProvider for CoreVcsProviderAdapter<'_> {
+    async fn health_check(&self) -> Result<(), CoreError> {
+        self.inner.health_check().await
+    }
+
+    async fn discover_repositories(
+        &self,
+        roots: &[PathBuf],
+    ) -> Result<Vec<orchestrator_core::RepositoryRef>, CoreError> {
+        self.inner.discover_repositories(roots).await
+    }
+
+    async fn create_worktree(
+        &self,
+        request: orchestrator_core::CreateWorktreeRequest,
+    ) -> Result<orchestrator_core::WorktreeSummary, CoreError> {
+        self.inner.create_worktree(request).await
+    }
+
+    async fn delete_worktree(
+        &self,
+        request: orchestrator_core::DeleteWorktreeRequest,
+    ) -> Result<(), CoreError> {
+        self.inner.delete_worktree(request).await
+    }
+
+    async fn worktree_status(
+        &self,
+        worktree_path: &std::path::Path,
+    ) -> Result<orchestrator_core::WorktreeStatus, CoreError> {
+        self.inner.worktree_status(worktree_path).await
+    }
+}
+
 pub struct App<S: Supervisor, G: GithubClient> {
     pub config: AppConfig,
     pub ticketing: Arc<dyn TicketingProvider + Send + Sync>,
@@ -240,7 +279,11 @@ impl<S: Supervisor, G: GithubClient> App<S, G> {
         worker_backend: &dyn WorkerBackend,
     ) -> Result<SelectedTicketFlowResult, CoreError> {
         let mut store = open_owned_event_store(&self.config.event_store_path)?;
-        let flow_config = SelectedTicketFlowConfig::from_workspace_root(&self.config.workspace);
+        let flow_config = SelectedTicketFlowConfig::from_workspace_and_worktrees_root(
+            &self.config.workspace,
+            &self.config.workspace,
+        );
+        let vcs_adapter = CoreVcsProviderAdapter { inner: vcs };
         let selected_ticket_description = self
             .ticketing
             .get_ticket(GetTicketRequest {
@@ -256,7 +299,7 @@ impl<S: Supervisor, G: GithubClient> App<S, G> {
             selected_ticket_description.as_deref(),
             &flow_config,
             repository_override,
-            vcs,
+            &vcs_adapter,
             worker_backend,
         )
         .await
@@ -894,7 +937,7 @@ pub fn set_git_binary_config(binary: String) {
     let _ = GIT_BINARY_CONFIG.set(trimmed.to_owned());
 }
 
-fn supervisor_model_from_env() -> String {
+pub(crate) fn supervisor_model_from_env() -> String {
     SUPERVISOR_MODEL_CONFIG
         .get()
         .cloned()
@@ -916,7 +959,7 @@ where
 {
     async fn dispatch_supervisor_command(
         &self,
-        invocation: UntypedCommandInvocation,
+        invocation: orchestrator_core::UntypedCommandInvocation,
         context: SupervisorCommandContext,
     ) -> Result<(String, orchestrator_supervisor::LlmResponseStream), CoreError> {
         command_dispatch::dispatch_supervisor_runtime_command(

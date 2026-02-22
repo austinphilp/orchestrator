@@ -3,7 +3,7 @@ mod runtime_stream_coordinator {
 
     use async_trait::async_trait;
     use orchestrator_harness::{
-        HarnessBackendInfo, HarnessRuntimeProvider, HarnessSessionControl, HarnessSessionStreamSource,
+        HarnessBackendInfo, HarnessRuntimeProvider, HarnessSessionStreamSource,
     };
     use orchestrator_core::{
         BackendCapabilities, BackendEvent, BackendKind, RuntimeResult, SessionHandle,

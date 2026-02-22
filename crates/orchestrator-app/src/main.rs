@@ -6,7 +6,7 @@ use orchestrator_app::{
 };
 use orchestrator_core::{
     BackendKind, CoreError, EventPrunePolicy, SpawnSpec, SqliteEventStore, TicketProvider,
-    TicketRecord, WorkItemId, WorkerBackend, WorkflowInteractionProfilesConfig, WorkflowState,
+    TicketRecord, WorkItemId, WorkerBackend, WorkflowState,
 };
 use orchestrator_harness::{
     build_provider_with_config, CodexHarnessProviderConfig, HarnessProviderFactoryConfig,
@@ -73,11 +73,6 @@ async fn main() -> Result<()> {
         config.ui.merge_poll_base_interval_secs,
         config.ui.merge_poll_max_backoff_secs,
         config.ui.merge_poll_backoff_multiplier,
-        WorkflowInteractionProfilesConfig {
-            default_profile: config.ui.default_workflow_profile.clone(),
-            profiles: config.ui.workflow_interaction_profiles.clone(),
-        },
-        config.ui.full_redraw_interval_secs,
     );
 
     let openrouter_api_key = required_env(ENV_OPENROUTER_API_KEY)?;

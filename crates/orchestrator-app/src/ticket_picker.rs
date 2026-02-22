@@ -6,12 +6,14 @@ use async_trait::async_trait;
 use crate::commands::{Command, CommandRegistry};
 use crate::projection::ProjectionState;
 use orchestrator_core::{
-    ArchiveTicketRequest, CodeHostProvider, CoreError, CreateTicketRequest, GithubClient,
-    LlmChatRequest, LlmMessage, LlmProvider, LlmRole, SelectedTicketFlowResult, Supervisor,
-    TicketId, TicketQuery, TicketSummary, TicketingProvider, WorkerBackend, WorkerSessionId,
-    WorkerSessionStatus, WorkflowInteractionProfilesConfig, WorkflowState,
+    CoreError, LlmChatRequest, LlmMessage, LlmProvider, LlmRole, SelectedTicketFlowResult,
+    Supervisor, WorkerBackend, WorkerSessionId, WorkerSessionStatus, WorkflowState,
+};
+use orchestrator_ticketing::{
+    ArchiveTicketRequest, CreateTicketRequest, TicketQuery, TicketSummary, TicketingProvider,
 };
 use orchestrator_vcs::VcsProvider;
+use orchestrator_vcs_repos::{CodeHostProvider, GithubClient};
 use orchestrator_ui::{
     CiCheckStatus, CreateTicketFromPickerRequest, InboxPublishRequest, InboxResolveRequest,
     MergeQueueCommandKind, MergeQueueEvent, SessionArchiveOutcome, SessionMergeFinalizeOutcome,
@@ -97,7 +99,6 @@ where
         &self,
         ticket: TicketSummary,
         repository_override: Option<PathBuf>,
-        profile_override: Option<String>,
     ) -> Result<SelectedTicketFlowResult, CoreError> {
         let app = self.app.clone();
         let ticket = ticket.clone();
@@ -118,7 +119,6 @@ where
                 app.start_or_resume_selected_ticket(
                     &ticket,
                     repository_override,
-                    profile_override,
                     vcs.as_ref(),
                     worker_backend.as_ref(),
                 )
@@ -391,51 +391,6 @@ where
             .send(session_id)
             .await
             .map_err(|error| CoreError::DependencyUnavailable(format!("PR merge queue closed: {error}")))
-    }
-
-    async fn save_workflow_interaction_profiles(
-        &self,
-        config: WorkflowInteractionProfilesConfig,
-    ) -> Result<WorkflowInteractionProfilesConfig, CoreError> {
-        let app = self.app.clone();
-        tokio::task::spawn_blocking(move || app.save_workflow_interaction_profiles(config))
-            .await
-            .map_err(|error| {
-                CoreError::Configuration(format!(
-                    "ticket picker task failed while saving workflow profiles: {error}"
-                ))
-            })?
-    }
-
-    async fn set_ticket_profile_override(
-        &self,
-        ticket_id: TicketId,
-        profile_name: Option<String>,
-    ) -> Result<(), CoreError> {
-        let app = self.app.clone();
-        tokio::task::spawn_blocking(move || {
-            app.set_ticket_profile_override(&ticket_id, profile_name.as_deref())
-        })
-        .await
-        .map_err(|error| {
-            CoreError::Configuration(format!(
-                "ticket picker task failed while persisting ticket profile override: {error}"
-            ))
-        })?
-    }
-
-    async fn list_ticket_profile_overrides(
-        &self,
-        ticket_ids: Vec<TicketId>,
-    ) -> Result<std::collections::HashMap<TicketId, String>, CoreError> {
-        let app = self.app.clone();
-        tokio::task::spawn_blocking(move || app.list_ticket_profile_overrides(&ticket_ids))
-            .await
-            .map_err(|error| {
-                CoreError::Configuration(format!(
-                    "ticket picker task failed while loading ticket profile overrides: {error}"
-                ))
-            })?
     }
 }
 
@@ -1045,7 +1000,7 @@ fn truncate_to_char_boundary(value: &str, max_chars: usize) -> &str {
 }
 
 fn supervisor_model_from_env() -> String {
-    crate::supervisor_model_from_env()
+    super::supervisor_model_from_env()
 }
 
 #[cfg(test)]

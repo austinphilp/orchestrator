@@ -1,10 +1,12 @@
 use orchestrator_app::{App, AppConfig};
 use orchestrator_core::test_support::TestDbPath;
 use orchestrator_core::{
-    AddTicketCommentRequest, CoreError, CreateTicketRequest, GetTicketRequest, GithubClient,
-    Supervisor, TicketDetails, TicketProvider, TicketQuery, TicketSummary, TicketingProvider,
-    UpdateTicketDescriptionRequest, UpdateTicketStateRequest,
+    AddTicketCommentRequest, CoreError, CreateTicketRequest, GetTicketRequest, Supervisor,
+    TicketDetails, TicketProvider, TicketQuery, TicketSummary, UpdateTicketDescriptionRequest,
+    UpdateTicketStateRequest,
 };
+use orchestrator_ticketing::TicketingProvider;
+use orchestrator_vcs_repos::GithubClient;
 use std::sync::Arc;
 
 struct MockAdapter {

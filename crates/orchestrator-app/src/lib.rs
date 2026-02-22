@@ -12,13 +12,21 @@ pub mod projection;
 
 // Temporary compatibility bridge while C-phase tickets move symbols into domain modules.
 pub use bootstrap::*;
+pub use events::{
+    ArtifactCreatedPayload, InboxItemCreatedPayload, InboxItemResolvedPayload, NewEventEnvelope,
+    OrchestrationEventPayload, SessionBlockedPayload, SessionCompletedPayload,
+    SessionNeedsInputPayload, SessionSpawnedPayload, StoredEventEnvelope, UserRespondedPayload,
+};
 pub use error::{AppError, AppResult};
+pub use orchestrator_core::{ArtifactId, ArtifactKind, WorkItemId, WorkflowState};
+pub use projection::{InboxItemProjection, ProjectionState, SessionProjection, WorkItemProjection};
 
 #[cfg(test)]
 mod module_tree_tests {
     use std::any::TypeId;
 
     #[test]
+    #[allow(unused_imports)]
     fn exposes_domain_first_modules() {
         use crate::attention as _;
         use crate::bootstrap as _;

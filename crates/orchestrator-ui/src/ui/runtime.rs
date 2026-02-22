@@ -37,6 +37,8 @@ impl Ui {
     }
 
     pub fn run(&mut self, status: &str, projection: &ProjectionState) -> io::Result<()> {
+        const FULL_REDRAW_INTERVAL: Duration = Duration::from_secs(1);
+
         let mut shell_state = UiShellState::new_with_integrations(
             status.to_owned(),
             projection.clone(),
@@ -77,7 +79,7 @@ impl Ui {
             let animation_frame_ready = animation_frame_interval
                 .map(|interval| now.duration_since(last_animation_frame) >= interval)
                 .unwrap_or(false);
-            let full_redraw_interval = full_redraw_interval_config_value();
+            let full_redraw_interval = FULL_REDRAW_INTERVAL;
             let full_redraw_due = now.duration_since(last_full_redraw_at) >= full_redraw_interval;
             let should_draw = force_draw
                 || changed
@@ -330,13 +332,11 @@ impl Ui {
                     }
 
                     let footer_style = bottom_bar_style(shell_state.mode);
-                    let workflow_profiles = workflow_profiles_config_value();
                     let footer_text = Text::from(vec![
                         Line::from(format!(
-                            "status: {} | mode: {} | profile: {}",
+                            "status: {} | mode: {}",
                             ui_state.status,
                             shell_state.mode.label(),
-                            workflow_profiles.default_profile
                         )),
                         Line::from(mode_help(shell_state.mode)),
                     ]);
@@ -359,13 +359,6 @@ impl Ui {
                             frame,
                             main,
                             &mut shell_state.ticket_picker_overlay,
-                        );
-                    }
-                    if shell_state.workflow_profiles_modal.visible {
-                        render_workflow_profiles_modal(
-                            frame,
-                            main,
-                            &shell_state.workflow_profiles_modal,
                         );
                     }
                     if let Some(ticket) = shell_state
@@ -400,7 +393,6 @@ impl Ui {
                 }
 
                 if shell_state.ticket_picker_overlay.has_repository_prompt()
-                    || shell_state.workflow_profiles_modal.renaming
                     || shell_state.terminal_needs_input_is_note_insert_mode()
                     || (shell_state.mode == UiMode::Insert
                         && shell_state.is_terminal_view_active())
@@ -423,13 +415,11 @@ impl Ui {
             } else {
                 IDLE_EVENT_SCAN_INTERVAL
             };
-            let full_redraw_deadline = last_full_redraw_at + full_redraw_interval;
             let wake_deadline =
                 shell_state.next_wake_deadline(
                     now,
                     animation_state,
                     last_animation_frame,
-                    full_redraw_deadline,
                 );
             let poll_timeout = match wake_deadline {
                 Some(deadline) if deadline <= now => Duration::from_millis(0),
@@ -551,5 +541,8 @@ fn bottom_bar_style(mode: UiMode) -> Style {
         UiMode::Insert => Style::default()
             .fg(Color::Rgb(236, 239, 244))
             .bg(Color::Rgb(76, 86, 106)),
+        UiMode::Terminal => Style::default()
+            .fg(Color::Rgb(236, 239, 244))
+            .bg(Color::Rgb(46, 52, 64)),
     }
 }

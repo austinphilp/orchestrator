@@ -28,7 +28,7 @@ enum UiCommand {
     TicketPickerStartSelected,
     SetApplicationModeAutopilot,
     SetApplicationModeManual,
-    ToggleWorkflowProfilesModal,
+    StartTerminalEscapeChord,
     ToggleWorktreeDiffModal,
     AdvanceTerminalWorkflowStage,
     ArchiveSelectedSession,
@@ -65,7 +65,7 @@ impl UiCommand {
         Self::TicketPickerStartSelected,
         Self::SetApplicationModeAutopilot,
         Self::SetApplicationModeManual,
-        Self::ToggleWorkflowProfilesModal,
+        Self::StartTerminalEscapeChord,
         Self::ToggleWorktreeDiffModal,
         Self::AdvanceTerminalWorkflowStage,
         Self::ArchiveSelectedSession,
@@ -102,7 +102,7 @@ impl UiCommand {
             Self::TicketPickerStartSelected => "ui.ticket_picker.start_selected",
             Self::SetApplicationModeAutopilot => "ui.app_mode.autopilot",
             Self::SetApplicationModeManual => "ui.app_mode.manual",
-            Self::ToggleWorkflowProfilesModal => "ui.workflow_profiles.toggle_modal",
+            Self::StartTerminalEscapeChord => "ui.mode.terminal_escape_prefix",
             Self::ToggleWorktreeDiffModal => "ui.worktree.diff.toggle",
             Self::AdvanceTerminalWorkflowStage => "ui.terminal.workflow.advance",
             Self::ArchiveSelectedSession => "ui.terminal.archive_selected_session",
@@ -140,7 +140,7 @@ impl UiCommand {
             Self::TicketPickerStartSelected => "Start selected ticket",
             Self::SetApplicationModeAutopilot => "Set application mode to autopilot",
             Self::SetApplicationModeManual => "Set application mode to manual",
-            Self::ToggleWorkflowProfilesModal => "Toggle workflow profiles modal",
+            Self::StartTerminalEscapeChord => "Start terminal escape chord prefix",
             Self::ToggleWorktreeDiffModal => "Toggle worktree diff modal for selected session",
             Self::AdvanceTerminalWorkflowStage => "Advance terminal workflow stage",
             Self::ArchiveSelectedSession => "Archive selected terminal session",
@@ -199,8 +199,8 @@ fn default_keymap_config() -> KeymapConfig {
                     binding(&["s"], UiCommand::OpenTicketPicker),
                     binding(&["c"], UiCommand::ToggleGlobalSupervisorChat),
                     binding(&["i"], UiCommand::EnterInsertMode),
+                    binding(&["I"], UiCommand::OpenTerminalForSelected),
                     binding(&["o"], UiCommand::OpenSessionOutputForSelectedInbox),
-                    binding(&["`"], UiCommand::ToggleWorkflowProfilesModal),
                     binding(&["D"], UiCommand::ToggleWorktreeDiffModal),
                     binding(&["w", "n"], UiCommand::AdvanceTerminalWorkflowStage),
                     binding(&["x"], UiCommand::ArchiveSelectedSession),
@@ -273,7 +273,7 @@ fn bottom_bar_hint_groups(mode: UiMode) -> &'static [BottomBarHintGroup] {
             },
             BottomBarHintGroup {
                 label: "Views:",
-                hints: &["i", "o", "s", "c", "v{d/t/p/c}", "D"],
+                hints: &["i/I", "o", "s", "c", "v{d/t/p/c}", "D"],
             },
             BottomBarHintGroup {
                 label: "Workflow:",
@@ -288,6 +288,16 @@ fn bottom_bar_hint_groups(mode: UiMode) -> &'static [BottomBarHintGroup] {
             BottomBarHintGroup {
                 label: "Back:",
                 hints: &["Esc", "Ctrl-["],
+            },
+        ],
+        UiMode::Terminal => &[
+            BottomBarHintGroup {
+                label: "Terminal:",
+                hints: &["Shift+J/K output", "i", "Esc"],
+            },
+            BottomBarHintGroup {
+                label: "Actions:",
+                hints: &["w n", "x", "D", "q"],
             },
         ],
     }
@@ -527,11 +537,25 @@ fn handle_key_press(shell_state: &mut UiShellState, key: KeyEvent) -> bool {
 }
 
 fn route_key_press(shell_state: &mut UiShellState, key: KeyEvent) -> RoutedInput {
+    if shell_state.mode == UiMode::Terminal && !shell_state.is_terminal_view_active() {
+        shell_state.enter_normal_mode();
+    }
+
+    if shell_state.terminal_escape_pending {
+        shell_state.terminal_escape_pending = false;
+        if is_ctrl_char(key, 'n') {
+            shell_state.enter_normal_mode();
+        }
+        return RoutedInput::Ignore;
+    }
+
+    if shell_state.mode == UiMode::Terminal && is_ctrl_char(key, '\\') {
+        shell_state.begin_terminal_escape_chord();
+        return RoutedInput::Ignore;
+    }
+
     if shell_state.worktree_diff_modal.is_some() {
         return route_worktree_diff_modal_key(shell_state, key);
-    }
-    if shell_state.workflow_profiles_modal.visible {
-        return route_workflow_profiles_modal_key(shell_state, key);
     }
     if shell_state.is_ticket_picker_visible() {
         return route_ticket_picker_key(shell_state, key);
@@ -674,89 +698,6 @@ fn route_worktree_diff_modal_key(shell_state: &mut UiShellState, key: KeyEvent) 
     RoutedInput::Ignore
 }
 
-fn route_workflow_profiles_modal_key(shell_state: &mut UiShellState, key: KeyEvent) -> RoutedInput {
-    if shell_state.workflow_profiles_modal.renaming {
-        if is_escape_to_normal(key) {
-            shell_state.cancel_workflow_profile_rename();
-            return RoutedInput::Ignore;
-        }
-        if matches!(key.code, KeyCode::Enter) && key.modifiers.is_empty() {
-            shell_state.submit_workflow_profile_rename();
-            return RoutedInput::Ignore;
-        }
-        if key.modifiers.is_empty() {
-            match key.code {
-                KeyCode::Backspace => {
-                    shell_state.pop_workflow_profile_rename_char();
-                    return RoutedInput::Ignore;
-                }
-                KeyCode::Char(ch) => {
-                    shell_state.append_workflow_profile_rename_char(ch);
-                    return RoutedInput::Ignore;
-                }
-                _ => {}
-            }
-        }
-        return RoutedInput::Ignore;
-    }
-
-    if is_escape_to_normal(key) {
-        shell_state.close_workflow_profiles_modal();
-        return RoutedInput::Ignore;
-    }
-    if !key.modifiers.is_empty() {
-        return RoutedInput::Ignore;
-    }
-
-    match key.code {
-        KeyCode::Char('`') | KeyCode::Char('q') => {
-            shell_state.close_workflow_profiles_modal();
-            RoutedInput::Ignore
-        }
-        KeyCode::Char('h') | KeyCode::Left => {
-            shell_state.cycle_workflow_profile_selection(-1);
-            RoutedInput::Ignore
-        }
-        KeyCode::Char('l') | KeyCode::Right => {
-            shell_state.cycle_workflow_profile_selection(1);
-            RoutedInput::Ignore
-        }
-        KeyCode::Char('j') | KeyCode::Down => {
-            shell_state.move_workflow_profile_state_selection(1);
-            RoutedInput::Ignore
-        }
-        KeyCode::Char('k') | KeyCode::Up => {
-            shell_state.move_workflow_profile_state_selection(-1);
-            RoutedInput::Ignore
-        }
-        KeyCode::Char(' ') | KeyCode::Enter => {
-            shell_state.toggle_selected_workflow_profile_state_level();
-            RoutedInput::Ignore
-        }
-        KeyCode::Char('c') => {
-            shell_state.add_workflow_profile();
-            RoutedInput::Ignore
-        }
-        KeyCode::Char('d') => {
-            shell_state.delete_selected_workflow_profile();
-            RoutedInput::Ignore
-        }
-        KeyCode::Char('g') => {
-            shell_state.set_selected_workflow_profile_as_default();
-            RoutedInput::Ignore
-        }
-        KeyCode::Char('r') => {
-            shell_state.begin_workflow_profile_rename();
-            RoutedInput::Ignore
-        }
-        KeyCode::Char('s') => {
-            shell_state.save_workflow_profiles();
-            RoutedInput::Ignore
-        }
-        _ => RoutedInput::Ignore,
-    }
-}
-
 fn route_configured_mode_key(shell_state: &mut UiShellState, key: KeyEvent) -> RoutedInput {
     match shell_state.keymap.route_key_event(
         shell_state.mode,
@@ -892,8 +833,8 @@ fn dispatch_command(shell_state: &mut UiShellState, command: UiCommand) -> bool 
             shell_state.set_application_mode_manual();
             false
         }
-        UiCommand::ToggleWorkflowProfilesModal => {
-            shell_state.toggle_workflow_profiles_modal();
+        UiCommand::StartTerminalEscapeChord => {
+            shell_state.begin_terminal_escape_chord();
             false
         }
         UiCommand::ToggleWorktreeDiffModal => {

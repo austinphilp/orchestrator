@@ -595,6 +595,12 @@ mod tests {
             OrchestrationEventPayload::SessionCheckpoint(_) => {
                 OrchestrationEventType::SessionCheckpoint
             }
+            OrchestrationEventPayload::WorkItemProfileOverrideSet(_) => {
+                OrchestrationEventType::WorkItemProfileOverrideSet
+            }
+            OrchestrationEventPayload::WorkItemProfileOverrideCleared(_) => {
+                OrchestrationEventType::WorkItemProfileOverrideCleared
+            }
             OrchestrationEventPayload::SessionNeedsInput(_) => {
                 OrchestrationEventType::SessionNeedsInput
             }
@@ -755,6 +761,7 @@ mod tests {
         projection.work_items.insert(
             work_item_id.clone(),
             WorkItemProjection {
+                profile_override: None,
                 id: work_item_id.clone(),
                 ticket_id: None,
                 project_id: None,
@@ -800,6 +807,7 @@ mod tests {
         projection.work_items.insert(
             work_item_id.clone(),
             WorkItemProjection {
+                profile_override: None,
                 id: work_item_id.clone(),
                 ticket_id: None,
                 project_id: None,
@@ -866,6 +874,7 @@ mod tests {
             projection.work_items.insert(
                 work_item_id.clone(),
                 WorkItemProjection {
+                    profile_override: None,
                     id: work_item_id.clone(),
                     ticket_id: None,
                     project_id: None,
@@ -935,6 +944,7 @@ mod tests {
             projection.work_items.insert(
                 work_item_id.clone(),
                 WorkItemProjection {
+                    profile_override: None,
                     id: work_item_id.clone(),
                     ticket_id: None,
                     project_id: None,
@@ -978,6 +988,7 @@ mod tests {
             projection.work_items.insert(
                 work_item_id.clone(),
                 WorkItemProjection {
+                    profile_override: None,
                     id: work_item_id.clone(),
                     ticket_id: None,
                     project_id: None,
@@ -1032,6 +1043,7 @@ mod tests {
             projection.work_items.insert(
                 work_item_id.clone(),
                 WorkItemProjection {
+                    profile_override: None,
                     id: work_item_id.clone(),
                     ticket_id: None,
                     project_id: None,
@@ -1104,6 +1116,7 @@ mod tests {
             projection.work_items.insert(
                 work_item_id.clone(),
                 WorkItemProjection {
+                    profile_override: None,
                     id: work_item_id.clone(),
                     ticket_id: None,
                     project_id: None,
@@ -1186,6 +1199,7 @@ mod tests {
         projection.work_items.insert(
             work_item_id.clone(),
             WorkItemProjection {
+                profile_override: None,
                 id: work_item_id.clone(),
                 ticket_id: None,
                 project_id: None,
@@ -1366,6 +1380,7 @@ mod tests {
         projection.work_items.insert(
             work_item_id.clone(),
             WorkItemProjection {
+                profile_override: None,
                 id: work_item_id.clone(),
                 ticket_id: None,
                 project_id: None,
@@ -1459,6 +1474,7 @@ mod tests {
         projection.work_items.insert(
             work_item_id.clone(),
             WorkItemProjection {
+                profile_override: None,
                 id: work_item_id.clone(),
                 ticket_id: None,
                 project_id: None,
@@ -1557,6 +1573,7 @@ mod tests {
         projection.work_items.insert(
             work_item_id.clone(),
             WorkItemProjection {
+                profile_override: None,
                 id: work_item_id.clone(),
                 ticket_id: None,
                 project_id: None,
@@ -1620,6 +1637,7 @@ mod tests {
         projection.work_items.insert(
             work_item_core.clone(),
             WorkItemProjection {
+                profile_override: None,
                 id: work_item_core.clone(),
                 ticket_id: Some(ticket_core.clone()),
                 project_id: Some(ProjectId::new("Core Platform")),
@@ -1633,6 +1651,7 @@ mod tests {
         projection.work_items.insert(
             work_item_orchestrator.clone(),
             WorkItemProjection {
+                profile_override: None,
                 id: work_item_orchestrator.clone(),
                 ticket_id: Some(ticket_orchestrator.clone()),
                 project_id: Some(ProjectId::new("Orchestrator")),
@@ -1736,6 +1755,7 @@ mod tests {
         projection.work_items.insert(
             work_item_id.clone(),
             WorkItemProjection {
+                profile_override: None,
                 id: work_item_id.clone(),
                 ticket_id: Some(ticket_id.clone()),
                 project_id: None,
@@ -1815,6 +1835,7 @@ mod tests {
         projection.work_items.insert(
             work_item_id.clone(),
             WorkItemProjection {
+                profile_override: None,
                 id: work_item_id.clone(),
                 ticket_id: None,
                 project_id: Some(ProjectId::new("Orchestrator")),
@@ -1873,6 +1894,7 @@ mod tests {
         projection.work_items.insert(
             planning_work_item.clone(),
             WorkItemProjection {
+                profile_override: None,
                 id: planning_work_item.clone(),
                 ticket_id: Some(planning_ticket.clone()),
                 project_id: Some(project.clone()),
@@ -1886,6 +1908,7 @@ mod tests {
         projection.work_items.insert(
             implementation_work_item.clone(),
             WorkItemProjection {
+                profile_override: None,
                 id: implementation_work_item.clone(),
                 ticket_id: Some(implementation_ticket.clone()),
                 project_id: Some(project.clone()),
@@ -1899,6 +1922,7 @@ mod tests {
         projection.work_items.insert(
             review_work_item.clone(),
             WorkItemProjection {
+                profile_override: None,
                 id: review_work_item.clone(),
                 ticket_id: Some(review_ticket.clone()),
                 project_id: Some(project.clone()),
@@ -1912,6 +1936,7 @@ mod tests {
         projection.work_items.insert(
             other_work_item.clone(),
             WorkItemProjection {
+                profile_override: None,
                 id: other_work_item.clone(),
                 ticket_id: Some(other_ticket.clone()),
                 project_id: Some(project),
@@ -2024,6 +2049,7 @@ mod tests {
         projection.work_items.insert(
             work_item_id.clone(),
             WorkItemProjection {
+                profile_override: None,
                 id: work_item_id.clone(),
                 ticket_id: Some(ticket_id.clone()),
                 project_id: Some(ProjectId::new("Orchestrator")),
@@ -2078,6 +2104,7 @@ mod tests {
         projection.work_items.insert(
             work_item_id.clone(),
             WorkItemProjection {
+                profile_override: None,
                 id: work_item_id.clone(),
                 ticket_id: Some(ticket_id.clone()),
                 project_id: Some(ProjectId::new("Orchestrator")),
@@ -2144,6 +2171,7 @@ mod tests {
         projection.work_items.insert(
             work_item_id.clone(),
             WorkItemProjection {
+                profile_override: None,
                 id: work_item_id.clone(),
                 ticket_id: Some(ticket_id.clone()),
                 project_id: Some(ProjectId::new("Orchestrator")),
@@ -2365,6 +2393,7 @@ mod tests {
         projection.work_items.insert(
             work_item_a.clone(),
             WorkItemProjection {
+                profile_override: None,
                 id: work_item_a.clone(),
                 ticket_id: None,
                 project_id: Some(ProjectId::new("Orchestrator")),
@@ -2378,6 +2407,7 @@ mod tests {
         projection.work_items.insert(
             work_item_b.clone(),
             WorkItemProjection {
+                profile_override: None,
                 id: work_item_b.clone(),
                 ticket_id: None,
                 project_id: Some(ProjectId::new("Orchestrator")),
@@ -3218,6 +3248,7 @@ mod tests {
         projection.work_items.insert(
             WorkItemId::new("wi-1"),
             WorkItemProjection {
+                profile_override: None,
                 id: WorkItemId::new("wi-1"),
                 ticket_id: None,
                 project_id: None,
@@ -3251,6 +3282,7 @@ mod tests {
         projection.work_items.insert(
             WorkItemId::new("wi-2"),
             WorkItemProjection {
+                profile_override: None,
                 id: WorkItemId::new("wi-2"),
                 ticket_id: None,
                 project_id: None,
@@ -3823,6 +3855,7 @@ mod tests {
         projection.work_items.insert(
             planning_work_item_id.clone(),
             WorkItemProjection {
+                profile_override: None,
                 id: planning_work_item_id.clone(),
                 ticket_id: None,
                 project_id: None,
@@ -3845,6 +3878,7 @@ mod tests {
         projection.work_items.insert(
             review_work_item_id.clone(),
             WorkItemProjection {
+                profile_override: None,
                 id: review_work_item_id.clone(),
                 ticket_id: None,
                 project_id: None,
@@ -4075,7 +4109,7 @@ mod tests {
                 &shell_state.terminal_session_states,
                 &WorkerSessionId::new("sess-1"),
             ),
-            TerminalActivityIndicator::Working
+            TerminalActivityIndicator::None
         );
     }
 
@@ -4772,6 +4806,7 @@ mod tests {
         projection.work_items.insert(
             second_work_item_id.clone(),
             WorkItemProjection {
+                profile_override: None,
                 id: second_work_item_id,
                 ticket_id: None,
                 project_id: None,
@@ -4837,6 +4872,7 @@ mod tests {
         projection.work_items.insert(
             WorkItemId::new("wi-2"),
             WorkItemProjection {
+                profile_override: None,
                 id: WorkItemId::new("wi-2"),
                 ticket_id: None,
                 project_id: None,
@@ -4915,6 +4951,7 @@ mod tests {
         projection.work_items.insert(
             WorkItemId::new("wi-2"),
             WorkItemProjection {
+                profile_override: None,
                 id: WorkItemId::new("wi-2"),
                 ticket_id: None,
                 project_id: None,
@@ -6329,6 +6366,7 @@ mod tests {
         projection.work_items.insert(
             work_item_a.clone(),
             WorkItemProjection {
+                profile_override: None,
                 id: work_item_a.clone(),
                 ticket_id: None,
                 project_id: None,
@@ -6342,6 +6380,7 @@ mod tests {
         projection.work_items.insert(
             work_item_b.clone(),
             WorkItemProjection {
+                profile_override: None,
                 id: work_item_b.clone(),
                 ticket_id: None,
                 project_id: None,
@@ -6479,6 +6518,7 @@ mod tests {
         projection.work_items.insert(
             work_item_id.clone(),
             WorkItemProjection {
+                profile_override: None,
                 id: work_item_id.clone(),
                 ticket_id: None,
                 project_id: None,
@@ -6567,6 +6607,7 @@ mod tests {
         projection.work_items.insert(
             extra_work_item_id.clone(),
             WorkItemProjection {
+                profile_override: None,
                 id: extra_work_item_id.clone(),
                 ticket_id: None,
                 project_id: None,
@@ -7517,6 +7558,7 @@ mod tests {
             projection.work_items.insert(
                 work_item_id.clone(),
                 WorkItemProjection {
+                    profile_override: None,
                     id: work_item_id.clone(),
                     ticket_id: Some(ticket_id),
                     project_id: None,
@@ -7824,6 +7866,7 @@ mod tests {
         projection.work_items.insert(
             resolved_work_item_id.clone(),
             WorkItemProjection {
+                profile_override: None,
                 id: resolved_work_item_id.clone(),
                 ticket_id: None,
                 project_id: None,
@@ -7837,6 +7880,7 @@ mod tests {
         projection.work_items.insert(
             unresolved_work_item_id.clone(),
             WorkItemProjection {
+                profile_override: None,
                 id: unresolved_work_item_id.clone(),
                 ticket_id: None,
                 project_id: None,
@@ -7959,6 +8003,10 @@ mod tests {
             command_id(UiCommand::SetApplicationModeManual),
             "ui.app_mode.manual"
         );
+        assert_eq!(
+            command_id(UiCommand::StartTerminalEscapeChord),
+            "ui.mode.terminal_escape_prefix"
+        );
     }
 
     #[test]
@@ -7972,7 +8020,6 @@ mod tests {
             UiCommand::OpenTestInspectorForSelected,
             UiCommand::OpenPrInspectorForSelected,
             UiCommand::OpenChatInspectorForSelected,
-            UiCommand::StartTerminalEscapeChord,
             UiCommand::QuitShell,
             UiCommand::FocusNextInbox,
             UiCommand::FocusPreviousInbox,
@@ -7989,6 +8036,7 @@ mod tests {
             UiCommand::OpenSessionOutputForSelectedInbox,
             UiCommand::SetApplicationModeAutopilot,
             UiCommand::SetApplicationModeManual,
+            UiCommand::StartTerminalEscapeChord,
         ];
 
         for command in all_commands {
@@ -8121,6 +8169,18 @@ mod tests {
         assert!(matches!(routed, RoutedInput::Ignore));
         assert!(!shell_state.terminal_escape_pending);
         assert!(editor_state_text(&shell_state.terminal_compose_editor).is_empty());
+    }
+
+    #[test]
+    fn terminal_escape_prefix_command_id_starts_chord() {
+        let mut shell_state = UiShellState::new("ready".to_owned(), sample_projection(true));
+        handle_key_press(&mut shell_state, key(KeyCode::Char('I')));
+        assert_eq!(shell_state.mode, UiMode::Terminal);
+        assert!(!shell_state.terminal_escape_pending);
+
+        let should_quit = dispatch_command(&mut shell_state, UiCommand::StartTerminalEscapeChord);
+        assert!(!should_quit);
+        assert!(shell_state.terminal_escape_pending);
     }
 
     #[test]

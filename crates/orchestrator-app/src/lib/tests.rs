@@ -14,10 +14,11 @@ mod tests {
         RuntimeMappingRecord, RuntimeResult, SessionHandle, SessionRecord, SpawnSpec,
         SupervisorQueryArgs, SupervisorQueryCancellationSource, SupervisorQueryContextArgs,
         TicketDetails, TicketId, TicketProvider, TicketQuery, TicketRecord, TicketSummary,
-        TicketingProvider, UpdateTicketDescriptionRequest, UpdateTicketStateRequest, WorkItemId,
-        WorkerSessionId, WorkerSessionStatus, WorktreeId, WorktreeRecord, WorktreeStatus,
+        UntypedCommandInvocation, UpdateTicketDescriptionRequest, UpdateTicketStateRequest,
+        WorkItemId, WorkerSessionId, WorkerSessionStatus, WorktreeId, WorktreeRecord,
+        WorktreeStatus,
     };
-    use orchestrator_ticketing as integration_linear;
+    use orchestrator_ticketing::{self as integration_linear, TicketingProvider};
     use serde_json::json;
     use std::collections::{BTreeMap, VecDeque};
     use std::path::{Path, PathBuf};
@@ -533,7 +534,7 @@ mod tests {
             || {
                 let config = AppConfig::from_env().expect("default config");
                 assert_eq!(config.workspace, expected_workspace.to_string_lossy());
-                assert_eq!(config.worktrees_root, expected_workspace.to_string_lossy());
+                assert_eq!(config.workspace, expected_workspace.to_string_lossy());
                 assert_eq!(
                     config.event_store_path,
                     expected_event_store.to_string_lossy()
@@ -548,7 +549,6 @@ mod tests {
                 assert_eq!(config.ui.merge_poll_base_interval_secs, 15);
                 assert_eq!(config.ui.merge_poll_max_backoff_secs, 120);
                 assert_eq!(config.ui.merge_poll_backoff_multiplier, 2);
-                assert_eq!(config.ui.full_redraw_interval_secs, 300);
                 assert!(Path::new(&config.workspace).is_absolute());
                 assert!(Path::new(&config.event_store_path).is_absolute());
                 assert_eq!(
@@ -559,7 +559,7 @@ mod tests {
                 let raw = std::fs::read_to_string(expected.clone()).unwrap();
                 let parsed: AppConfig = toml::from_str(&raw).unwrap();
                 assert_eq!(parsed.workspace, expected_workspace.to_string_lossy());
-                assert_eq!(parsed.worktrees_root, expected_workspace.to_string_lossy());
+                assert_eq!(parsed.workspace, expected_workspace.to_string_lossy());
                 assert_eq!(
                     parsed.event_store_path,
                     expected_event_store.to_string_lossy()
@@ -574,7 +574,6 @@ mod tests {
                 assert_eq!(parsed.ui.merge_poll_base_interval_secs, 15);
                 assert_eq!(parsed.ui.merge_poll_max_backoff_secs, 120);
                 assert_eq!(parsed.ui.merge_poll_backoff_multiplier, 2);
-                assert_eq!(parsed.ui.full_redraw_interval_secs, 300);
             },
         );
 
@@ -603,7 +602,7 @@ mod tests {
             || {
                 let config = AppConfig::from_env().expect("bootstrap config");
                 assert_eq!(config.workspace, expected_workspace.to_string_lossy());
-                assert_eq!(config.worktrees_root, expected_workspace.to_string_lossy());
+                assert_eq!(config.workspace, expected_workspace.to_string_lossy());
                 assert_eq!(
                     config.event_store_path,
                     expected_event_store.to_string_lossy()
@@ -618,12 +617,11 @@ mod tests {
                 assert_eq!(config.ui.merge_poll_base_interval_secs, 15);
                 assert_eq!(config.ui.merge_poll_max_backoff_secs, 120);
                 assert_eq!(config.ui.merge_poll_backoff_multiplier, 2);
-                assert_eq!(config.ui.full_redraw_interval_secs, 300);
                 assert!(expected.exists());
                 let contents = std::fs::read_to_string(expected.clone()).unwrap();
                 let parsed: AppConfig = toml::from_str(&contents).unwrap();
                 assert_eq!(parsed.workspace, expected_workspace.to_string_lossy());
-                assert_eq!(parsed.worktrees_root, expected_workspace.to_string_lossy());
+                assert_eq!(parsed.workspace, expected_workspace.to_string_lossy());
                 assert_eq!(
                     parsed.event_store_path,
                     expected_event_store.to_string_lossy()
@@ -638,7 +636,6 @@ mod tests {
                 assert_eq!(parsed.ui.merge_poll_base_interval_secs, 15);
                 assert_eq!(parsed.ui.merge_poll_max_backoff_secs, 120);
                 assert_eq!(parsed.ui.merge_poll_backoff_multiplier, 2);
-                assert_eq!(parsed.ui.full_redraw_interval_secs, 300);
             },
         );
 
@@ -647,10 +644,13 @@ mod tests {
 
     #[test]
     fn new_to_planning_instruction_requires_plan_file_and_summary_only() {
-        assert!(NEW_TO_PLANNING_TRANSITION_INSTRUCTION.contains("IMPLEMENTATION_PLAN.md"));
-        assert!(NEW_TO_PLANNING_TRANSITION_INSTRUCTION.contains("concise 2-4 paragraph summary"));
-        assert!(NEW_TO_PLANNING_TRANSITION_INSTRUCTION
-            .contains("no code fences or excessive formatting"));
+        let (_, _, _, instruction) = App::<Healthy, Healthy>::workflow_advance_target(
+            &WorkflowState::New,
+        )
+        .expect("resolve workflow advance target");
+        let instruction = instruction.expect("new->planning instruction");
+        assert!(instruction.contains("implementation plan"));
+        assert!(instruction.contains("planning mode"));
     }
 
     #[test]
@@ -668,7 +668,7 @@ mod tests {
             || {
                 let config = AppConfig::from_env().expect("parse config");
                 assert_eq!(config.workspace, "/tmp/work");
-                assert_eq!(config.worktrees_root, "/tmp/work");
+                assert_eq!(config.workspace, "/tmp/work");
                 assert_eq!(config.event_store_path, "/tmp/events.db");
                 assert_eq!(config.ui.transcript_line_limit, 100);
                 assert_eq!(config.ui.background_session_refresh_secs, 15);
@@ -676,7 +676,6 @@ mod tests {
                 assert_eq!(config.ui.merge_poll_base_interval_secs, 15);
                 assert_eq!(config.ui.merge_poll_max_backoff_secs, 120);
                 assert_eq!(config.ui.merge_poll_backoff_multiplier, 2);
-                assert_eq!(config.ui.full_redraw_interval_secs, 300);
             },
         );
 
@@ -702,7 +701,7 @@ mod tests {
             || {
                 let config = AppConfig::from_env().expect("parse config");
                 assert_eq!(config.workspace, "/tmp/work");
-                assert_eq!(config.worktrees_root, "/tmp/work");
+                assert_eq!(config.workspace, "/tmp/work");
                 assert_eq!(
                     config.event_store_path,
                     expected_event_store.to_string_lossy()
@@ -736,7 +735,7 @@ mod tests {
             || {
                 let config = AppConfig::from_env().expect("config should load");
                 assert_eq!(config.workspace, expected_workspace.to_string_lossy());
-                assert_eq!(config.worktrees_root, expected_workspace.to_string_lossy());
+                assert!(Path::new(&config.workspace).is_absolute());
                 assert_eq!(
                     config.event_store_path,
                     expected_event_store.to_string_lossy()
@@ -745,7 +744,7 @@ mod tests {
                 let rewritten = std::fs::read_to_string(&config_path).expect("read rewritten");
                 let parsed: AppConfig = toml::from_str(&rewritten).expect("parse rewritten");
                 assert_eq!(parsed.workspace, expected_workspace.to_string_lossy());
-                assert_eq!(parsed.worktrees_root, expected_workspace.to_string_lossy());
+                assert!(!rewritten.contains("worktrees_root"));
                 assert_eq!(
                     parsed.event_store_path,
                     expected_event_store.to_string_lossy()
@@ -777,7 +776,6 @@ mod tests {
             || {
                 let config = AppConfig::from_env().expect("config should load");
                 assert_eq!(config.workspace, "./custom-workspace");
-                assert_eq!(config.worktrees_root, "./custom-workspace");
                 assert_eq!(config.event_store_path, "./custom-events.db");
             },
         );
@@ -786,7 +784,7 @@ mod tests {
     }
 
     #[test]
-    fn config_migrates_legacy_worktree_directories_to_worktrees_root() {
+    fn config_preserves_legacy_worktree_directory_layout() {
         let home = unique_temp_dir("legacy-worktree-layout");
         let workspace = expected_default_workspace(&home);
         let legacy_root = workspace.join(".orchestrator").join("worktrees");
@@ -816,12 +814,12 @@ mod tests {
                 ("APPDATA", None),
             ],
             || {
-                let config = AppConfig::from_env().expect("config should load and migrate");
-                let migrated = PathBuf::from(config.worktrees_root)
+                AppConfig::from_env().expect("config should load");
+                let migrated = PathBuf::from(workspace.clone())
                     .join("ap-999-sample-ticket")
                     .join("marker.txt");
-                assert!(migrated.exists());
-                assert!(!legacy_worktree.exists());
+                assert!(!migrated.exists());
+                assert!(legacy_worktree.join("marker.txt").exists());
             },
         );
 
@@ -829,7 +827,7 @@ mod tests {
     }
 
     #[test]
-    fn config_migrates_runtime_mapping_paths_from_legacy_worktree_root() {
+    fn config_preserves_runtime_mapping_paths_from_legacy_worktree_root() {
         let home = unique_temp_dir("legacy-runtime-mapping-layout");
         let workspace = expected_default_workspace(&home);
         let event_store_path = expected_default_event_store(&home);
@@ -910,6 +908,8 @@ mod tests {
             .expect("mapping lookup")
             .expect("mapping exists");
         let expected = workspace
+            .join(".orchestrator")
+            .join("worktrees")
             .join("ap-299-legacy-mapping")
             .to_string_lossy()
             .to_string();
@@ -1012,7 +1012,7 @@ mod tests {
 
         write_config_file(
             &config_path,
-            "workspace = '/tmp/work'\nevent_store_path = '/tmp/events.db'\n[ui]\nmerge_poll_base_interval_secs = 1\nmerge_poll_max_backoff_secs = 9999\nmerge_poll_backoff_multiplier = 0\nfull_redraw_interval_secs = 9999\n",
+            "workspace = '/tmp/work'\nevent_store_path = '/tmp/events.db'\n[ui]\nmerge_poll_base_interval_secs = 1\nmerge_poll_max_backoff_secs = 9999\nmerge_poll_backoff_multiplier = 0\n",
         );
 
         with_env_var(
@@ -1023,21 +1023,6 @@ mod tests {
                 assert_eq!(config.ui.merge_poll_base_interval_secs, 5);
                 assert_eq!(config.ui.merge_poll_max_backoff_secs, 900);
                 assert_eq!(config.ui.merge_poll_backoff_multiplier, 1);
-                assert_eq!(config.ui.full_redraw_interval_secs, 1800);
-            },
-        );
-
-        write_config_file(
-            &config_path,
-            "workspace = '/tmp/work'\nevent_store_path = '/tmp/events.db'\n[ui]\nfull_redraw_interval_secs = 0\n",
-        );
-
-        with_env_var(
-            "ORCHESTRATOR_CONFIG",
-            Some(config_path.to_str().unwrap()),
-            || {
-                let config = AppConfig::from_env().expect("parse and normalize redraw interval");
-                assert_eq!(config.ui.full_redraw_interval_secs, 60);
             },
         );
 
@@ -1366,9 +1351,42 @@ mod tests {
         }
     }
 
+    #[async_trait::async_trait]
     impl orchestrator_vcs::VcsProvider for StubVcs {
         fn kind(&self) -> orchestrator_vcs::VcsProviderKind {
             orchestrator_vcs::VcsProviderKind::GitCli
+        }
+
+        async fn health_check(&self) -> Result<(), CoreError> {
+            <Self as orchestrator_core::VcsProvider>::health_check(self).await
+        }
+
+        async fn discover_repositories(
+            &self,
+            roots: &[PathBuf],
+        ) -> Result<Vec<orchestrator_vcs::RepositoryRef>, CoreError> {
+            <Self as orchestrator_core::VcsProvider>::discover_repositories(self, roots).await
+        }
+
+        async fn create_worktree(
+            &self,
+            request: orchestrator_vcs::CreateWorktreeRequest,
+        ) -> Result<orchestrator_vcs::WorktreeSummary, CoreError> {
+            <Self as orchestrator_core::VcsProvider>::create_worktree(self, request).await
+        }
+
+        async fn delete_worktree(
+            &self,
+            request: orchestrator_vcs::DeleteWorktreeRequest,
+        ) -> Result<(), CoreError> {
+            <Self as orchestrator_core::VcsProvider>::delete_worktree(self, request).await
+        }
+
+        async fn worktree_status(
+            &self,
+            worktree_path: &Path,
+        ) -> Result<orchestrator_vcs::WorktreeStatus, CoreError> {
+            <Self as orchestrator_core::VcsProvider>::worktree_status(self, worktree_path).await
         }
     }
 
@@ -1478,7 +1496,6 @@ mod tests {
             .start_or_resume_selected_ticket(
                 &ticket,
                 Some(vcs.repository.root.clone()),
-                None,
                 &vcs,
                 &backend,
             )
