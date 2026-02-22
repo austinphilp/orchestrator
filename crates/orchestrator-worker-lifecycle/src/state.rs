@@ -17,6 +17,6 @@ impl WorkerSessionState {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum WorkerSessionVisibility {
     #[default]
-    Focused,
     Background,
+    Focused,
 }
