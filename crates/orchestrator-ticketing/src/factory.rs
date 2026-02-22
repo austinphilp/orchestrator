@@ -1,7 +1,7 @@
 use crate::interface::{TicketingProviderError, TicketingProviderKind};
 use crate::providers::{
     linear::{LinearConfig, LinearTicketingProvider},
-    shortcut::ShortcutTicketingProvider,
+    shortcut::{ShortcutConfig, ShortcutTicketingProvider},
 };
 use std::fmt;
 
@@ -18,6 +18,7 @@ pub enum TicketingProviderFactoryOutput {
 #[derive(Debug, Clone, Default)]
 pub struct TicketingProviderFactoryConfig {
     pub linear: LinearConfig,
+    pub shortcut: ShortcutConfig,
 }
 
 impl fmt::Display for TicketingProviderFactoryOutput {
@@ -61,6 +62,9 @@ pub fn build_provider(
     if config.linear.api_key.trim().is_empty() {
         config.linear.api_key = "scaffold-token".to_owned();
     }
+    if config.shortcut.api_key.trim().is_empty() {
+        config.shortcut.api_key = "scaffold-token".to_owned();
+    }
     build_provider_with_config(provider_key, config)
 }
 
@@ -75,9 +79,11 @@ pub fn build_provider_with_config(
                 TicketingProviderError::ProviderInitialization(error.to_string())
             })?,
         ),
-        TicketingProviderKind::Shortcut => {
-            TicketingProviderFactoryOutput::Shortcut(ShortcutTicketingProvider::scaffold_default())
-        }
+        TicketingProviderKind::Shortcut => TicketingProviderFactoryOutput::Shortcut(
+            ShortcutTicketingProvider::new(config.shortcut).map_err(|error| {
+                TicketingProviderError::ProviderInitialization(error.to_string())
+            })?,
+        ),
     };
     Ok(provider)
 }
@@ -89,7 +95,7 @@ mod tests {
         TicketingProviderFactoryConfig, TicketingProviderFactoryOutput, SUPPORTED_PROVIDER_KEYS,
     };
     use crate::interface::{TicketingProviderError, TicketingProviderKind};
-    use crate::providers::linear::LinearConfig;
+    use crate::providers::{linear::LinearConfig, shortcut::ShortcutConfig};
 
     #[test]
     fn supported_provider_keys_are_namespaced() {
@@ -140,6 +146,7 @@ mod tests {
             "ticketing.linear",
             TicketingProviderFactoryConfig {
                 linear: LinearConfig::default(),
+                shortcut: ShortcutConfig::default(),
             },
         )
         .expect_err("linear with empty API key should fail");
@@ -166,5 +173,44 @@ mod tests {
             panic!("expected linear provider");
         };
         assert_eq!(provider.sync_query().assigned_to_me, true);
+    }
+
+    #[test]
+    fn build_provider_with_config_rejects_empty_shortcut_api_key() {
+        let shortcut_error = build_provider_with_config(
+            "ticketing.shortcut",
+            TicketingProviderFactoryConfig {
+                linear: LinearConfig {
+                    api_key: "token".to_owned(),
+                    ..LinearConfig::default()
+                },
+                shortcut: ShortcutConfig::default(),
+            },
+        )
+        .expect_err("shortcut with empty API key should fail");
+
+        assert!(matches!(
+            shortcut_error,
+            TicketingProviderError::ProviderInitialization(message)
+                if message.contains("ORCHESTRATOR_SHORTCUT_API_KEY is empty")
+        ));
+    }
+
+    #[test]
+    fn build_provider_with_config_applies_shortcut_configuration() {
+        let mut config = TicketingProviderFactoryConfig::default();
+        config.shortcut = ShortcutConfig {
+            api_url: "https://shortcut.example/api/v3".to_owned(),
+            api_key: "token".to_owned(),
+            fetch_limit: 42,
+        };
+
+        let provider = build_provider_with_config("ticketing.shortcut", config)
+            .expect("build shortcut provider");
+        let TicketingProviderFactoryOutput::Shortcut(provider) = provider else {
+            panic!("expected shortcut provider");
+        };
+        assert_eq!(provider.config().api_url, "https://shortcut.example/api/v3");
+        assert_eq!(provider.config().fetch_limit, 42);
     }
 }

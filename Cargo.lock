@@ -1094,13 +1094,7 @@ dependencies = [
 name = "integration-shortcut"
 version = "0.1.0"
 dependencies = [
- "async-trait",
- "orchestrator-core",
- "reqwest",
- "serde",
- "serde_json",
- "tokio",
- "tracing",
+ "orchestrator-ticketing",
 ]
 
 [[package]]
@@ -1435,7 +1429,6 @@ dependencies = [
  "anyhow",
  "async-trait",
  "integration-git",
- "integration-shortcut",
  "orchestrator-core",
  "orchestrator-github",
  "orchestrator-harness",

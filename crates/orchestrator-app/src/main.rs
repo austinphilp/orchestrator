@@ -1,5 +1,4 @@
 use anyhow::Result;
-use integration_shortcut::{ShortcutConfig, ShortcutTicketingProvider};
 use orchestrator_app::{
     set_database_runtime_config, App, AppConfig, AppFrontendController, FrontendController,
     WorkerManagerBackend,
@@ -17,7 +16,7 @@ use orchestrator_harness::{
 use orchestrator_supervisor::OpenRouterSupervisor;
 use orchestrator_ticketing::{
     build_provider_with_config as build_ticketing_provider_with_config, LinearConfig,
-    LinearRuntimeSettings, LinearTicketingProvider, TicketingProviderFactoryConfig,
+    LinearRuntimeSettings, LinearTicketingProvider, ShortcutConfig, TicketingProviderFactoryConfig,
     TicketingProviderFactoryOutput, WorkflowStateMapSetting,
 };
 use orchestrator_ui::Ui;
@@ -334,6 +333,7 @@ fn build_ticketing_provider(
                 "ticketing.linear",
                 TicketingProviderFactoryConfig {
                     linear: linear_config,
+                    ..TicketingProviderFactoryConfig::default()
                 },
             )
             .map_err(|error| CoreError::Configuration(error.to_string()))?;
@@ -355,10 +355,23 @@ fn build_ticketing_provider(
                 config.shortcut.api_url.clone(),
                 config.shortcut.fetch_limit,
             )?;
-            Ok((
-                Arc::new(ShortcutTicketingProvider::new(shortcut_config)?),
-                None,
-            ))
+            let provider = build_ticketing_provider_with_config(
+                "ticketing.shortcut",
+                TicketingProviderFactoryConfig {
+                    shortcut: shortcut_config,
+                    ..TicketingProviderFactoryConfig::default()
+                },
+            )
+            .map_err(|error| CoreError::Configuration(error.to_string()))?;
+            let TicketingProviderFactoryOutput::Shortcut(provider) = provider else {
+                return Err(CoreError::Configuration(
+                    "ticketing provider factory returned a non-shortcut provider for ticketing.shortcut"
+                        .to_owned(),
+                ));
+            };
+            let provider = Arc::new(provider);
+            let ticketing: Arc<dyn TicketingProvider + Send + Sync> = provider;
+            Ok((ticketing, None))
         }
         other => Err(CoreError::Configuration(format!(
             "Unknown ticketing provider '{other}'. Expected 'linear', 'shortcut', 'ticketing.linear', or 'ticketing.shortcut'."

@@ -17,4 +17,4 @@ pub use providers::linear::{
     LinearWorkflowSyncConfig, LinearWorkflowTransitionSyncRequest, ReqwestGraphqlTransport,
     TicketCacheSnapshot, WorkflowStateMapSetting, WorkflowStateMapping,
 };
-pub use providers::shortcut::ShortcutTicketingProvider;
+pub use providers::shortcut::{ShortcutConfig, ShortcutTicketingProvider};
