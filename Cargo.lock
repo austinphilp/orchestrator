@@ -1427,7 +1427,6 @@ dependencies = [
  "anyhow",
  "async-trait",
  "orchestrator-core",
- "orchestrator-github",
  "orchestrator-harness",
  "orchestrator-supervisor",
  "orchestrator-ticketing",
@@ -1464,11 +1463,7 @@ dependencies = [
 name = "orchestrator-github"
 version = "0.1.0"
 dependencies = [
- "async-trait",
- "orchestrator-core",
- "serde",
- "serde_json",
- "tokio",
+ "orchestrator-vcs-repos",
 ]
 
 [[package]]
@@ -1544,7 +1539,12 @@ dependencies = [
 name = "orchestrator-vcs-repos"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
+ "orchestrator-core",
+ "serde",
+ "serde_json",
  "thiserror 2.0.18",
+ "tokio",
 ]
 
 [[package]]

@@ -1,11 +1,28 @@
 use crate::interface::{VcsRepoProviderError, VcsRepoProviderKind};
-use crate::providers::github_gh_cli::GitHubGhCliRepoProvider;
+use crate::providers::github_gh_cli::{GitHubGhCliRepoProvider, GitHubGhCliRepoProviderConfig};
+use std::fmt;
 
 const SUPPORTED_PROVIDER_KEYS: [&str; 1] = [VcsRepoProviderKind::GitHubGhCli.as_key()];
 
-#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum VcsRepoProviderFactoryOutput {
     GitHubGhCli(GitHubGhCliRepoProvider),
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct VcsRepoProviderFactoryConfig {
+    pub github_gh_cli: GitHubGhCliRepoProviderConfig,
+}
+
+impl fmt::Debug for VcsRepoProviderFactoryOutput {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let provider_key = match self {
+            Self::GitHubGhCli(_) => VcsRepoProviderKind::GitHubGhCli.as_key(),
+        };
+        formatter
+            .debug_struct("VcsRepoProviderFactoryOutput")
+            .field("provider_key", &provider_key)
+            .finish()
+    }
 }
 
 pub fn supported_provider_keys() -> &'static [&'static str] {
@@ -22,11 +39,19 @@ pub fn resolve_provider_kind(
 pub fn build_provider(
     provider_key: &str,
 ) -> Result<VcsRepoProviderFactoryOutput, VcsRepoProviderError> {
+    build_provider_with_config(provider_key, VcsRepoProviderFactoryConfig::default())
+}
+
+pub fn build_provider_with_config(
+    provider_key: &str,
+    config: VcsRepoProviderFactoryConfig,
+) -> Result<VcsRepoProviderFactoryOutput, VcsRepoProviderError> {
     let kind = resolve_provider_kind(provider_key)?;
     let provider = match kind {
-        VcsRepoProviderKind::GitHubGhCli => {
-            VcsRepoProviderFactoryOutput::GitHubGhCli(GitHubGhCliRepoProvider::scaffold_default())
-        }
+        VcsRepoProviderKind::GitHubGhCli => VcsRepoProviderFactoryOutput::GitHubGhCli(
+            GitHubGhCliRepoProvider::from_config(config.github_gh_cli)
+                .map_err(|error| VcsRepoProviderError::ProviderInitialization(error.to_string()))?,
+        ),
     };
     Ok(provider)
 }
@@ -34,10 +59,11 @@ pub fn build_provider(
 #[cfg(test)]
 mod tests {
     use super::{
-        build_provider, resolve_provider_kind, supported_provider_keys,
-        VcsRepoProviderFactoryOutput, SUPPORTED_PROVIDER_KEYS,
+        build_provider, build_provider_with_config, resolve_provider_kind, supported_provider_keys,
+        VcsRepoProviderFactoryConfig, VcsRepoProviderFactoryOutput, SUPPORTED_PROVIDER_KEYS,
     };
-    use crate::interface::VcsRepoProviderKind;
+    use crate::interface::{VcsRepoProviderError, VcsRepoProviderKind};
+    use std::path::PathBuf;
 
     #[test]
     fn supported_provider_keys_are_namespaced() {
@@ -76,6 +102,46 @@ mod tests {
         assert!(matches!(
             provider,
             VcsRepoProviderFactoryOutput::GitHubGhCli(_)
+        ));
+    }
+
+    #[test]
+    fn build_provider_with_config_applies_gh_binary_setting() {
+        let provider = build_provider_with_config(
+            "vcs_repos.github_gh_cli",
+            VcsRepoProviderFactoryConfig {
+                github_gh_cli: crate::providers::github_gh_cli::GitHubGhCliRepoProviderConfig {
+                    binary: PathBuf::from("gh-real"),
+                    ..crate::providers::github_gh_cli::GitHubGhCliRepoProviderConfig::default()
+                },
+            },
+        )
+        .expect("build github gh cli provider");
+
+        match provider {
+            VcsRepoProviderFactoryOutput::GitHubGhCli(provider) => {
+                assert_eq!(provider.binary(), PathBuf::from("gh-real").as_path());
+            }
+        }
+    }
+
+    #[test]
+    fn build_provider_with_config_rejects_empty_gh_binary() {
+        let error = build_provider_with_config(
+            "vcs_repos.github_gh_cli",
+            VcsRepoProviderFactoryConfig {
+                github_gh_cli: crate::providers::github_gh_cli::GitHubGhCliRepoProviderConfig {
+                    binary: PathBuf::new(),
+                    ..crate::providers::github_gh_cli::GitHubGhCliRepoProviderConfig::default()
+                },
+            },
+        )
+        .expect_err("empty gh binary should fail");
+
+        assert!(matches!(
+            error,
+            VcsRepoProviderError::ProviderInitialization(message)
+                if message.contains("ORCHESTRATOR_GH_BIN is set but empty")
         ));
     }
 }

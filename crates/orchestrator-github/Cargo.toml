@@ -5,10 +5,4 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
-orchestrator-core = { path = "../orchestrator-core" }
-async-trait.workspace = true
-serde.workspace = true
-serde_json.workspace = true
-
-[dev-dependencies]
-tokio.workspace = true
+orchestrator-vcs-repos = { path = "../orchestrator-vcs-repos" }

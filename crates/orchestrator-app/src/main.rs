@@ -8,7 +8,6 @@ use orchestrator_core::{
     SqliteEventStore, TicketProvider, TicketRecord, TicketingProvider, WorkItemId, WorkerBackend,
     WorkflowState,
 };
-use orchestrator_github::{GhCliClient, ProcessCommandRunner as GhProcessCommandRunner};
 use orchestrator_harness::{
     build_provider_with_config, CodexHarnessProviderConfig, HarnessProviderFactoryConfig,
     HarnessProviderFactoryOutput, OpenCodeHarnessProviderConfig,
@@ -20,6 +19,11 @@ use orchestrator_ticketing::{
     TicketingProviderFactoryOutput, WorkflowStateMapSetting,
 };
 use orchestrator_ui::Ui;
+use orchestrator_vcs_repos::{
+    build_provider_with_config as build_vcs_repo_provider_with_config, GitHubGhCliRepoProvider,
+    GitHubGhCliRepoProviderConfig, VcsRepoProviderFactoryConfig, VcsRepoProviderFactoryOutput,
+    VcsRepoProviderKind,
+};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -71,11 +75,7 @@ async fn main() -> Result<()> {
         openrouter_api_key,
         config.supervisor.openrouter_base_url.clone(),
     )?;
-    let github = GhCliClient::new(
-        GhProcessCommandRunner,
-        PathBuf::from(config.github.binary.as_str()),
-        config.runtime.allow_unsafe_command_paths,
-    )?;
+    let github = build_vcs_repo_provider(&config)?;
     let (ticketing, linear_ticketing) =
         build_ticketing_provider(&config, &config.ticketing_provider)?;
     let raw_worker_backend = build_harness_provider(&config, &config.harness_provider)?;
@@ -424,6 +424,22 @@ fn build_harness_provider(
         HarnessProviderFactoryOutput::OpenCode(provider) => Ok(Arc::new(provider)),
         HarnessProviderFactoryOutput::Codex(provider) => Ok(Arc::new(provider)),
     }
+}
+
+fn build_vcs_repo_provider(config: &AppConfig) -> Result<GitHubGhCliRepoProvider, CoreError> {
+    let provider = build_vcs_repo_provider_with_config(
+        VcsRepoProviderKind::GitHubGhCli.as_key(),
+        VcsRepoProviderFactoryConfig {
+            github_gh_cli: GitHubGhCliRepoProviderConfig {
+                binary: PathBuf::from(config.github.binary.as_str()),
+                allow_unsafe_command_paths: config.runtime.allow_unsafe_command_paths,
+            },
+        },
+    )
+    .map_err(|error| CoreError::Configuration(error.to_string()))?;
+
+    let VcsRepoProviderFactoryOutput::GitHubGhCli(provider) = provider;
+    Ok(provider)
 }
 
 fn required_env(name: &str) -> Result<String, CoreError> {

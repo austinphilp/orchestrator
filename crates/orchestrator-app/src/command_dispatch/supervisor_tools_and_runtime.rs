@@ -21,11 +21,11 @@ use orchestrator_core::{
     WorkflowState, WorkflowTransitionPayload, WorkflowTransitionReason,
     DOMAIN_EVENT_SCHEMA_VERSION,
 };
-use orchestrator_github::default_system_url_opener;
 use orchestrator_supervisor::{
     build_freeform_messages, build_template_messages_with_variables, SupervisorQueryEngine,
 };
 use orchestrator_ui::SupervisorCommandContext;
+use orchestrator_vcs_repos::default_system_url_opener;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
