@@ -1442,19 +1442,8 @@ async fn seed_session_history(
         }
     }
 
-    if let Some(turns) = extract_turns(&response) {
-        for turn in turns {
-            if let Some(items) = turn.get("items").and_then(Value::as_array) {
-                for item in items {
-                    emit_history_item(session, item, &mut emitted_any);
-                }
-            }
-        }
-    }
-    if let Some(items) = extract_history_items(&response) {
-        for item in items {
-            emit_history_item(session, item, &mut emitted_any);
-        }
+    for item in history_items_for_thread_read(&response) {
+        emit_history_item(session, item, &mut emitted_any);
     }
 
     if emitted_any {
@@ -1483,6 +1472,25 @@ fn extract_history_items(response: &Value) -> Option<&Vec<Value>> {
             .and_then(|thread| thread.get("items"))
             .and_then(Value::as_array)
     })
+}
+
+fn history_items_for_thread_read(response: &Value) -> Vec<&Value> {
+    let turn_items = extract_turns(response)
+        .map(|turns| {
+            turns
+                .iter()
+                .filter_map(|turn| turn.get("items").and_then(Value::as_array))
+                .flat_map(|items| items.iter())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    if !turn_items.is_empty() {
+        return turn_items;
+    }
+
+    extract_history_items(response)
+        .map(|items| items.iter().collect::<Vec<_>>())
+        .unwrap_or_default()
 }
 
 fn emit_history_item(session: &CodexSession, item: &Value, emitted_any: &mut bool) {
@@ -2032,5 +2040,58 @@ mod tests {
                 "model": "gpt-5-codex"
             }
         }))));
+    }
+
+    #[test]
+    fn history_items_for_thread_read_prefers_turn_items() {
+        let response = json!({
+            "turns": [
+                {
+                    "items": [
+                        {
+                            "type": "userMessage",
+                            "content": [{ "text": "from turn" }]
+                        }
+                    ]
+                }
+            ],
+            "items": [
+                {
+                    "type": "userMessage",
+                    "content": [{ "text": "from top-level" }]
+                }
+            ]
+        });
+
+        let items = history_items_for_thread_read(&response);
+        assert_eq!(items.len(), 1);
+        assert_eq!(
+            extract_history_user_text(items[0]).as_deref(),
+            Some("from turn")
+        );
+    }
+
+    #[test]
+    fn history_items_for_thread_read_falls_back_to_top_level_items() {
+        let response = json!({
+            "turns": [
+                {
+                    "items": []
+                }
+            ],
+            "items": [
+                {
+                    "type": "userMessage",
+                    "content": [{ "text": "from top-level" }]
+                }
+            ]
+        });
+
+        let items = history_items_for_thread_read(&response);
+        assert_eq!(items.len(), 1);
+        assert_eq!(
+            extract_history_user_text(items[0]).as_deref(),
+            Some("from top-level")
+        );
     }
 }
