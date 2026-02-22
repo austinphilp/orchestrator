@@ -3,13 +3,13 @@ use crate::events::{
     SessionCompletedPayload, SessionCrashedPayload, StoredEventEnvelope, WorkflowTransitionPayload,
 };
 use crate::normalization::DOMAIN_EVENT_SCHEMA_VERSION;
+use crate::projection::{rebuild_projection, ProjectionState, SessionRuntimeProjection};
 use orchestrator_core::{
-    apply_workflow_transition, rebuild_projection, CodeHostProvider, CoreError, EventStore,
-    GetTicketRequest, GithubClient, InboxItemId, LlmProvider, ProjectionState, RuntimeSessionId,
-    SelectedTicketFlowConfig, SelectedTicketFlowResult, SessionHandle, SessionRuntimeProjection,
-    SqliteEventStore, Supervisor, TicketSummary, TicketingProvider, UntypedCommandInvocation,
-    WorkItemId, WorkerBackend, WorkerSessionId, WorkerSessionStatus, WorkflowGuardContext,
-    WorkflowState, WorkflowTransitionReason,
+    apply_workflow_transition, CodeHostProvider, CoreError, EventStore, GetTicketRequest,
+    GithubClient, InboxItemId, LlmProvider, RuntimeSessionId, SelectedTicketFlowConfig,
+    SelectedTicketFlowResult, SessionHandle, SqliteEventStore, Supervisor, TicketSummary,
+    TicketingProvider, UntypedCommandInvocation, WorkItemId, WorkerBackend, WorkerSessionId,
+    WorkerSessionStatus, WorkflowGuardContext, WorkflowState, WorkflowTransitionReason,
 };
 use orchestrator_ticketing::LinearTicketingProvider;
 use orchestrator_ui::{

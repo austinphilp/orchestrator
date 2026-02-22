@@ -3,9 +3,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use crate::projection::ProjectionState;
 use orchestrator_core::{
-    ArchiveTicketRequest, CodeHostProvider, Command, CommandRegistry, CoreError, CreateTicketRequest,
-    GithubClient, LlmChatRequest, LlmMessage, LlmProvider, LlmRole, ProjectionState,
+    ArchiveTicketRequest, CodeHostProvider, Command, CommandRegistry, CoreError,
+    CreateTicketRequest, GithubClient, LlmChatRequest, LlmMessage, LlmProvider, LlmRole,
     SelectedTicketFlowResult, Supervisor, TicketId, TicketQuery, TicketSummary, TicketingProvider,
     WorkerBackend, WorkerSessionId, WorkerSessionStatus, WorkflowInteractionProfilesConfig,
     WorkflowState,
@@ -1050,7 +1051,7 @@ fn supervisor_model_from_env() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use orchestrator_core::{SessionProjection, WorkItemProjection};
+    use crate::projection::{SessionProjection, WorkItemProjection};
 
     #[test]
     fn parse_ticket_draft_extracts_title_and_description_sections() {
