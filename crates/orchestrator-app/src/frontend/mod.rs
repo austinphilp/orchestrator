@@ -6,6 +6,67 @@ use orchestrator_core::{
     CoreError, WorkItemId, WorkerSessionId,
 };
 
+pub mod ui_boundary {
+    pub use super::{
+        FrontendApplicationMode, FrontendCommandIntent, FrontendController, FrontendEvent,
+        FrontendEventStream, FrontendEventSubscription, FrontendIntent, FrontendNotification,
+        FrontendNotificationLevel, FrontendSnapshot, FrontendTerminalEvent,
+    };
+    pub use crate::attention::{
+        attention_inbox_snapshot, AttentionBatchKind, AttentionEngineConfig,
+        AttentionInboxSnapshot, AttentionPriorityBand,
+    };
+    pub use crate::commands::ids as command_ids;
+    pub use crate::controller::action_runners::{
+        run_publish_inbox_item_task, run_resolve_inbox_item_task, run_session_merge_finalize_task,
+        run_session_workflow_advance_task, run_start_pr_pipeline_polling_task,
+        run_stop_pr_pipeline_polling_task, run_supervisor_command_task, run_supervisor_stream_task,
+        InboxPublishRunnerEvent as ControllerInboxPublishRunnerEvent,
+        InboxResolveRunnerEvent as ControllerInboxResolveRunnerEvent,
+        SupervisorStreamRunnerEvent as ControllerSupervisorStreamRunnerEvent,
+        WorkflowAdvanceRunnerEvent as ControllerWorkflowAdvanceRunnerEvent,
+    };
+    pub use crate::controller::contracts::{
+        CiCheckStatus, CreateTicketFromPickerRequest, InboxPublishRequest, InboxResolveRequest,
+        MergeQueueCommandKind, MergeQueueEvent, SessionArchiveOutcome, SessionMergeFinalizeOutcome,
+        SessionWorkflowAdvanceOutcome, SessionWorktreeDiff, SupervisorCommandContext,
+        SupervisorCommandDispatcher, TicketCreateSubmitMode, TicketPickerProvider,
+    };
+    pub use crate::events::{
+        InboxItemCreatedPayload, InboxItemResolvedPayload, NewEventEnvelope,
+        OrchestrationEventPayload, OrchestrationEventType, SessionBlockedPayload,
+        SessionCheckpointPayload, SessionCompletedPayload, SessionNeedsInputPayload,
+        StoredEventEnvelope, SupervisorQueryFinishedPayload, TicketDetailsSyncedPayload,
+        TicketSyncedPayload, UserRespondedPayload, WorkflowTransitionPayload,
+        WorktreeCreatedPayload,
+    };
+    pub use crate::projection::{
+        apply_event, rebuild_projection, ArtifactProjection, InboxItemProjection, ProjectionState,
+        SessionProjection, SessionRuntimeProjection, WorkItemProjection,
+    };
+    pub use orchestrator_core::{
+        ArtifactId, ArtifactKind, Command, CommandRegistry, CoreError, InboxItemId, InboxItemKind,
+        LlmChatRequest, LlmFinishReason, LlmMessage, LlmProvider, LlmProviderKind,
+        LlmRateLimitState, LlmResponseStream, LlmResponseSubscription, LlmRole, LlmStreamChunk,
+        LlmTokenUsage, ProjectId, SelectedTicketFlowResult, SessionLifecycle, SupervisorQueryArgs,
+        SupervisorQueryContextArgs, TicketId, TicketProvider, TicketSummary,
+        UntypedCommandInvocation, WorkItemId, WorkerBackend, WorkerEventStream,
+        WorkerEventSubscription, WorkerSessionId, WorkerSessionStatus, WorkflowState,
+        WorkflowTransitionReason, WorktreeId,
+    };
+    pub use orchestrator_worker_protocol::{
+        WorkerBackendCapabilities as BackendCapabilities, WorkerBackendKind as BackendKind,
+        WorkerEvent as BackendEvent, WorkerNeedsInputAnswer as BackendNeedsInputAnswer,
+        WorkerNeedsInputEvent as BackendNeedsInputEvent,
+        WorkerNeedsInputOption as BackendNeedsInputOption,
+        WorkerNeedsInputQuestion as BackendNeedsInputQuestion,
+        WorkerOutputEvent as BackendOutputEvent, WorkerOutputStream as BackendOutputStream,
+        WorkerRuntimeError as RuntimeError, WorkerRuntimeResult as RuntimeResult,
+        WorkerSessionHandle as SessionHandle, WorkerSessionId as RuntimeSessionId,
+        WorkerSpawnRequest as SpawnSpec, WorkerTurnStateEvent as BackendTurnStateEvent,
+    };
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, Hash)]
 pub enum FrontendApplicationMode {
     Manual,

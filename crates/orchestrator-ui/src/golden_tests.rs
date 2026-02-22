@@ -1,7 +1,7 @@
 use super::*;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use orchestrator_core::{
+use orchestrator_app::frontend::ui_boundary::{
     rebuild_projection, NewEventEnvelope, OrchestrationEventPayload, StoredEventEnvelope,
 };
 use serde::Deserialize;

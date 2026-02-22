@@ -6,28 +6,22 @@ mod golden_tests;
 mod tests {
     use super::*;
     use async_trait::async_trait;
-    use orchestrator_core::{
+    use orchestrator_app::frontend::ui_boundary::{
         ArtifactId, ArtifactKind, ArtifactProjection, CoreError, FrontendApplicationMode,
         FrontendCommandIntent, FrontendController, FrontendEvent, FrontendEventStream,
         FrontendEventSubscription, FrontendIntent, FrontendSnapshot, InboxItemProjection,
-        InboxItemCreatedPayload, LlmProviderKind, LlmResponseStream, LlmResponseSubscription,
-        LlmStreamChunk, OrchestrationEventPayload, OrchestrationEventType, SessionBlockedPayload,
-        SessionCheckpointPayload,
+        InboxItemCreatedPayload, InboxItemResolvedPayload, LlmProviderKind, LlmResponseStream,
+        LlmResponseSubscription, LlmStreamChunk, OrchestrationEventPayload,
+        OrchestrationEventType, SessionBlockedPayload, SessionCheckpointPayload,
         SessionCompletedPayload, SessionNeedsInputPayload, SessionProjection,
         SessionLifecycle, SessionRuntimeProjection, StoredEventEnvelope,
-        SupervisorQueryFinishedPayload, TicketProvider, UserRespondedPayload,
-        WorkItemProjection, WorkerEventStream, WorkflowTransitionPayload,
-        WorkflowTransitionReason, WorkflowState,
-    };
-    use orchestrator_worker_protocol::{
-        WorkerBackendCapabilities as BackendCapabilities, WorkerBackendKind as BackendKind,
-        WorkerEvent as BackendEvent, WorkerNeedsInputEvent as BackendNeedsInputEvent,
-        WorkerNeedsInputOption as BackendNeedsInputOption,
-        WorkerNeedsInputQuestion as BackendNeedsInputQuestion,
-        WorkerOutputEvent as BackendOutputEvent, WorkerOutputStream as BackendOutputStream,
-        WorkerRuntimeResult as RuntimeResult, WorkerSessionHandle as SessionHandle,
-        WorkerSessionId as RuntimeSessionId, WorkerSpawnRequest as SpawnSpec,
-        WorkerTurnStateEvent as BackendTurnStateEvent,
+        SupervisorQueryFinishedPayload, TicketDetailsSyncedPayload, TicketProvider,
+        UserRespondedPayload, WorkItemProjection, WorkerEventStream, WorkerEventSubscription,
+        WorkflowTransitionPayload, WorkflowTransitionReason, WorktreeCreatedPayload, WorktreeId,
+        WorkflowState, BackendCapabilities, BackendKind, BackendEvent,
+        BackendNeedsInputEvent, BackendNeedsInputOption, BackendNeedsInputQuestion,
+        BackendOutputEvent, BackendOutputStream, RuntimeResult, SessionHandle,
+        RuntimeSessionId, SpawnSpec, BackendTurnStateEvent,
     };
     use std::collections::VecDeque;
     use std::sync::{Arc, Mutex};
@@ -399,7 +393,7 @@ mod tests {
                 Some(request.work_item_id.clone()),
                 None,
                 OrchestrationEventPayload::InboxItemResolved(
-                    orchestrator_core::InboxItemResolvedPayload {
+                    InboxItemResolvedPayload {
                         inbox_item_id: request.inbox_item_id,
                         work_item_id: request.work_item_id,
                     },
@@ -702,7 +696,7 @@ mod tests {
     struct EmptyEventStream;
 
     #[async_trait]
-    impl orchestrator_core::WorkerEventSubscription for EmptyEventStream {
+    impl WorkerEventSubscription for EmptyEventStream {
         async fn next_event(&mut self) -> RuntimeResult<Option<BackendEvent>> {
             Ok(None)
         }
@@ -1348,7 +1342,7 @@ mod tests {
             work_item_id: Some(work_item_id.clone()),
             session_id: None,
             event_type: OrchestrationEventType::TicketSynced,
-            payload: OrchestrationEventPayload::TicketSynced(orchestrator_core::TicketSyncedPayload {
+            payload: OrchestrationEventPayload::TicketSynced(TicketSyncedPayload {
                 ticket_id: ticket_id.clone(),
                 identifier: "AP-244".to_owned(),
                 title: "Add right sidebar".to_owned(),
@@ -1366,7 +1360,7 @@ mod tests {
             session_id: None,
             event_type: OrchestrationEventType::TicketDetailsSynced,
             payload: OrchestrationEventPayload::TicketDetailsSynced(
-                orchestrator_core::TicketDetailsSyncedPayload {
+                TicketDetailsSyncedPayload {
                     ticket_id,
                     description: Some(
                         "Render PR status, diff stats, ticket details, and open inbox in sidebar."
@@ -1700,7 +1694,7 @@ mod tests {
             session_id: None,
             event_type: OrchestrationEventType::TicketSynced,
             payload: OrchestrationEventPayload::TicketSynced(
-                orchestrator_core::TicketSyncedPayload {
+                TicketSyncedPayload {
                     ticket_id: ticket_core,
                     identifier: "AP-101".to_owned(),
                     title: "Harden session lifecycle".to_owned(),
@@ -1719,7 +1713,7 @@ mod tests {
             session_id: None,
             event_type: OrchestrationEventType::TicketSynced,
             payload: OrchestrationEventPayload::TicketSynced(
-                orchestrator_core::TicketSyncedPayload {
+                TicketSyncedPayload {
                     ticket_id: ticket_orchestrator,
                     identifier: "AP-202".to_owned(),
                     title: "Session list redesign".to_owned(),
@@ -1794,8 +1788,8 @@ mod tests {
             session_id: None,
             event_type: OrchestrationEventType::WorktreeCreated,
             payload: OrchestrationEventPayload::WorktreeCreated(
-                orchestrator_core::WorktreeCreatedPayload {
-                    worktree_id: orchestrator_core::WorktreeId::new("wt-repo-fallback"),
+                WorktreeCreatedPayload {
+                    worktree_id: WorktreeId::new("wt-repo-fallback"),
                     work_item_id: work_item_id.clone(),
                     path: "/tmp/github/orchestrator".to_owned(),
                     branch: "feature/repo-fallback".to_owned(),
@@ -1812,7 +1806,7 @@ mod tests {
             session_id: None,
             event_type: OrchestrationEventType::TicketSynced,
             payload: OrchestrationEventPayload::TicketSynced(
-                orchestrator_core::TicketSyncedPayload {
+                TicketSyncedPayload {
                     ticket_id,
                     identifier: "AP-303".to_owned(),
                     title: "Repository label fallback".to_owned(),
@@ -2007,7 +2001,7 @@ mod tests {
                 session_id: None,
                 event_type: OrchestrationEventType::TicketSynced,
                 payload: OrchestrationEventPayload::TicketSynced(
-                    orchestrator_core::TicketSyncedPayload {
+                    TicketSyncedPayload {
                         ticket_id,
                         identifier: identifier.to_owned(),
                         title: title.to_owned(),
@@ -2086,7 +2080,7 @@ mod tests {
             work_item_id: Some(work_item_id),
             session_id: None,
             event_type: OrchestrationEventType::TicketSynced,
-            payload: OrchestrationEventPayload::TicketSynced(orchestrator_core::TicketSyncedPayload {
+            payload: OrchestrationEventPayload::TicketSynced(TicketSyncedPayload {
                 ticket_id,
                 identifier: "AP-405".to_owned(),
                 title: "Implementation only".to_owned(),
@@ -2141,7 +2135,7 @@ mod tests {
             work_item_id: Some(work_item_id),
             session_id: None,
             event_type: OrchestrationEventType::TicketSynced,
-            payload: OrchestrationEventPayload::TicketSynced(orchestrator_core::TicketSyncedPayload {
+            payload: OrchestrationEventPayload::TicketSynced(TicketSyncedPayload {
                 ticket_id,
                 identifier: "AP-406".to_owned(),
                 title: "Active implementing session".to_owned(),
@@ -2208,7 +2202,7 @@ mod tests {
             work_item_id: Some(work_item_id),
             session_id: None,
             event_type: OrchestrationEventType::TicketSynced,
-            payload: OrchestrationEventPayload::TicketSynced(orchestrator_core::TicketSyncedPayload {
+            payload: OrchestrationEventPayload::TicketSynced(TicketSyncedPayload {
                 ticket_id,
                 identifier: "AP-407".to_owned(),
                 title: "Running session without active turn".to_owned(),
@@ -2348,7 +2342,7 @@ mod tests {
                 session_id: Some(session_id.clone()),
                 event_type: OrchestrationEventType::InboxItemCreated,
                 payload: OrchestrationEventPayload::InboxItemCreated(
-                    orchestrator_core::InboxItemCreatedPayload {
+                    InboxItemCreatedPayload {
                         inbox_item_id: inbox_item_id.clone(),
                         work_item_id: work_item_id.clone(),
                         kind: InboxItemKind::NeedsApproval,
@@ -2365,7 +2359,7 @@ mod tests {
                 session_id: Some(session_id.clone()),
                 event_type: OrchestrationEventType::InboxItemResolved,
                 payload: OrchestrationEventPayload::InboxItemResolved(
-                    orchestrator_core::InboxItemResolvedPayload {
+                    InboxItemResolvedPayload {
                         inbox_item_id,
                         work_item_id: work_item_id.clone(),
                     },

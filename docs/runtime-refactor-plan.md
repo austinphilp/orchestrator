@@ -38,6 +38,7 @@
 - Implementation update (RRP26 D04): `orchestrator-ui` startup/run now carries an injected `UiRuntimeConfig` derived from `UiViewConfig`, UI runtime config singleton/setter APIs were removed, and UI state/runtime behavior now reads config exclusively from explicit constructor-injected state.
 - Implementation update (RRP26 D05): `orchestrator-app::controller::contracts` now owns UI-facing action contracts (ticket picker, merge queue, supervisor dispatch), app runtime/ticket-picker paths now import these contracts from the app controller boundary, and `orchestrator-ui` consumes these contracts via app-controller re-exports instead of defining orchestration/provider action traits in the UI crate.
 - Implementation update (RRP26 D06): workflow/merge/inbox/polling/supervisor action runners now live under `orchestrator-app::controller::action_runners`, UI runtime paths call those controller runners via contract event adapters, and runner coverage moved to app-controller tests while preserving UI intent/state behavior.
+- Implementation update (RRP26 D07): `orchestrator-app::frontend::ui_boundary` now provides the canonical UI-facing boundary exports (view contracts/read models/events plus controller-owned action contracts/runners), `orchestrator-ui` now resolves those symbols exclusively through that boundary (no direct `orchestrator-core`/`orchestrator-worker-protocol` imports), and boundary guard tests enforce direct business-crate dependency/import bans in the UI crate.
 
 ## Why This Refactor
 `orchestrator-runtime` currently combines too many concerns:

@@ -878,10 +878,9 @@ impl UiShellState {
         session_id: WorkerSessionId,
         is_working: bool,
     ) {
-        self.domain.session_runtime.insert(
-            session_id.clone(),
-            orchestrator_core::SessionRuntimeProjection { is_working },
-        );
+        self.domain
+            .session_runtime
+            .insert(session_id.clone(), SessionRuntimeProjection { is_working });
 
         if self.session_is_in_planning_stage(&session_id) {
             self.pending_session_working_state_persists.insert(
@@ -902,10 +901,9 @@ impl UiShellState {
         session_id: WorkerSessionId,
         is_working: bool,
     ) {
-        self.domain.session_runtime.insert(
-            session_id.clone(),
-            orchestrator_core::SessionRuntimeProjection { is_working },
-        );
+        self.domain
+            .session_runtime
+            .insert(session_id.clone(), SessionRuntimeProjection { is_working });
         self.pending_session_working_state_persists
             .remove(&session_id);
         self.spawn_set_session_working_state(session_id, is_working);

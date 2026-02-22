@@ -1477,7 +1477,7 @@ fn ticket_labels_by_ticket_id(domain: &ProjectionState) -> HashMap<String, Strin
     ticket_labels
 }
 
-fn ticket_label_from_synced_event(payload: &orchestrator_core::TicketSyncedPayload) -> String {
+fn ticket_label_from_synced_event(payload: &TicketSyncedPayload) -> String {
     let title = payload.title.trim();
     let identifier = payload.identifier.trim();
     if title.is_empty() {

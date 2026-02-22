@@ -4,20 +4,28 @@ use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-pub use orchestrator_app::controller::contracts::{
-    CiCheckStatus, CreateTicketFromPickerRequest, InboxPublishRequest, InboxResolveRequest,
-    MergeQueueCommandKind, MergeQueueEvent, SessionArchiveOutcome, SessionMergeFinalizeOutcome,
-    SessionWorkflowAdvanceOutcome, SessionWorktreeDiff, SupervisorCommandContext,
-    SupervisorCommandDispatcher, TicketCreateSubmitMode, TicketPickerProvider,
-};
-pub use orchestrator_app::controller::action_runners::{
+pub use orchestrator_app::frontend::ui_boundary::{
     run_publish_inbox_item_task, run_resolve_inbox_item_task, run_session_merge_finalize_task,
     run_session_workflow_advance_task, run_start_pr_pipeline_polling_task,
     run_stop_pr_pipeline_polling_task, run_supervisor_command_task, run_supervisor_stream_task,
-    InboxPublishRunnerEvent as ControllerInboxPublishRunnerEvent,
-    InboxResolveRunnerEvent as ControllerInboxResolveRunnerEvent,
-    SupervisorStreamRunnerEvent as ControllerSupervisorStreamRunnerEvent,
-    WorkflowAdvanceRunnerEvent as ControllerWorkflowAdvanceRunnerEvent,
+    BackendKind, BackendNeedsInputAnswer, BackendNeedsInputEvent, BackendNeedsInputOption,
+    BackendNeedsInputQuestion, BackendOutputEvent, BackendTurnStateEvent, CiCheckStatus, Command,
+    CommandRegistry, ControllerInboxPublishRunnerEvent, ControllerInboxResolveRunnerEvent,
+    ControllerSupervisorStreamRunnerEvent, ControllerWorkflowAdvanceRunnerEvent, CoreError,
+    CreateTicketFromPickerRequest, FrontendApplicationMode, FrontendCommandIntent,
+    FrontendController, FrontendEvent, FrontendIntent, FrontendNotification,
+    FrontendNotificationLevel, FrontendSnapshot, FrontendTerminalEvent, InboxItemId, InboxItemKind,
+    InboxPublishRequest, InboxResolveRequest, LlmChatRequest, LlmFinishReason, LlmMessage,
+    LlmProvider, LlmRateLimitState, LlmRole, LlmTokenUsage, MergeQueueCommandKind, MergeQueueEvent,
+    OrchestrationEventPayload, ProjectionState, ProjectId, RuntimeError, RuntimeResult,
+    SelectedTicketFlowResult, SessionArchiveOutcome, SessionMergeFinalizeOutcome,
+    SessionProjection, SessionRuntimeProjection, SessionWorkflowAdvanceOutcome, SessionWorktreeDiff, StoredEventEnvelope,
+    SupervisorCommandContext, SupervisorCommandDispatcher, SupervisorQueryArgs,
+    SupervisorQueryContextArgs, TicketCreateSubmitMode, TicketId, TicketPickerProvider,
+    TicketSummary, TicketSyncedPayload, UntypedCommandInvocation, WorkItemId, WorkerBackend, WorkerSessionId,
+    WorkerSessionStatus, WorkflowState, apply_event, attention_inbox_snapshot, command_ids,
+    ArtifactKind, ArtifactProjection, AttentionBatchKind, AttentionEngineConfig,
+    AttentionInboxSnapshot, AttentionPriorityBand,
 };
 use orchestrator_config::{
     normalize_supervisor_model, normalize_ui_config, SupervisorConfig, UiConfigToml, UiViewConfig,
@@ -29,29 +37,6 @@ use crossterm::terminal::{
 };
 use crossterm::ExecutableCommand;
 use edtui::{EditorEventHandler, EditorMode, EditorState, EditorTheme, EditorView, Lines};
-use orchestrator_core::{
-    apply_event, attention_inbox_snapshot, command_ids, ArtifactKind, ArtifactProjection,
-    AttentionBatchKind, AttentionEngineConfig, AttentionInboxSnapshot, AttentionPriorityBand,
-    Command, CommandRegistry, CoreError, FrontendApplicationMode, FrontendCommandIntent,
-    FrontendController, FrontendEvent, FrontendIntent, FrontendNotification,
-    FrontendNotificationLevel, FrontendSnapshot,
-    FrontendTerminalEvent,
-    InboxItemId, InboxItemKind, LlmChatRequest, LlmFinishReason, LlmMessage, LlmProvider,
-    LlmRateLimitState, LlmRole, LlmTokenUsage, OrchestrationEventPayload, ProjectId, ProjectionState,
-    SessionProjection, StoredEventEnvelope, SupervisorQueryArgs,
-    SupervisorQueryContextArgs, TicketId, TicketSummary, UntypedCommandInvocation, WorkItemId,
-    WorkerBackend, WorkerSessionId, WorkerSessionStatus, WorkflowState,
-};
-#[cfg(test)]
-use orchestrator_core::SelectedTicketFlowResult;
-use orchestrator_worker_protocol::{
-    WorkerBackendKind as BackendKind, WorkerNeedsInputAnswer as BackendNeedsInputAnswer,
-    WorkerNeedsInputEvent as BackendNeedsInputEvent,
-    WorkerNeedsInputOption as BackendNeedsInputOption,
-    WorkerNeedsInputQuestion as BackendNeedsInputQuestion,
-    WorkerOutputEvent as BackendOutputEvent, WorkerRuntimeError as RuntimeError,
-    WorkerRuntimeResult as RuntimeResult, WorkerTurnStateEvent as BackendTurnStateEvent,
-};
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};

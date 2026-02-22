@@ -6,8 +6,6 @@ license.workspace = true
 
 [dependencies]
 orchestrator-app = { path = "../orchestrator-app" }
-orchestrator-core = { path = "../orchestrator-core" }
-orchestrator-worker-protocol = { path = "../orchestrator-worker-protocol" }
 orchestrator-config = { path = "../orchestrator-config" }
 crossterm.workspace = true
 ratatui.workspace = true
@@ -22,3 +20,4 @@ tracing.workspace = true
 [dev-dependencies]
 serde.workspace = true
 serde_json.workspace = true
+toml.workspace = true
