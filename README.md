@@ -36,8 +36,10 @@ Configuration:
 - When the resolved config file does not exist, the app creates it with default values on first run.
 - Runtime configuration is TOML-first (non-secret settings), with environment reserved for API keys and config path.
 - Optional CLI overrides:
-  - `--ticketing-provider linear|shortcut`
-  - `--harness-provider opencode|codex`
+  - `--ticketing-provider ticketing.linear|ticketing.shortcut`
+  - `--harness-provider harness.opencode|harness.codex`
+  - `--vcs-provider vcs.git_cli`
+  - `--vcs-repo-provider vcs_repos.github_gh_cli`
 
 Example `config.toml`:
 
@@ -45,8 +47,10 @@ Example `config.toml`:
 workspace = "/home/user/.local/share/orchestrator/workspace"
 worktrees_root = "/home/user/.local/share/orchestrator/workspace"
 event_store_path = "/home/user/.local/share/orchestrator/orchestrator-events.db"
-ticketing_provider = "linear"
-harness_provider = "codex"
+ticketing_provider = "ticketing.linear"
+harness_provider = "harness.codex"
+vcs_provider = "vcs.git_cli"
+vcs_repo_provider = "vcs_repos.github_gh_cli"
 
 [supervisor]
 model = "c/claude-haiku-4.5"

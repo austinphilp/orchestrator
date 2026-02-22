@@ -24,6 +24,7 @@
 - Implementation update (RRP26 B06): local VCS contracts are now exposed via `orchestrator-vcs::interface`, the Git CLI implementation is ported under `orchestrator-vcs::providers::git_cli`, `integration-git` is reduced to re-exports, and the VCS factory now supports explicit `vcs.git_cli` construction via `build_provider_with_config`.
 - Implementation update (RRP26 B07): repo/code-host contracts are now exposed via `orchestrator-vcs-repos::interface`, the GitHub CLI implementation is ported under `orchestrator-vcs-repos::providers::github_gh_cli`, `orchestrator-app` now constructs GitHub via the VCS-repos factory path (`vcs_repos.github_gh_cli`), and `orchestrator-github` is reduced to re-export migration edges.
 - Implementation update (RRP26 B08): `orchestrator-app` composition now resolves harness/ticketing/vcs/vcs-repos provider keys at startup, constructs providers through explicit factory paths in `orchestrator-harness`/`orchestrator-ticketing`/`orchestrator-vcs`/`orchestrator-vcs-repos`, and adapts harness runtime providers into the runtime manager boundary via explicit composition wiring.
+- Implementation update (RRP26 B09): provider selection values now require namespaced keys only (`harness.*`, `ticketing.*`, `vcs.*`, `vcs_repos.*`) across app config defaults, startup validation, and CLI/help surfaces; legacy aliases were removed.
 
 ## Why This Refactor
 `orchestrator-runtime` currently combines too many concerns:

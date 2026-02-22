@@ -63,8 +63,8 @@ pub struct AppConfig {
 
 const LEGACY_DEFAULT_WORKSPACE_PATH: &str = "./";
 const LEGACY_DEFAULT_EVENT_STORE_PATH: &str = "./orchestrator-events.db";
-const DEFAULT_TICKETING_PROVIDER: &str = "linear";
-const DEFAULT_HARNESS_PROVIDER: &str = "codex";
+const DEFAULT_TICKETING_PROVIDER: &str = "ticketing.linear";
+const DEFAULT_HARNESS_PROVIDER: &str = "harness.codex";
 const DEFAULT_VCS_PROVIDER: &str = "vcs.git_cli";
 const DEFAULT_VCS_REPO_PROVIDER: &str = "vcs_repos.github_gh_cli";
 const DEFAULT_SUPERVISOR_MODEL: &str = "c/claude-haiku-4.5";
@@ -727,46 +727,29 @@ fn normalize_config(config: &mut AppConfig) -> bool {
         config.event_store_path = default_event_store_path();
         changed = true;
     }
-    if config.ticketing_provider.trim().is_empty() {
-        config.ticketing_provider = default_ticketing_provider();
-        changed = true;
-    } else {
-        let normalized = config.ticketing_provider.trim().to_ascii_lowercase();
-        if normalized != config.ticketing_provider {
-            config.ticketing_provider = normalized;
-            changed = true;
-        }
-    }
-    if config.harness_provider.trim().is_empty() {
-        config.harness_provider = default_harness_provider();
-        changed = true;
-    } else {
-        let normalized = config.harness_provider.trim().to_ascii_lowercase();
-        if normalized != config.harness_provider {
-            config.harness_provider = normalized;
-            changed = true;
-        }
-    }
-    if config.vcs_provider.trim().is_empty() {
-        config.vcs_provider = default_vcs_provider();
-        changed = true;
-    } else {
-        let normalized = config.vcs_provider.trim().to_ascii_lowercase();
-        if normalized != config.vcs_provider {
-            config.vcs_provider = normalized;
-            changed = true;
-        }
-    }
-    if config.vcs_repo_provider.trim().is_empty() {
-        config.vcs_repo_provider = default_vcs_repo_provider();
-        changed = true;
-    } else {
-        let normalized = config.vcs_repo_provider.trim().to_ascii_lowercase();
-        if normalized != config.vcs_repo_provider {
-            config.vcs_repo_provider = normalized;
-            changed = true;
-        }
-    }
+    changed |= normalize_provider_selection(
+        &mut config.ticketing_provider,
+        DEFAULT_TICKETING_PROVIDER,
+        &[("linear", "ticketing.linear"), ("shortcut", "ticketing.shortcut")],
+    );
+    changed |= normalize_provider_selection(
+        &mut config.harness_provider,
+        DEFAULT_HARNESS_PROVIDER,
+        &[("opencode", "harness.opencode"), ("codex", "harness.codex")],
+    );
+    changed |= normalize_provider_selection(
+        &mut config.vcs_provider,
+        DEFAULT_VCS_PROVIDER,
+        &[("git", "vcs.git_cli"), ("git_cli", "vcs.git_cli")],
+    );
+    changed |= normalize_provider_selection(
+        &mut config.vcs_repo_provider,
+        DEFAULT_VCS_REPO_PROVIDER,
+        &[
+            ("github", "vcs_repos.github_gh_cli"),
+            ("github_gh_cli", "vcs_repos.github_gh_cli"),
+        ],
+    );
 
     changed |= normalize_non_empty_string(
         &mut config.supervisor.model,
@@ -915,6 +898,30 @@ fn normalize_config(config: &mut AppConfig) -> bool {
     }
 
     changed
+}
+
+fn normalize_provider_selection(
+    value: &mut String,
+    default: &str,
+    legacy_aliases: &[(&str, &str)],
+) -> bool {
+    let normalized = value.trim().to_ascii_lowercase();
+    let canonical = if normalized.is_empty() {
+        default.to_owned()
+    } else {
+        legacy_aliases
+            .iter()
+            .find_map(|(legacy, namespaced)| (normalized == *legacy).then_some(*namespaced))
+            .unwrap_or(normalized.as_str())
+            .to_owned()
+    };
+
+    if *value != canonical {
+        *value = canonical;
+        return true;
+    }
+
+    false
 }
 
 fn normalize_non_empty_string(value: &mut String, default: String) -> bool {
@@ -1099,8 +1106,10 @@ mod config_normalization_tests {
     use super::*;
 
     #[test]
-    fn normalize_config_defaults_missing_vcs_provider_keys() {
+    fn normalize_config_defaults_missing_provider_keys_to_namespaced_values() {
         let mut config = AppConfig {
+            ticketing_provider: String::new(),
+            harness_provider: String::new(),
             vcs_provider: String::new(),
             vcs_repo_provider: String::new(),
             ..AppConfig::default()
@@ -1109,13 +1118,17 @@ mod config_normalization_tests {
         let changed = normalize_config(&mut config);
 
         assert!(changed);
+        assert_eq!(config.ticketing_provider, "ticketing.linear");
+        assert_eq!(config.harness_provider, "harness.codex");
         assert_eq!(config.vcs_provider, "vcs.git_cli");
         assert_eq!(config.vcs_repo_provider, "vcs_repos.github_gh_cli");
     }
 
     #[test]
-    fn normalize_config_trims_and_lowercases_vcs_provider_keys() {
+    fn normalize_config_trims_and_lowercases_namespaced_provider_keys() {
         let mut config = AppConfig {
+            ticketing_provider: "  TICKETING.SHORTCUT  ".to_owned(),
+            harness_provider: "  HARNESS.OPENCODE ".to_owned(),
             vcs_provider: "  VCS.GIT_CLI  ".to_owned(),
             vcs_repo_provider: "  VCS_REPOS.GITHUB_GH_CLI ".to_owned(),
             ..AppConfig::default()
@@ -1124,6 +1137,27 @@ mod config_normalization_tests {
         let changed = normalize_config(&mut config);
 
         assert!(changed);
+        assert_eq!(config.ticketing_provider, "ticketing.shortcut");
+        assert_eq!(config.harness_provider, "harness.opencode");
+        assert_eq!(config.vcs_provider, "vcs.git_cli");
+        assert_eq!(config.vcs_repo_provider, "vcs_repos.github_gh_cli");
+    }
+
+    #[test]
+    fn normalize_config_migrates_legacy_provider_aliases_to_namespaced_values() {
+        let mut config = AppConfig {
+            ticketing_provider: "linear".to_owned(),
+            harness_provider: "codex".to_owned(),
+            vcs_provider: "git".to_owned(),
+            vcs_repo_provider: "github_gh_cli".to_owned(),
+            ..AppConfig::default()
+        };
+
+        let changed = normalize_config(&mut config);
+
+        assert!(changed);
+        assert_eq!(config.ticketing_provider, "ticketing.linear");
+        assert_eq!(config.harness_provider, "harness.codex");
         assert_eq!(config.vcs_provider, "vcs.git_cli");
         assert_eq!(config.vcs_repo_provider, "vcs_repos.github_gh_cli");
     }

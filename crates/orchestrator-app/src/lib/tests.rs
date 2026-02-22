@@ -536,6 +536,10 @@ mod tests {
                     config.event_store_path,
                     expected_event_store.to_string_lossy()
                 );
+                assert_eq!(config.ticketing_provider, "ticketing.linear");
+                assert_eq!(config.harness_provider, "harness.codex");
+                assert_eq!(config.vcs_provider, "vcs.git_cli");
+                assert_eq!(config.vcs_repo_provider, "vcs_repos.github_gh_cli");
                 assert_eq!(config.ui.transcript_line_limit, 100);
                 assert_eq!(config.ui.background_session_refresh_secs, 15);
                 assert_eq!(config.ui.session_info_background_refresh_secs, 15);
@@ -558,6 +562,10 @@ mod tests {
                     parsed.event_store_path,
                     expected_event_store.to_string_lossy()
                 );
+                assert_eq!(parsed.ticketing_provider, "ticketing.linear");
+                assert_eq!(parsed.harness_provider, "harness.codex");
+                assert_eq!(parsed.vcs_provider, "vcs.git_cli");
+                assert_eq!(parsed.vcs_repo_provider, "vcs_repos.github_gh_cli");
                 assert_eq!(parsed.ui.transcript_line_limit, 100);
                 assert_eq!(parsed.ui.background_session_refresh_secs, 15);
                 assert_eq!(parsed.ui.session_info_background_refresh_secs, 15);
@@ -598,6 +606,10 @@ mod tests {
                     config.event_store_path,
                     expected_event_store.to_string_lossy()
                 );
+                assert_eq!(config.ticketing_provider, "ticketing.linear");
+                assert_eq!(config.harness_provider, "harness.codex");
+                assert_eq!(config.vcs_provider, "vcs.git_cli");
+                assert_eq!(config.vcs_repo_provider, "vcs_repos.github_gh_cli");
                 assert_eq!(config.ui.transcript_line_limit, 100);
                 assert_eq!(config.ui.background_session_refresh_secs, 15);
                 assert_eq!(config.ui.session_info_background_refresh_secs, 15);
@@ -614,6 +626,10 @@ mod tests {
                     parsed.event_store_path,
                     expected_event_store.to_string_lossy()
                 );
+                assert_eq!(parsed.ticketing_provider, "ticketing.linear");
+                assert_eq!(parsed.harness_provider, "harness.codex");
+                assert_eq!(parsed.vcs_provider, "vcs.git_cli");
+                assert_eq!(parsed.vcs_repo_provider, "vcs_repos.github_gh_cli");
                 assert_eq!(parsed.ui.transcript_line_limit, 100);
                 assert_eq!(parsed.ui.background_session_refresh_secs, 15);
                 assert_eq!(parsed.ui.session_info_background_refresh_secs, 15);
@@ -1281,8 +1297,8 @@ mod tests {
             config: AppConfig {
                 workspace: "./".to_owned(),
                 event_store_path: temp_db.path().to_string_lossy().to_string(),
-                ticketing_provider: "linear".to_owned(),
-                harness_provider: "codex".to_owned(),
+                ticketing_provider: "ticketing.linear".to_owned(),
+                harness_provider: "harness.codex".to_owned(),
                 ..AppConfig::default()
             },
             ticketing: MockTicketingProvider::service(),
@@ -1425,8 +1441,8 @@ mod tests {
             config: AppConfig {
                 workspace: "/workspace".to_owned(),
                 event_store_path: temp_db.path().to_string_lossy().to_string(),
-                ticketing_provider: "linear".to_owned(),
-                harness_provider: "codex".to_owned(),
+                ticketing_provider: "ticketing.linear".to_owned(),
+                harness_provider: "harness.codex".to_owned(),
                 ..AppConfig::default()
             },
             ticketing: MockTicketingProvider::service(),
@@ -1483,8 +1499,8 @@ mod tests {
             config: AppConfig {
                 workspace: "/workspace".to_owned(),
                 event_store_path: temp_db.path().to_string_lossy().to_string(),
-                ticketing_provider: "linear".to_owned(),
-                harness_provider: "codex".to_owned(),
+                ticketing_provider: "ticketing.linear".to_owned(),
+                harness_provider: "harness.codex".to_owned(),
                 ..AppConfig::default()
             },
             ticketing: MockTicketingProvider::service(),
@@ -1577,8 +1593,8 @@ mod tests {
             config: AppConfig {
                 workspace: "/workspace".to_owned(),
                 event_store_path: temp_db.path().to_string_lossy().to_string(),
-                ticketing_provider: "linear".to_owned(),
-                harness_provider: "codex".to_owned(),
+                ticketing_provider: "ticketing.linear".to_owned(),
+                harness_provider: "harness.codex".to_owned(),
                 ..AppConfig::default()
             },
             ticketing: MockTicketingProvider::service(),
@@ -1602,8 +1618,8 @@ mod tests {
             config: AppConfig {
                 workspace: "/workspace".to_owned(),
                 event_store_path: temp_db.path().to_string_lossy().to_string(),
-                ticketing_provider: "shortcut".to_owned(),
-                harness_provider: "codex".to_owned(),
+                ticketing_provider: "ticketing.shortcut".to_owned(),
+                harness_provider: "harness.codex".to_owned(),
                 ..AppConfig::default()
             },
             ticketing: MockTicketingProvider::service(),
@@ -1643,8 +1659,8 @@ mod tests {
             config: AppConfig {
                 workspace: "/workspace".to_owned(),
                 event_store_path: temp_db.path().to_string_lossy().to_string(),
-                ticketing_provider: "linear".to_owned(),
-                harness_provider: "codex".to_owned(),
+                ticketing_provider: "ticketing.linear".to_owned(),
+                harness_provider: "harness.codex".to_owned(),
                 ..AppConfig::default()
             },
             ticketing: MockTicketingProvider::service(),
@@ -1742,8 +1758,8 @@ mod tests {
             config: AppConfig {
                 workspace: "/workspace".to_owned(),
                 event_store_path: temp_db.path().to_string_lossy().to_string(),
-                ticketing_provider: "linear".to_owned(),
-                harness_provider: "codex".to_owned(),
+                ticketing_provider: "ticketing.linear".to_owned(),
+                harness_provider: "harness.codex".to_owned(),
                 ..AppConfig::default()
             },
             ticketing: ticketing.clone(),
@@ -1844,8 +1860,8 @@ mod tests {
             config: AppConfig {
                 workspace: "/workspace".to_owned(),
                 event_store_path: temp_db.path().to_string_lossy().to_string(),
-                ticketing_provider: "linear".to_owned(),
-                harness_provider: "codex".to_owned(),
+                ticketing_provider: "ticketing.linear".to_owned(),
+                harness_provider: "harness.codex".to_owned(),
                 ..AppConfig::default()
             },
             ticketing: ticketing.clone(),
@@ -1925,8 +1941,8 @@ mod tests {
             config: AppConfig {
                 workspace: "/workspace".to_owned(),
                 event_store_path: temp_db.path().to_string_lossy().to_string(),
-                ticketing_provider: "linear".to_owned(),
-                harness_provider: "codex".to_owned(),
+                ticketing_provider: "ticketing.linear".to_owned(),
+                harness_provider: "harness.codex".to_owned(),
                 ..AppConfig::default()
             },
             ticketing: MockTicketingProvider::service(),
@@ -2011,8 +2027,8 @@ mod tests {
             config: AppConfig {
                 workspace: "/workspace".to_owned(),
                 event_store_path: temp_db.path().to_string_lossy().to_string(),
-                ticketing_provider: "linear".to_owned(),
-                harness_provider: "codex".to_owned(),
+                ticketing_provider: "ticketing.linear".to_owned(),
+                harness_provider: "harness.codex".to_owned(),
                 ..AppConfig::default()
             },
             ticketing: MockTicketingProvider::service(),
@@ -2099,8 +2115,8 @@ mod tests {
             config: AppConfig {
                 workspace: "/workspace".to_owned(),
                 event_store_path: temp_db.path().to_string_lossy().to_string(),
-                ticketing_provider: "linear".to_owned(),
-                harness_provider: "codex".to_owned(),
+                ticketing_provider: "ticketing.linear".to_owned(),
+                harness_provider: "harness.codex".to_owned(),
                 ..AppConfig::default()
             },
             ticketing: MockTicketingProvider::service(),
@@ -2150,8 +2166,8 @@ mod tests {
             config: AppConfig {
                 workspace: "/workspace".to_owned(),
                 event_store_path: temp_db.path().to_string_lossy().to_string(),
-                ticketing_provider: "linear".to_owned(),
-                harness_provider: "codex".to_owned(),
+                ticketing_provider: "ticketing.linear".to_owned(),
+                harness_provider: "harness.codex".to_owned(),
                 ..AppConfig::default()
             },
             ticketing: MockTicketingProvider::service(),
@@ -2206,8 +2222,8 @@ mod tests {
             config: AppConfig {
                 workspace: "/workspace".to_owned(),
                 event_store_path: temp_db.path().to_string_lossy().to_string(),
-                ticketing_provider: "linear".to_owned(),
-                harness_provider: "codex".to_owned(),
+                ticketing_provider: "ticketing.linear".to_owned(),
+                harness_provider: "harness.codex".to_owned(),
                 ..AppConfig::default()
             },
             ticketing: MockTicketingProvider::service(),
@@ -2264,8 +2280,8 @@ mod tests {
                 config: AppConfig {
                     workspace: "/workspace".to_owned(),
                     event_store_path: temp_db.path().to_string_lossy().to_string(),
-                    ticketing_provider: "linear".to_owned(),
-                    harness_provider: "codex".to_owned(),
+                    ticketing_provider: "ticketing.linear".to_owned(),
+                    harness_provider: "harness.codex".to_owned(),
                     ..AppConfig::default()
                 },
                 ticketing: MockTicketingProvider::service(),
@@ -2310,8 +2326,8 @@ mod tests {
             config: AppConfig {
                 workspace: "/workspace".to_owned(),
                 event_store_path: temp_db.path().to_string_lossy().to_string(),
-                ticketing_provider: "linear".to_owned(),
-                harness_provider: "codex".to_owned(),
+                ticketing_provider: "ticketing.linear".to_owned(),
+                harness_provider: "harness.codex".to_owned(),
                 ..AppConfig::default()
             },
             ticketing: MockTicketingProvider::service(),
@@ -2349,8 +2365,8 @@ mod tests {
             config: AppConfig {
                 workspace: "/workspace".to_owned(),
                 event_store_path: temp_db.path().to_string_lossy().to_string(),
-                ticketing_provider: "linear".to_owned(),
-                harness_provider: "codex".to_owned(),
+                ticketing_provider: "ticketing.linear".to_owned(),
+                harness_provider: "harness.codex".to_owned(),
                 ..AppConfig::default()
             },
             ticketing: MockTicketingProvider::service(),
@@ -2386,8 +2402,8 @@ mod tests {
             config: AppConfig {
                 workspace: "/workspace".to_owned(),
                 event_store_path: temp_db.path().to_string_lossy().to_string(),
-                ticketing_provider: "linear".to_owned(),
-                harness_provider: "codex".to_owned(),
+                ticketing_provider: "ticketing.linear".to_owned(),
+                harness_provider: "harness.codex".to_owned(),
                 ..AppConfig::default()
             },
             ticketing: MockTicketingProvider::service(),
@@ -2428,8 +2444,8 @@ mod tests {
             config: AppConfig {
                 workspace: "/workspace".to_owned(),
                 event_store_path: temp_db.path().to_string_lossy().to_string(),
-                ticketing_provider: "linear".to_owned(),
-                harness_provider: "codex".to_owned(),
+                ticketing_provider: "ticketing.linear".to_owned(),
+                harness_provider: "harness.codex".to_owned(),
                 ..AppConfig::default()
             },
             ticketing: MockTicketingProvider::service(),
@@ -2482,8 +2498,8 @@ mod tests {
             config: AppConfig {
                 workspace: "/workspace".to_owned(),
                 event_store_path: temp_db.path().to_string_lossy().to_string(),
-                ticketing_provider: "linear".to_owned(),
-                harness_provider: "codex".to_owned(),
+                ticketing_provider: "ticketing.linear".to_owned(),
+                harness_provider: "harness.codex".to_owned(),
                 ..AppConfig::default()
             },
             ticketing: MockTicketingProvider::service(),
@@ -2526,8 +2542,8 @@ mod tests {
             config: AppConfig {
                 workspace: "/workspace".to_owned(),
                 event_store_path: temp_db.path().to_string_lossy().to_string(),
-                ticketing_provider: "linear".to_owned(),
-                harness_provider: "codex".to_owned(),
+                ticketing_provider: "ticketing.linear".to_owned(),
+                harness_provider: "harness.codex".to_owned(),
                 ..AppConfig::default()
             },
             ticketing: MockTicketingProvider::service(),
@@ -2583,8 +2599,8 @@ mod tests {
             config: AppConfig {
                 workspace: "/workspace".to_owned(),
                 event_store_path: temp_db.path().to_string_lossy().to_string(),
-                ticketing_provider: "linear".to_owned(),
-                harness_provider: "codex".to_owned(),
+                ticketing_provider: "ticketing.linear".to_owned(),
+                harness_provider: "harness.codex".to_owned(),
                 ..AppConfig::default()
             },
             ticketing: MockTicketingProvider::service(),
@@ -2628,8 +2644,8 @@ mod tests {
             config: AppConfig {
                 workspace: "/workspace".to_owned(),
                 event_store_path: temp_db.path().to_string_lossy().to_string(),
-                ticketing_provider: "linear".to_owned(),
-                harness_provider: "codex".to_owned(),
+                ticketing_provider: "ticketing.linear".to_owned(),
+                harness_provider: "harness.codex".to_owned(),
                 ..AppConfig::default()
             },
             ticketing: MockTicketingProvider::service(),
@@ -2692,8 +2708,8 @@ mod tests {
             config: AppConfig {
                 workspace: "/workspace".to_owned(),
                 event_store_path: temp_db.path().to_string_lossy().to_string(),
-                ticketing_provider: "linear".to_owned(),
-                harness_provider: "codex".to_owned(),
+                ticketing_provider: "ticketing.linear".to_owned(),
+                harness_provider: "harness.codex".to_owned(),
                 ..AppConfig::default()
             },
             ticketing: MockTicketingProvider::service(),
@@ -2742,8 +2758,8 @@ mod tests {
             config: AppConfig {
                 workspace: "/workspace".to_owned(),
                 event_store_path: temp_db.path().to_string_lossy().to_string(),
-                ticketing_provider: "linear".to_owned(),
-                harness_provider: "codex".to_owned(),
+                ticketing_provider: "ticketing.linear".to_owned(),
+                harness_provider: "harness.codex".to_owned(),
                 ..AppConfig::default()
             },
             ticketing: MockTicketingProvider::service(),
@@ -2776,8 +2792,8 @@ mod tests {
             config: AppConfig {
                 workspace: "/workspace".to_owned(),
                 event_store_path: temp_db.path().to_string_lossy().to_string(),
-                ticketing_provider: "linear".to_owned(),
-                harness_provider: "codex".to_owned(),
+                ticketing_provider: "ticketing.linear".to_owned(),
+                harness_provider: "harness.codex".to_owned(),
                 ..AppConfig::default()
             },
             ticketing: MockTicketingProvider::service(),
@@ -2825,8 +2841,8 @@ mod tests {
             config: AppConfig {
                 workspace: "/workspace".to_owned(),
                 event_store_path: temp_db.path().to_string_lossy().to_string(),
-                ticketing_provider: "linear".to_owned(),
-                harness_provider: "codex".to_owned(),
+                ticketing_provider: "ticketing.linear".to_owned(),
+                harness_provider: "harness.codex".to_owned(),
                 ..AppConfig::default()
             },
             ticketing: MockTicketingProvider::service(),
@@ -2858,8 +2874,8 @@ mod tests {
             config: AppConfig {
                 workspace: "/workspace".to_owned(),
                 event_store_path: temp_db.path().to_string_lossy().to_string(),
-                ticketing_provider: "linear".to_owned(),
-                harness_provider: "codex".to_owned(),
+                ticketing_provider: "ticketing.linear".to_owned(),
+                harness_provider: "harness.codex".to_owned(),
                 ..AppConfig::default()
             },
             ticketing: MockTicketingProvider::service(),
@@ -2926,8 +2942,8 @@ mod tests {
             config: AppConfig {
                 workspace: "/workspace".to_owned(),
                 event_store_path: temp_db.path().to_string_lossy().to_string(),
-                ticketing_provider: "linear".to_owned(),
-                harness_provider: "codex".to_owned(),
+                ticketing_provider: "ticketing.linear".to_owned(),
+                harness_provider: "harness.codex".to_owned(),
                 ..AppConfig::default()
             },
             ticketing: MockTicketingProvider::service(),
@@ -2990,8 +3006,8 @@ mod tests {
             config: AppConfig {
                 workspace: "/workspace".to_owned(),
                 event_store_path: temp_db.path().to_string_lossy().to_string(),
-                ticketing_provider: "linear".to_owned(),
-                harness_provider: "codex".to_owned(),
+                ticketing_provider: "ticketing.linear".to_owned(),
+                harness_provider: "harness.codex".to_owned(),
                 ..AppConfig::default()
             },
             ticketing: MockTicketingProvider::service(),
