@@ -6,3 +6,8 @@ license.workspace = true
 
 [dependencies]
 orchestrator-worker-protocol = { path = "../orchestrator-worker-protocol" }
+orchestrator-worker-eventbus = { path = "../orchestrator-worker-eventbus" }
+tokio = { workspace = true }
+
+[dev-dependencies]
+async-trait.workspace = true

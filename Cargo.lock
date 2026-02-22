@@ -1457,7 +1457,10 @@ dependencies = [
  "orchestrator-github",
  "orchestrator-supervisor",
  "orchestrator-ui",
+ "orchestrator-worker-eventbus",
+ "orchestrator-worker-lifecycle",
  "orchestrator-worker-protocol",
+ "orchestrator-worker-runtime",
  "r2d2",
  "r2d2_sqlite",
  "serde",
@@ -1546,7 +1549,10 @@ dependencies = [
 name = "orchestrator-worker-lifecycle"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
+ "orchestrator-worker-eventbus",
  "orchestrator-worker-protocol",
+ "tokio",
 ]
 
 [[package]]
@@ -1563,10 +1569,12 @@ dependencies = [
 name = "orchestrator-worker-runtime"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "orchestrator-worker-eventbus",
  "orchestrator-worker-lifecycle",
  "orchestrator-worker-protocol",
  "orchestrator-worker-scheduler",
+ "tokio",
 ]
 
 [[package]]

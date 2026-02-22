@@ -1,8 +1,10 @@
 //! Worker lifecycle state machine and session registry.
 
+pub mod controller;
 pub mod registry;
 pub mod state;
 
+pub use controller::{WorkerLifecycle, WorkerLifecycleBackend, WorkerLifecycleTaskSnapshot};
 pub use registry::{
     WorkerLifecycleRegistry, WorkerLifecycleSnapshot, WorkerLifecycleSummary,
     WorkerTerminalTransition,

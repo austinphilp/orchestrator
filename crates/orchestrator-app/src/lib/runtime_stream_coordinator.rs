@@ -3,16 +3,23 @@ mod runtime_stream_coordinator {
 
     use async_trait::async_trait;
     use orchestrator_core::{
-        BackendCapabilities, BackendEvent, BackendKind, ManagedSessionStatus, RuntimeError,
-        RuntimeResult, RuntimeSessionId, SessionEventSubscription, SessionHandle,
+        BackendCapabilities, BackendEvent, BackendKind, RuntimeResult, SessionHandle,
         SessionLifecycle, SpawnSpec, WorkerBackend, WorkerEventStream, WorkerEventSubscription,
-        WorkerManager, WorkerManagerConfig,
+        WorkerManagerConfig,
     };
-    use orchestrator_worker_protocol::WorkerNeedsInputAnswer as BackendNeedsInputAnswer;
+    use orchestrator_worker_eventbus::{
+        WorkerEventBus, WorkerEventBusConfig, WorkerSessionEventSubscription,
+    };
+    use orchestrator_worker_lifecycle::WorkerLifecycleBackend;
+    use orchestrator_worker_protocol::backend::{
+        WorkerBackendInfo, WorkerSessionControl, WorkerSessionStreamSource,
+    };
+    use orchestrator_worker_protocol::event::WorkerNeedsInputAnswer as BackendNeedsInputAnswer;
+    use orchestrator_worker_runtime::WorkerRuntime;
 
     #[derive(Clone)]
     pub struct WorkerManagerBackend {
-        manager: WorkerManager,
+        runtime: Arc<WorkerRuntime>,
         backend: Arc<dyn WorkerBackend + Send + Sync>,
     }
 
@@ -28,50 +35,129 @@ mod runtime_stream_coordinator {
             backend: Arc<dyn WorkerBackend + Send + Sync>,
             config: WorkerManagerConfig,
         ) -> Self {
-            let manager_backend: Arc<dyn WorkerBackend> = backend.clone();
-            let manager = WorkerManager::with_config(manager_backend, config);
-            Self { manager, backend }
-        }
-
-        async fn ensure_running_session(&self, session_id: &RuntimeSessionId) -> RuntimeResult<()> {
-            match self.manager.session_status(session_id).await {
-                Ok(ManagedSessionStatus::Running) => Ok(()),
-                Ok(ManagedSessionStatus::Starting) => Err(RuntimeError::Process(format!(
-                    "worker session is still starting: {}",
-                    session_id.as_str()
-                ))),
-                Ok(status) => Err(RuntimeError::Process(format!(
-                    "worker session is not running: {} ({status:?})",
-                    session_id.as_str()
-                ))),
-                Err(error) => Err(error),
-            }
+            let runtime_backend: Arc<dyn WorkerLifecycleBackend> =
+                Arc::new(WorkerBackendProtocolAdapter::new(backend.clone()));
+            // AP-313 only rewires stream ingestion + lifecycle controls.
+            // Checkpoint/perf scheduler semantics remain in AP-314/AP-315.
+            let eventbus = WorkerEventBus::new(WorkerEventBusConfig {
+                session_buffer_capacity: config.session_event_buffer.max(1),
+                global_buffer_capacity: config.global_event_buffer.max(1),
+            });
+            let runtime = Arc::new(WorkerRuntime::with_eventbus(runtime_backend, eventbus));
+            Self { runtime, backend }
         }
     }
 
-    struct WorkerManagerSessionStream {
-        subscription: SessionEventSubscription,
+    struct WorkerBackendProtocolAdapter {
+        backend: Arc<dyn WorkerBackend + Send + Sync>,
+    }
+
+    impl WorkerBackendProtocolAdapter {
+        fn new(backend: Arc<dyn WorkerBackend + Send + Sync>) -> Self {
+            Self { backend }
+        }
     }
 
     #[async_trait]
-    impl WorkerEventSubscription for WorkerManagerSessionStream {
+    impl WorkerSessionControl for WorkerBackendProtocolAdapter {
+        async fn spawn(
+            &self,
+            spec: orchestrator_worker_protocol::session::WorkerSpawnRequest,
+        ) -> RuntimeResult<orchestrator_worker_protocol::session::WorkerSessionHandle> {
+            self.backend.spawn(spec).await
+        }
+
+        async fn kill(
+            &self,
+            session: &orchestrator_worker_protocol::session::WorkerSessionHandle,
+        ) -> RuntimeResult<()> {
+            self.backend.kill(session).await
+        }
+
+        async fn send_input(
+            &self,
+            session: &orchestrator_worker_protocol::session::WorkerSessionHandle,
+            input: &[u8],
+        ) -> RuntimeResult<()> {
+            self.backend.send_input(session, input).await
+        }
+
+        async fn respond_to_needs_input(
+            &self,
+            session: &orchestrator_worker_protocol::session::WorkerSessionHandle,
+            prompt_id: &str,
+            answers: &[BackendNeedsInputAnswer],
+        ) -> RuntimeResult<()> {
+            self.backend
+                .respond_to_needs_input(session, prompt_id, answers)
+                .await
+        }
+
+        async fn resize(
+            &self,
+            session: &orchestrator_worker_protocol::session::WorkerSessionHandle,
+            cols: u16,
+            rows: u16,
+        ) -> RuntimeResult<()> {
+            self.backend.resize(session, cols, rows).await
+        }
+    }
+
+    #[async_trait]
+    impl WorkerSessionStreamSource for WorkerBackendProtocolAdapter {
+        async fn subscribe(
+            &self,
+            session: &orchestrator_worker_protocol::session::WorkerSessionHandle,
+        ) -> RuntimeResult<orchestrator_worker_protocol::backend::WorkerEventStream> {
+            self.backend.subscribe(session).await
+        }
+
+        async fn harness_session_id(
+            &self,
+            session: &orchestrator_worker_protocol::session::WorkerSessionHandle,
+        ) -> RuntimeResult<Option<String>> {
+            self.backend.harness_session_id(session).await
+        }
+    }
+
+    #[async_trait]
+    impl WorkerBackendInfo for WorkerBackendProtocolAdapter {
+        fn kind(&self) -> orchestrator_worker_protocol::backend::WorkerBackendKind {
+            self.backend.kind()
+        }
+
+        fn capabilities(&self) -> orchestrator_worker_protocol::backend::WorkerBackendCapabilities {
+            self.backend.capabilities()
+        }
+
+        async fn health_check(&self) -> RuntimeResult<()> {
+            self.backend.health_check().await
+        }
+    }
+
+    struct WorkerRuntimeSessionStream {
+        subscription: WorkerSessionEventSubscription,
+    }
+
+    #[async_trait]
+    impl WorkerEventSubscription for WorkerRuntimeSessionStream {
         async fn next_event(&mut self) -> RuntimeResult<Option<BackendEvent>> {
-            self.subscription.next_event().await
+            Ok(self.subscription.next_event().await.map(|envelope| envelope.event))
         }
     }
 
     #[async_trait]
     impl SessionLifecycle for WorkerManagerBackend {
         async fn spawn(&self, spec: SpawnSpec) -> RuntimeResult<SessionHandle> {
-            self.manager.spawn(spec).await
+            self.runtime.spawn(spec).await
         }
 
         async fn kill(&self, session: &SessionHandle) -> RuntimeResult<()> {
-            self.manager.kill(&session.session_id).await
+            self.runtime.kill(&session.session_id).await
         }
 
         async fn send_input(&self, session: &SessionHandle, input: &[u8]) -> RuntimeResult<()> {
-            self.manager.send_input(&session.session_id, input).await
+            self.runtime.send_input(&session.session_id, input).await
         }
 
         async fn respond_to_needs_input(
@@ -80,34 +166,33 @@ mod runtime_stream_coordinator {
             prompt_id: &str,
             answers: &[BackendNeedsInputAnswer],
         ) -> RuntimeResult<()> {
-            self.ensure_running_session(&session.session_id).await?;
-            self.backend
-                .respond_to_needs_input(session, prompt_id, answers)
+            self.runtime
+                .respond_to_needs_input(&session.session_id, prompt_id, answers)
                 .await
         }
 
         async fn resize(&self, session: &SessionHandle, cols: u16, rows: u16) -> RuntimeResult<()> {
-            self.manager.resize(&session.session_id, cols, rows).await
+            self.runtime.resize(&session.session_id, cols, rows).await
         }
     }
 
     #[async_trait]
     impl WorkerBackend for WorkerManagerBackend {
         fn kind(&self) -> BackendKind {
-            self.manager.backend_kind()
+            self.runtime.backend_kind()
         }
 
         fn capabilities(&self) -> BackendCapabilities {
-            self.manager.backend_capabilities()
+            self.runtime.backend_capabilities()
         }
 
         async fn health_check(&self) -> RuntimeResult<()> {
-            self.backend.health_check().await
+            self.runtime.health_check().await
         }
 
         async fn subscribe(&self, session: &SessionHandle) -> RuntimeResult<WorkerEventStream> {
-            let subscription = self.manager.subscribe(&session.session_id).await?;
-            Ok(Box::new(WorkerManagerSessionStream { subscription }))
+            let subscription = self.runtime.subscribe_session(&session.session_id).await?;
+            Ok(Box::new(WorkerRuntimeSessionStream { subscription }))
         }
 
         async fn harness_session_id(
@@ -123,10 +208,12 @@ mod runtime_stream_coordinator {
         use std::collections::HashMap;
         use std::path::PathBuf;
         use std::sync::{Arc, Mutex};
+        use std::time::Duration;
 
         use async_trait::async_trait;
-        use orchestrator_core::{BackendOutputEvent, BackendOutputStream};
+        use orchestrator_core::{BackendOutputEvent, BackendOutputStream, RuntimeError, RuntimeSessionId};
         use tokio::sync::mpsc;
+        use tokio::time::timeout;
 
         use super::*;
 
@@ -342,6 +429,8 @@ mod runtime_stream_coordinator {
             }
         }
 
+        const TEST_TIMEOUT: Duration = Duration::from_secs(2);
+
         #[tokio::test]
         async fn coordinator_fans_out_single_backend_stream_to_multiple_subscribers() {
             let backend = Arc::new(MockBackend::default());
@@ -405,6 +494,64 @@ mod runtime_stream_coordinator {
                 )]
             );
             assert!(backend.is_killed(&handle.session_id));
+        }
+
+        #[tokio::test]
+        async fn coordinator_rejects_subscribe_for_missing_session() {
+            let backend = Arc::new(MockBackend::default());
+            let coordinator = WorkerManagerBackend::new(backend);
+            let missing = SessionHandle {
+                session_id: RuntimeSessionId::new("wm-coordinator-missing"),
+                backend: BackendKind::OpenCode,
+            };
+
+            assert!(matches!(
+                coordinator.subscribe(&missing).await,
+                Err(RuntimeError::SessionNotFound(_))
+            ));
+        }
+
+        #[tokio::test]
+        async fn coordinator_with_config_applies_session_buffer_capacity() {
+            let backend = Arc::new(MockBackend::default());
+            let coordinator = WorkerManagerBackend::with_config(
+                backend.clone(),
+                WorkerManagerConfig {
+                    session_event_buffer: 1,
+                    global_event_buffer: 1,
+                    checkpoint_prompt_interval: None,
+                    checkpoint_prompt_message: "Emit a checkpoint now.".to_owned(),
+                    perf_metrics_enabled: true,
+                },
+            );
+            let handle = coordinator
+                .spawn(spawn_spec("wm-coordinator-buffer"))
+                .await
+                .expect("spawn session");
+            let mut subscriber = coordinator.subscribe(&handle).await.expect("subscribe");
+
+            for chunk in ["one", "two", "three"] {
+                backend.emit_event(
+                    &handle.session_id,
+                    BackendEvent::Output(BackendOutputEvent {
+                        stream: BackendOutputStream::Stdout,
+                        bytes: chunk.as_bytes().to_vec(),
+                    }),
+                );
+            }
+
+            let marker = timeout(TEST_TIMEOUT, subscriber.next_event())
+                .await
+                .expect("marker timeout")
+                .expect("marker result")
+                .expect("marker event");
+            match marker {
+                BackendEvent::Output(output) => {
+                    assert_eq!(output.stream, BackendOutputStream::Stderr);
+                    assert!(String::from_utf8_lossy(&output.bytes).contains("output truncated"));
+                }
+                other => panic!("expected truncation marker, got {other:?}"),
+            }
         }
 
         #[tokio::test]
