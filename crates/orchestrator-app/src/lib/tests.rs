@@ -1282,6 +1282,7 @@ mod tests {
             .start_or_resume_selected_ticket(
                 &ticket,
                 Some(vcs.repository.root.clone()),
+                None,
                 &vcs,
                 &backend,
             )

@@ -1130,6 +1130,7 @@ Allow creating tickets with n.
                 worktree_id: None,
                 inbox_items: Vec::new(),
                 artifacts: Vec::new(),
+                profile_override: None,
             },
         );
         projection.work_items.insert(
@@ -1143,6 +1144,7 @@ Allow creating tickets with n.
                 worktree_id: None,
                 inbox_items: Vec::new(),
                 artifacts: Vec::new(),
+                profile_override: None,
             },
         );
         projection.work_items.insert(
@@ -1156,6 +1158,7 @@ Allow creating tickets with n.
                 worktree_id: None,
                 inbox_items: Vec::new(),
                 artifacts: Vec::new(),
+                profile_override: None,
             },
         );
         projection.sessions.insert(
