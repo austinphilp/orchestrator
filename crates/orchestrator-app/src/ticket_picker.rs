@@ -7,9 +7,10 @@ use orchestrator_core::{
     ArchiveTicketRequest, CodeHostProvider, Command, CommandRegistry, CoreError, CreateTicketRequest,
     GithubClient, LlmChatRequest, LlmMessage, LlmProvider, LlmRole, ProjectionState,
     SelectedTicketFlowResult, StoredEventEnvelope, Supervisor, TicketId, TicketQuery, TicketSummary,
-    TicketingProvider, VcsProvider, WorkerBackend, WorkerSessionId, WorkerSessionStatus,
+    TicketingProvider, WorkerBackend, WorkerSessionId, WorkerSessionStatus,
     WorkflowInteractionProfilesConfig, WorkflowState,
 };
+use orchestrator_vcs::VcsProvider;
 use orchestrator_ui::{
     CiCheckStatus, CreateTicketFromPickerRequest, InboxPublishRequest, InboxResolveRequest,
     MergeQueueCommandKind, MergeQueueEvent, SessionArchiveOutcome, SessionMergeFinalizeOutcome,

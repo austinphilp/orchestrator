@@ -1,7 +1,10 @@
 #[cfg(test)]
 mod tests {
     use super::*;
-    use orchestrator_core::{CreateWorktreeRequest, WorktreeId, WorktreeSummary};
+    use crate::interface::VcsProvider as LocalVcsProvider;
+    use orchestrator_core::{
+        CreateWorktreeRequest, VcsProvider as CoreVcsProvider, WorktreeId, WorktreeSummary,
+    };
     use std::collections::VecDeque;
     use std::sync::Mutex;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -121,6 +124,20 @@ mod tests {
             calls[0].1,
             GitCliVcsProvider::<ProcessCommandRunner>::health_check_args()
         );
+    }
+
+    #[test]
+    fn provider_identity_is_namespaced_git_cli() {
+        let provider = GitCliVcsProvider::with_binary(
+            StubRunner::with_results(Vec::new()),
+            PathBuf::from("git"),
+            false,
+        );
+        assert_eq!(
+            LocalVcsProvider::kind(&provider),
+            crate::interface::VcsProviderKind::GitCli
+        );
+        assert_eq!(LocalVcsProvider::provider_key(&provider), "vcs.git_cli");
     }
 
     #[tokio::test]

@@ -4,11 +4,12 @@ use orchestrator_core::{
     LlmProvider, NewEventEnvelope, OrchestrationEventPayload, ProjectionState, RuntimeSessionId,
     SelectedTicketFlowConfig, SelectedTicketFlowResult, SessionCompletedPayload,
     SessionCrashedPayload, SessionHandle, SqliteEventStore, Supervisor, TicketSummary,
-    StoredEventEnvelope, TicketingProvider, UntypedCommandInvocation, VcsProvider, WorkItemId,
+    StoredEventEnvelope, TicketingProvider, UntypedCommandInvocation, WorkItemId,
     WorkerBackend, WorkerSessionId, WorkerSessionStatus, WorkflowGuardContext, WorkflowState,
     WorkflowTransitionPayload, WorkflowTransitionReason, DOMAIN_EVENT_SCHEMA_VERSION,
     SessionRuntimeProjection,
 };
+use orchestrator_vcs::VcsProvider;
 use orchestrator_ticketing::LinearTicketingProvider;
 use orchestrator_ui::{
     InboxPublishRequest, InboxResolveRequest, SessionArchiveOutcome,

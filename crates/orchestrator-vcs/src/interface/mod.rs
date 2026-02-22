@@ -1,5 +1,10 @@
 use thiserror::Error;
 
+pub use orchestrator_core::{
+    CoreError, CreateWorktreeRequest, DeleteWorktreeRequest, RepositoryRef, WorktreeStatus,
+    WorktreeSummary,
+};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VcsProviderKind {
     GitCli,
@@ -20,20 +25,7 @@ impl VcsProviderKind {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct VcsCommandRequest {
-    pub worktree_path: String,
-    pub args: Vec<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct VcsCommandResult {
-    pub exit_code: i32,
-    pub stdout: String,
-    pub stderr: String,
-}
-
-pub trait VcsProvider: Send + Sync {
+pub trait VcsProvider: orchestrator_core::VcsProvider + Send + Sync {
     fn kind(&self) -> VcsProviderKind;
 
     fn provider_key(&self) -> &'static str {
@@ -41,8 +33,14 @@ pub trait VcsProvider: Send + Sync {
     }
 }
 
+pub trait WorktreeManager: VcsProvider {}
+
+impl<T: VcsProvider + ?Sized> WorktreeManager for T {}
+
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum VcsProviderError {
     #[error("unknown vcs provider key: {0}")]
     UnknownProviderKey(String),
+    #[error("failed to initialize vcs provider: {0}")]
+    ProviderInitialization(String),
 }

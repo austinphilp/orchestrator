@@ -1301,7 +1301,7 @@ mod tests {
     }
 
     #[async_trait::async_trait]
-    impl VcsProvider for StubVcs {
+    impl orchestrator_core::VcsProvider for StubVcs {
         async fn health_check(&self) -> Result<(), CoreError> {
             Ok(())
         }
@@ -1346,6 +1346,12 @@ mod tests {
                 commits_ahead: 0,
                 commits_behind: 0,
             })
+        }
+    }
+
+    impl orchestrator_vcs::VcsProvider for StubVcs {
+        fn kind(&self) -> orchestrator_vcs::VcsProviderKind {
+            orchestrator_vcs::VcsProviderKind::GitCli
         }
     }
 

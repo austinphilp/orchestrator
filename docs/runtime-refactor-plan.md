@@ -21,6 +21,7 @@
 - Implementation update (RRP26 B03): `backend-codex` implementation is ported into `orchestrator-harness::providers::codex`, `orchestrator-app` harness selection now instantiates both providers via the harness factory configuration path, and harness contract coverage for both codex/opencode lives under `orchestrator-harness` tests.
 - Implementation update (RRP26 B04): ticketing contracts are exposed via `orchestrator-ticketing::interface`, the Linear implementation is ported under `orchestrator-ticketing::providers::linear`, and `orchestrator-app` now constructs Linear through the ticketing factory path (`ticketing.linear`) while `integration-linear` is reduced to re-exports.
 - Implementation update (RRP26 B05): the Shortcut implementation is ported under `orchestrator-ticketing::providers::shortcut`, `orchestrator-app` now constructs Shortcut through the shared ticketing factory path (`ticketing.shortcut`), `integration-shortcut` is reduced to re-exports, and shared ticketing contract tests cover both Linear and Shortcut providers.
+- Implementation update (RRP26 B06): local VCS contracts are now exposed via `orchestrator-vcs::interface`, the Git CLI implementation is ported under `orchestrator-vcs::providers::git_cli`, `integration-git` is reduced to re-exports, and the VCS factory now supports explicit `vcs.git_cli` construction via `build_provider_with_config`.
 
 ## Why This Refactor
 `orchestrator-runtime` currently combines too many concerns:

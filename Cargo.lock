@@ -1078,9 +1078,7 @@ dependencies = [
 name = "integration-git"
 version = "0.1.0"
 dependencies = [
- "async-trait",
- "orchestrator-core",
- "tokio",
+ "orchestrator-vcs",
 ]
 
 [[package]]
@@ -1428,7 +1426,6 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
- "integration-git",
  "orchestrator-core",
  "orchestrator-github",
  "orchestrator-harness",
@@ -1537,7 +1534,10 @@ dependencies = [
 name = "orchestrator-vcs"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
+ "orchestrator-core",
  "thiserror 2.0.18",
+ "tokio",
 ]
 
 [[package]]
