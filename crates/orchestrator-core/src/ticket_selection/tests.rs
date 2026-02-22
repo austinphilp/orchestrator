@@ -228,7 +228,7 @@ mod tests {
     fn config() -> SelectedTicketFlowConfig {
         SelectedTicketFlowConfig {
             repository_roots: vec![PathBuf::from("/workspace")],
-            worktrees_root: PathBuf::from("/workspace/.orchestrator/worktrees"),
+            worktrees_root: PathBuf::from("/workspace"),
             project_id: ProjectId::new("proj-126"),
             base_branch: "main".to_owned(),
             model: Some("gpt-5-codex".to_owned()),
@@ -356,7 +356,7 @@ mod tests {
     #[tokio::test]
     async fn start_flow_uses_provider_reported_worktree_path_for_spawn_and_mapping() {
         let mut store = SqliteEventStore::in_memory().expect("in-memory store");
-        let canonical_path = PathBuf::from("/workspace/.orchestrator/worktrees/ap-126-canonical");
+        let canonical_path = PathBuf::from("/workspace/ap-126-canonical");
         let vcs = StubVcsProvider::with_single_repository("/workspace/repo")
             .with_created_worktree_path(canonical_path.clone());
         let backend = StubWorkerBackend::new(BackendKind::OpenCode);
@@ -380,7 +380,7 @@ mod tests {
         assert_eq!(result.mapping.worktree.path, result.mapping.session.workdir);
         assert_eq!(
             result.mapping.session.workdir,
-            "/workspace/.orchestrator/worktrees/ap-126-canonical"
+            "/workspace/ap-126-canonical"
         );
     }
 

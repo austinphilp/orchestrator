@@ -10,7 +10,7 @@ mod tests {
         NewEventEnvelope, OrchestrationEventPayload, RuntimeMappingRecord, RuntimeResult,
         SessionHandle, SessionRecord, SpawnSpec, SupervisorQueryArgs,
         SupervisorQueryCancellationSource, SupervisorQueryContextArgs, TicketDetails, TicketId,
-        TicketProvider, TicketQuery, TicketSummary, TicketingProvider,
+        TicketProvider, TicketQuery, TicketRecord, TicketSummary, TicketingProvider,
         UpdateTicketDescriptionRequest, UpdateTicketStateRequest, WorkItemId, WorkerSessionId,
         WorkerSessionStatus, WorktreeId, WorktreeRecord, WorktreeStatus,
         DOMAIN_EVENT_SCHEMA_VERSION,
@@ -530,6 +530,7 @@ mod tests {
             || {
                 let config = AppConfig::from_env().expect("default config");
                 assert_eq!(config.workspace, expected_workspace.to_string_lossy());
+                assert_eq!(config.worktrees_root, expected_workspace.to_string_lossy());
                 assert_eq!(
                     config.event_store_path,
                     expected_event_store.to_string_lossy()
@@ -550,6 +551,7 @@ mod tests {
                 let raw = std::fs::read_to_string(expected.clone()).unwrap();
                 let parsed: AppConfig = toml::from_str(&raw).unwrap();
                 assert_eq!(parsed.workspace, expected_workspace.to_string_lossy());
+                assert_eq!(parsed.worktrees_root, expected_workspace.to_string_lossy());
                 assert_eq!(
                     parsed.event_store_path,
                     expected_event_store.to_string_lossy()
@@ -588,6 +590,7 @@ mod tests {
             || {
                 let config = AppConfig::from_env().expect("bootstrap config");
                 assert_eq!(config.workspace, expected_workspace.to_string_lossy());
+                assert_eq!(config.worktrees_root, expected_workspace.to_string_lossy());
                 assert_eq!(
                     config.event_store_path,
                     expected_event_store.to_string_lossy()
@@ -602,6 +605,7 @@ mod tests {
                 let contents = std::fs::read_to_string(expected.clone()).unwrap();
                 let parsed: AppConfig = toml::from_str(&contents).unwrap();
                 assert_eq!(parsed.workspace, expected_workspace.to_string_lossy());
+                assert_eq!(parsed.worktrees_root, expected_workspace.to_string_lossy());
                 assert_eq!(
                     parsed.event_store_path,
                     expected_event_store.to_string_lossy()
@@ -633,6 +637,7 @@ mod tests {
             || {
                 let config = AppConfig::from_env().expect("parse config");
                 assert_eq!(config.workspace, "/tmp/work");
+                assert_eq!(config.worktrees_root, "/tmp/work");
                 assert_eq!(config.event_store_path, "/tmp/events.db");
                 assert_eq!(config.ui.transcript_line_limit, 100);
                 assert_eq!(config.ui.background_session_refresh_secs, 15);
@@ -665,6 +670,7 @@ mod tests {
             || {
                 let config = AppConfig::from_env().expect("parse config");
                 assert_eq!(config.workspace, "/tmp/work");
+                assert_eq!(config.worktrees_root, "/tmp/work");
                 assert_eq!(
                     config.event_store_path,
                     expected_event_store.to_string_lossy()
@@ -698,6 +704,7 @@ mod tests {
             || {
                 let config = AppConfig::from_env().expect("config should load");
                 assert_eq!(config.workspace, expected_workspace.to_string_lossy());
+                assert_eq!(config.worktrees_root, expected_workspace.to_string_lossy());
                 assert_eq!(
                     config.event_store_path,
                     expected_event_store.to_string_lossy()
@@ -706,6 +713,7 @@ mod tests {
                 let rewritten = std::fs::read_to_string(&config_path).expect("read rewritten");
                 let parsed: AppConfig = toml::from_str(&rewritten).expect("parse rewritten");
                 assert_eq!(parsed.workspace, expected_workspace.to_string_lossy());
+                assert_eq!(parsed.worktrees_root, expected_workspace.to_string_lossy());
                 assert_eq!(
                     parsed.event_store_path,
                     expected_event_store.to_string_lossy()
@@ -737,9 +745,144 @@ mod tests {
             || {
                 let config = AppConfig::from_env().expect("config should load");
                 assert_eq!(config.workspace, "./custom-workspace");
+                assert_eq!(config.worktrees_root, "./custom-workspace");
                 assert_eq!(config.event_store_path, "./custom-events.db");
             },
         );
+
+        remove_temp_path(&home);
+    }
+
+    #[test]
+    fn config_migrates_legacy_worktree_directories_to_worktrees_root() {
+        let home = unique_temp_dir("legacy-worktree-layout");
+        let workspace = expected_default_workspace(&home);
+        let legacy_root = workspace.join(".orchestrator").join("worktrees");
+        let legacy_worktree = legacy_root.join("ap-999-sample-ticket");
+        std::fs::create_dir_all(&legacy_worktree).expect("create legacy worktree");
+        write_config_file(&legacy_worktree.join("marker.txt"), "legacy");
+
+        let config_path = home.join("config.toml");
+        write_config_file(
+            &config_path,
+            format!(
+                "workspace = '{}'\nworktrees_root = '{}'\nevent_store_path = '{}'\n",
+                workspace.display(),
+                workspace.display(),
+                expected_default_event_store(&home).display()
+            )
+            .as_str(),
+        );
+
+        with_env_vars(
+            &[
+                ("HOME", Some(home.to_str().unwrap())),
+                ("USERPROFILE", None),
+                ("ORCHESTRATOR_CONFIG", Some(config_path.to_str().unwrap())),
+                ("XDG_DATA_HOME", None),
+                ("LOCALAPPDATA", None),
+                ("APPDATA", None),
+            ],
+            || {
+                let config = AppConfig::from_env().expect("config should load and migrate");
+                let migrated = PathBuf::from(config.worktrees_root)
+                    .join("ap-999-sample-ticket")
+                    .join("marker.txt");
+                assert!(migrated.exists());
+                assert!(!legacy_worktree.exists());
+            },
+        );
+
+        remove_temp_path(&home);
+    }
+
+    #[test]
+    fn config_migrates_runtime_mapping_paths_from_legacy_worktree_root() {
+        let home = unique_temp_dir("legacy-runtime-mapping-layout");
+        let workspace = expected_default_workspace(&home);
+        let event_store_path = expected_default_event_store(&home);
+        if let Some(parent) = event_store_path.parent() {
+            std::fs::create_dir_all(parent).expect("create event store parent");
+        }
+
+        let mut store = SqliteEventStore::open(&event_store_path).expect("create event store");
+        let ticket = TicketRecord {
+            ticket_id: TicketId::from("linear:issue-299"),
+            provider: TicketProvider::Linear,
+            provider_ticket_id: "issue-299".to_owned(),
+            identifier: "AP-299".to_owned(),
+            title: "Legacy mapping".to_owned(),
+            state: "In Progress".to_owned(),
+            updated_at: "2026-02-21T12:00:00Z".to_owned(),
+        };
+        let legacy_workdir = workspace
+            .join(".orchestrator")
+            .join("worktrees")
+            .join("ap-299-legacy-mapping")
+            .to_string_lossy()
+            .to_string();
+        store
+            .upsert_runtime_mapping(&RuntimeMappingRecord {
+                ticket,
+                work_item_id: WorkItemId::new("wi-linear-issue-299"),
+                worktree: WorktreeRecord {
+                    worktree_id: WorktreeId::new("wt-linear-issue-299"),
+                    work_item_id: WorkItemId::new("wi-linear-issue-299"),
+                    path: legacy_workdir.clone(),
+                    branch: "ap/AP-299-legacy-mapping".to_owned(),
+                    base_branch: "main".to_owned(),
+                    created_at: "2026-02-21T12:00:00Z".to_owned(),
+                },
+                session: SessionRecord {
+                    session_id: WorkerSessionId::new("sess-linear-issue-299"),
+                    work_item_id: WorkItemId::new("wi-linear-issue-299"),
+                    backend_kind: BackendKind::Codex,
+                    workdir: legacy_workdir,
+                    model: Some("gpt-5-codex".to_owned()),
+                    status: WorkerSessionStatus::Running,
+                    created_at: "2026-02-21T12:00:00Z".to_owned(),
+                    updated_at: "2026-02-21T12:00:00Z".to_owned(),
+                },
+            })
+            .expect("seed runtime mapping");
+
+        let config_path = home.join("config.toml");
+        write_config_file(
+            &config_path,
+            format!(
+                "workspace = '{}'\nworktrees_root = '{}'\nevent_store_path = '{}'\n",
+                workspace.display(),
+                workspace.display(),
+                event_store_path.display()
+            )
+            .as_str(),
+        );
+
+        with_env_vars(
+            &[
+                ("HOME", Some(home.to_str().unwrap())),
+                ("USERPROFILE", None),
+                ("ORCHESTRATOR_CONFIG", Some(config_path.to_str().unwrap())),
+                ("XDG_DATA_HOME", None),
+                ("LOCALAPPDATA", None),
+                ("APPDATA", None),
+            ],
+            || {
+                AppConfig::from_env().expect("config should load and migrate mappings");
+            },
+        );
+
+        let store = SqliteEventStore::open(&event_store_path).expect("open migrated store");
+        let mapping = store
+            .find_runtime_mapping_by_ticket(&TicketProvider::Linear, "issue-299")
+            .expect("mapping lookup")
+            .expect("mapping exists");
+        let expected = workspace
+            .join("ap-299-legacy-mapping")
+            .to_string_lossy()
+            .to_string();
+        assert_eq!(mapping.worktree.path, expected);
+        assert_eq!(mapping.session.workdir, expected);
 
         remove_temp_path(&home);
     }
