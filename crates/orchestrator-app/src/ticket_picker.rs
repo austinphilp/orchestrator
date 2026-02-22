@@ -11,7 +11,7 @@ use crate::controller::contracts::{
 };
 use crate::projection::ProjectionState;
 use async_trait::async_trait;
-use orchestrator_core::{
+use orchestrator_domain::{
     CoreError, LlmChatRequest, LlmMessage, LlmProvider, LlmRole, SelectedTicketFlowResult,
     Supervisor, WorkerBackend, WorkerSessionId, WorkerSessionStatus, WorkflowState,
 };
@@ -1073,11 +1073,11 @@ Allow creating tickets with n.
     #[test]
     fn review_session_contexts_filters_non_review_or_closed_sessions() {
         let review_session_id = WorkerSessionId::new("sess-review");
-        let review_work_item_id = orchestrator_core::WorkItemId::new("wi-review");
+        let review_work_item_id = orchestrator_domain::WorkItemId::new("wi-review");
         let done_session_id = WorkerSessionId::new("sess-done");
-        let done_work_item_id = orchestrator_core::WorkItemId::new("wi-done");
+        let done_work_item_id = orchestrator_domain::WorkItemId::new("wi-done");
         let planning_session_id = WorkerSessionId::new("sess-planning");
-        let planning_work_item_id = orchestrator_core::WorkItemId::new("wi-planning");
+        let planning_work_item_id = orchestrator_domain::WorkItemId::new("wi-planning");
 
         let mut projection = ProjectionState::default();
         projection.work_items.insert(

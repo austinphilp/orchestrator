@@ -7,7 +7,7 @@ license.workspace = true
 [dependencies]
 async-trait.workspace = true
 anyhow.workspace = true
-orchestrator-core = { path = "../orchestrator-core" }
+orchestrator-domain = { path = "../orchestrator-domain" }
 orchestrator-supervisor = { path = "../orchestrator-supervisor" }
 orchestrator-harness = { path = "../orchestrator-harness" }
 orchestrator-ticketing = { path = "../orchestrator-ticketing" }
@@ -28,5 +28,5 @@ r2d2_sqlite.workspace = true
 time.workspace = true
 
 [dev-dependencies]
-orchestrator-core = { path = "../orchestrator-core", features = ["test-support"] }
+orchestrator-domain = { path = "../orchestrator-domain", features = ["test-support"] }
 serde_json.workspace = true

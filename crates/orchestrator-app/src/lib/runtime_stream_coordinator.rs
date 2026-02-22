@@ -5,7 +5,7 @@ mod runtime_stream_coordinator {
     use orchestrator_harness::{
         HarnessBackendInfo, HarnessRuntimeProvider, HarnessSessionStreamSource,
     };
-    use orchestrator_core::{
+    use orchestrator_domain::{
         BackendCapabilities, BackendEvent, BackendKind, RuntimeResult, SessionHandle,
         SessionLifecycle, SpawnSpec, WorkerBackend, WorkerEventStream, WorkerEventSubscription,
         WorkerManagerConfig,
@@ -292,7 +292,7 @@ mod runtime_stream_coordinator {
         use std::time::Duration;
 
         use async_trait::async_trait;
-        use orchestrator_core::{
+        use orchestrator_domain::{
             BackendOutputEvent, BackendOutputStream, RuntimeError, RuntimeSessionId,
         };
         use orchestrator_harness::{

@@ -1231,7 +1231,7 @@ pub(crate) async fn dispatch_supervisor_runtime_command<P>(
     event_store_path: &str,
     supervisor_runtime_config: &SupervisorRuntimeConfig,
     database_runtime_config: &DatabaseRuntimeConfig,
-    invocation: orchestrator_core::UntypedCommandInvocation,
+    invocation: orchestrator_domain::UntypedCommandInvocation,
     context: SupervisorCommandContext,
 ) -> Result<(String, LlmResponseStream), CoreError>
 where

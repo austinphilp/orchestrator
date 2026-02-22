@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 
 use crate::projection::ProjectionState;
-use orchestrator_core::{
+use orchestrator_domain::{
     BackendNeedsInputAnswer, BackendNeedsInputEvent, BackendOutputEvent, BackendTurnStateEvent,
     CoreError, WorkItemId, WorkerSessionId,
 };
@@ -44,7 +44,7 @@ pub mod ui_boundary {
         apply_event, rebuild_projection, ArtifactProjection, InboxItemProjection, ProjectionState,
         SessionProjection, SessionRuntimeProjection, WorkItemProjection,
     };
-    pub use orchestrator_core::{
+    pub use orchestrator_domain::{
         ArtifactId, ArtifactKind, Command, CommandRegistry, CoreError, InboxItemId, InboxItemKind,
         LlmChatRequest, LlmFinishReason, LlmMessage, LlmProvider, LlmProviderKind,
         LlmRateLimitState, LlmResponseStream, LlmResponseSubscription, LlmRole, LlmStreamChunk,
@@ -275,7 +275,7 @@ pub trait FrontendController: Send + Sync {
     async fn subscribe(&self) -> Result<FrontendEventStream, CoreError>;
 }
 
-impl From<FrontendApplicationMode> for orchestrator_core::FrontendApplicationMode {
+impl From<FrontendApplicationMode> for orchestrator_domain::FrontendApplicationMode {
     fn from(value: FrontendApplicationMode) -> Self {
         match value {
             FrontendApplicationMode::Manual => Self::Manual,
@@ -284,16 +284,16 @@ impl From<FrontendApplicationMode> for orchestrator_core::FrontendApplicationMod
     }
 }
 
-impl From<orchestrator_core::FrontendApplicationMode> for FrontendApplicationMode {
-    fn from(value: orchestrator_core::FrontendApplicationMode) -> Self {
+impl From<orchestrator_domain::FrontendApplicationMode> for FrontendApplicationMode {
+    fn from(value: orchestrator_domain::FrontendApplicationMode) -> Self {
         match value {
-            orchestrator_core::FrontendApplicationMode::Manual => Self::Manual,
-            orchestrator_core::FrontendApplicationMode::Autopilot => Self::Autopilot,
+            orchestrator_domain::FrontendApplicationMode::Manual => Self::Manual,
+            orchestrator_domain::FrontendApplicationMode::Autopilot => Self::Autopilot,
         }
     }
 }
 
-impl From<FrontendSnapshot> for orchestrator_core::FrontendSnapshot {
+impl From<FrontendSnapshot> for orchestrator_domain::FrontendSnapshot {
     fn from(value: FrontendSnapshot) -> Self {
         Self {
             status: value.status,
@@ -303,8 +303,8 @@ impl From<FrontendSnapshot> for orchestrator_core::FrontendSnapshot {
     }
 }
 
-impl From<orchestrator_core::FrontendSnapshot> for FrontendSnapshot {
-    fn from(value: orchestrator_core::FrontendSnapshot) -> Self {
+impl From<orchestrator_domain::FrontendSnapshot> for FrontendSnapshot {
+    fn from(value: orchestrator_domain::FrontendSnapshot) -> Self {
         Self {
             status: value.status,
             projection: value.projection,
@@ -313,7 +313,7 @@ impl From<orchestrator_core::FrontendSnapshot> for FrontendSnapshot {
     }
 }
 
-impl From<FrontendNotificationLevel> for orchestrator_core::FrontendNotificationLevel {
+impl From<FrontendNotificationLevel> for orchestrator_domain::FrontendNotificationLevel {
     fn from(value: FrontendNotificationLevel) -> Self {
         match value {
             FrontendNotificationLevel::Info => Self::Info,
@@ -323,17 +323,17 @@ impl From<FrontendNotificationLevel> for orchestrator_core::FrontendNotification
     }
 }
 
-impl From<orchestrator_core::FrontendNotificationLevel> for FrontendNotificationLevel {
-    fn from(value: orchestrator_core::FrontendNotificationLevel) -> Self {
+impl From<orchestrator_domain::FrontendNotificationLevel> for FrontendNotificationLevel {
+    fn from(value: orchestrator_domain::FrontendNotificationLevel) -> Self {
         match value {
-            orchestrator_core::FrontendNotificationLevel::Info => Self::Info,
-            orchestrator_core::FrontendNotificationLevel::Warning => Self::Warning,
-            orchestrator_core::FrontendNotificationLevel::Error => Self::Error,
+            orchestrator_domain::FrontendNotificationLevel::Info => Self::Info,
+            orchestrator_domain::FrontendNotificationLevel::Warning => Self::Warning,
+            orchestrator_domain::FrontendNotificationLevel::Error => Self::Error,
         }
     }
 }
 
-impl From<FrontendNotification> for orchestrator_core::FrontendNotification {
+impl From<FrontendNotification> for orchestrator_domain::FrontendNotification {
     fn from(value: FrontendNotification) -> Self {
         Self {
             level: value.level.into(),
@@ -344,8 +344,8 @@ impl From<FrontendNotification> for orchestrator_core::FrontendNotification {
     }
 }
 
-impl From<orchestrator_core::FrontendNotification> for FrontendNotification {
-    fn from(value: orchestrator_core::FrontendNotification) -> Self {
+impl From<orchestrator_domain::FrontendNotification> for FrontendNotification {
+    fn from(value: orchestrator_domain::FrontendNotification) -> Self {
         Self {
             level: value.level.into(),
             message: value.message,
@@ -355,7 +355,7 @@ impl From<orchestrator_core::FrontendNotification> for FrontendNotification {
     }
 }
 
-impl From<FrontendTerminalEvent> for orchestrator_core::FrontendTerminalEvent {
+impl From<FrontendTerminalEvent> for orchestrator_domain::FrontendTerminalEvent {
     fn from(value: FrontendTerminalEvent) -> Self {
         match value {
             FrontendTerminalEvent::Output { session_id, output } => {
@@ -389,27 +389,27 @@ impl From<FrontendTerminalEvent> for orchestrator_core::FrontendTerminalEvent {
     }
 }
 
-impl From<orchestrator_core::FrontendTerminalEvent> for FrontendTerminalEvent {
-    fn from(value: orchestrator_core::FrontendTerminalEvent) -> Self {
+impl From<orchestrator_domain::FrontendTerminalEvent> for FrontendTerminalEvent {
+    fn from(value: orchestrator_domain::FrontendTerminalEvent) -> Self {
         match value {
-            orchestrator_core::FrontendTerminalEvent::Output { session_id, output } => {
+            orchestrator_domain::FrontendTerminalEvent::Output { session_id, output } => {
                 Self::Output { session_id, output }
             }
-            orchestrator_core::FrontendTerminalEvent::TurnState {
+            orchestrator_domain::FrontendTerminalEvent::TurnState {
                 session_id,
                 turn_state,
             } => Self::TurnState {
                 session_id,
                 turn_state,
             },
-            orchestrator_core::FrontendTerminalEvent::NeedsInput {
+            orchestrator_domain::FrontendTerminalEvent::NeedsInput {
                 session_id,
                 needs_input,
             } => Self::NeedsInput {
                 session_id,
                 needs_input,
             },
-            orchestrator_core::FrontendTerminalEvent::StreamFailed {
+            orchestrator_domain::FrontendTerminalEvent::StreamFailed {
                 session_id,
                 message,
                 is_session_not_found,
@@ -418,14 +418,14 @@ impl From<orchestrator_core::FrontendTerminalEvent> for FrontendTerminalEvent {
                 message,
                 is_session_not_found,
             },
-            orchestrator_core::FrontendTerminalEvent::StreamEnded { session_id } => {
+            orchestrator_domain::FrontendTerminalEvent::StreamEnded { session_id } => {
                 Self::StreamEnded { session_id }
             }
         }
     }
 }
 
-impl From<FrontendEvent> for orchestrator_core::FrontendEvent {
+impl From<FrontendEvent> for orchestrator_domain::FrontendEvent {
     fn from(value: FrontendEvent) -> Self {
         match value {
             FrontendEvent::SnapshotUpdated(snapshot) => Self::SnapshotUpdated(snapshot.into()),
@@ -435,23 +435,23 @@ impl From<FrontendEvent> for orchestrator_core::FrontendEvent {
     }
 }
 
-impl From<orchestrator_core::FrontendEvent> for FrontendEvent {
-    fn from(value: orchestrator_core::FrontendEvent) -> Self {
+impl From<orchestrator_domain::FrontendEvent> for FrontendEvent {
+    fn from(value: orchestrator_domain::FrontendEvent) -> Self {
         match value {
-            orchestrator_core::FrontendEvent::SnapshotUpdated(snapshot) => {
+            orchestrator_domain::FrontendEvent::SnapshotUpdated(snapshot) => {
                 Self::SnapshotUpdated(snapshot.into())
             }
-            orchestrator_core::FrontendEvent::Notification(notification) => {
+            orchestrator_domain::FrontendEvent::Notification(notification) => {
                 Self::Notification(notification.into())
             }
-            orchestrator_core::FrontendEvent::TerminalSession(event) => {
+            orchestrator_domain::FrontendEvent::TerminalSession(event) => {
                 Self::TerminalSession(event.into())
             }
         }
     }
 }
 
-impl From<FrontendCommandIntent> for orchestrator_core::FrontendCommandIntent {
+impl From<FrontendCommandIntent> for orchestrator_domain::FrontendCommandIntent {
     fn from(value: FrontendCommandIntent) -> Self {
         match value {
             FrontendCommandIntent::EnterNormalMode => Self::EnterNormalMode,
@@ -501,95 +501,95 @@ impl From<FrontendCommandIntent> for orchestrator_core::FrontendCommandIntent {
     }
 }
 
-impl From<orchestrator_core::FrontendCommandIntent> for FrontendCommandIntent {
-    fn from(value: orchestrator_core::FrontendCommandIntent) -> Self {
+impl From<orchestrator_domain::FrontendCommandIntent> for FrontendCommandIntent {
+    fn from(value: orchestrator_domain::FrontendCommandIntent) -> Self {
         match value {
-            orchestrator_core::FrontendCommandIntent::EnterNormalMode => Self::EnterNormalMode,
-            orchestrator_core::FrontendCommandIntent::EnterInsertMode => Self::EnterInsertMode,
-            orchestrator_core::FrontendCommandIntent::ToggleGlobalSupervisorChat => {
+            orchestrator_domain::FrontendCommandIntent::EnterNormalMode => Self::EnterNormalMode,
+            orchestrator_domain::FrontendCommandIntent::EnterInsertMode => Self::EnterInsertMode,
+            orchestrator_domain::FrontendCommandIntent::ToggleGlobalSupervisorChat => {
                 Self::ToggleGlobalSupervisorChat
             }
-            orchestrator_core::FrontendCommandIntent::OpenTerminalForSelected => {
+            orchestrator_domain::FrontendCommandIntent::OpenTerminalForSelected => {
                 Self::OpenTerminalForSelected
             }
-            orchestrator_core::FrontendCommandIntent::OpenDiffInspectorForSelected => {
+            orchestrator_domain::FrontendCommandIntent::OpenDiffInspectorForSelected => {
                 Self::OpenDiffInspectorForSelected
             }
-            orchestrator_core::FrontendCommandIntent::OpenTestInspectorForSelected => {
+            orchestrator_domain::FrontendCommandIntent::OpenTestInspectorForSelected => {
                 Self::OpenTestInspectorForSelected
             }
-            orchestrator_core::FrontendCommandIntent::OpenPrInspectorForSelected => {
+            orchestrator_domain::FrontendCommandIntent::OpenPrInspectorForSelected => {
                 Self::OpenPrInspectorForSelected
             }
-            orchestrator_core::FrontendCommandIntent::OpenChatInspectorForSelected => {
+            orchestrator_domain::FrontendCommandIntent::OpenChatInspectorForSelected => {
                 Self::OpenChatInspectorForSelected
             }
-            orchestrator_core::FrontendCommandIntent::StartTerminalEscapeChord => {
+            orchestrator_domain::FrontendCommandIntent::StartTerminalEscapeChord => {
                 Self::StartTerminalEscapeChord
             }
-            orchestrator_core::FrontendCommandIntent::QuitShell => Self::QuitShell,
-            orchestrator_core::FrontendCommandIntent::FocusNextInbox => Self::FocusNextInbox,
-            orchestrator_core::FrontendCommandIntent::FocusPreviousInbox => {
+            orchestrator_domain::FrontendCommandIntent::QuitShell => Self::QuitShell,
+            orchestrator_domain::FrontendCommandIntent::FocusNextInbox => Self::FocusNextInbox,
+            orchestrator_domain::FrontendCommandIntent::FocusPreviousInbox => {
                 Self::FocusPreviousInbox
             }
-            orchestrator_core::FrontendCommandIntent::CycleBatchNext => Self::CycleBatchNext,
-            orchestrator_core::FrontendCommandIntent::CycleBatchPrevious => {
+            orchestrator_domain::FrontendCommandIntent::CycleBatchNext => Self::CycleBatchNext,
+            orchestrator_domain::FrontendCommandIntent::CycleBatchPrevious => {
                 Self::CycleBatchPrevious
             }
-            orchestrator_core::FrontendCommandIntent::JumpFirstInbox => Self::JumpFirstInbox,
-            orchestrator_core::FrontendCommandIntent::JumpLastInbox => Self::JumpLastInbox,
-            orchestrator_core::FrontendCommandIntent::JumpBatchDecideOrUnblock => {
+            orchestrator_domain::FrontendCommandIntent::JumpFirstInbox => Self::JumpFirstInbox,
+            orchestrator_domain::FrontendCommandIntent::JumpLastInbox => Self::JumpLastInbox,
+            orchestrator_domain::FrontendCommandIntent::JumpBatchDecideOrUnblock => {
                 Self::JumpBatchDecideOrUnblock
             }
-            orchestrator_core::FrontendCommandIntent::JumpBatchApprovals => {
+            orchestrator_domain::FrontendCommandIntent::JumpBatchApprovals => {
                 Self::JumpBatchApprovals
             }
-            orchestrator_core::FrontendCommandIntent::JumpBatchReviewReady => {
+            orchestrator_domain::FrontendCommandIntent::JumpBatchReviewReady => {
                 Self::JumpBatchReviewReady
             }
-            orchestrator_core::FrontendCommandIntent::JumpBatchFyiDigest => {
+            orchestrator_domain::FrontendCommandIntent::JumpBatchFyiDigest => {
                 Self::JumpBatchFyiDigest
             }
-            orchestrator_core::FrontendCommandIntent::OpenTicketPicker => Self::OpenTicketPicker,
-            orchestrator_core::FrontendCommandIntent::CloseTicketPicker => Self::CloseTicketPicker,
-            orchestrator_core::FrontendCommandIntent::TicketPickerMoveNext => {
+            orchestrator_domain::FrontendCommandIntent::OpenTicketPicker => Self::OpenTicketPicker,
+            orchestrator_domain::FrontendCommandIntent::CloseTicketPicker => Self::CloseTicketPicker,
+            orchestrator_domain::FrontendCommandIntent::TicketPickerMoveNext => {
                 Self::TicketPickerMoveNext
             }
-            orchestrator_core::FrontendCommandIntent::TicketPickerMovePrevious => {
+            orchestrator_domain::FrontendCommandIntent::TicketPickerMovePrevious => {
                 Self::TicketPickerMovePrevious
             }
-            orchestrator_core::FrontendCommandIntent::TicketPickerFoldProject => {
+            orchestrator_domain::FrontendCommandIntent::TicketPickerFoldProject => {
                 Self::TicketPickerFoldProject
             }
-            orchestrator_core::FrontendCommandIntent::TicketPickerUnfoldProject => {
+            orchestrator_domain::FrontendCommandIntent::TicketPickerUnfoldProject => {
                 Self::TicketPickerUnfoldProject
             }
-            orchestrator_core::FrontendCommandIntent::TicketPickerStartSelected => {
+            orchestrator_domain::FrontendCommandIntent::TicketPickerStartSelected => {
                 Self::TicketPickerStartSelected
             }
-            orchestrator_core::FrontendCommandIntent::ToggleWorktreeDiffModal => {
+            orchestrator_domain::FrontendCommandIntent::ToggleWorktreeDiffModal => {
                 Self::ToggleWorktreeDiffModal
             }
-            orchestrator_core::FrontendCommandIntent::AdvanceTerminalWorkflowStage => {
+            orchestrator_domain::FrontendCommandIntent::AdvanceTerminalWorkflowStage => {
                 Self::AdvanceTerminalWorkflowStage
             }
-            orchestrator_core::FrontendCommandIntent::ArchiveSelectedSession => {
+            orchestrator_domain::FrontendCommandIntent::ArchiveSelectedSession => {
                 Self::ArchiveSelectedSession
             }
-            orchestrator_core::FrontendCommandIntent::OpenSessionOutputForSelectedInbox => {
+            orchestrator_domain::FrontendCommandIntent::OpenSessionOutputForSelectedInbox => {
                 Self::OpenSessionOutputForSelectedInbox
             }
-            orchestrator_core::FrontendCommandIntent::SetApplicationModeAutopilot => {
+            orchestrator_domain::FrontendCommandIntent::SetApplicationModeAutopilot => {
                 Self::SetApplicationModeAutopilot
             }
-            orchestrator_core::FrontendCommandIntent::SetApplicationModeManual => {
+            orchestrator_domain::FrontendCommandIntent::SetApplicationModeManual => {
                 Self::SetApplicationModeManual
             }
         }
     }
 }
 
-impl From<FrontendIntent> for orchestrator_core::FrontendIntent {
+impl From<FrontendIntent> for orchestrator_domain::FrontendIntent {
     fn from(value: FrontendIntent) -> Self {
         match value {
             FrontendIntent::Command(command) => Self::Command(command.into()),
@@ -609,14 +609,14 @@ impl From<FrontendIntent> for orchestrator_core::FrontendIntent {
     }
 }
 
-impl From<orchestrator_core::FrontendIntent> for FrontendIntent {
-    fn from(value: orchestrator_core::FrontendIntent) -> Self {
+impl From<orchestrator_domain::FrontendIntent> for FrontendIntent {
+    fn from(value: orchestrator_domain::FrontendIntent) -> Self {
         match value {
-            orchestrator_core::FrontendIntent::Command(command) => Self::Command(command.into()),
-            orchestrator_core::FrontendIntent::SendTerminalInput { session_id, input } => {
+            orchestrator_domain::FrontendIntent::Command(command) => Self::Command(command.into()),
+            orchestrator_domain::FrontendIntent::SendTerminalInput { session_id, input } => {
                 Self::SendTerminalInput { session_id, input }
             }
-            orchestrator_core::FrontendIntent::RespondToNeedsInput {
+            orchestrator_domain::FrontendIntent::RespondToNeedsInput {
                 session_id,
                 prompt_id,
                 answers,
@@ -707,7 +707,7 @@ mod tests {
             .iter()
             .map(|intent| intent.command_id())
             .collect::<Vec<_>>();
-        let core_ids = orchestrator_core::FrontendCommandIntent::ALL
+        let core_ids = orchestrator_domain::FrontendCommandIntent::ALL
             .iter()
             .map(|intent| intent.command_id())
             .collect::<Vec<_>>();
@@ -718,7 +718,7 @@ mod tests {
     #[test]
     fn frontend_command_intent_round_trips_through_core_adapter() {
         for intent in FrontendCommandIntent::ALL {
-            let core: orchestrator_core::FrontendCommandIntent = intent.into();
+            let core: orchestrator_domain::FrontendCommandIntent = intent.into();
             let roundtrip: FrontendCommandIntent = core.into();
             assert_eq!(roundtrip, intent);
         }
@@ -732,7 +732,7 @@ mod tests {
             application_mode: FrontendApplicationMode::Autopilot,
         };
 
-        let core: orchestrator_core::FrontendSnapshot = snapshot.clone().into();
+        let core: orchestrator_domain::FrontendSnapshot = snapshot.clone().into();
         let roundtrip: FrontendSnapshot = core.into();
         assert_eq!(roundtrip, snapshot);
     }
@@ -743,7 +743,7 @@ mod tests {
             session_id: WorkerSessionId::new("sess-2"),
         });
 
-        let core: orchestrator_core::FrontendEvent = event.clone().into();
+        let core: orchestrator_domain::FrontendEvent = event.clone().into();
         let roundtrip: FrontendEvent = core.into();
         assert_eq!(roundtrip, event);
     }
@@ -752,7 +752,7 @@ mod tests {
     fn frontend_intent_round_trips_through_core_adapter() {
         let intent = FrontendIntent::Command(FrontendCommandIntent::SetApplicationModeManual);
 
-        let core: orchestrator_core::FrontendIntent = intent.clone().into();
+        let core: orchestrator_domain::FrontendIntent = intent.clone().into();
         let roundtrip: FrontendIntent = core.into();
         assert_eq!(roundtrip, intent);
     }
@@ -767,7 +767,7 @@ mod tests {
         });
 
         let app_json = serde_json::to_value(&event).expect("serialize app event");
-        let core_json = serde_json::to_value(orchestrator_core::FrontendEvent::from(event))
+        let core_json = serde_json::to_value(orchestrator_domain::FrontendEvent::from(event))
             .expect("serialize core event");
         assert_eq!(app_json, core_json);
     }

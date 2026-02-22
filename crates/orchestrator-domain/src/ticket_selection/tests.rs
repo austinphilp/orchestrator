@@ -236,7 +236,7 @@ mod tests {
     }
 
     fn seeded_resume_workdir() -> String {
-        let path = std::env::temp_dir().join("orchestrator-core-tests-ap126-resume");
+        let path = std::env::temp_dir().join("orchestrator-domain-tests-ap126-resume");
         std::fs::create_dir_all(&path).expect("create seeded resume workdir");
         path.to_string_lossy().to_string()
     }

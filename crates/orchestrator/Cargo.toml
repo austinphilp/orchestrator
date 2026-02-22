@@ -10,7 +10,7 @@ tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 orchestrator-app = { path = "../orchestrator-app" }
-orchestrator-core = { path = "../orchestrator-core" }
+orchestrator-domain = { path = "../orchestrator-domain" }
 orchestrator-harness = { path = "../orchestrator-harness" }
 orchestrator-supervisor = { path = "../orchestrator-supervisor" }
 orchestrator-ticketing = { path = "../orchestrator-ticketing" }

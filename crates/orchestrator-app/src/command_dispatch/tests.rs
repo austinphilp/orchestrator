@@ -7,8 +7,8 @@ mod tests {
         WorkflowTransitionPayload,
     };
     use crate::normalization::DOMAIN_EVENT_SCHEMA_VERSION;
-    use orchestrator_core::test_support::TestDbPath;
-    use orchestrator_core::{
+    use orchestrator_domain::test_support::TestDbPath;
+    use orchestrator_domain::{
         ArtifactId, ArtifactKind, ArtifactRecord, BackendKind, CodeHostKind, PullRequestCiStatus,
         PullRequestMergeState, PullRequestRef, PullRequestSummary, RepositoryRef, ReviewerRequest,
         RuntimeMappingRecord, SessionRecord, SqliteEventStore, TicketId, TicketProvider,
@@ -245,7 +245,7 @@ mod tests {
 
         async fn create_draft_pull_request(
             &self,
-            _request: orchestrator_core::CreatePullRequestRequest,
+            _request: orchestrator_domain::CreatePullRequestRequest,
         ) -> Result<PullRequestSummary, CoreError> {
             Err(CoreError::DependencyUnavailable(
                 "not implemented in test mock".to_owned(),

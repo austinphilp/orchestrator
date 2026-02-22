@@ -177,7 +177,7 @@ impl<S: Supervisor, G: GithubClient> AppFrontendController<S, G> {
         &self,
         session_id: &WorkerSessionId,
         prompt_id: &str,
-        answers: &[orchestrator_core::BackendNeedsInputAnswer],
+        answers: &[orchestrator_domain::BackendNeedsInputAnswer],
     ) -> Result<(), CoreError> {
         let Some(worker_backend) = self.worker_backend.clone() else {
             return Err(CoreError::DependencyUnavailable(
@@ -238,7 +238,7 @@ fn ensure_terminal_streams(
                             message: error.to_string(),
                             is_session_not_found: matches!(
                                 error,
-                                orchestrator_core::RuntimeError::SessionNotFound(_)
+                                orchestrator_domain::RuntimeError::SessionNotFound(_)
                             ),
                         },
                     ));
@@ -251,7 +251,7 @@ fn ensure_terminal_streams(
                     _ = stream_shutdown_rx.changed() => return,
                     next = stream.next_event() => {
                         match next {
-                            Ok(Some(orchestrator_core::BackendEvent::Output(output))) => {
+                            Ok(Some(orchestrator_domain::BackendEvent::Output(output))) => {
                                 let _ = stream_event_tx.send(FrontendEvent::TerminalSession(
                                     FrontendTerminalEvent::Output {
                                         session_id: stream_session_id.clone(),
@@ -259,7 +259,7 @@ fn ensure_terminal_streams(
                                     }
                                 ));
                             }
-                            Ok(Some(orchestrator_core::BackendEvent::TurnState(turn_state))) => {
+                            Ok(Some(orchestrator_domain::BackendEvent::TurnState(turn_state))) => {
                                 let _ = stream_event_tx.send(FrontendEvent::TerminalSession(
                                     FrontendTerminalEvent::TurnState {
                                         session_id: stream_session_id.clone(),
@@ -267,7 +267,7 @@ fn ensure_terminal_streams(
                                     }
                                 ));
                             }
-                            Ok(Some(orchestrator_core::BackendEvent::NeedsInput(needs_input))) => {
+                            Ok(Some(orchestrator_domain::BackendEvent::NeedsInput(needs_input))) => {
                                 let _ = stream_event_tx.send(FrontendEvent::TerminalSession(
                                     FrontendTerminalEvent::NeedsInput {
                                         session_id: stream_session_id.clone(),
@@ -291,7 +291,7 @@ fn ensure_terminal_streams(
                                         message: error.to_string(),
                                         is_session_not_found: matches!(
                                             error,
-                                            orchestrator_core::RuntimeError::SessionNotFound(_)
+                                            orchestrator_domain::RuntimeError::SessionNotFound(_)
                                         ),
                                     },
                                 ));
@@ -353,8 +353,8 @@ impl FrontendEventSubscription for FrontendBroadcastSubscription {
 }
 
 #[async_trait::async_trait]
-impl orchestrator_core::FrontendEventSubscription for CoreFrontendSubscriptionAdapter {
-    async fn next_event(&mut self) -> Result<Option<orchestrator_core::FrontendEvent>, CoreError> {
+impl orchestrator_domain::FrontendEventSubscription for CoreFrontendSubscriptionAdapter {
+    async fn next_event(&mut self) -> Result<Option<orchestrator_domain::FrontendEvent>, CoreError> {
         Ok(self.inner.next_event().await?.map(Into::into))
     }
 }
@@ -405,20 +405,20 @@ where
 }
 
 #[async_trait::async_trait]
-impl<S, G> orchestrator_core::FrontendController for AppFrontendController<S, G>
+impl<S, G> orchestrator_domain::FrontendController for AppFrontendController<S, G>
 where
     S: Supervisor + Send + Sync + 'static,
     G: GithubClient + Send + Sync + 'static,
 {
-    async fn snapshot(&self) -> Result<orchestrator_core::FrontendSnapshot, CoreError> {
+    async fn snapshot(&self) -> Result<orchestrator_domain::FrontendSnapshot, CoreError> {
         Ok(<Self as FrontendController>::snapshot(self).await?.into())
     }
 
-    async fn submit_intent(&self, intent: orchestrator_core::FrontendIntent) -> Result<(), CoreError> {
+    async fn submit_intent(&self, intent: orchestrator_domain::FrontendIntent) -> Result<(), CoreError> {
         <Self as FrontendController>::submit_intent(self, intent.into()).await
     }
 
-    async fn subscribe(&self) -> Result<orchestrator_core::FrontendEventStream, CoreError> {
+    async fn subscribe(&self) -> Result<orchestrator_domain::FrontendEventStream, CoreError> {
         let stream = <Self as FrontendController>::subscribe(self).await?;
         Ok(Box::new(CoreFrontendSubscriptionAdapter { inner: stream }))
     }

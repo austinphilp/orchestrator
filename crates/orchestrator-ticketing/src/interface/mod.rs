@@ -1,6 +1,6 @@
 use thiserror::Error;
 
-pub use orchestrator_core::{
+pub use orchestrator_domain::{
     AddTicketCommentRequest, ArchiveTicketRequest, CoreError, CreateTicketRequest,
     GetTicketRequest, TicketAttachment, TicketDetails, TicketId, TicketProvider, TicketQuery,
     TicketSummary, UpdateTicketDescriptionRequest, UpdateTicketStateRequest, WorkflowState,

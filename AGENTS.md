@@ -11,7 +11,7 @@
 - `OPENROUTER_API_KEY` (orchestrator-supervisor): required API key for supervisor.
 - `LINEAR_API_KEY` (orchestrator-app, orchestrator-ticketing, scripts/ralph_loop.py, scripts/linear_graphql.py): required Linear API key.
 - `ORCHESTRATOR_LINEAR_API_URL` (scripts/linear_graphql.py): optional Linear GraphQL endpoint override for script usage.
-- `ORCHESTRATOR_HARNESS_SESSION_ID` (orchestrator-app, orchestrator-core, orchestrator-harness): optional harness thread/session identifier used to resume Codex sessions; automatically set from persisted runtime mappings and not typically configured manually.
+- `ORCHESTRATOR_HARNESS_SESSION_ID` (orchestrator-app, orchestrator-domain, orchestrator-harness): optional harness thread/session identifier used to resume Codex sessions; automatically set from persisted runtime mappings and not typically configured manually.
 - `ORCHESTRATOR_SHORTCUT_API_KEY` (orchestrator-app, orchestrator-ticketing): required for Shortcut ticketing.
 - `ORCHESTRATOR_UPDATE_GOLDENS` (orchestrator-ui): optional test helper toggle for golden snapshot updates.
 

@@ -6,7 +6,7 @@ Rust workspace for the Orchestrator bootstrap architecture.
 
 - `orchestrator-app`: composition root and app/controller contracts.
 - `orchestrator`: process entrypoint binary.
-- `orchestrator-core`: shared domain models, traits, and errors.
+- `orchestrator-domain`: shared domain models, traits, and errors.
 - `orchestrator-worker-protocol`: canonical worker protocol IDs/events/errors and backend traits.
 - `orchestrator-worker-lifecycle`: worker session lifecycle state machine and control APIs.
 - `orchestrator-worker-eventbus`: worker event fanout and backpressure semantics.

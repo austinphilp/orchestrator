@@ -5,7 +5,7 @@ use orchestrator_app::{
     load_app_config_from_env, App, AppConfig, AppError, AppFrontendController, FrontendController,
     WorkerManagerBackend,
 };
-use orchestrator_core::{
+use orchestrator_domain::{
     BackendKind, CoreError, EventPrunePolicy, SpawnSpec, SqliteEventStore, TicketProvider,
     TicketRecord, WorkItemId, WorkerBackend, WorkflowState,
 };

@@ -1,9 +1,9 @@
 //! Canonical orchestration event schema/types boundary.
 //!
 //! During the app/core merge, orchestrator-app is the canonical import path for
-//! event contracts while store/projection ownership remains in orchestrator-core.
+//! event contracts while store/projection ownership remains in orchestrator-domain.
 
-pub use orchestrator_core::{
+pub use orchestrator_domain::{
     ArtifactCreatedPayload, InboxItemCreatedPayload, InboxItemResolvedPayload, NewEventEnvelope,
     OrchestrationEventPayload, OrchestrationEventType, SessionBlockedPayload,
     SessionCheckpointPayload, SessionCompletedPayload, SessionCrashedPayload,
@@ -19,7 +19,7 @@ pub use orchestrator_core::{
 mod tests {
     use super::*;
     use crate::normalization::DOMAIN_EVENT_SCHEMA_VERSION;
-    use orchestrator_core::{ArtifactId, WorkItemId, WorkerSessionId, WorkflowState};
+    use orchestrator_domain::{ArtifactId, WorkItemId, WorkerSessionId, WorkflowState};
 
     fn sample_event(event_id: &str, payload: OrchestrationEventPayload) -> NewEventEnvelope {
         NewEventEnvelope {

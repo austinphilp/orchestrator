@@ -1,6 +1,6 @@
 use orchestrator_app::{App, AppConfig};
-use orchestrator_core::test_support::TestDbPath;
-use orchestrator_core::{
+use orchestrator_domain::test_support::TestDbPath;
+use orchestrator_domain::{
     AddTicketCommentRequest, CoreError, CreateTicketRequest, GetTicketRequest, Supervisor,
     TicketDetails, TicketProvider, TicketQuery, TicketSummary, UpdateTicketDescriptionRequest,
     UpdateTicketStateRequest,

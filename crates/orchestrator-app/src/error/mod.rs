@@ -1,9 +1,9 @@
 //! App-level orchestration error surface boundary.
 //!
 //! During the C-phase migration this owns app-facing conversion glue at
-//! integration edges while legacy `orchestrator-core::CoreError` paths remain.
+//! integration edges while legacy `orchestrator-domain::CoreError` paths remain.
 
-use orchestrator_core::{CoreError, RuntimeError};
+use orchestrator_domain::{CoreError, RuntimeError};
 use orchestrator_harness::HarnessProviderError;
 use orchestrator_ticketing::TicketingProviderError;
 use orchestrator_vcs::VcsProviderError;

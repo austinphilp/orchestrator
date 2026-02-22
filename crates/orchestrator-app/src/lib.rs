@@ -18,7 +18,7 @@ pub use events::{
     OrchestrationEventPayload, SessionBlockedPayload, SessionCompletedPayload,
     SessionNeedsInputPayload, SessionSpawnedPayload, StoredEventEnvelope, UserRespondedPayload,
 };
-pub use orchestrator_core::{ArtifactId, ArtifactKind, WorkItemId, WorkflowState};
+pub use orchestrator_domain::{ArtifactId, ArtifactKind, WorkItemId, WorkflowState};
 pub use projection::{InboxItemProjection, ProjectionState, SessionProjection, WorkItemProjection};
 
 #[cfg(test)]

@@ -1,5 +1,21 @@
 [workspace]
-members = ["crates/*"]
+members = [
+    "crates/orchestrator",
+    "crates/orchestrator-app",
+    "crates/orchestrator-config",
+    "crates/orchestrator-domain",
+    "crates/orchestrator-harness",
+    "crates/orchestrator-supervisor",
+    "crates/orchestrator-ticketing",
+    "crates/orchestrator-ui",
+    "crates/orchestrator-vcs",
+    "crates/orchestrator-vcs-repos",
+    "crates/orchestrator-worker-eventbus",
+    "crates/orchestrator-worker-lifecycle",
+    "crates/orchestrator-worker-protocol",
+    "crates/orchestrator-worker-runtime",
+    "crates/orchestrator-worker-scheduler",
+]
 resolver = "2"
 
 [workspace.package]

@@ -3,7 +3,7 @@ struct CoreVcsProviderAdapter<'a> {
 }
 
 #[async_trait::async_trait]
-impl orchestrator_core::VcsProvider for CoreVcsProviderAdapter<'_> {
+impl orchestrator_domain::VcsProvider for CoreVcsProviderAdapter<'_> {
     async fn health_check(&self) -> Result<(), CoreError> {
         self.inner.health_check().await
     }
@@ -11,20 +11,20 @@ impl orchestrator_core::VcsProvider for CoreVcsProviderAdapter<'_> {
     async fn discover_repositories(
         &self,
         roots: &[PathBuf],
-    ) -> Result<Vec<orchestrator_core::RepositoryRef>, CoreError> {
+    ) -> Result<Vec<orchestrator_domain::RepositoryRef>, CoreError> {
         self.inner.discover_repositories(roots).await
     }
 
     async fn create_worktree(
         &self,
-        request: orchestrator_core::CreateWorktreeRequest,
-    ) -> Result<orchestrator_core::WorktreeSummary, CoreError> {
+        request: orchestrator_domain::CreateWorktreeRequest,
+    ) -> Result<orchestrator_domain::WorktreeSummary, CoreError> {
         self.inner.create_worktree(request).await
     }
 
     async fn delete_worktree(
         &self,
-        request: orchestrator_core::DeleteWorktreeRequest,
+        request: orchestrator_domain::DeleteWorktreeRequest,
     ) -> Result<(), CoreError> {
         self.inner.delete_worktree(request).await
     }
@@ -32,7 +32,7 @@ impl orchestrator_core::VcsProvider for CoreVcsProviderAdapter<'_> {
     async fn worktree_status(
         &self,
         worktree_path: &std::path::Path,
-    ) -> Result<orchestrator_core::WorktreeStatus, CoreError> {
+    ) -> Result<orchestrator_domain::WorktreeStatus, CoreError> {
         self.inner.worktree_status(worktree_path).await
     }
 }
@@ -310,7 +310,7 @@ impl<S: Supervisor, G: GithubClient> App<S, G> {
             .ok()
             .and_then(|details| details.description);
 
-        orchestrator_core::start_or_resume_selected_ticket(
+        orchestrator_domain::start_or_resume_selected_ticket(
             &mut store,
             selected_ticket,
             selected_ticket_description.as_deref(),
@@ -364,7 +364,7 @@ impl<S: Supervisor, G: GithubClient> App<S, G> {
         }
         if self.config.runtime.event_prune_enabled {
             match store.prune_completed_session_events(
-                orchestrator_core::EventPrunePolicy {
+                orchestrator_domain::EventPrunePolicy {
                     retention_days: self.config.runtime.event_retention_days,
                 },
                 now_unix_seconds(),
@@ -669,7 +669,7 @@ impl<S: Supervisor, G: GithubClient> App<S, G> {
             backend: existing_mapping.session.backend_kind.clone(),
         };
         if let Err(error) = worker_backend.kill(&handle).await {
-            if !matches!(error, orchestrator_core::RuntimeError::SessionNotFound(_)) {
+            if !matches!(error, orchestrator_domain::RuntimeError::SessionNotFound(_)) {
                 cleanup_warnings.push(format!(
                     "failed to archive runtime session '{}': {error}",
                     session_id.as_str()
@@ -715,7 +715,7 @@ impl<S: Supervisor, G: GithubClient> App<S, G> {
         })?;
         if self.config.runtime.event_prune_enabled {
             match store.prune_completed_session_events(
-                orchestrator_core::EventPrunePolicy {
+                orchestrator_domain::EventPrunePolicy {
                     retention_days: self.config.runtime.event_retention_days,
                 },
                 now_unix_seconds(),
@@ -960,7 +960,7 @@ where
 {
     async fn dispatch_supervisor_command(
         &self,
-        invocation: orchestrator_core::UntypedCommandInvocation,
+        invocation: orchestrator_domain::UntypedCommandInvocation,
         context: SupervisorCommandContext,
     ) -> Result<(String, orchestrator_supervisor::LlmResponseStream), CoreError> {
         let supervisor_config = self.supervisor_runtime_config();

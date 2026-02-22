@@ -6,8 +6,8 @@ use time::OffsetDateTime;
 
 use crate::events::{OrchestrationEventPayload, StoredEventEnvelope};
 use crate::projection::ProjectionState;
-use orchestrator_core::{InboxItemId, WorkItemId, WorkerSessionId};
-use orchestrator_core::{InboxItemKind, WorkerSessionStatus, WorkflowState};
+use orchestrator_domain::{InboxItemId, WorkItemId, WorkerSessionId};
+use orchestrator_domain::{InboxItemKind, WorkerSessionStatus, WorkflowState};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum AttentionPriorityBand {
@@ -1717,9 +1717,9 @@ mod tests {
         let pinned = vec![inbox_id];
         let app_snapshot =
             attention_inbox_snapshot(&projection, &AttentionEngineConfig::default(), &pinned);
-        let core_snapshot = orchestrator_core::attention_inbox_snapshot(
+        let core_snapshot = orchestrator_domain::attention_inbox_snapshot(
             &projection,
-            &orchestrator_core::AttentionEngineConfig::default(),
+            &orchestrator_domain::AttentionEngineConfig::default(),
             &pinned,
         );
 

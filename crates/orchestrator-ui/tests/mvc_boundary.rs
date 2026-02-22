@@ -24,7 +24,7 @@ fn ui_manifest_avoids_direct_business_crates() {
     let parsed: Value = manifest.parse().expect("parse Cargo.toml");
 
     for forbidden in [
-        "orchestrator-core",
+        "orchestrator-domain",
         "orchestrator-worker-protocol",
         "orchestrator-ticketing",
         "orchestrator-harness",
@@ -48,7 +48,7 @@ fn ui_sources_use_app_frontend_boundary_only() {
         let text = fs::read_to_string(&file).expect("source text");
         let compact: String = text.chars().filter(|ch| !ch.is_whitespace()).collect();
         for forbidden in [
-            "orchestrator_core::",
+            "orchestrator_domain::",
             "orchestrator_worker_protocol::",
             "orchestrator_ticketing::",
             "orchestrator_app::controller::",

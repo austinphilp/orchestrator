@@ -6,7 +6,7 @@ license.workspace = true
 
 [dependencies]
 async-trait.workspace = true
-orchestrator-core = { path = "../orchestrator-core" }
+orchestrator-domain = { path = "../orchestrator-domain" }
 thiserror.workspace = true
 
 [dev-dependencies]

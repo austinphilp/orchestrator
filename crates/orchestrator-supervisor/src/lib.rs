@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
-pub use orchestrator_core::{
+pub use orchestrator_domain::{
     command_ids, ArtifactCreatedPayload, ArtifactId, ArtifactKind, ArtifactRecord, CoreError,
     EventStore, InboxItemCreatedPayload, InboxItemId, InboxItemKind, LlmChatRequest,
     LlmFinishReason, LlmMessage, LlmProvider, LlmProviderKind, LlmRateLimitState,
@@ -850,7 +850,7 @@ fn header_string(headers: &HeaderMap, names: &[&str]) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use orchestrator_core::test_support::with_env_var;
+    use orchestrator_domain::test_support::with_env_var;
     use std::io::{Read, Write};
     use std::net::{TcpListener, TcpStream};
     use std::thread;

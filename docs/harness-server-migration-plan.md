@@ -115,7 +115,7 @@ Current status in this migration step:
    - Remove `TerminalSnapshot`, `snapshot` and PTY modules.
    - Collapse snapshot polling paths.
    - Introduce/verify a stable event shape for runtime consumers.
-   - Files: `crates/orchestrator-runtime/src/lib.rs`, `crates/orchestrator-runtime/src/worker_manager.rs`, exports from `crates/orchestrator-core/src/lib.rs`.
+   - Files: `crates/orchestrator-runtime/src/lib.rs`, `crates/orchestrator-runtime/src/worker_manager.rs`, exports from `crates/orchestrator-domain/src/lib.rs`.
 2. Backend protocol migration
    - Update Opencode backend first (session lifecycle + event stream).
    - Update Codex backend next.

@@ -1,10 +1,10 @@
 //! Event replay/read-model materialization boundary.
 
-pub use orchestrator_core::{
+pub use orchestrator_domain::{
     ArtifactProjection, InboxItemProjection, ProjectionState, SessionProjection,
     SessionRuntimeProjection, WorkItemProjection,
 };
-use orchestrator_core::{
+use orchestrator_domain::{
     OrchestrationEventPayload, RetrievalScope, StoredEventEnvelope, WorkItemId, WorkerSessionId,
     WorkerSessionStatus,
 };
@@ -234,7 +234,7 @@ mod tests {
         InboxItemCreatedPayload, NewEventEnvelope, OrchestrationEventType, SessionCompletedPayload,
         SessionCrashedPayload, SessionSpawnedPayload, UserRespondedPayload, WorkItemCreatedPayload,
     };
-    use orchestrator_core::{
+    use orchestrator_domain::{
         ArtifactId, InboxItemId, InboxItemKind, ProjectId, TicketId, WorkflowState,
         WorkflowTransitionPayload,
     };
@@ -490,7 +490,7 @@ mod tests {
                 sample_event(
                     "evt-5",
                     OrchestrationEventPayload::SessionCheckpoint(
-                        orchestrator_core::SessionCheckpointPayload {
+                        orchestrator_domain::SessionCheckpointPayload {
                             session_id: WorkerSessionId::new("sess-1"),
                             artifact_id: ArtifactId::new("artifact-1"),
                             summary: "checkpoint".to_owned(),
@@ -501,7 +501,7 @@ mod tests {
         ];
 
         let app_projection = rebuild_projection(&events);
-        let core_projection = orchestrator_core::rebuild_projection(&events);
+        let core_projection = orchestrator_domain::rebuild_projection(&events);
         assert_eq!(app_projection, core_projection);
 
         let app_scoped = retrieve_events(
@@ -509,7 +509,7 @@ mod tests {
             RetrievalScope::Session(WorkerSessionId::new("sess-1")),
             3,
         );
-        let core_scoped = orchestrator_core::retrieve_events(
+        let core_scoped = orchestrator_domain::retrieve_events(
             &core_projection,
             RetrievalScope::Session(WorkerSessionId::new("sess-1")),
             3,

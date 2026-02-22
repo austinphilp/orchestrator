@@ -20,7 +20,7 @@ Your repo already has a good “composition root + adapters” seed:
 
 **Crates (present)**
 - `orchestrator-app`: composition root, reads config from env TOML, wires `OpenRouterSupervisor`, `GhCliClient`, and runs a minimal UI.
-- `orchestrator-core`: basic domain types + `Supervisor` and `GithubClient` traits.
+- `orchestrator-domain`: basic domain types + `Supervisor` and `GithubClient` traits.
 - `orchestrator-ui`: a minimal ratatui loop that renders status and quits on `q`.
 - `orchestrator-supervisor`: OpenRouter API key loading + `health_check`.
 - `orchestrator-github`: `gh auth status` healthcheck via an abstracted command runner.
@@ -136,7 +136,7 @@ The orchestrator should be thought of as **four cooperating subsystems**:
 
 You can keep your existing crates and add a few, or refactor names. A clean split:
 
-### `orchestrator-core` (domain + command APIs)
+### `orchestrator-domain` (domain + command APIs)
 **Owns**
 - Domain types (Ticket, WorkItem, Worktree, WorkerSession, InboxItem, Artifact, WorkflowState)
 - Event types + EventStore trait
@@ -707,7 +707,7 @@ You already have:
 - traits for dependencies (Supervisor, GithubClient).
 
 Next evolutions to keep the same pattern:
-- Expand `orchestrator-core` with **additional traits**:
+- Expand `orchestrator-domain` with **additional traits**:
   - WorkerBackend
   - TicketingProvider
   - VcsProvider / WorktreeManager

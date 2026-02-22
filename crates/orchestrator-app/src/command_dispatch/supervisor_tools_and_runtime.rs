@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use orchestrator_core::{
+use orchestrator_domain::{
     apply_workflow_transition, ArtifactId, ArtifactKind, ArtifactRecord, CoreError, EventStore,
     LlmChatRequest, LlmFinishReason, LlmMessage, LlmProvider, LlmResponseStream,
     LlmResponseSubscription, LlmRole, LlmStreamChunk, LlmTokenUsage, LlmTool, LlmToolCall,

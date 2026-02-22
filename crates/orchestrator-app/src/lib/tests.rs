@@ -5,8 +5,8 @@ mod tests {
         ArtifactCreatedPayload, NewEventEnvelope, OrchestrationEventPayload, StoredEventEnvelope,
     };
     use crate::normalization::DOMAIN_EVENT_SCHEMA_VERSION;
-    use orchestrator_core::test_support::{with_env_var, with_env_vars, TestDbPath};
-    use orchestrator_core::{
+    use orchestrator_domain::test_support::{with_env_var, with_env_vars, TestDbPath};
+    use orchestrator_domain::{
         command_ids, AddTicketCommentRequest, ArtifactId, ArtifactKind, ArtifactRecord,
         BackendCapabilities, BackendKind, CodeHostKind, Command, CommandRegistry,
         CreateTicketRequest, GetTicketRequest, LlmChatRequest, LlmFinishReason, LlmProviderKind,
@@ -157,8 +157,8 @@ mod tests {
 
         async fn create_draft_pull_request(
             &self,
-            _request: orchestrator_core::CreatePullRequestRequest,
-        ) -> Result<orchestrator_core::PullRequestSummary, CoreError> {
+            _request: orchestrator_domain::CreatePullRequestRequest,
+        ) -> Result<orchestrator_domain::PullRequestSummary, CoreError> {
             Err(CoreError::DependencyUnavailable(
                 "healthy mock does not create pull requests in unit tests".to_owned(),
             ))
@@ -166,30 +166,30 @@ mod tests {
 
         async fn mark_ready_for_review(
             &self,
-            _pr: &orchestrator_core::PullRequestRef,
+            _pr: &orchestrator_domain::PullRequestRef,
         ) -> Result<(), CoreError> {
             Ok(())
         }
 
         async fn request_reviewers(
             &self,
-            _pr: &orchestrator_core::PullRequestRef,
-            _reviewers: orchestrator_core::ReviewerRequest,
+            _pr: &orchestrator_domain::PullRequestRef,
+            _reviewers: orchestrator_domain::ReviewerRequest,
         ) -> Result<(), CoreError> {
             Ok(())
         }
 
         async fn list_waiting_for_my_review(
             &self,
-        ) -> Result<Vec<orchestrator_core::PullRequestSummary>, CoreError> {
+        ) -> Result<Vec<orchestrator_domain::PullRequestSummary>, CoreError> {
             Ok(Vec::new())
         }
 
         async fn get_pull_request_merge_state(
             &self,
-            _pr: &orchestrator_core::PullRequestRef,
-        ) -> Result<orchestrator_core::PullRequestMergeState, CoreError> {
-            Ok(orchestrator_core::PullRequestMergeState {
+            _pr: &orchestrator_domain::PullRequestRef,
+        ) -> Result<orchestrator_domain::PullRequestMergeState, CoreError> {
+            Ok(orchestrator_domain::PullRequestMergeState {
                 merged: false,
                 is_draft: true,
                 state: None,
@@ -203,7 +203,7 @@ mod tests {
 
         async fn merge_pull_request(
             &self,
-            _pr: &orchestrator_core::PullRequestRef,
+            _pr: &orchestrator_domain::PullRequestRef,
         ) -> Result<(), CoreError> {
             Ok(())
         }
@@ -294,7 +294,7 @@ mod tests {
 
     #[derive(Clone, Default)]
     struct MockCodeHost {
-        ready_calls: Arc<Mutex<Vec<orchestrator_core::PullRequestRef>>>,
+        ready_calls: Arc<Mutex<Vec<orchestrator_domain::PullRequestRef>>>,
         ready_error: Arc<Mutex<Option<String>>>,
     }
 
@@ -306,7 +306,7 @@ mod tests {
             }
         }
 
-        fn ready_calls(&self) -> Vec<orchestrator_core::PullRequestRef> {
+        fn ready_calls(&self) -> Vec<orchestrator_domain::PullRequestRef> {
             self.ready_calls.lock().expect("ready calls lock").clone()
         }
     }
@@ -323,10 +323,10 @@ mod tests {
 
         async fn create_draft_pull_request(
             &self,
-            request: orchestrator_core::CreatePullRequestRequest,
-        ) -> Result<orchestrator_core::PullRequestSummary, CoreError> {
-            Ok(orchestrator_core::PullRequestSummary {
-                reference: orchestrator_core::PullRequestRef {
+            request: orchestrator_domain::CreatePullRequestRequest,
+        ) -> Result<orchestrator_domain::PullRequestSummary, CoreError> {
+            Ok(orchestrator_domain::PullRequestSummary {
+                reference: orchestrator_domain::PullRequestRef {
                     repository: request.repository,
                     number: 1,
                     url: "https://github.com/example/placeholder/pull/1".to_owned(),
@@ -338,7 +338,7 @@ mod tests {
 
         async fn mark_ready_for_review(
             &self,
-            pr: &orchestrator_core::PullRequestRef,
+            pr: &orchestrator_domain::PullRequestRef,
         ) -> Result<(), CoreError> {
             self.ready_calls
                 .lock()
@@ -354,23 +354,23 @@ mod tests {
 
         async fn request_reviewers(
             &self,
-            _pr: &orchestrator_core::PullRequestRef,
-            _reviewers: orchestrator_core::ReviewerRequest,
+            _pr: &orchestrator_domain::PullRequestRef,
+            _reviewers: orchestrator_domain::ReviewerRequest,
         ) -> Result<(), CoreError> {
             Ok(())
         }
 
         async fn list_waiting_for_my_review(
             &self,
-        ) -> Result<Vec<orchestrator_core::PullRequestSummary>, CoreError> {
+        ) -> Result<Vec<orchestrator_domain::PullRequestSummary>, CoreError> {
             Ok(Vec::new())
         }
 
         async fn get_pull_request_merge_state(
             &self,
-            _pr: &orchestrator_core::PullRequestRef,
-        ) -> Result<orchestrator_core::PullRequestMergeState, CoreError> {
-            Ok(orchestrator_core::PullRequestMergeState {
+            _pr: &orchestrator_domain::PullRequestRef,
+        ) -> Result<orchestrator_domain::PullRequestMergeState, CoreError> {
+            Ok(orchestrator_domain::PullRequestMergeState {
                 merged: false,
                 is_draft: true,
                 state: None,
@@ -384,7 +384,7 @@ mod tests {
 
         async fn merge_pull_request(
             &self,
-            _pr: &orchestrator_core::PullRequestRef,
+            _pr: &orchestrator_domain::PullRequestRef,
         ) -> Result<(), CoreError> {
             Ok(())
         }
@@ -444,7 +444,7 @@ mod tests {
         artifact_id: &str,
         pr_url: &str,
     ) -> Result<(), CoreError> {
-        let ticket = orchestrator_core::TicketRecord {
+        let ticket = orchestrator_domain::TicketRecord {
             ticket_id: TicketId::from_provider_uuid(
                 TicketProvider::Linear,
                 format!("provider-{}", work_item_id.as_str()),
@@ -1298,12 +1298,12 @@ mod tests {
     }
 
     struct StubVcs {
-        repository: orchestrator_core::RepositoryRef,
-        create_calls: Mutex<Vec<orchestrator_core::CreateWorktreeRequest>>,
+        repository: orchestrator_domain::RepositoryRef,
+        create_calls: Mutex<Vec<orchestrator_domain::CreateWorktreeRequest>>,
     }
 
     #[async_trait::async_trait]
-    impl orchestrator_core::VcsProvider for StubVcs {
+    impl orchestrator_domain::VcsProvider for StubVcs {
         async fn health_check(&self) -> Result<(), CoreError> {
             Ok(())
         }
@@ -1311,19 +1311,19 @@ mod tests {
         async fn discover_repositories(
             &self,
             _roots: &[PathBuf],
-        ) -> Result<Vec<orchestrator_core::RepositoryRef>, CoreError> {
+        ) -> Result<Vec<orchestrator_domain::RepositoryRef>, CoreError> {
             Ok(vec![self.repository.clone()])
         }
 
         async fn create_worktree(
             &self,
-            request: orchestrator_core::CreateWorktreeRequest,
-        ) -> Result<orchestrator_core::WorktreeSummary, CoreError> {
+            request: orchestrator_domain::CreateWorktreeRequest,
+        ) -> Result<orchestrator_domain::WorktreeSummary, CoreError> {
             self.create_calls
                 .lock()
                 .expect("lock")
                 .push(request.clone());
-            Ok(orchestrator_core::WorktreeSummary {
+            Ok(orchestrator_domain::WorktreeSummary {
                 worktree_id: request.worktree_id,
                 repository: request.repository,
                 path: request.worktree_path,
@@ -1334,7 +1334,7 @@ mod tests {
 
         async fn delete_worktree(
             &self,
-            _request: orchestrator_core::DeleteWorktreeRequest,
+            _request: orchestrator_domain::DeleteWorktreeRequest,
         ) -> Result<(), CoreError> {
             Ok(())
         }
@@ -1358,43 +1358,43 @@ mod tests {
         }
 
         async fn health_check(&self) -> Result<(), CoreError> {
-            <Self as orchestrator_core::VcsProvider>::health_check(self).await
+            <Self as orchestrator_domain::VcsProvider>::health_check(self).await
         }
 
         async fn discover_repositories(
             &self,
             roots: &[PathBuf],
         ) -> Result<Vec<orchestrator_vcs::RepositoryRef>, CoreError> {
-            <Self as orchestrator_core::VcsProvider>::discover_repositories(self, roots).await
+            <Self as orchestrator_domain::VcsProvider>::discover_repositories(self, roots).await
         }
 
         async fn create_worktree(
             &self,
             request: orchestrator_vcs::CreateWorktreeRequest,
         ) -> Result<orchestrator_vcs::WorktreeSummary, CoreError> {
-            <Self as orchestrator_core::VcsProvider>::create_worktree(self, request).await
+            <Self as orchestrator_domain::VcsProvider>::create_worktree(self, request).await
         }
 
         async fn delete_worktree(
             &self,
             request: orchestrator_vcs::DeleteWorktreeRequest,
         ) -> Result<(), CoreError> {
-            <Self as orchestrator_core::VcsProvider>::delete_worktree(self, request).await
+            <Self as orchestrator_domain::VcsProvider>::delete_worktree(self, request).await
         }
 
         async fn worktree_status(
             &self,
             worktree_path: &Path,
         ) -> Result<orchestrator_vcs::WorktreeStatus, CoreError> {
-            <Self as orchestrator_core::VcsProvider>::worktree_status(self, worktree_path).await
+            <Self as orchestrator_domain::VcsProvider>::worktree_status(self, worktree_path).await
         }
     }
 
     struct EmptyStream;
 
     #[async_trait::async_trait]
-    impl orchestrator_core::WorkerEventSubscription for EmptyStream {
-        async fn next_event(&mut self) -> RuntimeResult<Option<orchestrator_core::BackendEvent>> {
+    impl orchestrator_domain::WorkerEventSubscription for EmptyStream {
+        async fn next_event(&mut self) -> RuntimeResult<Option<orchestrator_domain::BackendEvent>> {
             Ok(None)
         }
     }
@@ -1404,7 +1404,7 @@ mod tests {
     }
 
     #[async_trait::async_trait]
-    impl orchestrator_core::SessionLifecycle for StubBackend {
+    impl orchestrator_domain::SessionLifecycle for StubBackend {
         async fn spawn(&self, spec: SpawnSpec) -> RuntimeResult<SessionHandle> {
             self.spawn_calls.lock().expect("lock").push(spec.clone());
             Ok(SessionHandle {
@@ -1448,7 +1448,7 @@ mod tests {
         async fn subscribe(
             &self,
             _session: &SessionHandle,
-        ) -> RuntimeResult<orchestrator_core::WorkerEventStream> {
+        ) -> RuntimeResult<orchestrator_domain::WorkerEventStream> {
             Ok(Box::new(EmptyStream))
         }
     }
@@ -1469,7 +1469,7 @@ mod tests {
             github: Healthy,
         };
         let vcs = StubVcs {
-            repository: orchestrator_core::RepositoryRef {
+            repository: orchestrator_domain::RepositoryRef {
                 id: "/workspace/repo".to_owned(),
                 name: "repo".to_owned(),
                 root: PathBuf::from("/workspace/repo"),
@@ -1504,7 +1504,7 @@ mod tests {
 
         assert_eq!(
             result.action,
-            orchestrator_core::SelectedTicketFlowAction::Started
+            orchestrator_domain::SelectedTicketFlowAction::Started
         );
         assert_eq!(vcs.create_calls.lock().expect("lock").len(), 1);
         assert_eq!(backend.spawn_calls.lock().expect("lock").len(), 1);
@@ -1530,7 +1530,7 @@ mod tests {
             let mut store = SqliteEventStore::open(temp_db.path()).expect("open store");
             store
                 .upsert_runtime_mapping(&RuntimeMappingRecord {
-                    ticket: orchestrator_core::TicketRecord {
+                    ticket: orchestrator_domain::TicketRecord {
                         ticket_id: TicketId::from_provider_uuid(TicketProvider::Linear, "issue-1"),
                         provider: TicketProvider::Linear,
                         provider_ticket_id: "issue-1".to_owned(),
@@ -1946,7 +1946,7 @@ mod tests {
                 delta: String::new(),
                 tool_calls: Vec::new(),
                 finish_reason: Some(LlmFinishReason::Stop),
-                usage: Some(orchestrator_core::LlmTokenUsage {
+                usage: Some(orchestrator_domain::LlmTokenUsage {
                     input_tokens: 18,
                     output_tokens: 11,
                     total_tokens: 29,
@@ -2032,7 +2032,7 @@ mod tests {
                 delta: String::new(),
                 tool_calls: Vec::new(),
                 finish_reason: Some(LlmFinishReason::Stop),
-                usage: Some(orchestrator_core::LlmTokenUsage {
+                usage: Some(orchestrator_domain::LlmTokenUsage {
                     input_tokens: 64,
                     output_tokens: 19,
                     total_tokens: 83,

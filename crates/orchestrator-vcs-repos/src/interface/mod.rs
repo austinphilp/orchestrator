@@ -1,6 +1,6 @@
 use thiserror::Error;
 
-pub use orchestrator_core::{
+pub use orchestrator_domain::{
     CodeHostKind, CoreError, CreatePullRequestRequest, PullRequestCiStatus, PullRequestMergeState,
     PullRequestRef, PullRequestReviewSummary, PullRequestSummary, RepositoryRef, ReviewerRequest,
     UrlOpener,

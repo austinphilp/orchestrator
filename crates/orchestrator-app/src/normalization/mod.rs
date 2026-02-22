@@ -8,7 +8,7 @@ use crate::events::{
     SessionBlockedPayload, SessionCheckpointPayload, SessionCompletedPayload,
     SessionCrashedPayload, SessionNeedsInputPayload,
 };
-use orchestrator_core::{
+use orchestrator_domain::{
     ArtifactId, ArtifactKind, ArtifactRecord, BackendArtifactEvent, BackendArtifactKind,
     BackendBlockedEvent, BackendDoneEvent, BackendEvent, BackendNeedsInputEvent,
     BackendOutputEvent, InboxItemId, InboxItemKind, WorkItemId, WorkerSessionId,
@@ -581,7 +581,7 @@ fn title_case(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use orchestrator_core::{
+    use orchestrator_domain::{
         normalize_backend_event as core_normalize_backend_event, BackendCheckpointEvent,
         BackendCrashedEvent,
         BackendEventNormalizationContext as CoreBackendEventNormalizationContext,

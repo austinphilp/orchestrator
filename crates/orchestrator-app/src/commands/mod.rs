@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use orchestrator_core::{CoreError, RetrievalScope, WorkItemId, WorkerSessionId};
+use orchestrator_domain::{CoreError, RetrievalScope, WorkItemId, WorkerSessionId};
 
 const SUPERVISOR_CONTEXT_IDENTIFIER_MAX_CHARS: usize = 128;
 const SUPERVISOR_CONTEXT_SCOPE_MAX_CHARS: usize = 160;
@@ -600,8 +600,8 @@ fn ensure_no_args(command_id: &'static str, args: Option<&Value>) -> Result<(), 
     })
 }
 
-impl From<orchestrator_core::UntypedCommandInvocation> for UntypedCommandInvocation {
-    fn from(value: orchestrator_core::UntypedCommandInvocation) -> Self {
+impl From<orchestrator_domain::UntypedCommandInvocation> for UntypedCommandInvocation {
+    fn from(value: orchestrator_domain::UntypedCommandInvocation) -> Self {
         Self {
             command_id: value.command_id,
             args: value.args,
@@ -609,7 +609,7 @@ impl From<orchestrator_core::UntypedCommandInvocation> for UntypedCommandInvocat
     }
 }
 
-impl From<UntypedCommandInvocation> for orchestrator_core::UntypedCommandInvocation {
+impl From<UntypedCommandInvocation> for orchestrator_domain::UntypedCommandInvocation {
     fn from(value: UntypedCommandInvocation) -> Self {
         Self {
             command_id: value.command_id,
@@ -618,8 +618,8 @@ impl From<UntypedCommandInvocation> for orchestrator_core::UntypedCommandInvocat
     }
 }
 
-impl From<orchestrator_core::SupervisorQueryContextArgs> for SupervisorQueryContextArgs {
-    fn from(value: orchestrator_core::SupervisorQueryContextArgs) -> Self {
+impl From<orchestrator_domain::SupervisorQueryContextArgs> for SupervisorQueryContextArgs {
+    fn from(value: orchestrator_domain::SupervisorQueryContextArgs) -> Self {
         Self {
             selected_work_item_id: value.selected_work_item_id,
             selected_session_id: value.selected_session_id,
@@ -628,7 +628,7 @@ impl From<orchestrator_core::SupervisorQueryContextArgs> for SupervisorQueryCont
     }
 }
 
-impl From<SupervisorQueryContextArgs> for orchestrator_core::SupervisorQueryContextArgs {
+impl From<SupervisorQueryContextArgs> for orchestrator_domain::SupervisorQueryContextArgs {
     fn from(value: SupervisorQueryContextArgs) -> Self {
         Self {
             selected_work_item_id: value.selected_work_item_id,
@@ -1105,47 +1105,47 @@ mod tests {
     fn command_ids_match_legacy_core_contract() {
         assert_eq!(
             ids::UI_FOCUS_NEXT_INBOX,
-            orchestrator_core::command_ids::UI_FOCUS_NEXT_INBOX
+            orchestrator_domain::command_ids::UI_FOCUS_NEXT_INBOX
         );
         assert_eq!(
             ids::UI_OPEN_TERMINAL_FOR_SELECTED,
-            orchestrator_core::command_ids::UI_OPEN_TERMINAL_FOR_SELECTED
+            orchestrator_domain::command_ids::UI_OPEN_TERMINAL_FOR_SELECTED
         );
         assert_eq!(
             ids::UI_OPEN_DIFF_INSPECTOR_FOR_SELECTED,
-            orchestrator_core::command_ids::UI_OPEN_DIFF_INSPECTOR_FOR_SELECTED
+            orchestrator_domain::command_ids::UI_OPEN_DIFF_INSPECTOR_FOR_SELECTED
         );
         assert_eq!(
             ids::UI_OPEN_TEST_INSPECTOR_FOR_SELECTED,
-            orchestrator_core::command_ids::UI_OPEN_TEST_INSPECTOR_FOR_SELECTED
+            orchestrator_domain::command_ids::UI_OPEN_TEST_INSPECTOR_FOR_SELECTED
         );
         assert_eq!(
             ids::UI_OPEN_PR_INSPECTOR_FOR_SELECTED,
-            orchestrator_core::command_ids::UI_OPEN_PR_INSPECTOR_FOR_SELECTED
+            orchestrator_domain::command_ids::UI_OPEN_PR_INSPECTOR_FOR_SELECTED
         );
         assert_eq!(
             ids::UI_OPEN_CHAT_INSPECTOR_FOR_SELECTED,
-            orchestrator_core::command_ids::UI_OPEN_CHAT_INSPECTOR_FOR_SELECTED
+            orchestrator_domain::command_ids::UI_OPEN_CHAT_INSPECTOR_FOR_SELECTED
         );
         assert_eq!(
             ids::SUPERVISOR_QUERY,
-            orchestrator_core::command_ids::SUPERVISOR_QUERY
+            orchestrator_domain::command_ids::SUPERVISOR_QUERY
         );
         assert_eq!(
             ids::WORKFLOW_APPROVE_PR_READY,
-            orchestrator_core::command_ids::WORKFLOW_APPROVE_PR_READY
+            orchestrator_domain::command_ids::WORKFLOW_APPROVE_PR_READY
         );
         assert_eq!(
             ids::WORKFLOW_RECONCILE_PR_MERGE,
-            orchestrator_core::command_ids::WORKFLOW_RECONCILE_PR_MERGE
+            orchestrator_domain::command_ids::WORKFLOW_RECONCILE_PR_MERGE
         );
         assert_eq!(
             ids::WORKFLOW_MERGE_PR,
-            orchestrator_core::command_ids::WORKFLOW_MERGE_PR
+            orchestrator_domain::command_ids::WORKFLOW_MERGE_PR
         );
         assert_eq!(
             ids::GITHUB_OPEN_REVIEW_TABS,
-            orchestrator_core::command_ids::GITHUB_OPEN_REVIEW_TABS
+            orchestrator_domain::command_ids::GITHUB_OPEN_REVIEW_TABS
         );
     }
 
@@ -1162,7 +1162,7 @@ mod tests {
                 )
             })
             .collect::<Vec<_>>();
-        let core_metadata = orchestrator_core::CommandRegistry::default()
+        let core_metadata = orchestrator_domain::CommandRegistry::default()
             .list()
             .into_iter()
             .map(|metadata| {
@@ -1180,7 +1180,7 @@ mod tests {
     #[test]
     fn parse_and_roundtrip_matches_legacy_core_contract() {
         let app_registry = CommandRegistry::default();
-        let core_registry = orchestrator_core::CommandRegistry::default();
+        let core_registry = orchestrator_domain::CommandRegistry::default();
         let cases = vec![
             UntypedCommandInvocation {
                 command_id: ids::UI_FOCUS_NEXT_INBOX.to_owned(),
@@ -1253,7 +1253,7 @@ mod tests {
             })),
         };
 
-        let core: orchestrator_core::UntypedCommandInvocation = invocation.clone().into();
+        let core: orchestrator_domain::UntypedCommandInvocation = invocation.clone().into();
         let roundtrip: UntypedCommandInvocation = core.into();
         assert_eq!(roundtrip, invocation);
     }
@@ -1266,7 +1266,7 @@ mod tests {
             scope: Some("session:sess-123".to_owned()),
         };
 
-        let core: orchestrator_core::SupervisorQueryContextArgs = context.clone().into();
+        let core: orchestrator_domain::SupervisorQueryContextArgs = context.clone().into();
         let roundtrip: SupervisorQueryContextArgs = core.into();
         assert_eq!(roundtrip, context);
     }

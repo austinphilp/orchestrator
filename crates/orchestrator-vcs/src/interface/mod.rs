@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 
 use thiserror::Error;
 
-pub use orchestrator_core::{
+pub use orchestrator_domain::{
     CoreError, CreateWorktreeRequest, DeleteWorktreeRequest, RepositoryRef, WorktreeId,
     WorktreeStatus, WorktreeSummary,
 };

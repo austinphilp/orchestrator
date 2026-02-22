@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use async_trait::async_trait;
-use orchestrator_core::{
+use orchestrator_domain::{
     CoreError, InboxItemId, InboxItemKind, LlmResponseStream, SelectedTicketFlowResult,
     UntypedCommandInvocation, WorkItemId, WorkerSessionId, WorkflowState,
 };
@@ -206,7 +206,7 @@ pub enum MergeQueueEvent {
     },
 }
 
-pub type SupervisorCommandContext = orchestrator_core::SupervisorQueryContextArgs;
+pub type SupervisorCommandContext = orchestrator_domain::SupervisorQueryContextArgs;
 
 #[async_trait]
 pub trait SupervisorCommandDispatcher: Send + Sync {
@@ -260,7 +260,7 @@ mod tests {
     fn supervisor_command_context_alias_tracks_command_context_type() {
         assert_eq!(
             TypeId::of::<SupervisorCommandContext>(),
-            TypeId::of::<orchestrator_core::SupervisorQueryContextArgs>()
+            TypeId::of::<orchestrator_domain::SupervisorQueryContextArgs>()
         );
     }
 

@@ -16,7 +16,7 @@ The repository is a Rust workspace with a layered design:
 - `orchestrator-ui`: terminal UI, stateful views, keymaps, interaction modes.
 
 2. Domain and state layer
-- `orchestrator-core`: domain model, workflow states, commands/events, normalization, attention engine, projections, event store abstractions.
+- `orchestrator-domain`: domain model, workflow states, commands/events, normalization, attention engine, projections, event store abstractions.
 
 3. Harness/runtime layer
 - `orchestrator-worker-runtime`: runtime composition facade over worker lifecycle, eventbus, and scheduler crates.
@@ -42,7 +42,7 @@ The repository is a Rust workspace with a layered design:
 - UI emits intent-level actions/commands from keybindings and view interactions.
 - App command dispatch translates these into domain commands/integration calls.
 
-3. Domain updates (`orchestrator-core`)
+3. Domain updates (`orchestrator-domain`)
 - Commands produce domain events (workflow/ticket/session state transitions).
 - Events persist to SQLite store and update read projection.
 - Projection is rendered back into UI view models.
@@ -56,14 +56,14 @@ The repository is a Rust workspace with a layered design:
 ## State and persistence model
 
 - Event-first model:
-  - Event definitions in `orchestrator-core/src/events.rs`.
-  - Projection/read model in `orchestrator-core/src/projection.rs`.
-  - Domain status and workflow transitions in `orchestrator-core/src/status.rs` and `orchestrator-core/src/workflow.rs`.
+  - Event definitions in `orchestrator-domain/src/events.rs`.
+  - Projection/read model in `orchestrator-domain/src/projection.rs`.
+  - Domain status and workflow transitions in `orchestrator-domain/src/status.rs` and `orchestrator-domain/src/workflow.rs`.
 - Persistence:
-  - SQLite-backed event and mapping store in `orchestrator-core/src/store.rs`.
+  - SQLite-backed event and mapping store in `orchestrator-domain/src/store.rs`.
   - Startup rebuilds in-memory/projected state from persisted events.
 - Normalization:
-  - Backend event normalization in `orchestrator-core/src/normalization.rs` makes backend-specific output consumable by core/UI.
+  - Backend event normalization in `orchestrator-domain/src/normalization.rs` makes backend-specific output consumable by core/UI.
 
 ## Projection replacement and recompute policy
 
@@ -78,17 +78,17 @@ The repository is a Rust workspace with a layered design:
 - Ticket provider abstraction supports external issue systems (Linear/Shortcut).
 - Ticket picker logic and start/resume orchestration in:
   - `orchestrator-app/src/ticket_picker.rs`
-  - `orchestrator-core/src/ticket_selection.rs`
+  - `orchestrator-domain/src/ticket_selection.rs`
 - Ticket-focused workflow states and transitions implemented in core workflow modules.
 
 ## Workflow lifecycle and attention model
 
 - Workflow states, transition constraints, and command handling:
-  - `orchestrator-core/src/workflow.rs`
-  - `orchestrator-core/src/commands.rs`
-  - `orchestrator-core/src/events.rs`
+  - `orchestrator-domain/src/workflow.rs`
+  - `orchestrator-domain/src/commands.rs`
+  - `orchestrator-domain/src/events.rs`
 - Attention scoring plus batch-lane grouping for inbox prioritization:
-  - `orchestrator-core/src/attention_engine.rs`
+  - `orchestrator-domain/src/attention_engine.rs`
 
 ## Supervisor (LLM) support
 
@@ -152,7 +152,7 @@ The repository is a Rust workspace with a layered design:
 
 ## Architectural boundaries that matter for future work
 
-1. Keep `orchestrator-core` pure and provider-agnostic.
+1. Keep `orchestrator-domain` pure and provider-agnostic.
 2. Keep integration-specific API behavior inside integration crates.
 3. Keep `orchestrator-app` as composition/coordination, not business-rule storage.
 4. Keep UI state derived from core projection/events whenever possible.

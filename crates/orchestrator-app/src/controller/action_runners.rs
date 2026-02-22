@@ -5,7 +5,7 @@ use crate::controller::contracts::{
     SupervisorCommandContext, SupervisorCommandDispatcher, TicketPickerProvider,
 };
 use crate::events::StoredEventEnvelope;
-use orchestrator_core::{
+use orchestrator_domain::{
     CoreError, LlmChatRequest, LlmFinishReason, LlmProvider, LlmRateLimitState, LlmResponseStream,
     LlmTokenUsage, UntypedCommandInvocation, WorkerSessionId,
 };
@@ -336,7 +336,7 @@ fn sanitize_terminal_display_text(input: &str) -> String {
 mod tests {
     use super::*;
     use async_trait::async_trait;
-    use orchestrator_core::{
+    use orchestrator_domain::{
         CoreError, InboxItemId, InboxItemKind, LlmProviderKind, LlmResponseSubscription,
         LlmStreamChunk, OrchestrationEventPayload, OrchestrationEventType,
         SelectedTicketFlowResult, SessionCompletedPayload, TicketSummary, WorkItemId,

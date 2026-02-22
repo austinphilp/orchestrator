@@ -15,7 +15,7 @@ use orchestrator_config::{
     load_from_env as canonical_load_from_env, load_from_path as canonical_load_from_path,
     ConfigError,
 };
-use orchestrator_core::{
+use orchestrator_domain::{
     apply_workflow_transition, CoreError, EventStore, InboxItemId, RuntimeSessionId,
     SelectedTicketFlowConfig, SelectedTicketFlowResult, SessionHandle, SqliteEventStore,
     WorkItemId, WorkerBackend, WorkerSessionId, WorkerSessionStatus, WorkflowGuardContext,
@@ -190,7 +190,7 @@ pub(crate) fn open_owned_event_store(path: &str) -> Result<SqliteEventStore, Cor
 #[cfg(test)]
 mod config_and_bootstrap_tests {
     use super::*;
-    use orchestrator_core::test_support::TestDbPath;
+    use orchestrator_domain::test_support::TestDbPath;
 
     #[test]
     fn open_event_store_replaces_pool_when_runtime_config_changes() {

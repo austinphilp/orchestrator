@@ -23,7 +23,7 @@ pub enum CoreError {
     #[error(transparent)]
     Runtime(#[from] RuntimeError),
     #[error(
-        "unsupported database schema version {found}; this binary supports up to {supported}. Please upgrade orchestrator-core."
+        "unsupported database schema version {found}; this binary supports up to {supported}. Please upgrade orchestrator-domain."
     )]
     UnsupportedSchemaVersion { supported: u32, found: u32 },
     #[error("unknown command id: {command_id}")]

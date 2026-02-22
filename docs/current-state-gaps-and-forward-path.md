@@ -10,7 +10,7 @@
 
 ## 1) Core workflow automation planner is present but not clearly wired into runtime
 
-- `orchestrator-core/src/workflow_automation.rs` contains automation planning/policy structures.
+- `orchestrator-domain/src/workflow_automation.rs` contains automation planning/policy structures.
 - Runtime command and UI flow appear centered on direct command dispatch paths rather than planner-driven execution.
 - Impact:
   - Planning logic can drift from actual behavior.
