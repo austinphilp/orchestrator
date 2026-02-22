@@ -6,10 +6,10 @@ use std::time::{Duration, SystemTime};
 use async_trait::async_trait;
 use crate::interface::{
     AddTicketCommentRequest, ArchiveTicketRequest, CoreError, CreateTicketRequest,
-    GetTicketRequest, TicketAttachment, TicketDetails, TicketId, TicketProvider, TicketQuery,
-    TicketSummary, UpdateTicketDescriptionRequest, UpdateTicketStateRequest, WorkflowState,
+    CoreTicketingProvider, GetTicketRequest, TicketAttachment, TicketDetails, TicketId,
+    TicketProvider, TicketQuery, TicketSummary, UpdateTicketDescriptionRequest,
+    UpdateTicketStateRequest, WorkflowState,
 };
-use orchestrator_core::TicketingProvider;
 use serde::Deserialize;
 use serde_json::json;
 use tokio::sync::{oneshot, Mutex};

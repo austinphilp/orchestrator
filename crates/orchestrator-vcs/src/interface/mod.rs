@@ -1,8 +1,9 @@
 use thiserror::Error;
 
+pub use orchestrator_core::VcsProvider as CoreVcsProvider;
 pub use orchestrator_core::{
-    CoreError, CreateWorktreeRequest, DeleteWorktreeRequest, RepositoryRef, WorktreeStatus,
-    WorktreeSummary,
+    CoreError, CreateWorktreeRequest, DeleteWorktreeRequest, RepositoryRef, WorktreeId,
+    WorktreeStatus, WorktreeSummary,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -25,7 +26,7 @@ impl VcsProviderKind {
     }
 }
 
-pub trait VcsProvider: orchestrator_core::VcsProvider + Send + Sync {
+pub trait VcsProvider: CoreVcsProvider + Send + Sync {
     fn kind(&self) -> VcsProviderKind;
 
     fn provider_key(&self) -> &'static str {

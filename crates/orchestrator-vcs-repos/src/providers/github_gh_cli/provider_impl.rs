@@ -5,9 +5,9 @@ use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 
 use crate::interface::{
-    CodeHostKind, CoreError, CreatePullRequestRequest, PullRequestCiStatus,
-    PullRequestMergeState, PullRequestRef, PullRequestReviewSummary, PullRequestSummary,
-    RepositoryRef, ReviewerRequest, UrlOpener,
+    CodeHostKind, CoreCodeHostProvider, CoreError, CoreGithubClient, CreatePullRequestRequest,
+    PullRequestCiStatus, PullRequestMergeState, PullRequestRef, PullRequestReviewSummary,
+    PullRequestSummary, RepositoryRef, ReviewerRequest, UrlOpener,
 };
 use crate::interface::{VcsRepoProvider, VcsRepoProviderKind};
 use serde::Deserialize;
@@ -658,20 +658,20 @@ fn validate_command_binary_path(
 }
 
 #[async_trait::async_trait]
-impl<R: CommandRunner> orchestrator_core::GithubClient for GitHubGhCliRepoProvider<R> {
+impl<R: CommandRunner> CoreGithubClient for GitHubGhCliRepoProvider<R> {
     async fn health_check(&self) -> Result<(), CoreError> {
         self.run_gh(&Self::health_check_args(), None).map(|_| ())
     }
 }
 
 #[async_trait::async_trait]
-impl<R: CommandRunner> orchestrator_core::CodeHostProvider for GitHubGhCliRepoProvider<R> {
+impl<R: CommandRunner> CoreCodeHostProvider for GitHubGhCliRepoProvider<R> {
     fn kind(&self) -> CodeHostKind {
         CodeHostKind::Github
     }
 
     async fn health_check(&self) -> Result<(), CoreError> {
-        orchestrator_core::GithubClient::health_check(self).await
+        CoreGithubClient::health_check(self).await
     }
 
     async fn create_draft_pull_request(
@@ -1169,8 +1169,10 @@ struct GhBranchPullRequest {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::interface::{VcsRepoProvider, VcsRepoProviderKind};
-    use orchestrator_core::{CodeHostProvider, CreatePullRequestRequest, GithubClient, UrlOpener};
+    use crate::interface::{
+        CoreCodeHostProvider as CodeHostProvider, CoreGithubClient as GithubClient,
+        CreatePullRequestRequest, UrlOpener, VcsRepoProvider, VcsRepoProviderKind,
+    };
     use std::collections::VecDeque;
     use std::path::{Path, PathBuf};
     use std::sync::Mutex;

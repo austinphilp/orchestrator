@@ -6,7 +6,7 @@ use orchestrator_app::{
 };
 use orchestrator_core::{
     BackendKind, CoreError, EventPrunePolicy, SpawnSpec, SqliteEventStore, TicketProvider,
-    TicketRecord, TicketingProvider, WorkItemId, WorkerBackend, WorkflowState,
+    TicketRecord, WorkItemId, WorkerBackend, WorkflowInteractionProfilesConfig, WorkflowState,
 };
 use orchestrator_harness::{
     build_provider_with_config, CodexHarnessProviderConfig, HarnessProviderFactoryConfig,
@@ -16,8 +16,9 @@ use orchestrator_harness::{
 use orchestrator_supervisor::OpenRouterSupervisor;
 use orchestrator_ticketing::{
     build_provider_with_config as build_ticketing_provider_with_config, LinearConfig,
-    LinearRuntimeSettings, LinearTicketingProvider, ShortcutConfig, TicketingProviderFactoryConfig,
-    TicketingProviderFactoryOutput, TicketingProviderKind, WorkflowStateMapSetting,
+    LinearRuntimeSettings, LinearTicketingProvider, ShortcutConfig, TicketingProvider,
+    TicketingProviderFactoryConfig, TicketingProviderFactoryOutput, TicketingProviderKind,
+    WorkflowStateMapSetting,
 };
 use orchestrator_ui::Ui;
 use orchestrator_vcs::{
@@ -72,7 +73,7 @@ async fn main() -> Result<()> {
         config.ui.merge_poll_base_interval_secs,
         config.ui.merge_poll_max_backoff_secs,
         config.ui.merge_poll_backoff_multiplier,
-        orchestrator_core::WorkflowInteractionProfilesConfig {
+        WorkflowInteractionProfilesConfig {
             default_profile: config.ui.default_workflow_profile.clone(),
             profiles: config.ui.workflow_interaction_profiles.clone(),
         },

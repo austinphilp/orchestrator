@@ -1,10 +1,9 @@
-use async_trait::async_trait;
-use orchestrator_core::{
-    AddTicketCommentRequest, CoreError, CreateTicketRequest, GetTicketRequest, TicketAttachment,
-    TicketDetails, TicketId, TicketProvider, TicketQuery, TicketSummary,
-    TicketingProvider as CoreTicketingProvider, UpdateTicketDescriptionRequest,
-    UpdateTicketStateRequest,
+use crate::interface::{
+    AddTicketCommentRequest, CoreError, CoreTicketingProvider, CreateTicketRequest,
+    GetTicketRequest, TicketAttachment, TicketDetails, TicketId, TicketProvider, TicketQuery,
+    TicketSummary, UpdateTicketDescriptionRequest, UpdateTicketStateRequest,
 };
+use async_trait::async_trait;
 use reqwest::{header, Client};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Deserializer};
@@ -875,13 +874,13 @@ struct ShortcutWorkflowState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::interface::{TicketingProvider, TicketingProviderKind};
+    use crate::interface::{CoreTicketingProvider, TicketingProvider, TicketingProviderKind};
 
     #[test]
     fn scaffold_default_uses_shortcut_kind() {
         let provider = ShortcutTicketingProvider::scaffold_default();
         assert_eq!(
-            orchestrator_core::TicketingProvider::provider(&provider),
+            CoreTicketingProvider::provider(&provider),
             TicketProvider::Shortcut
         );
         assert_eq!(provider.kind(), TicketingProviderKind::Shortcut);

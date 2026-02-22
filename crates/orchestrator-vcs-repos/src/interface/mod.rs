@@ -1,4 +1,4 @@
-use orchestrator_core::{
+pub use orchestrator_core::{
     CodeHostProvider as CoreCodeHostProvider, GithubClient as CoreGithubClient,
 };
 use thiserror::Error;
@@ -56,15 +56,15 @@ pub enum VcsRepoProviderError {
 #[cfg(test)]
 mod tests {
     use super::{
-        CodeHostKind, CodeHostProvider, CoreError, CreatePullRequestRequest, PullRequestCiStatus,
-        PullRequestMergeState, PullRequestRef, PullRequestSummary, RepositoryRef, ReviewerRequest,
-        VcsRepoProvider, VcsRepoProviderKind,
+        CodeHostKind, CodeHostProvider, CoreCodeHostProvider, CoreError, CreatePullRequestRequest,
+        PullRequestCiStatus, PullRequestMergeState, PullRequestRef, PullRequestSummary,
+        RepositoryRef, ReviewerRequest, VcsRepoProvider, VcsRepoProviderKind,
     };
 
     struct StubCodeHostProvider;
 
     #[async_trait::async_trait]
-    impl orchestrator_core::CodeHostProvider for StubCodeHostProvider {
+    impl CoreCodeHostProvider for StubCodeHostProvider {
         fn kind(&self) -> CodeHostKind {
             CodeHostKind::Other("stub".to_owned())
         }

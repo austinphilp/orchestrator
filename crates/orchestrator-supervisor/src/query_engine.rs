@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 
-use orchestrator_core::{
+use crate::{
     ArtifactId, ArtifactKind, ArtifactRecord, CoreError, EventStore, OrchestrationEventPayload,
     OrchestrationEventType, RetrievalScope, SqliteEventStore, StoredEventEnvelope,
     SupervisorQueryContextArgs, SupervisorQueryKind, TicketRecord, WorkItemId, WorkerSessionId,
@@ -816,9 +816,10 @@ fn truncate_chars(value: &str, max_chars: usize) -> String {
 mod tests {
     use std::collections::HashMap;
 
-    use orchestrator_core::{
-        ArtifactCreatedPayload, InboxItemKind, NewEventEnvelope, OrchestrationEventPayload,
-        OrchestrationEventType, SessionNeedsInputPayload, SessionSpawnedPayload, SqliteEventStore,
+    use crate::{
+        ArtifactCreatedPayload, InboxItemCreatedPayload, InboxItemId, InboxItemKind,
+        NewEventEnvelope, OrchestrationEventPayload, OrchestrationEventType, ProjectId,
+        SessionNeedsInputPayload, SessionSpawnedPayload, SqliteEventStore,
         SupervisorQueryContextArgs, TicketId, TicketProvider, TicketRecord, TicketSyncedPayload,
         TicketWorkItemMapping, UserRespondedPayload, WorkItemCreatedPayload, WorkflowState,
         WorkflowTransitionPayload,
@@ -916,7 +917,7 @@ mod tests {
                     OrchestrationEventPayload::WorkItemCreated(WorkItemCreatedPayload {
                         work_item_id: WorkItemId::new("wi-a"),
                         ticket_id: TicketId::from("linear:1"),
-                        project_id: orchestrator_core::ProjectId::new("proj-1"),
+                        project_id: ProjectId::new("proj-1"),
                     }),
                 ),
                 stored_event(
@@ -1628,14 +1629,12 @@ mod tests {
     #[test]
     fn event_summary_for_inbox_created_includes_kind_and_title() {
         let summary = summarize_event_payload(
-            &OrchestrationEventPayload::InboxItemCreated(
-                orchestrator_core::InboxItemCreatedPayload {
-                    inbox_item_id: orchestrator_core::InboxItemId::new("inbox-1"),
-                    work_item_id: WorkItemId::new("wi-1"),
-                    kind: InboxItemKind::NeedsApproval,
-                    title: "Approve deployment".to_owned(),
-                },
-            ),
+            &OrchestrationEventPayload::InboxItemCreated(InboxItemCreatedPayload {
+                inbox_item_id: InboxItemId::new("inbox-1"),
+                work_item_id: WorkItemId::new("wi-1"),
+                kind: InboxItemKind::NeedsApproval,
+                title: "Approve deployment".to_owned(),
+            }),
             200,
         );
         assert!(summary.contains("NeedsApproval"));

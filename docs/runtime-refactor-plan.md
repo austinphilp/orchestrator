@@ -31,6 +31,7 @@
 - Implementation update (RRP26 C03): `orchestrator-app::projection` now owns projection apply/rebuild/retrieve logic for app runtime paths, `orchestrator-app::attention` now owns attention scoring/ranking logic, and deterministic projection replay + attention ranking coverage is now exercised under `orchestrator-app` module tests.
 - Implementation update (RRP26 C04): `orchestrator-app::commands` now owns command IDs/registry/parsing/invocation types (including uniqueness + roundtrip coverage), `orchestrator-app::frontend` now owns frontend event/intent/controller contracts with schema roundtrip tests, and app command/frontend runtime paths now import those app-domain modules directly with compatibility adapters at legacy boundaries.
 - Implementation update (RRP26 C05): `orchestrator-app::error` now owns app-level error conversion glue (provider factory + runtime adaptation at app integration edges), and startup composition paths now convert cross-crate provider factory errors through that boundary while legacy `orchestrator-core` conversion behavior remains available during migration.
+- Implementation update (RRP26 C06): provider/supervisor-facing workspace imports now resolve through `orchestrator-ticketing`/`orchestrator-vcs`/`orchestrator-vcs-repos`/`orchestrator-supervisor` interfaces, and direct `orchestrator-core` imports were removed from provider implementation crates in favor of those owners.
 
 ## Why This Refactor
 `orchestrator-runtime` currently combines too many concerns:

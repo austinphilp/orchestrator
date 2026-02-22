@@ -25,7 +25,7 @@ impl<R: CommandRunner> crate::interface::VcsProvider for GitCliVcsProvider<R> {
 }
 
 #[async_trait::async_trait]
-impl<R: CommandRunner> orchestrator_core::VcsProvider for GitCliVcsProvider<R> {
+impl<R: CommandRunner> crate::interface::CoreVcsProvider for GitCliVcsProvider<R> {
     async fn health_check(&self) -> Result<(), CoreError> {
         self.run_git(&Self::health_check_args())?;
         Ok(())

@@ -2,10 +2,16 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
-use orchestrator_core::{
-    CoreError, LlmChatRequest, LlmFinishReason, LlmMessage, LlmProvider, LlmProviderKind,
-    LlmRateLimitState, LlmResponseStream, LlmResponseSubscription, LlmRole, LlmStreamChunk,
-    LlmTokenUsage, LlmToolCall, Supervisor,
+pub use orchestrator_core::{
+    command_ids, ArtifactCreatedPayload, ArtifactId, ArtifactKind, ArtifactRecord, CoreError,
+    EventStore, InboxItemCreatedPayload, InboxItemId, InboxItemKind, LlmChatRequest,
+    LlmFinishReason, LlmMessage, LlmProvider, LlmProviderKind, LlmRateLimitState,
+    LlmResponseStream, LlmResponseSubscription, LlmRole, LlmStreamChunk, LlmTokenUsage,
+    LlmToolCall, NewEventEnvelope, OrchestrationEventPayload, OrchestrationEventType, ProjectId,
+    RetrievalScope, SessionNeedsInputPayload, SessionSpawnedPayload, SqliteEventStore,
+    StoredEventEnvelope, Supervisor, SupervisorQueryContextArgs, SupervisorQueryKind, TicketId,
+    TicketProvider, TicketRecord, TicketSyncedPayload, TicketWorkItemMapping, UserRespondedPayload,
+    WorkItemCreatedPayload, WorkItemId, WorkerSessionId, WorkflowState, WorkflowTransitionPayload,
 };
 use reqwest::header::HeaderMap;
 use serde_json::{Map, Value};
@@ -845,7 +851,6 @@ fn header_string(headers: &HeaderMap, names: &[&str]) -> Option<String> {
 mod tests {
     use super::*;
     use orchestrator_core::test_support::with_env_var;
-    use orchestrator_core::{LlmProvider, LlmRole};
     use std::io::{Read, Write};
     use std::net::{TcpListener, TcpStream};
     use std::thread;

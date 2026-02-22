@@ -1,7 +1,6 @@
-use orchestrator_core::TicketingProvider as CoreTicketingProvider;
 use orchestrator_ticketing::{
-    AddTicketCommentRequest, CoreError, CreateTicketRequest, GetTicketRequest,
-    LinearTicketingProvider, ShortcutTicketingProvider, TicketId, TicketProvider,
+    AddTicketCommentRequest, CoreError, CoreTicketingProvider, CreateTicketRequest,
+    GetTicketRequest, LinearTicketingProvider, ShortcutTicketingProvider, TicketId, TicketProvider,
     TicketingProvider, TicketingProviderKind, UpdateTicketDescriptionRequest,
     UpdateTicketStateRequest,
 };

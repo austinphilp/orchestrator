@@ -1,4 +1,4 @@
-use orchestrator_core::TicketingProvider as CoreTicketingProvider;
+pub use orchestrator_core::TicketingProvider as CoreTicketingProvider;
 use thiserror::Error;
 
 pub use orchestrator_core::{

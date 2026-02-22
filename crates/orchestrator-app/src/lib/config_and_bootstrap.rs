@@ -4,19 +4,23 @@ use crate::events::{
 };
 use crate::normalization::DOMAIN_EVENT_SCHEMA_VERSION;
 use crate::projection::{rebuild_projection, ProjectionState, SessionRuntimeProjection};
+use crate::commands::UntypedCommandInvocation;
 use orchestrator_core::{
-    apply_workflow_transition, CodeHostProvider, CoreError, EventStore, GetTicketRequest,
-    GithubClient, InboxItemId, LlmProvider, RuntimeSessionId, SelectedTicketFlowConfig,
-    SelectedTicketFlowResult, SessionHandle, SqliteEventStore, Supervisor, TicketSummary,
-    TicketingProvider, UntypedCommandInvocation, WorkItemId, WorkerBackend, WorkerSessionId,
-    WorkerSessionStatus, WorkflowGuardContext, WorkflowState, WorkflowTransitionReason,
+    apply_workflow_transition, CoreError, EventStore, InboxItemId, RuntimeSessionId,
+    SelectedTicketFlowConfig, SelectedTicketFlowResult, SessionHandle, SqliteEventStore,
+    WorkItemId, WorkerBackend, WorkerSessionId, WorkerSessionStatus, WorkflowGuardContext,
+    WorkflowState, WorkflowTransitionReason,
 };
-use orchestrator_ticketing::LinearTicketingProvider;
+use orchestrator_supervisor::{LlmProvider, Supervisor};
+use orchestrator_ticketing::{
+    GetTicketRequest, LinearTicketingProvider, TicketSummary, TicketingProvider,
+};
 use orchestrator_ui::{
     InboxPublishRequest, InboxResolveRequest, SessionArchiveOutcome, SessionMergeFinalizeOutcome,
     SessionWorkflowAdvanceOutcome, SupervisorCommandContext, SupervisorCommandDispatcher,
 };
 use orchestrator_vcs::VcsProvider;
+use orchestrator_vcs_repos::{CodeHostProvider, GithubClient};
 use r2d2::{Pool, PooledConnection};
 use r2d2_sqlite::SqliteConnectionManager;
 use serde::{Deserialize, Serialize};

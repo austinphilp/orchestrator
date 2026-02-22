@@ -918,7 +918,7 @@ where
         &self,
         invocation: UntypedCommandInvocation,
         context: SupervisorCommandContext,
-    ) -> Result<(String, orchestrator_core::LlmResponseStream), CoreError> {
+    ) -> Result<(String, orchestrator_supervisor::LlmResponseStream), CoreError> {
         command_dispatch::dispatch_supervisor_runtime_command(
             &self.supervisor,
             &self.github,

@@ -1,8 +1,6 @@
 use std::collections::BTreeMap;
 
-use orchestrator_core::{
-    command_ids, CoreError, LlmMessage, LlmRole, OrchestrationEventType, RetrievalScope,
-};
+use crate::{command_ids, CoreError, LlmMessage, LlmRole, OrchestrationEventType, RetrievalScope};
 
 use crate::BoundedContextPack;
 
@@ -612,7 +610,7 @@ fn matches_next_actions_intent(normalized: &str) -> bool {
 mod tests {
     use std::collections::BTreeMap;
 
-    use orchestrator_core::{ArtifactId, ArtifactKind, WorkItemId, WorkerSessionId};
+    use crate::{ArtifactId, ArtifactKind, WorkItemId, WorkerSessionId};
 
     use crate::{
         RetrievalFocusFilters, RetrievalPackEvent, RetrievalPackEvidence, RetrievalPackStats,

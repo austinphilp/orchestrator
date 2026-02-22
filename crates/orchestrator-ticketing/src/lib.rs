@@ -7,10 +7,10 @@ pub use factory::{
     TicketingProviderFactoryConfig, TicketingProviderFactoryOutput,
 };
 pub use interface::{
-    AddTicketCommentRequest, ArchiveTicketRequest, CoreError, CreateTicketRequest,
-    GetTicketRequest, TicketAttachment, TicketDetails, TicketId, TicketProvider, TicketQuery,
-    TicketSummary, TicketingProvider, TicketingProviderError, TicketingProviderKind,
-    UpdateTicketDescriptionRequest, UpdateTicketStateRequest, WorkflowState,
+    AddTicketCommentRequest, ArchiveTicketRequest, CoreError, CoreTicketingProvider,
+    CreateTicketRequest, GetTicketRequest, TicketAttachment, TicketDetails, TicketId,
+    TicketProvider, TicketQuery, TicketSummary, TicketingProvider, TicketingProviderError,
+    TicketingProviderKind, UpdateTicketDescriptionRequest, UpdateTicketStateRequest, WorkflowState,
 };
 pub use providers::linear::{
     GraphqlRequest, GraphqlTransport, LinearConfig, LinearRuntimeSettings, LinearTicketingProvider,
