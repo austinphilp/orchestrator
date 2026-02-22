@@ -1589,4 +1589,20 @@ mod tests {
         assert!(truncated.ends_with("..."));
         assert_eq!(truncated.chars().count(), 203);
     }
+
+    #[test]
+    fn reqwest_transport_rejects_empty_endpoint() {
+        let error = ReqwestGraphqlTransport::new("   ", "token")
+            .expect_err("empty endpoint should fail");
+        assert!(error
+            .to_string()
+            .contains("Linear GraphQL endpoint is empty"));
+    }
+
+    #[test]
+    fn reqwest_transport_rejects_empty_api_key() {
+        let error = ReqwestGraphqlTransport::new("https://api.linear.app/graphql", "   ")
+            .expect_err("empty API key should fail");
+        assert!(error.to_string().contains("LINEAR_API_KEY is empty"));
+    }
 }

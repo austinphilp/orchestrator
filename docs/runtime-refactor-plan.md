@@ -19,6 +19,7 @@
 - Implementation update (RRP26 B01): scaffold crates `orchestrator-harness`, `orchestrator-ticketing`, `orchestrator-vcs`, and `orchestrator-vcs-repos` now exist with standardized `interface` + `providers/*` + `factory` + `lib` module layout, namespaced provider key factories, and baseline factory resolution tests; no provider implementation moves are included in this phase.
 - Implementation update (RRP26 B02): harness contracts remain owned by `orchestrator-harness::interface`, `backend-opencode` implementation is ported into `orchestrator-harness::providers::opencode`, and the harness factory `harness.opencode` now constructs the real OpenCode provider implementation.
 - Implementation update (RRP26 B03): `backend-codex` implementation is ported into `orchestrator-harness::providers::codex`, `orchestrator-app` harness selection now instantiates both providers via the harness factory configuration path, and harness contract coverage for both codex/opencode lives under `orchestrator-harness` tests.
+- Implementation update (RRP26 B04): ticketing contracts are exposed via `orchestrator-ticketing::interface`, the Linear implementation is ported under `orchestrator-ticketing::providers::linear`, and `orchestrator-app` now constructs Linear through the ticketing factory path (`ticketing.linear`) while `integration-linear` is reduced to re-exports.
 
 ## Why This Refactor
 `orchestrator-runtime` currently combines too many concerns:

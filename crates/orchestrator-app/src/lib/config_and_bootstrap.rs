@@ -1,4 +1,3 @@
-use integration_linear::LinearTicketingProvider;
 use orchestrator_core::{
     apply_workflow_transition, rebuild_projection, CodeHostProvider, CoreError, EventStore,
     GetTicketRequest, GithubClient, InboxItemCreatedPayload, InboxItemId, InboxItemResolvedPayload,
@@ -10,6 +9,7 @@ use orchestrator_core::{
     WorkflowTransitionPayload, WorkflowTransitionReason, DOMAIN_EVENT_SCHEMA_VERSION,
     SessionRuntimeProjection,
 };
+use orchestrator_ticketing::LinearTicketingProvider;
 use orchestrator_ui::{
     InboxPublishRequest, InboxResolveRequest, SessionArchiveOutcome,
     SessionMergeFinalizeOutcome, SessionWorkflowAdvanceOutcome, SupervisorCommandContext,

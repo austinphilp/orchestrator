@@ -1087,13 +1087,7 @@ dependencies = [
 name = "integration-linear"
 version = "0.1.0"
 dependencies = [
- "async-trait",
- "orchestrator-core",
- "reqwest",
- "serde",
- "serde_json",
- "tokio",
- "tracing",
+ "orchestrator-ticketing",
 ]
 
 [[package]]
@@ -1441,7 +1435,6 @@ dependencies = [
  "anyhow",
  "async-trait",
  "integration-git",
- "integration-linear",
  "integration-shortcut",
  "orchestrator-core",
  "orchestrator-github",
@@ -1519,7 +1512,14 @@ dependencies = [
 name = "orchestrator-ticketing"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
+ "orchestrator-core",
+ "reqwest",
+ "serde",
+ "serde_json",
  "thiserror 2.0.18",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

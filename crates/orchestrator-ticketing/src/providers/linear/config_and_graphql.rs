@@ -4,12 +4,12 @@ use std::sync::{Arc, RwLock};
 use std::time::{Duration, SystemTime};
 
 use async_trait::async_trait;
-use orchestrator_core::{
+use crate::interface::{
     AddTicketCommentRequest, ArchiveTicketRequest, CoreError, CreateTicketRequest,
     GetTicketRequest, TicketAttachment, TicketDetails, TicketId, TicketProvider, TicketQuery,
-    TicketSummary, TicketingProvider, UpdateTicketDescriptionRequest, UpdateTicketStateRequest,
-    WorkflowState,
+    TicketSummary, UpdateTicketDescriptionRequest, UpdateTicketStateRequest, WorkflowState,
 };
+use orchestrator_core::TicketingProvider;
 use serde::Deserialize;
 use serde_json::json;
 use tokio::sync::{oneshot, Mutex};
@@ -517,8 +517,24 @@ impl fmt::Debug for ReqwestGraphqlTransport {
 
 impl ReqwestGraphqlTransport {
     pub fn new(endpoint: impl Into<String>, api_key: impl Into<String>) -> Result<Self, CoreError> {
+        let endpoint = endpoint.into();
+        let endpoint = endpoint.trim();
+        if endpoint.is_empty() {
+            return Err(CoreError::Configuration(
+                "Linear GraphQL endpoint is empty. Provide a non-empty API URL.".to_owned(),
+            ));
+        }
+
+        let api_key = api_key.into();
+        let api_key = api_key.trim();
+        if api_key.is_empty() {
+            return Err(CoreError::Configuration(
+                "LINEAR_API_KEY is empty. Provide a non-empty API key.".to_owned(),
+            ));
+        }
+
         let client = reqwest::Client::builder()
-            .user_agent("orchestrator/integration-linear")
+            .user_agent("orchestrator/orchestrator-ticketing")
             .build()
             .map_err(|err| {
                 CoreError::DependencyUnavailable(format!(
@@ -527,8 +543,8 @@ impl ReqwestGraphqlTransport {
             })?;
 
         Ok(Self {
-            endpoint: endpoint.into(),
-            api_key: api_key.into(),
+            endpoint: endpoint.to_owned(),
+            api_key: api_key.to_owned(),
             client,
         })
     }

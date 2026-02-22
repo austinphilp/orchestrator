@@ -1,7 +1,4 @@
 use anyhow::Result;
-use integration_linear::{
-    LinearConfig, LinearRuntimeSettings, LinearTicketingProvider, WorkflowStateMapSetting,
-};
 use integration_shortcut::{ShortcutConfig, ShortcutTicketingProvider};
 use orchestrator_app::{
     set_database_runtime_config, App, AppConfig, AppFrontendController, FrontendController,
@@ -18,6 +15,11 @@ use orchestrator_harness::{
     HarnessProviderFactoryOutput, OpenCodeHarnessProviderConfig,
 };
 use orchestrator_supervisor::OpenRouterSupervisor;
+use orchestrator_ticketing::{
+    build_provider_with_config as build_ticketing_provider_with_config, LinearConfig,
+    LinearRuntimeSettings, LinearTicketingProvider, TicketingProviderFactoryConfig,
+    TicketingProviderFactoryOutput, WorkflowStateMapSetting,
+};
 use orchestrator_ui::Ui;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -226,7 +228,7 @@ fn parse_cli_flags() -> Result<CliFlags, CoreError> {
                     &arg,
                     args.next().ok_or_else(|| {
                         CoreError::Configuration(
-                            "Missing value after --ticketing-provider. Use --ticketing-provider <linear|shortcut>."
+                            "Missing value after --ticketing-provider. Use --ticketing-provider <linear|shortcut|ticketing.linear|ticketing.shortcut>."
                                 .to_owned(),
                         )
                     })?,
@@ -264,10 +266,10 @@ fn parse_cli_flags() -> Result<CliFlags, CoreError> {
 }
 
 fn print_cli_help() {
-    println!("Usage: orchestrator-app [--ticketing-provider <linear|shortcut>] [--harness-provider <opencode|codex>]");
+    println!("Usage: orchestrator-app [--ticketing-provider <linear|shortcut|ticketing.linear|ticketing.shortcut>] [--harness-provider <opencode|codex>]");
     println!();
     println!(
-        "  --ticketing-provider <provider>   Configure ticketing provider (linear or shortcut)"
+        "  --ticketing-provider <provider>   Configure ticketing provider (linear/shortcut or namespaced key)"
     );
     println!("  --harness-provider <provider>     Configure harness/backend provider (opencode or codex)");
     println!("  --help                            Show this help message");
@@ -307,7 +309,7 @@ fn build_ticketing_provider(
     CoreError,
 > {
     match provider {
-        "linear" => {
+        "linear" | "ticketing.linear" => {
             let api_key = required_env(ENV_LINEAR_API_KEY)?;
             let settings = LinearRuntimeSettings {
                 api_url: config.linear.api_url.clone(),
@@ -328,12 +330,25 @@ fn build_ticketing_provider(
                 workflow_attach_pr_links: config.linear.workflow_attach_pr_links,
             };
             let linear_config = LinearConfig::from_settings(api_key, settings)?;
-            let provider = Arc::new(LinearTicketingProvider::new(linear_config)?);
+            let provider = build_ticketing_provider_with_config(
+                "ticketing.linear",
+                TicketingProviderFactoryConfig {
+                    linear: linear_config,
+                },
+            )
+            .map_err(|error| CoreError::Configuration(error.to_string()))?;
+            let TicketingProviderFactoryOutput::Linear(provider) = provider else {
+                return Err(CoreError::Configuration(
+                    "ticketing provider factory returned a non-linear provider for ticketing.linear"
+                        .to_owned(),
+                ));
+            };
+            let provider = Arc::new(provider);
             let linear_ticketing = Arc::clone(&provider);
             let ticketing: Arc<dyn TicketingProvider + Send + Sync> = provider;
             Ok((ticketing, Some(linear_ticketing)))
         }
-        "shortcut" => {
+        "shortcut" | "ticketing.shortcut" => {
             let api_key = required_env(ENV_SHORTCUT_API_KEY)?;
             let shortcut_config = ShortcutConfig::from_settings(
                 api_key,
@@ -346,7 +361,7 @@ fn build_ticketing_provider(
             ))
         }
         other => Err(CoreError::Configuration(format!(
-            "Unknown ticketing provider '{other}'. Expected 'linear' or 'shortcut'."
+            "Unknown ticketing provider '{other}'. Expected 'linear', 'shortcut', 'ticketing.linear', or 'ticketing.shortcut'."
         ))),
     }
 }

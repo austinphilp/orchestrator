@@ -1,6 +1,7 @@
 #[cfg(test)]
 mod tests {
     use super::*;
+    use orchestrator_ticketing as integration_linear;
     use orchestrator_core::test_support::{with_env_var, with_env_vars, TestDbPath};
     use orchestrator_core::{
         command_ids, AddTicketCommentRequest, ArtifactCreatedPayload, ArtifactId, ArtifactKind,
