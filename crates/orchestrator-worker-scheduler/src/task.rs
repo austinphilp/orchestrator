@@ -1,16 +1,18 @@
 use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashMap};
-use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering as AtomicOrdering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use orchestrator_worker_lifecycle::{WorkerLifecycle, WorkerSessionState, WorkerSessionVisibility};
 use orchestrator_worker_protocol::error::WorkerRuntimeError;
 use orchestrator_worker_protocol::ids::WorkerSessionId;
-use tokio::sync::Notify;
+use tokio::sync::{broadcast, Notify};
 use tokio::task::JoinHandle;
 
 pub type WorkerSchedulerTaskId = u64;
+const DEFAULT_DISABLE_AFTER_CONSECUTIVE_FAILURES: u32 = 3;
+const WORKER_SCHEDULER_DIAGNOSTIC_BUFFER: usize = 128;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WorkerSchedulerTargetSelector {
@@ -21,16 +23,21 @@ pub enum WorkerSchedulerTargetSelector {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WorkerSchedulerFailurePolicy {
     Retry,
-    Disable,
+    Disable {
+        max_consecutive_failures: u32,
+    },
     Backoff {
         initial_backoff: Duration,
         max_backoff: Duration,
+        disable_after_consecutive_failures: Option<u32>,
     },
 }
 
 impl Default for WorkerSchedulerFailurePolicy {
     fn default() -> Self {
-        Self::Disable
+        Self::Disable {
+            max_consecutive_failures: DEFAULT_DISABLE_AFTER_CONSECUTIVE_FAILURES,
+        }
     }
 }
 
@@ -63,7 +70,7 @@ impl WorkerSchedulerTask {
                 prompt,
                 suppress_when_focused: true,
             },
-            failure_policy: WorkerSchedulerFailurePolicy::Disable,
+            failure_policy: WorkerSchedulerFailurePolicy::default(),
         }
     }
 
@@ -78,6 +85,125 @@ enum WorkerSchedulerExecutionOutcome {
     Continue,
     CancelTask,
     Failed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+struct WorkerSchedulerExecutionMetrics {
+    checkpoint_send_attempts: u64,
+    checkpoint_send_failures: u64,
+    checkpoint_skips_focused: u64,
+    checkpoint_skips_non_running: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct WorkerSchedulerExecutionReport {
+    outcome: WorkerSchedulerExecutionOutcome,
+    metrics: WorkerSchedulerExecutionMetrics,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WorkerSchedulerDiagnosticEventKind {
+    TaskFailure {
+        consecutive_failures: u32,
+    },
+    TaskBackoffScheduled {
+        consecutive_failures: u32,
+        backoff: Duration,
+    },
+    TaskDisabled {
+        consecutive_failures: u32,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkerSchedulerDiagnosticEvent {
+    pub task_id: WorkerSchedulerTaskId,
+    pub selector: WorkerSchedulerTargetSelector,
+    pub kind: WorkerSchedulerDiagnosticEventKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct WorkerSchedulerPerfSnapshot {
+    pub task_registrations_total: u64,
+    pub task_cancellations_total: u64,
+    pub task_dispatches_total: u64,
+    pub checkpoint_send_attempts_total: u64,
+    pub checkpoint_send_failures_total: u64,
+    pub checkpoint_skips_focused_total: u64,
+    pub checkpoint_skips_non_running_total: u64,
+    pub task_failures_total: u64,
+    pub task_backoff_schedules_total: u64,
+    pub task_disables_total: u64,
+    pub diagnostic_events_total: u64,
+    pub diagnostic_events_dropped_total: u64,
+}
+
+#[derive(Debug, Default)]
+struct WorkerSchedulerPerfCounters {
+    task_registrations_total: AtomicU64,
+    task_cancellations_total: AtomicU64,
+    task_dispatches_total: AtomicU64,
+    checkpoint_send_attempts_total: AtomicU64,
+    checkpoint_send_failures_total: AtomicU64,
+    checkpoint_skips_focused_total: AtomicU64,
+    checkpoint_skips_non_running_total: AtomicU64,
+    task_failures_total: AtomicU64,
+    task_backoff_schedules_total: AtomicU64,
+    task_disables_total: AtomicU64,
+    diagnostic_events_total: AtomicU64,
+    diagnostic_events_dropped_total: AtomicU64,
+}
+
+impl WorkerSchedulerPerfCounters {
+    fn snapshot(&self) -> WorkerSchedulerPerfSnapshot {
+        WorkerSchedulerPerfSnapshot {
+            task_registrations_total: self.task_registrations_total.load(AtomicOrdering::Relaxed),
+            task_cancellations_total: self.task_cancellations_total.load(AtomicOrdering::Relaxed),
+            task_dispatches_total: self.task_dispatches_total.load(AtomicOrdering::Relaxed),
+            checkpoint_send_attempts_total: self
+                .checkpoint_send_attempts_total
+                .load(AtomicOrdering::Relaxed),
+            checkpoint_send_failures_total: self
+                .checkpoint_send_failures_total
+                .load(AtomicOrdering::Relaxed),
+            checkpoint_skips_focused_total: self
+                .checkpoint_skips_focused_total
+                .load(AtomicOrdering::Relaxed),
+            checkpoint_skips_non_running_total: self
+                .checkpoint_skips_non_running_total
+                .load(AtomicOrdering::Relaxed),
+            task_failures_total: self.task_failures_total.load(AtomicOrdering::Relaxed),
+            task_backoff_schedules_total: self
+                .task_backoff_schedules_total
+                .load(AtomicOrdering::Relaxed),
+            task_disables_total: self.task_disables_total.load(AtomicOrdering::Relaxed),
+            diagnostic_events_total: self.diagnostic_events_total.load(AtomicOrdering::Relaxed),
+            diagnostic_events_dropped_total: self
+                .diagnostic_events_dropped_total
+                .load(AtomicOrdering::Relaxed),
+        }
+    }
+
+    fn record_execution(&self, metrics: WorkerSchedulerExecutionMetrics) {
+        self.checkpoint_send_attempts_total
+            .fetch_add(metrics.checkpoint_send_attempts, AtomicOrdering::Relaxed);
+        self.checkpoint_send_failures_total
+            .fetch_add(metrics.checkpoint_send_failures, AtomicOrdering::Relaxed);
+        self.checkpoint_skips_focused_total
+            .fetch_add(metrics.checkpoint_skips_focused, AtomicOrdering::Relaxed);
+        self.checkpoint_skips_non_running_total.fetch_add(
+            metrics.checkpoint_skips_non_running,
+            AtomicOrdering::Relaxed,
+        );
+    }
+
+    fn add_cancellations(&self, count: usize) {
+        if count == 0 {
+            return;
+        }
+        self.task_cancellations_total
+            .fetch_add(count as u64, AtomicOrdering::Relaxed);
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -147,6 +273,8 @@ struct WorkerSchedulerInner {
     wake: Notify,
     loop_handle: Mutex<Option<JoinHandle<()>>>,
     closed: AtomicBool,
+    diagnostics_tx: broadcast::Sender<WorkerSchedulerDiagnosticEvent>,
+    perf: WorkerSchedulerPerfCounters,
 }
 
 #[derive(Clone)]
@@ -156,6 +284,8 @@ pub struct WorkerScheduler {
 
 impl WorkerScheduler {
     pub fn new(lifecycle: WorkerLifecycle) -> Self {
+        let (diagnostics_tx, _diagnostics_rx) =
+            broadcast::channel(WORKER_SCHEDULER_DIAGNOSTIC_BUFFER);
         Self {
             inner: Arc::new(WorkerSchedulerInner {
                 lifecycle,
@@ -163,6 +293,8 @@ impl WorkerScheduler {
                 wake: Notify::new(),
                 loop_handle: Mutex::new(None),
                 closed: AtomicBool::new(false),
+                diagnostics_tx,
+                perf: WorkerSchedulerPerfCounters::default(),
             }),
         }
     }
@@ -215,7 +347,8 @@ impl WorkerScheduler {
         if let WorkerSchedulerFailurePolicy::Backoff {
             initial_backoff,
             max_backoff,
-        } = task.failure_policy
+            disable_after_consecutive_failures,
+        } = &task.failure_policy
         {
             if initial_backoff.is_zero() {
                 return Err(WorkerRuntimeError::Configuration(
@@ -225,6 +358,24 @@ impl WorkerScheduler {
             if max_backoff < initial_backoff {
                 return Err(WorkerRuntimeError::Configuration(
                     "worker scheduler max backoff must be >= initial backoff".to_owned(),
+                ));
+            }
+            if let Some(max_failures) = disable_after_consecutive_failures {
+                if *max_failures == 0 {
+                    return Err(WorkerRuntimeError::Configuration(
+                        "worker scheduler backoff disable threshold must be greater than zero"
+                            .to_owned(),
+                    ));
+                }
+            }
+        }
+        if let WorkerSchedulerFailurePolicy::Disable {
+            max_consecutive_failures,
+        } = &task.failure_policy
+        {
+            if *max_consecutive_failures == 0 {
+                return Err(WorkerRuntimeError::Configuration(
+                    "worker scheduler disable threshold must be greater than zero".to_owned(),
                 ));
             }
         }
@@ -252,6 +403,10 @@ impl WorkerScheduler {
             version: 0,
         });
         drop(state);
+        self.inner
+            .perf
+            .task_registrations_total
+            .fetch_add(1, AtomicOrdering::Relaxed);
         self.inner.wake.notify_one();
         Ok(task_id)
     }
@@ -265,6 +420,7 @@ impl WorkerScheduler {
         let removed = state.tasks.remove(&task_id).is_some();
         drop(state);
         if removed {
+            self.inner.perf.add_cancellations(1);
             self.inner.wake.notify_one();
         }
         removed
@@ -289,6 +445,7 @@ impl WorkerScheduler {
         });
         drop(state);
         if removed > 0 {
+            self.inner.perf.add_cancellations(removed);
             self.inner.wake.notify_one();
         }
         removed
@@ -301,6 +458,14 @@ impl WorkerScheduler {
             .lock()
             .expect("worker scheduler state lock poisoned");
         state.tasks.len()
+    }
+
+    pub fn subscribe_diagnostics(&self) -> broadcast::Receiver<WorkerSchedulerDiagnosticEvent> {
+        self.inner.diagnostics_tx.subscribe()
+    }
+
+    pub fn perf_snapshot(&self) -> WorkerSchedulerPerfSnapshot {
+        self.inner.perf.snapshot()
     }
 
     pub fn close(&self) {
@@ -406,7 +571,12 @@ async fn dispatch_ready_task(
         }
     };
 
-    let outcome = execute_task(&inner.lifecycle, &task).await;
+    inner
+        .perf
+        .task_dispatches_total
+        .fetch_add(1, AtomicOrdering::Relaxed);
+    let report = execute_task(&inner.lifecycle, &task).await;
+    inner.perf.record_execution(report.metrics);
 
     let mut state = inner
         .state
@@ -419,55 +589,142 @@ async fn dispatch_ready_task(
         return;
     }
 
-    match outcome {
+    let mut diagnostics = Vec::new();
+    let mut queue_next_due_at: Option<Instant> = None;
+    let mut queue_next_version: Option<u64> = None;
+    let mut remove_task = false;
+    let mut increment_disable_count = false;
+    let mut increment_backoff_count = false;
+
+    match report.outcome {
         WorkerSchedulerExecutionOutcome::CancelTask => {
-            state.tasks.remove(&task_id);
+            remove_task = true;
         }
         WorkerSchedulerExecutionOutcome::Continue => {
             registered.consecutive_failures = 0;
             registered.version = registered.version.saturating_add(1);
-            let next_version = registered.version;
-            let next_due_at = Instant::now() + registered.task.interval;
-            state.timing_queue.push(WorkerSchedulerTimingQueueEntry {
-                due_at: next_due_at,
-                task_id,
-                version: next_version,
-            });
+            queue_next_due_at = Some(Instant::now() + registered.task.interval);
+            queue_next_version = Some(registered.version);
         }
-        WorkerSchedulerExecutionOutcome::Failed => match registered.task.failure_policy {
-            WorkerSchedulerFailurePolicy::Retry => {
-                registered.version = registered.version.saturating_add(1);
-                let next_version = registered.version;
-                let next_due_at = Instant::now() + registered.task.interval;
-                state.timing_queue.push(WorkerSchedulerTimingQueueEntry {
-                    due_at: next_due_at,
-                    task_id,
-                    version: next_version,
-                });
+        WorkerSchedulerExecutionOutcome::Failed => {
+            inner
+                .perf
+                .task_failures_total
+                .fetch_add(1, AtomicOrdering::Relaxed);
+            registered.consecutive_failures = registered.consecutive_failures.saturating_add(1);
+            diagnostics.push(WorkerSchedulerDiagnosticEvent {
+                task_id,
+                selector: registered.task.selector.clone(),
+                kind: WorkerSchedulerDiagnosticEventKind::TaskFailure {
+                    consecutive_failures: registered.consecutive_failures,
+                },
+            });
+
+            match &registered.task.failure_policy {
+                WorkerSchedulerFailurePolicy::Retry => {
+                    registered.version = registered.version.saturating_add(1);
+                    queue_next_due_at = Some(Instant::now() + registered.task.interval);
+                    queue_next_version = Some(registered.version);
+                }
+                WorkerSchedulerFailurePolicy::Disable {
+                    max_consecutive_failures,
+                } => {
+                    if registered.consecutive_failures >= *max_consecutive_failures {
+                        diagnostics.push(WorkerSchedulerDiagnosticEvent {
+                            task_id,
+                            selector: registered.task.selector.clone(),
+                            kind: WorkerSchedulerDiagnosticEventKind::TaskDisabled {
+                                consecutive_failures: registered.consecutive_failures,
+                            },
+                        });
+                        remove_task = true;
+                        increment_disable_count = true;
+                    } else {
+                        registered.version = registered.version.saturating_add(1);
+                        queue_next_due_at = Some(Instant::now() + registered.task.interval);
+                        queue_next_version = Some(registered.version);
+                    }
+                }
+                WorkerSchedulerFailurePolicy::Backoff {
+                    initial_backoff,
+                    max_backoff,
+                    disable_after_consecutive_failures,
+                } => {
+                    if disable_after_consecutive_failures
+                        .is_some_and(|limit| registered.consecutive_failures >= limit)
+                    {
+                        diagnostics.push(WorkerSchedulerDiagnosticEvent {
+                            task_id,
+                            selector: registered.task.selector.clone(),
+                            kind: WorkerSchedulerDiagnosticEventKind::TaskDisabled {
+                                consecutive_failures: registered.consecutive_failures,
+                            },
+                        });
+                        remove_task = true;
+                        increment_disable_count = true;
+                    } else {
+                        registered.version = registered.version.saturating_add(1);
+                        let backoff = next_backoff_duration(
+                            registered.consecutive_failures,
+                            *initial_backoff,
+                            *max_backoff,
+                        );
+                        queue_next_due_at = Some(Instant::now() + backoff);
+                        queue_next_version = Some(registered.version);
+                        increment_backoff_count = true;
+                        diagnostics.push(WorkerSchedulerDiagnosticEvent {
+                            task_id,
+                            selector: registered.task.selector.clone(),
+                            kind: WorkerSchedulerDiagnosticEventKind::TaskBackoffScheduled {
+                                consecutive_failures: registered.consecutive_failures,
+                                backoff,
+                            },
+                        });
+                    }
+                }
             }
-            WorkerSchedulerFailurePolicy::Disable => {
-                state.tasks.remove(&task_id);
-            }
-            WorkerSchedulerFailurePolicy::Backoff {
-                initial_backoff,
-                max_backoff,
-            } => {
-                registered.consecutive_failures = registered.consecutive_failures.saturating_add(1);
-                registered.version = registered.version.saturating_add(1);
-                let next_version = registered.version;
-                let next_due_at = Instant::now()
-                    + next_backoff_duration(
-                        registered.consecutive_failures,
-                        initial_backoff,
-                        max_backoff,
-                    );
-                state.timing_queue.push(WorkerSchedulerTimingQueueEntry {
-                    due_at: next_due_at,
-                    task_id,
-                    version: next_version,
-                });
-            }
-        },
+        }
+    }
+
+    if remove_task {
+        state.tasks.remove(&task_id);
+    }
+    if let (Some(due_at), Some(version)) = (queue_next_due_at, queue_next_version) {
+        state.timing_queue.push(WorkerSchedulerTimingQueueEntry {
+            due_at,
+            task_id,
+            version,
+        });
+    }
+    drop(state);
+
+    if increment_disable_count {
+        inner
+            .perf
+            .task_disables_total
+            .fetch_add(1, AtomicOrdering::Relaxed);
+    }
+    if increment_backoff_count {
+        inner
+            .perf
+            .task_backoff_schedules_total
+            .fetch_add(1, AtomicOrdering::Relaxed);
+    }
+    for event in diagnostics {
+        emit_diagnostic_event(inner, event);
+    }
+}
+
+fn emit_diagnostic_event(inner: &WorkerSchedulerInner, event: WorkerSchedulerDiagnosticEvent) {
+    inner
+        .perf
+        .diagnostic_events_total
+        .fetch_add(1, AtomicOrdering::Relaxed);
+    if inner.diagnostics_tx.send(event).is_err() {
+        inner
+            .perf
+            .diagnostic_events_dropped_total
+            .fetch_add(1, AtomicOrdering::Relaxed);
     }
 }
 
@@ -490,10 +747,20 @@ fn next_backoff_duration(
     current.min(max_backoff)
 }
 
+fn is_non_running_lifecycle_send_error(error: &WorkerRuntimeError) -> bool {
+    match error {
+        WorkerRuntimeError::SessionNotFound(_) => true,
+        WorkerRuntimeError::Process(message) => {
+            message.contains("still starting") || message.contains("not running")
+        }
+        _ => false,
+    }
+}
+
 async fn execute_task(
     lifecycle: &WorkerLifecycle,
     task: &WorkerSchedulerTask,
-) -> WorkerSchedulerExecutionOutcome {
+) -> WorkerSchedulerExecutionReport {
     match &task.action {
         WorkerSchedulerAction::Checkpoint {
             prompt,
@@ -509,49 +776,111 @@ async fn execute_checkpoint_task(
     selector: &WorkerSchedulerTargetSelector,
     prompt: &[u8],
     suppress_when_focused: bool,
-) -> WorkerSchedulerExecutionOutcome {
+) -> WorkerSchedulerExecutionReport {
     match selector {
         WorkerSchedulerTargetSelector::Session(session_id) => {
             let snapshot = lifecycle.snapshot(session_id).await;
             let Some(snapshot) = snapshot else {
-                return WorkerSchedulerExecutionOutcome::CancelTask;
+                return WorkerSchedulerExecutionReport {
+                    outcome: WorkerSchedulerExecutionOutcome::CancelTask,
+                    metrics: WorkerSchedulerExecutionMetrics {
+                        checkpoint_skips_non_running: 1,
+                        ..WorkerSchedulerExecutionMetrics::default()
+                    },
+                };
             };
             if snapshot.state != WorkerSessionState::Running {
-                return WorkerSchedulerExecutionOutcome::CancelTask;
+                return WorkerSchedulerExecutionReport {
+                    outcome: WorkerSchedulerExecutionOutcome::CancelTask,
+                    metrics: WorkerSchedulerExecutionMetrics {
+                        checkpoint_skips_non_running: 1,
+                        ..WorkerSchedulerExecutionMetrics::default()
+                    },
+                };
             }
             if suppress_when_focused && snapshot.visibility == WorkerSessionVisibility::Focused {
-                return WorkerSchedulerExecutionOutcome::Continue;
+                return WorkerSchedulerExecutionReport {
+                    outcome: WorkerSchedulerExecutionOutcome::Continue,
+                    metrics: WorkerSchedulerExecutionMetrics {
+                        checkpoint_skips_focused: 1,
+                        ..WorkerSchedulerExecutionMetrics::default()
+                    },
+                };
             }
             match lifecycle.send_input(session_id, prompt).await {
-                Ok(()) => WorkerSchedulerExecutionOutcome::Continue,
-                Err(_) => WorkerSchedulerExecutionOutcome::Failed,
+                Ok(()) => WorkerSchedulerExecutionReport {
+                    outcome: WorkerSchedulerExecutionOutcome::Continue,
+                    metrics: WorkerSchedulerExecutionMetrics {
+                        checkpoint_send_attempts: 1,
+                        ..WorkerSchedulerExecutionMetrics::default()
+                    },
+                },
+                Err(error) => {
+                    if is_non_running_lifecycle_send_error(&error) {
+                        WorkerSchedulerExecutionReport {
+                            outcome: WorkerSchedulerExecutionOutcome::CancelTask,
+                            metrics: WorkerSchedulerExecutionMetrics {
+                                checkpoint_send_attempts: 1,
+                                checkpoint_skips_non_running: 1,
+                                ..WorkerSchedulerExecutionMetrics::default()
+                            },
+                        }
+                    } else {
+                        WorkerSchedulerExecutionReport {
+                            outcome: WorkerSchedulerExecutionOutcome::Failed,
+                            metrics: WorkerSchedulerExecutionMetrics {
+                                checkpoint_send_attempts: 1,
+                                checkpoint_send_failures: 1,
+                                ..WorkerSchedulerExecutionMetrics::default()
+                            },
+                        }
+                    }
+                }
             }
         }
         WorkerSchedulerTargetSelector::RunningSessions => {
             let sessions = lifecycle.list_sessions().await;
+            let mut metrics = WorkerSchedulerExecutionMetrics::default();
             let mut has_failures = false;
 
-            for session in sessions
-                .into_iter()
-                .filter(|session| session.state == WorkerSessionState::Running)
-            {
+            for session in sessions {
+                if session.state != WorkerSessionState::Running {
+                    metrics.checkpoint_skips_non_running =
+                        metrics.checkpoint_skips_non_running.saturating_add(1);
+                    continue;
+                }
                 if suppress_when_focused && session.visibility == WorkerSessionVisibility::Focused {
+                    metrics.checkpoint_skips_focused =
+                        metrics.checkpoint_skips_focused.saturating_add(1);
                     continue;
                 }
 
-                if lifecycle
-                    .send_input(&session.session_id, prompt)
-                    .await
-                    .is_err()
-                {
-                    has_failures = true;
+                metrics.checkpoint_send_attempts =
+                    metrics.checkpoint_send_attempts.saturating_add(1);
+                match lifecycle.send_input(&session.session_id, prompt).await {
+                    Ok(()) => {}
+                    Err(error) if is_non_running_lifecycle_send_error(&error) => {
+                        metrics.checkpoint_skips_non_running =
+                            metrics.checkpoint_skips_non_running.saturating_add(1);
+                    }
+                    Err(_) => {
+                        metrics.checkpoint_send_failures =
+                            metrics.checkpoint_send_failures.saturating_add(1);
+                        has_failures = true;
+                    }
                 }
             }
 
             if has_failures {
-                WorkerSchedulerExecutionOutcome::Failed
+                WorkerSchedulerExecutionReport {
+                    outcome: WorkerSchedulerExecutionOutcome::Failed,
+                    metrics,
+                }
             } else {
-                WorkerSchedulerExecutionOutcome::Continue
+                WorkerSchedulerExecutionReport {
+                    outcome: WorkerSchedulerExecutionOutcome::Continue,
+                    metrics,
+                }
             }
         }
     }
@@ -581,8 +910,8 @@ mod tests {
     use tokio::time::{sleep, timeout};
 
     use super::{
-        WorkerScheduler, WorkerSchedulerFailurePolicy, WorkerSchedulerState,
-        WorkerSchedulerTargetSelector, WorkerSchedulerTask,
+        WorkerScheduler, WorkerSchedulerDiagnosticEventKind, WorkerSchedulerFailurePolicy,
+        WorkerSchedulerState, WorkerSchedulerTargetSelector, WorkerSchedulerTask,
     };
 
     type StreamMessage = WorkerRuntimeResult<Option<WorkerEvent>>;
@@ -603,6 +932,14 @@ mod tests {
         event_tx: Option<mpsc::UnboundedSender<StreamMessage>>,
         event_rx: Option<mpsc::UnboundedReceiver<StreamMessage>>,
         sent_input: Vec<Vec<u8>>,
+        send_input_failure: Option<MockSendInputFailure>,
+        send_input_attempts: usize,
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct MockSendInputFailure {
+        remaining: usize,
+        error: WorkerRuntimeError,
     }
 
     struct MockEventStream {
@@ -618,6 +955,37 @@ mod tests {
                 .expect("session exists")
                 .sent_input
                 .clone()
+        }
+
+        fn send_input_attempts(&self, session_id: &WorkerSessionId) -> usize {
+            let state = self.state.lock().expect("lock backend state");
+            state
+                .sessions
+                .get(session_id)
+                .expect("session exists")
+                .send_input_attempts
+        }
+
+        fn set_send_input_failures(&self, session_id: &WorkerSessionId, failures_remaining: usize) {
+            self.set_send_input_failure_error(
+                session_id,
+                failures_remaining,
+                WorkerRuntimeError::Process("simulated scheduled send_input failure".to_owned()),
+            );
+        }
+
+        fn set_send_input_failure_error(
+            &self,
+            session_id: &WorkerSessionId,
+            failures_remaining: usize,
+            error: WorkerRuntimeError,
+        ) {
+            let mut state = self.state.lock().expect("lock backend state");
+            let session = state.sessions.get_mut(session_id).expect("session exists");
+            session.send_input_failure = (failures_remaining > 0).then_some(MockSendInputFailure {
+                remaining: failures_remaining,
+                error,
+            });
         }
 
         fn emit_event(&self, session_id: &WorkerSessionId, event: WorkerEvent) {
@@ -650,6 +1018,8 @@ mod tests {
                     event_tx: Some(event_tx),
                     event_rx: Some(event_rx),
                     sent_input: Vec::new(),
+                    send_input_failure: None,
+                    send_input_attempts: 0,
                 },
             );
             Ok(WorkerSessionHandle {
@@ -671,6 +1041,13 @@ mod tests {
             let session = state.sessions.get_mut(&session.session_id).ok_or_else(|| {
                 WorkerRuntimeError::SessionNotFound(session.session_id.as_str().to_owned())
             })?;
+            session.send_input_attempts = session.send_input_attempts.saturating_add(1);
+            if let Some(failure) = session.send_input_failure.as_mut() {
+                if failure.remaining > 0 {
+                    failure.remaining -= 1;
+                    return Err(failure.error.clone());
+                }
+            }
             session.sent_input.push(input.to_vec());
             Ok(())
         }
@@ -770,6 +1147,23 @@ mod tests {
         .expect("timed out waiting for scheduled input");
     }
 
+    async fn wait_for_send_input_attempt_count(
+        backend: &MockBackend,
+        session_id: &WorkerSessionId,
+        expected: usize,
+    ) {
+        timeout(TEST_TIMEOUT, async {
+            loop {
+                if backend.send_input_attempts(session_id) >= expected {
+                    return;
+                }
+                sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("timed out waiting for scheduled input attempts");
+    }
+
     async fn assert_sent_input_count_stable(
         backend: &MockBackend,
         session_id: &WorkerSessionId,
@@ -782,6 +1176,23 @@ mod tests {
                 backend.sent_input(session_id).len(),
                 expected,
                 "scheduled input changed during stability window",
+            );
+            sleep(Duration::from_millis(10)).await;
+        }
+    }
+
+    async fn assert_send_input_attempt_count_stable(
+        backend: &MockBackend,
+        session_id: &WorkerSessionId,
+        expected: usize,
+        window: Duration,
+    ) {
+        let start = Instant::now();
+        while start.elapsed() < window {
+            assert_eq!(
+                backend.send_input_attempts(session_id),
+                expected,
+                "scheduled input attempts changed during stability window",
             );
             sleep(Duration::from_millis(10)).await;
         }
@@ -802,6 +1213,19 @@ mod tests {
         })
         .await
         .expect("timed out waiting for status transition");
+    }
+
+    async fn wait_for_task_count(scheduler: &WorkerScheduler, expected: usize) {
+        timeout(TEST_TIMEOUT, async {
+            loop {
+                if scheduler.task_count() == expected {
+                    return;
+                }
+                sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("timed out waiting for scheduler task count");
     }
 
     #[test]
@@ -872,6 +1296,57 @@ mod tests {
         assert_eq!(scheduler.task_count(), 0);
     }
 
+    #[test]
+    fn register_rejects_zero_disable_threshold() {
+        let backend = Arc::new(MockBackend::default());
+        let lifecycle = WorkerLifecycle::new(backend, Arc::new(WorkerEventBus::default()));
+        let scheduler = WorkerScheduler::new(lifecycle);
+
+        let error = scheduler
+            .register(
+                WorkerSchedulerTask::checkpoint_for_session(
+                    WorkerSessionId::new("sess-invalid-disable-threshold"),
+                    Duration::from_millis(30),
+                    b"Emit a checkpoint now.\n".to_vec(),
+                )
+                .with_failure_policy(WorkerSchedulerFailurePolicy::Disable {
+                    max_consecutive_failures: 0,
+                }),
+            )
+            .expect_err("register should fail for zero disable threshold");
+        assert!(matches!(
+            error,
+            WorkerRuntimeError::Configuration(message) if message.contains("disable threshold")
+        ));
+    }
+
+    #[test]
+    fn register_rejects_zero_backoff_disable_threshold() {
+        let backend = Arc::new(MockBackend::default());
+        let lifecycle = WorkerLifecycle::new(backend, Arc::new(WorkerEventBus::default()));
+        let scheduler = WorkerScheduler::new(lifecycle);
+
+        let error = scheduler
+            .register(
+                WorkerSchedulerTask::checkpoint_for_session(
+                    WorkerSessionId::new("sess-invalid-backoff-disable-threshold"),
+                    Duration::from_millis(30),
+                    b"Emit a checkpoint now.\n".to_vec(),
+                )
+                .with_failure_policy(WorkerSchedulerFailurePolicy::Backoff {
+                    initial_backoff: Duration::from_millis(20),
+                    max_backoff: Duration::from_millis(40),
+                    disable_after_consecutive_failures: Some(0),
+                }),
+            )
+            .expect_err("register should fail for zero backoff disable threshold");
+        assert!(matches!(
+            error,
+            WorkerRuntimeError::Configuration(message)
+                if message.contains("backoff disable threshold")
+        ));
+    }
+
     #[tokio::test]
     async fn periodic_checkpoint_dispatches_for_running_session() {
         let backend = Arc::new(MockBackend::default());
@@ -925,6 +1400,69 @@ mod tests {
 
         lifecycle.focus_session(None).await.expect("clear focus");
         wait_for_sent_input_count(&backend, &handle.session_id, 1).await;
+        let perf = scheduler.perf_snapshot();
+        assert!(perf.checkpoint_skips_focused_total >= 1);
+        scheduler.close();
+    }
+
+    #[tokio::test]
+    async fn running_sessions_selector_counts_focused_and_non_running_skips() {
+        let backend = Arc::new(MockBackend::default());
+        let lifecycle = WorkerLifecycle::new(backend.clone(), Arc::new(WorkerEventBus::default()));
+        let scheduler = WorkerScheduler::new(lifecycle.clone());
+
+        let running = lifecycle
+            .spawn(spawn_request("scheduler-running-focused"))
+            .await
+            .expect("spawn running session");
+        let done = lifecycle
+            .spawn(spawn_request("scheduler-running-done"))
+            .await
+            .expect("spawn done session");
+
+        lifecycle
+            .focus_session(Some(&running.session_id))
+            .await
+            .expect("focus running session");
+        backend.emit_event(
+            &done.session_id,
+            WorkerEvent::Done(WorkerDoneEvent {
+                summary: Some("finished".to_owned()),
+            }),
+        );
+        wait_for_status(&lifecycle, &done.session_id, WorkerSessionState::Done).await;
+
+        scheduler
+            .register(WorkerSchedulerTask {
+                selector: WorkerSchedulerTargetSelector::RunningSessions,
+                interval: Duration::from_millis(25),
+                action: super::WorkerSchedulerAction::Checkpoint {
+                    prompt: b"Emit a checkpoint now.\n".to_vec(),
+                    suppress_when_focused: true,
+                },
+                failure_policy: WorkerSchedulerFailurePolicy::Retry,
+            })
+            .expect("register running selector task");
+
+        timeout(TEST_TIMEOUT, async {
+            loop {
+                let perf = scheduler.perf_snapshot();
+                if perf.checkpoint_skips_focused_total >= 1
+                    && perf.checkpoint_skips_non_running_total >= 1
+                {
+                    return;
+                }
+                sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("timed out waiting for focused/non-running skip metrics");
+
+        assert_eq!(backend.sent_input(&running.session_id).len(), 0);
+        assert_eq!(backend.sent_input(&done.session_id).len(), 0);
+
+        lifecycle.focus_session(None).await.expect("clear focus");
+        wait_for_sent_input_count(&backend, &running.session_id, 1).await;
         scheduler.close();
     }
 
@@ -1009,6 +1547,214 @@ mod tests {
 
         wait_for_sent_input_count(&backend, &session_a.session_id, 1).await;
         wait_for_sent_input_count(&backend, &session_b.session_id, 1).await;
+        scheduler.close();
+    }
+
+    #[tokio::test]
+    async fn session_selector_non_running_send_error_cancels_without_failure() {
+        let backend = Arc::new(MockBackend::default());
+        let lifecycle = WorkerLifecycle::new(backend.clone(), Arc::new(WorkerEventBus::default()));
+        let scheduler = WorkerScheduler::new(lifecycle.clone());
+        let handle = lifecycle
+            .spawn(spawn_request("scheduler-non-running-send-error"))
+            .await
+            .expect("spawn session");
+        backend.set_send_input_failure_error(
+            &handle.session_id,
+            1,
+            WorkerRuntimeError::Process("worker session is not running: simulated".to_owned()),
+        );
+
+        scheduler
+            .register(WorkerSchedulerTask::checkpoint_for_session(
+                handle.session_id.clone(),
+                Duration::from_millis(20),
+                b"Emit a checkpoint now.\n".to_vec(),
+            ))
+            .expect("register checkpoint task");
+
+        wait_for_send_input_attempt_count(&backend, &handle.session_id, 1).await;
+        wait_for_task_count(&scheduler, 0).await;
+        assert_send_input_attempt_count_stable(
+            &backend,
+            &handle.session_id,
+            1,
+            Duration::from_millis(120),
+        )
+        .await;
+
+        let perf = scheduler.perf_snapshot();
+        assert_eq!(perf.task_failures_total, 0);
+        assert_eq!(perf.task_disables_total, 0);
+        assert_eq!(perf.checkpoint_send_attempts_total, 1);
+        assert_eq!(perf.checkpoint_send_failures_total, 0);
+        assert_eq!(perf.checkpoint_skips_non_running_total, 1);
+        assert_eq!(perf.diagnostic_events_total, 0);
+        scheduler.close();
+    }
+
+    #[tokio::test]
+    async fn running_sessions_non_running_send_error_does_not_trigger_failure_policy() {
+        let backend = Arc::new(MockBackend::default());
+        let lifecycle = WorkerLifecycle::new(backend.clone(), Arc::new(WorkerEventBus::default()));
+        let scheduler = WorkerScheduler::new(lifecycle.clone());
+        let handle = lifecycle
+            .spawn(spawn_request("scheduler-running-race"))
+            .await
+            .expect("spawn running session");
+        backend.set_send_input_failure_error(
+            &handle.session_id,
+            1,
+            WorkerRuntimeError::SessionNotFound(handle.session_id.as_str().to_owned()),
+        );
+
+        scheduler
+            .register(WorkerSchedulerTask {
+                selector: WorkerSchedulerTargetSelector::RunningSessions,
+                interval: Duration::from_millis(20),
+                action: super::WorkerSchedulerAction::Checkpoint {
+                    prompt: b"Emit a checkpoint now.\n".to_vec(),
+                    suppress_when_focused: false,
+                },
+                failure_policy: WorkerSchedulerFailurePolicy::Disable {
+                    max_consecutive_failures: 1,
+                },
+            })
+            .expect("register running selector task");
+
+        wait_for_send_input_attempt_count(&backend, &handle.session_id, 2).await;
+        wait_for_sent_input_count(&backend, &handle.session_id, 1).await;
+        assert_eq!(scheduler.task_count(), 1);
+
+        let perf = scheduler.perf_snapshot();
+        assert_eq!(perf.task_failures_total, 0);
+        assert_eq!(perf.task_disables_total, 0);
+        assert_eq!(perf.checkpoint_send_failures_total, 0);
+        assert!(perf.checkpoint_skips_non_running_total >= 1);
+        assert_eq!(perf.diagnostic_events_total, 0);
+        scheduler.close();
+    }
+
+    #[tokio::test]
+    async fn repeated_checkpoint_failures_disable_task_after_threshold_and_emit_diagnostics() {
+        let backend = Arc::new(MockBackend::default());
+        let lifecycle = WorkerLifecycle::new(backend.clone(), Arc::new(WorkerEventBus::default()));
+        let scheduler = WorkerScheduler::new(lifecycle.clone());
+        let handle = lifecycle
+            .spawn(spawn_request("scheduler-disable-repeated-failures"))
+            .await
+            .expect("spawn failure session");
+        backend.set_send_input_failures(&handle.session_id, 10);
+        let mut diagnostics = scheduler.subscribe_diagnostics();
+
+        scheduler
+            .register(WorkerSchedulerTask::checkpoint_for_session(
+                handle.session_id.clone(),
+                Duration::from_millis(20),
+                b"Emit a checkpoint now.\n".to_vec(),
+            ))
+            .expect("register checkpoint task");
+
+        wait_for_send_input_attempt_count(&backend, &handle.session_id, 3).await;
+        wait_for_task_count(&scheduler, 0).await;
+        assert_send_input_attempt_count_stable(
+            &backend,
+            &handle.session_id,
+            3,
+            Duration::from_millis(120),
+        )
+        .await;
+        assert_eq!(backend.sent_input(&handle.session_id).len(), 0);
+
+        let mut saw_failure = false;
+        let mut saw_disabled = false;
+        timeout(TEST_TIMEOUT, async {
+            loop {
+                let event = diagnostics.recv().await.expect("diagnostic event");
+                match event.kind {
+                    WorkerSchedulerDiagnosticEventKind::TaskFailure { .. } => {
+                        saw_failure = true;
+                    }
+                    WorkerSchedulerDiagnosticEventKind::TaskDisabled { .. } => {
+                        saw_disabled = true;
+                    }
+                    WorkerSchedulerDiagnosticEventKind::TaskBackoffScheduled { .. } => {}
+                }
+                if saw_failure && saw_disabled {
+                    return;
+                }
+            }
+        })
+        .await
+        .expect("timed out waiting for failure/disable diagnostic events");
+
+        let perf = scheduler.perf_snapshot();
+        assert_eq!(perf.task_failures_total, 3);
+        assert_eq!(perf.task_disables_total, 1);
+        assert_eq!(perf.checkpoint_send_attempts_total, 3);
+        assert_eq!(perf.checkpoint_send_failures_total, 3);
+        scheduler.close();
+    }
+
+    #[tokio::test]
+    async fn backoff_failure_policy_schedules_backoff_and_then_disables() {
+        let backend = Arc::new(MockBackend::default());
+        let lifecycle = WorkerLifecycle::new(backend.clone(), Arc::new(WorkerEventBus::default()));
+        let scheduler = WorkerScheduler::new(lifecycle.clone());
+        let handle = lifecycle
+            .spawn(spawn_request("scheduler-backoff-failures"))
+            .await
+            .expect("spawn backoff session");
+        backend.set_send_input_failures(&handle.session_id, 10);
+        let mut diagnostics = scheduler.subscribe_diagnostics();
+
+        scheduler
+            .register(
+                WorkerSchedulerTask::checkpoint_for_session(
+                    handle.session_id.clone(),
+                    Duration::from_millis(15),
+                    b"Emit a checkpoint now.\n".to_vec(),
+                )
+                .with_failure_policy(WorkerSchedulerFailurePolicy::Backoff {
+                    initial_backoff: Duration::from_millis(40),
+                    max_backoff: Duration::from_millis(80),
+                    disable_after_consecutive_failures: Some(3),
+                }),
+            )
+            .expect("register backoff task");
+
+        wait_for_send_input_attempt_count(&backend, &handle.session_id, 3).await;
+        wait_for_task_count(&scheduler, 0).await;
+        assert_eq!(backend.sent_input(&handle.session_id).len(), 0);
+
+        let mut saw_backoff = false;
+        let mut saw_disabled = false;
+        timeout(TEST_TIMEOUT, async {
+            loop {
+                let event = diagnostics.recv().await.expect("diagnostic event");
+                match event.kind {
+                    WorkerSchedulerDiagnosticEventKind::TaskBackoffScheduled { .. } => {
+                        saw_backoff = true;
+                    }
+                    WorkerSchedulerDiagnosticEventKind::TaskDisabled { .. } => {
+                        saw_disabled = true;
+                    }
+                    WorkerSchedulerDiagnosticEventKind::TaskFailure { .. } => {}
+                }
+                if saw_backoff && saw_disabled {
+                    return;
+                }
+            }
+        })
+        .await
+        .expect("timed out waiting for backoff/disable diagnostic events");
+
+        let perf = scheduler.perf_snapshot();
+        assert_eq!(perf.task_failures_total, 3);
+        assert_eq!(perf.task_backoff_schedules_total, 2);
+        assert_eq!(perf.task_disables_total, 1);
+        assert_eq!(perf.checkpoint_send_attempts_total, 3);
+        assert_eq!(perf.checkpoint_send_failures_total, 3);
         scheduler.close();
     }
 }

@@ -3,6 +3,7 @@
 pub mod task;
 
 pub use task::{
-    WorkerScheduler, WorkerSchedulerAction, WorkerSchedulerFailurePolicy,
+    WorkerScheduler, WorkerSchedulerAction, WorkerSchedulerDiagnosticEvent,
+    WorkerSchedulerDiagnosticEventKind, WorkerSchedulerFailurePolicy, WorkerSchedulerPerfSnapshot,
     WorkerSchedulerTargetSelector, WorkerSchedulerTask, WorkerSchedulerTaskId,
 };

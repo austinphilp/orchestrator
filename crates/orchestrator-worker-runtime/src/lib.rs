@@ -16,7 +16,11 @@ use orchestrator_worker_protocol::error::WorkerRuntimeResult;
 use orchestrator_worker_protocol::event::{WorkerEvent, WorkerNeedsInputAnswer};
 use orchestrator_worker_protocol::ids::WorkerSessionId;
 use orchestrator_worker_protocol::session::{WorkerSessionHandle, WorkerSpawnRequest};
-use orchestrator_worker_scheduler::{WorkerScheduler, WorkerSchedulerTask};
+use orchestrator_worker_scheduler::{
+    WorkerScheduler, WorkerSchedulerDiagnosticEvent, WorkerSchedulerPerfSnapshot,
+    WorkerSchedulerTask,
+};
+use tokio::sync::broadcast;
 use tokio::task::JoinHandle;
 
 const DEFAULT_CHECKPOINT_PROMPT_INTERVAL_SECS: u64 = 120;
@@ -25,6 +29,7 @@ const DEFAULT_CHECKPOINT_PROMPT_MESSAGE: &str = "Emit a checkpoint now.";
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkerRuntimePerfSnapshot {
     pub eventbus: WorkerEventBusPerfSnapshot,
+    pub scheduler: WorkerSchedulerPerfSnapshot,
     pub active_stream_ingestion_tasks: usize,
 }
 
@@ -243,9 +248,16 @@ impl WorkerRuntime {
         &self.scheduler
     }
 
+    pub fn subscribe_scheduler_diagnostics(
+        &self,
+    ) -> broadcast::Receiver<WorkerSchedulerDiagnosticEvent> {
+        self.scheduler.subscribe_diagnostics()
+    }
+
     pub async fn perf_snapshot(&self) -> WorkerRuntimePerfSnapshot {
         WorkerRuntimePerfSnapshot {
             eventbus: self.eventbus.perf_snapshot(),
+            scheduler: self.scheduler.perf_snapshot(),
             active_stream_ingestion_tasks: self
                 .lifecycle
                 .task_snapshot()
@@ -633,6 +645,9 @@ mod tests {
             .await
             .expect("spawn session");
         wait_for_sent_input_count(&backend, &handle.session_id, 1).await;
+        let snapshot = runtime.perf_snapshot().await;
+        assert!(snapshot.scheduler.task_dispatches_total >= 1);
+        assert!(snapshot.scheduler.checkpoint_send_attempts_total >= 1);
         assert_eq!(runtime.scheduler().task_count(), 1);
 
         backend.emit_event(
