@@ -8,7 +8,6 @@ enum UiCommand {
     OpenTestInspectorForSelected,
     OpenPrInspectorForSelected,
     OpenChatInspectorForSelected,
-    StartTerminalEscapeChord,
     QuitShell,
     FocusNextInbox,
     FocusPreviousInbox,
@@ -37,7 +36,7 @@ enum UiCommand {
 }
 
 impl UiCommand {
-    const ALL: [Self; 34] = [
+    const ALL: [Self; 33] = [
         Self::EnterNormalMode,
         Self::EnterInsertMode,
         Self::ToggleGlobalSupervisorChat,
@@ -46,7 +45,6 @@ impl UiCommand {
         Self::OpenTestInspectorForSelected,
         Self::OpenPrInspectorForSelected,
         Self::OpenChatInspectorForSelected,
-        Self::StartTerminalEscapeChord,
         Self::QuitShell,
         Self::FocusNextInbox,
         Self::FocusPreviousInbox,
@@ -84,7 +82,6 @@ impl UiCommand {
             Self::OpenTestInspectorForSelected => command_ids::UI_OPEN_TEST_INSPECTOR_FOR_SELECTED,
             Self::OpenPrInspectorForSelected => command_ids::UI_OPEN_PR_INSPECTOR_FOR_SELECTED,
             Self::OpenChatInspectorForSelected => command_ids::UI_OPEN_CHAT_INSPECTOR_FOR_SELECTED,
-            Self::StartTerminalEscapeChord => "ui.mode.terminal_escape_prefix",
             Self::QuitShell => "ui.shell.quit",
             Self::FocusNextInbox => command_ids::UI_FOCUS_NEXT_INBOX,
             Self::FocusPreviousInbox => "ui.focus_previous_inbox",
@@ -123,7 +120,6 @@ impl UiCommand {
             Self::OpenTestInspectorForSelected => "Open test inspector for selected item",
             Self::OpenPrInspectorForSelected => "Open PR inspector for selected item",
             Self::OpenChatInspectorForSelected => "Open chat inspector for selected item",
-            Self::StartTerminalEscapeChord => "Terminal escape chord (Ctrl-\\ Ctrl-n)",
             Self::QuitShell => "Quit shell",
             Self::FocusNextInbox => "Focus next session",
             Self::FocusPreviousInbox => "Focus previous session",
@@ -203,7 +199,6 @@ fn default_keymap_config() -> KeymapConfig {
                     binding(&["s"], UiCommand::OpenTicketPicker),
                     binding(&["c"], UiCommand::ToggleGlobalSupervisorChat),
                     binding(&["i"], UiCommand::EnterInsertMode),
-                    binding(&["I"], UiCommand::OpenTerminalForSelected),
                     binding(&["o"], UiCommand::OpenSessionOutputForSelectedInbox),
                     binding(&["`"], UiCommand::ToggleWorkflowProfilesModal),
                     binding(&["D"], UiCommand::ToggleWorktreeDiffModal),
@@ -244,11 +239,6 @@ fn default_keymap_config() -> KeymapConfig {
                 bindings: Vec::new(),
                 prefixes: Vec::new(),
             },
-            ModeKeymapConfig {
-                mode: UiMode::Terminal,
-                bindings: Vec::new(),
-                prefixes: Vec::new(),
-            },
         ],
     }
 }
@@ -283,7 +273,7 @@ fn bottom_bar_hint_groups(mode: UiMode) -> &'static [BottomBarHintGroup] {
             },
             BottomBarHintGroup {
                 label: "Views:",
-                hints: &["i/I", "o", "s", "c", "`", "v{d/t/p/c}", "D"],
+                hints: &["i", "o", "s", "c", "v{d/t/p/c}", "D"],
             },
             BottomBarHintGroup {
                 label: "Workflow:",
@@ -298,20 +288,6 @@ fn bottom_bar_hint_groups(mode: UiMode) -> &'static [BottomBarHintGroup] {
             BottomBarHintGroup {
                 label: "Back:",
                 hints: &["Esc", "Ctrl-["],
-            },
-        ],
-        UiMode::Terminal => &[
-            BottomBarHintGroup {
-                label: "Terminal:",
-                hints: &["Type by default", "Enter send", "Shift+Enter newline"],
-            },
-            BottomBarHintGroup {
-                label: "Back:",
-                hints: &["Esc", "Ctrl-\\ Ctrl-n"],
-            },
-            BottomBarHintGroup {
-                label: "Workflow:",
-                hints: &["w n"],
             },
         ],
     }
@@ -595,15 +571,6 @@ fn route_key_press(shell_state: &mut UiShellState, key: KeyEvent) -> RoutedInput
         }
     }
 
-    if shell_state.mode == UiMode::Terminal
-        && shell_state.is_terminal_view_active()
-        && key.code == KeyCode::Esc
-        && key.modifiers.is_empty()
-        && shell_state.apply_terminal_compose_key(key)
-    {
-        return RoutedInput::Ignore;
-    }
-
     if is_escape_to_normal(key) {
         if shell_state.is_active_supervisor_stream_visible()
             && !shell_state.is_global_supervisor_chat_active()
@@ -619,23 +586,11 @@ fn route_key_press(shell_state: &mut UiShellState, key: KeyEvent) -> RoutedInput
     if shell_state.apply_global_chat_insert_key(key) {
         return RoutedInput::Ignore;
     }
-    if shell_state.mode == UiMode::Terminal && shell_state.terminal_escape_pending {
-        return route_terminal_mode_key(shell_state, key);
-    }
     if shell_state.apply_terminal_compose_key(key) {
         return RoutedInput::Ignore;
     }
 
-    match shell_state.mode {
-        UiMode::Normal | UiMode::Insert => route_configured_mode_key(shell_state, key),
-        UiMode::Terminal => {
-            if shell_state.is_terminal_view_active() {
-                route_terminal_mode_key(shell_state, key)
-            } else {
-                RoutedInput::Command(UiCommand::EnterNormalMode)
-            }
-        }
-    }
+    route_configured_mode_key(shell_state, key)
 }
 
 fn is_needs_input_interaction_key(code: KeyCode) -> bool {
@@ -825,22 +780,6 @@ fn route_configured_mode_key(shell_state: &mut UiShellState, key: KeyEvent) -> R
     }
 }
 
-fn route_terminal_mode_key(shell_state: &mut UiShellState, key: KeyEvent) -> RoutedInput {
-    if shell_state.terminal_escape_pending {
-        if is_ctrl_char(key, 'n') {
-            return RoutedInput::Command(UiCommand::EnterNormalMode);
-        }
-        shell_state.terminal_escape_pending = false;
-        return RoutedInput::Ignore;
-    }
-
-    if is_ctrl_char(key, '\\') {
-        return RoutedInput::Command(UiCommand::StartTerminalEscapeChord);
-    }
-
-    RoutedInput::Ignore
-}
-
 fn dispatch_command(shell_state: &mut UiShellState, command: UiCommand) -> bool {
     let _command_id = command.id();
     match command {
@@ -874,10 +813,6 @@ fn dispatch_command(shell_state: &mut UiShellState, command: UiCommand) -> bool 
         }
         UiCommand::OpenChatInspectorForSelected => {
             shell_state.open_chat_inspector_for_selected();
-            false
-        }
-        UiCommand::StartTerminalEscapeChord => {
-            shell_state.begin_terminal_escape_chord();
             false
         }
         UiCommand::QuitShell => true,

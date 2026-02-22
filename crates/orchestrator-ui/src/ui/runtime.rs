@@ -267,7 +267,7 @@ impl Ui {
                                 &shell_state.domain,
                                 &session_id,
                                 prompt,
-                                shell_state.mode == UiMode::Terminal,
+                                shell_state.mode == UiMode::Insert,
                             );
                         } else {
                             frame.render_widget(
@@ -403,7 +403,7 @@ impl Ui {
                 if shell_state.ticket_picker_overlay.has_repository_prompt()
                     || shell_state.workflow_profiles_modal.renaming
                     || shell_state.terminal_needs_input_is_note_insert_mode()
-                    || (shell_state.mode == UiMode::Terminal
+                    || (shell_state.mode == UiMode::Insert
                         && shell_state.is_terminal_view_active())
                 {
                     let _ = io::stdout()
@@ -464,8 +464,5 @@ fn bottom_bar_style(mode: UiMode) -> Style {
         UiMode::Insert => Style::default()
             .fg(Color::Rgb(236, 239, 244))
             .bg(Color::Rgb(76, 86, 106)),
-        UiMode::Terminal => Style::default()
-            .fg(Color::Rgb(236, 239, 244))
-            .bg(Color::Rgb(94, 129, 172)),
     }
 }

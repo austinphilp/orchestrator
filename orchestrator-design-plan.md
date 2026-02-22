@@ -488,11 +488,9 @@ Key behavior:
 ### 11.1 Modes
 - **Normal**: navigation + commands
 - **Insert**: editing text (responses, chat input)
-- **Terminal**: raw pass-through to PTY (with escape hatch)
 
 Hard rules:
 - `Esc` always returns to Normal
-- Terminal mode has a reliable escape (`Esc` or `Ctrl-\\ Ctrl-n` style)
 
 ### 11.2 Config-driven keymaps (trie)
 Keymaps should be defined by config and compiled into a trie:
