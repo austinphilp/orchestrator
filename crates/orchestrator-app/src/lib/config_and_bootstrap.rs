@@ -8,7 +8,7 @@ use crate::projection::{rebuild_projection, ProjectionState, SessionRuntimeProje
 use orchestrator_config::default_config_path as canonical_default_config_path;
 use orchestrator_config::{
     load_from_env as canonical_load_from_env, load_from_path as canonical_load_from_path,
-    ConfigError,
+    normalize_database_config, ConfigError,
 };
 use orchestrator_core::{
     apply_workflow_transition, CoreError, EventStore, InboxItemId, RuntimeSessionId,
@@ -45,8 +45,6 @@ pub use orchestrator_config::{
 };
 pub use ticket_picker::AppTicketPickerProvider;
 
-const DEFAULT_SUPERVISOR_MODEL: &str = "c/claude-haiku-4.5";
-
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct StartupState {
     pub status: String,
@@ -72,30 +70,6 @@ fn config_error_to_core(error: ConfigError) -> CoreError {
 #[cfg(test)]
 fn default_config_path() -> Result<std::path::PathBuf, CoreError> {
     canonical_default_config_path().map_err(config_error_to_core)
-}
-
-fn default_database_max_connections() -> u32 {
-    DatabaseConfigToml::default().max_connections
-}
-
-fn default_database_busy_timeout_ms() -> u64 {
-    DatabaseConfigToml::default().busy_timeout_ms
-}
-
-fn default_database_chunk_event_flush_ms() -> u64 {
-    DatabaseConfigToml::default().chunk_event_flush_ms
-}
-
-fn default_database_synchronous() -> String {
-    DatabaseConfigToml::default().synchronous
-}
-
-fn normalize_database_synchronous(value: &str) -> String {
-    let candidate = value.trim().to_ascii_uppercase();
-    match candidate.as_str() {
-        "OFF" | "NORMAL" | "FULL" | "EXTRA" => candidate,
-        _ => default_database_synchronous(),
-    }
 }
 
 fn ensure_event_store_parent_dir(path: &str) -> Result<(), CoreError> {
@@ -131,22 +105,7 @@ fn database_runtime_config_cell() -> &'static Mutex<DatabaseConfigToml> {
 
 pub fn set_database_runtime_config(config: DatabaseConfigToml) {
     let mut normalized = config;
-    normalized.max_connections = if normalized.max_connections == 0 {
-        default_database_max_connections()
-    } else {
-        normalized.max_connections.clamp(1, 64)
-    };
-    normalized.busy_timeout_ms = if normalized.busy_timeout_ms == 0 {
-        default_database_busy_timeout_ms()
-    } else {
-        normalized.busy_timeout_ms.clamp(100, 60_000)
-    };
-    normalized.chunk_event_flush_ms = if normalized.chunk_event_flush_ms == 0 {
-        default_database_chunk_event_flush_ms()
-    } else {
-        normalized.chunk_event_flush_ms.clamp(50, 5_000)
-    };
-    normalized.synchronous = normalize_database_synchronous(normalized.synchronous.as_str());
+    let _ = normalize_database_config(&mut normalized);
 
     {
         let mut guard = database_runtime_config_cell()

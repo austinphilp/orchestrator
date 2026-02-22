@@ -941,7 +941,7 @@ pub(crate) fn supervisor_model_from_env() -> String {
     SUPERVISOR_MODEL_CONFIG
         .get()
         .cloned()
-        .unwrap_or_else(|| DEFAULT_SUPERVISOR_MODEL.to_owned())
+        .unwrap_or_else(|| SupervisorConfig::default().model)
 }
 
 fn git_binary_from_config() -> String {

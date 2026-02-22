@@ -171,18 +171,11 @@ pub fn load_from_path(path: impl AsRef<Path>) -> Result<OrchestratorConfig, Conf
 }
 
 pub fn default_config_path() -> Result<PathBuf, ConfigError> {
-    let home = std::env::var("HOME")
-        .or_else(|_| std::env::var("USERPROFILE"))
-        .map_err(|_| {
-            ConfigError::configuration("Unable to resolve home directory from HOME or USERPROFILE")
-        })?;
-    if home.trim().is_empty() {
-        return Err(ConfigError::configuration(
-            "HOME and USERPROFILE values are empty",
-        ));
-    }
+    let home = resolve_home_dir().ok_or_else(|| {
+        ConfigError::configuration("Unable to resolve home directory from HOME or USERPROFILE")
+    })?;
 
-    Ok(PathBuf::from(home)
+    Ok(home
         .join(".config")
         .join("orchestrator")
         .join("config.toml"))
@@ -190,7 +183,13 @@ pub fn default_config_path() -> Result<PathBuf, ConfigError> {
 
 fn config_path_from_env() -> Result<PathBuf, ConfigError> {
     match std::env::var(ENV_ORCHESTRATOR_CONFIG) {
-        Ok(raw) => Ok(raw.into()),
+        Ok(raw) => {
+            if raw.trim().is_empty() {
+                default_config_path()
+            } else {
+                Ok(raw.into())
+            }
+        }
         Err(std::env::VarError::NotPresent) => default_config_path(),
         Err(_) => Err(ConfigError::configuration(
             "ORCHESTRATOR_CONFIG contained invalid UTF-8",
@@ -811,7 +810,7 @@ fn normalize_config(config: &mut OrchestratorConfig) -> bool {
         ],
     );
 
-    changed |= normalize_non_empty_string(&mut config.supervisor.model, default_supervisor_model());
+    changed |= normalize_supervisor_model(&mut config.supervisor.model);
     changed |= normalize_non_empty_string(
         &mut config.supervisor.openrouter_base_url,
         default_openrouter_base_url(),
@@ -882,81 +881,106 @@ fn normalize_config(config: &mut OrchestratorConfig) -> bool {
         changed = true;
     }
 
-    let normalized_max_connections = if config.database.max_connections == 0 {
+    changed |= normalize_database_config(&mut config.database);
+    changed |= normalize_ui_config(&mut config.ui);
+
+    changed
+}
+
+pub fn normalize_supervisor_model(value: &mut String) -> bool {
+    normalize_non_empty_string(value, default_supervisor_model())
+}
+
+pub fn normalize_database_config(config: &mut DatabaseConfigToml) -> bool {
+    let mut changed = false;
+
+    let normalized_max_connections = if config.max_connections == 0 {
         default_database_max_connections()
     } else {
-        config.database.max_connections.clamp(1, 64)
+        config.max_connections.clamp(1, 64)
     };
-    if normalized_max_connections != config.database.max_connections {
-        config.database.max_connections = normalized_max_connections;
-        changed = true;
-    }
-    let normalized_busy_timeout_ms = if config.database.busy_timeout_ms == 0 {
-        default_database_busy_timeout_ms()
-    } else {
-        config.database.busy_timeout_ms.clamp(100, 60_000)
-    };
-    if normalized_busy_timeout_ms != config.database.busy_timeout_ms {
-        config.database.busy_timeout_ms = normalized_busy_timeout_ms;
-        changed = true;
-    }
-    let normalized_chunk_event_flush_ms = if config.database.chunk_event_flush_ms == 0 {
-        default_database_chunk_event_flush_ms()
-    } else {
-        config.database.chunk_event_flush_ms.clamp(50, 5_000)
-    };
-    if normalized_chunk_event_flush_ms != config.database.chunk_event_flush_ms {
-        config.database.chunk_event_flush_ms = normalized_chunk_event_flush_ms;
-        changed = true;
-    }
-    let normalized_synchronous =
-        normalize_database_synchronous(config.database.synchronous.as_str());
-    if normalized_synchronous != config.database.synchronous {
-        config.database.synchronous = normalized_synchronous;
+    if normalized_max_connections != config.max_connections {
+        config.max_connections = normalized_max_connections;
         changed = true;
     }
 
-    changed |= normalize_non_empty_string(&mut config.ui.theme, default_ui_theme());
-    changed |= normalize_string_vec(&mut config.ui.ticket_picker_priority_states);
-    if config.ui.ticket_picker_priority_states.is_empty() {
-        config.ui.ticket_picker_priority_states = default_ticket_picker_priority_states();
+    let normalized_busy_timeout_ms = if config.busy_timeout_ms == 0 {
+        default_database_busy_timeout_ms()
+    } else {
+        config.busy_timeout_ms.clamp(100, 60_000)
+    };
+    if normalized_busy_timeout_ms != config.busy_timeout_ms {
+        config.busy_timeout_ms = normalized_busy_timeout_ms;
         changed = true;
     }
-    let normalized_transcript_line_limit = config.ui.transcript_line_limit.max(1);
-    if normalized_transcript_line_limit != config.ui.transcript_line_limit {
-        config.ui.transcript_line_limit = normalized_transcript_line_limit;
+
+    let normalized_chunk_event_flush_ms = if config.chunk_event_flush_ms == 0 {
+        default_database_chunk_event_flush_ms()
+    } else {
+        config.chunk_event_flush_ms.clamp(50, 5_000)
+    };
+    if normalized_chunk_event_flush_ms != config.chunk_event_flush_ms {
+        config.chunk_event_flush_ms = normalized_chunk_event_flush_ms;
         changed = true;
     }
-    let normalized_background_refresh_secs = config.ui.background_session_refresh_secs.clamp(2, 15);
-    if normalized_background_refresh_secs != config.ui.background_session_refresh_secs {
-        config.ui.background_session_refresh_secs = normalized_background_refresh_secs;
+
+    let normalized_synchronous = normalize_database_synchronous(config.synchronous.as_str());
+    if normalized_synchronous != config.synchronous {
+        config.synchronous = normalized_synchronous;
         changed = true;
     }
+
+    changed
+}
+
+pub fn normalize_ui_config(config: &mut UiConfigToml) -> bool {
+    let mut changed = false;
+
+    changed |= normalize_non_empty_string(&mut config.theme, default_ui_theme());
+    changed |= normalize_string_vec(&mut config.ticket_picker_priority_states);
+    if config.ticket_picker_priority_states.is_empty() {
+        config.ticket_picker_priority_states = default_ticket_picker_priority_states();
+        changed = true;
+    }
+
+    let normalized_transcript_line_limit = config.transcript_line_limit.max(1);
+    if normalized_transcript_line_limit != config.transcript_line_limit {
+        config.transcript_line_limit = normalized_transcript_line_limit;
+        changed = true;
+    }
+
+    let normalized_background_refresh_secs = config.background_session_refresh_secs.clamp(2, 15);
+    if normalized_background_refresh_secs != config.background_session_refresh_secs {
+        config.background_session_refresh_secs = normalized_background_refresh_secs;
+        changed = true;
+    }
+
     let normalized_session_info_background_refresh_secs =
-        config.ui.session_info_background_refresh_secs.max(15);
+        config.session_info_background_refresh_secs.max(15);
     if normalized_session_info_background_refresh_secs
-        != config.ui.session_info_background_refresh_secs
+        != config.session_info_background_refresh_secs
     {
-        config.ui.session_info_background_refresh_secs =
+        config.session_info_background_refresh_secs =
             normalized_session_info_background_refresh_secs;
         changed = true;
     }
+
     let normalized_merge_poll_base_interval_secs =
-        config.ui.merge_poll_base_interval_secs.clamp(5, 300);
-    if normalized_merge_poll_base_interval_secs != config.ui.merge_poll_base_interval_secs {
-        config.ui.merge_poll_base_interval_secs = normalized_merge_poll_base_interval_secs;
+        config.merge_poll_base_interval_secs.clamp(5, 300);
+    if normalized_merge_poll_base_interval_secs != config.merge_poll_base_interval_secs {
+        config.merge_poll_base_interval_secs = normalized_merge_poll_base_interval_secs;
         changed = true;
     }
-    let normalized_merge_poll_max_backoff_secs =
-        config.ui.merge_poll_max_backoff_secs.clamp(15, 900);
-    if normalized_merge_poll_max_backoff_secs != config.ui.merge_poll_max_backoff_secs {
-        config.ui.merge_poll_max_backoff_secs = normalized_merge_poll_max_backoff_secs;
+
+    let normalized_merge_poll_max_backoff_secs = config.merge_poll_max_backoff_secs.clamp(15, 900);
+    if normalized_merge_poll_max_backoff_secs != config.merge_poll_max_backoff_secs {
+        config.merge_poll_max_backoff_secs = normalized_merge_poll_max_backoff_secs;
         changed = true;
     }
-    let normalized_merge_poll_backoff_multiplier =
-        config.ui.merge_poll_backoff_multiplier.clamp(1, 8);
-    if normalized_merge_poll_backoff_multiplier != config.ui.merge_poll_backoff_multiplier {
-        config.ui.merge_poll_backoff_multiplier = normalized_merge_poll_backoff_multiplier;
+
+    let normalized_merge_poll_backoff_multiplier = config.merge_poll_backoff_multiplier.clamp(1, 8);
+    if normalized_merge_poll_backoff_multiplier != config.merge_poll_backoff_multiplier {
+        config.merge_poll_backoff_multiplier = normalized_merge_poll_backoff_multiplier;
         changed = true;
     }
 
@@ -1117,6 +1141,92 @@ mod tests {
         );
 
         remove_temp_path(&home);
+    }
+
+    #[test]
+    fn load_from_env_honors_explicit_orchestrator_config_path() {
+        let home = unique_temp_dir("home-explicit-path");
+        let root = unique_temp_dir("explicit-path");
+        let explicit = root.join("nested").join("custom.toml");
+        let default = home
+            .join(".config")
+            .join("orchestrator")
+            .join("config.toml");
+
+        with_env_vars(
+            &[
+                ("HOME", Some(home.to_str().expect("home path"))),
+                ("USERPROFILE", None),
+                (
+                    ENV_ORCHESTRATOR_CONFIG,
+                    Some(explicit.to_str().expect("config path")),
+                ),
+                ("XDG_DATA_HOME", None),
+                ("LOCALAPPDATA", None),
+                ("APPDATA", None),
+            ],
+            || {
+                let config = load_from_env().expect("load explicit path config");
+                assert!(explicit.exists());
+                assert!(!default.exists());
+                assert_eq!(config.ticketing_provider, "ticketing.linear");
+            },
+        );
+
+        remove_temp_path(&home);
+        remove_temp_path(&root);
+    }
+
+    #[test]
+    fn load_from_env_treats_blank_orchestrator_config_as_unset() {
+        let home = unique_temp_dir("home-blank-path");
+        let expected = home
+            .join(".config")
+            .join("orchestrator")
+            .join("config.toml");
+
+        with_env_vars(
+            &[
+                ("HOME", Some(home.to_str().expect("home path"))),
+                ("USERPROFILE", None),
+                (ENV_ORCHESTRATOR_CONFIG, Some("  ")),
+                ("XDG_DATA_HOME", None),
+                ("LOCALAPPDATA", None),
+                ("APPDATA", None),
+            ],
+            || {
+                let config = load_from_env().expect("load config from default path");
+                assert!(expected.exists());
+                assert_eq!(config.ticketing_provider, "ticketing.linear");
+            },
+        );
+
+        remove_temp_path(&home);
+    }
+
+    #[test]
+    fn default_config_path_falls_back_to_userprofile_when_home_is_blank() {
+        let userprofile = unique_temp_dir("userprofile-default-path");
+        let expected = userprofile
+            .join(".config")
+            .join("orchestrator")
+            .join("config.toml");
+
+        with_env_vars(
+            &[
+                ("HOME", Some(" ")),
+                (
+                    "USERPROFILE",
+                    Some(userprofile.to_str().expect("userprofile path")),
+                ),
+            ],
+            || {
+                let resolved = default_config_path().expect("resolve default config path");
+                assert_eq!(resolved, expected);
+            },
+        );
+
+        remove_temp_path(&userprofile);
     }
 
     #[test]
