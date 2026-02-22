@@ -1,6 +1,7 @@
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::AppConfig;
     use crate::events::{
         ArtifactCreatedPayload, NewEventEnvelope, OrchestrationEventPayload,
         WorkflowTransitionPayload,
@@ -323,9 +324,11 @@ mod tests {
         url_opener: &impl UrlOpener,
     ) -> Result<(String, LlmResponseStream), CoreError> {
         let code_host = MockCodeHost::new(None);
+        let database_runtime_config = AppConfig::default().database_runtime();
         super::execute_github_open_review_tabs_with_opener(
             &code_host,
             event_store_path,
+            &database_runtime_config,
             context,
             url_opener,
         )
@@ -730,6 +733,7 @@ mod tests {
         let (stream_id, mut stream) = super::execute_github_open_review_tabs_with_opener(
             &code_host,
             temp_db.path().to_str().expect("path"),
+            &AppConfig::default().database_runtime(),
             SupervisorCommandContext {
                 selected_work_item_id: Some(work_item_id.as_str().to_owned()),
                 selected_session_id: None,
@@ -757,7 +761,7 @@ mod tests {
         assert_eq!(code_host.fallback_calls().len(), 1);
 
         let persisted_store =
-            open_event_store(temp_db.path().to_str().expect("path")).expect("reopen store");
+            open_event_store(temp_db.path().to_str().expect("path"), &AppConfig::default().database_runtime()).expect("reopen store");
         let runtime = resolve_runtime_mapping_for_context_with_command(
             &persisted_store,
             &SupervisorCommandContext {
@@ -798,6 +802,7 @@ mod tests {
         let (_stream_id, mut stream) = execute_workflow_reconcile_pr_merge(
             &code_host,
             temp_db.path().to_str().expect("path"),
+            &AppConfig::default().database_runtime(),
             SupervisorCommandContext {
                 selected_work_item_id: Some(work_item_id.as_str().to_owned()),
                 selected_session_id: None,
@@ -819,7 +824,7 @@ mod tests {
         assert_eq!(code_host.fallback_calls().len(), 1);
 
         let persisted_store =
-            open_event_store(temp_db.path().to_str().expect("path")).expect("reopen store");
+            open_event_store(temp_db.path().to_str().expect("path"), &AppConfig::default().database_runtime()).expect("reopen store");
         let runtime = resolve_runtime_mapping_for_context_with_command(
             &persisted_store,
             &SupervisorCommandContext {
@@ -851,6 +856,7 @@ mod tests {
         let (_stream_id, mut stream) = execute_workflow_reconcile_pr_merge(
             &code_host,
             temp_db.path().to_str().expect("path"),
+            &AppConfig::default().database_runtime(),
             SupervisorCommandContext {
                 selected_work_item_id: Some(work_item_id.as_str().to_owned()),
                 selected_session_id: Some("sess-reconcile-pr-missing".to_owned()),
@@ -926,6 +932,7 @@ mod tests {
         let (_stream_id, mut stream) = execute_workflow_reconcile_pr_merge(
             &code_host,
             temp_db.path().to_str().expect("path"),
+            &AppConfig::default().database_runtime(),
             SupervisorCommandContext {
                 selected_work_item_id: Some(work_item_id.as_str().to_owned()),
                 selected_session_id: Some(session_id.as_str().to_owned()),
@@ -997,6 +1004,7 @@ mod tests {
         let (_stream_id, mut stream) = execute_workflow_reconcile_pr_merge(
             &code_host,
             temp_db.path().to_str().expect("path"),
+            &AppConfig::default().database_runtime(),
             SupervisorCommandContext {
                 selected_work_item_id: Some(work_item_id.as_str().to_owned()),
                 selected_session_id: Some(session_id.as_str().to_owned()),
@@ -1016,7 +1024,7 @@ mod tests {
         assert_eq!(parsed["completed"], true);
 
         let persisted_store =
-            open_event_store(temp_db.path().to_str().expect("path")).expect("reopen store");
+            open_event_store(temp_db.path().to_str().expect("path"), &AppConfig::default().database_runtime()).expect("reopen store");
         let events = persisted_store.read_ordered().expect("read events");
         let latest_state = events
             .iter()
@@ -1081,6 +1089,7 @@ mod tests {
         let (_stream_id, mut stream) = super::execute_workflow_merge_pr(
             &code_host,
             temp_db.path().to_str().expect("path"),
+            &AppConfig::default().database_runtime(),
             SupervisorCommandContext {
                 selected_work_item_id: Some(work_item_id.as_str().to_owned()),
                 selected_session_id: Some(session_id.as_str().to_owned()),
@@ -1150,6 +1159,7 @@ mod tests {
         let (_stream_id, mut stream) = super::execute_workflow_merge_pr(
             &code_host,
             temp_db.path().to_str().expect("path"),
+            &AppConfig::default().database_runtime(),
             SupervisorCommandContext {
                 selected_work_item_id: Some(work_item_id.as_str().to_owned()),
                 selected_session_id: Some(session_id.as_str().to_owned()),
@@ -1219,6 +1229,7 @@ mod tests {
         let (_stream_id, mut stream) = super::execute_workflow_merge_pr(
             &code_host,
             temp_db.path().to_str().expect("path"),
+            &AppConfig::default().database_runtime(),
             SupervisorCommandContext {
                 selected_work_item_id: Some(work_item_id.as_str().to_owned()),
                 selected_session_id: Some(session_id.as_str().to_owned()),
@@ -1242,7 +1253,7 @@ mod tests {
             .contains("failed to mark draft PR #613 ready for review"));
 
         let persisted_store =
-            open_event_store(temp_db.path().to_str().expect("path")).expect("reopen store");
+            open_event_store(temp_db.path().to_str().expect("path"), &AppConfig::default().database_runtime()).expect("reopen store");
         let events = persisted_store.read_ordered().expect("read events");
         let transition_targets = events
             .iter()
@@ -1301,6 +1312,7 @@ mod tests {
         let (_stream_id, mut stream) = super::execute_workflow_merge_pr(
             &code_host,
             temp_db.path().to_str().expect("path"),
+            &AppConfig::default().database_runtime(),
             SupervisorCommandContext {
                 selected_work_item_id: Some(work_item_id.as_str().to_owned()),
                 selected_session_id: Some(session_id.as_str().to_owned()),
@@ -1373,6 +1385,7 @@ mod tests {
         let (_stream_id, mut stream) = super::execute_workflow_merge_pr(
             &code_host,
             temp_db.path().to_str().expect("path"),
+            &AppConfig::default().database_runtime(),
             SupervisorCommandContext {
                 selected_work_item_id: Some(work_item_id.as_str().to_owned()),
                 selected_session_id: Some(session_id.as_str().to_owned()),
@@ -1396,7 +1409,7 @@ mod tests {
             .contains("merge blocked by required checks"));
 
         let persisted_store =
-            open_event_store(temp_db.path().to_str().expect("path")).expect("reopen store");
+            open_event_store(temp_db.path().to_str().expect("path"), &AppConfig::default().database_runtime()).expect("reopen store");
         let events = persisted_store.read_ordered().expect("read events");
         let transition_targets = events
             .iter()
@@ -1461,6 +1474,7 @@ mod tests {
         let (_stream_id, mut stream) = execute_workflow_reconcile_pr_merge(
             &code_host,
             temp_db.path().to_str().expect("path"),
+            &AppConfig::default().database_runtime(),
             SupervisorCommandContext {
                 selected_work_item_id: Some(work_item_id.as_str().to_owned()),
                 selected_session_id: Some(session_id.as_str().to_owned()),
@@ -1485,7 +1499,7 @@ mod tests {
             .any(|transition| transition == "PendingMerge->Done"));
 
         let persisted_store =
-            open_event_store(temp_db.path().to_str().expect("path")).expect("reopen store");
+            open_event_store(temp_db.path().to_str().expect("path"), &AppConfig::default().database_runtime()).expect("reopen store");
         let events = persisted_store.read_ordered().expect("read events");
         let latest_state = events
             .iter()
@@ -1535,6 +1549,7 @@ mod tests {
         let (_stream_id, mut stream) = execute_workflow_reconcile_pr_merge(
             &code_host,
             temp_db.path().to_str().expect("path"),
+            &AppConfig::default().database_runtime(),
             SupervisorCommandContext {
                 selected_work_item_id: Some(work_item_id.as_str().to_owned()),
                 selected_session_id: Some(session_id.as_str().to_owned()),
@@ -1558,7 +1573,7 @@ mod tests {
         );
 
         let persisted_store =
-            open_event_store(temp_db.path().to_str().expect("path")).expect("reopen store");
+            open_event_store(temp_db.path().to_str().expect("path"), &AppConfig::default().database_runtime()).expect("reopen store");
         let events = persisted_store.read_ordered().expect("read events");
         let latest_state = events
             .iter()

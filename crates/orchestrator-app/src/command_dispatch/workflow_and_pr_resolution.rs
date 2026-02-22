@@ -231,13 +231,14 @@ fn looks_like_pull_request_url(url: &str) -> bool {
 async fn execute_workflow_approve_pr_ready<C>(
     code_host: &C,
     event_store_path: &str,
+    database_runtime_config: &DatabaseRuntimeConfig,
     context: SupervisorCommandContext,
 ) -> Result<(String, LlmResponseStream), CoreError>
 where
     C: CodeHostProvider + ?Sized,
 {
     let command_id = command_ids::WORKFLOW_APPROVE_PR_READY;
-    let mut store = open_event_store(event_store_path)?;
+    let mut store = open_event_store(event_store_path, database_runtime_config)?;
     let runtime = resolve_runtime_mapping_for_context(&store, &context)?;
     let pr = resolve_pull_request_for_mapping_with_vcs_fallback(
         &mut store, &runtime, command_id, code_host,
@@ -374,13 +375,14 @@ fn normalize_to_in_review_for_merge(
 async fn execute_workflow_reconcile_pr_merge<C>(
     code_host: &C,
     event_store_path: &str,
+    database_runtime_config: &DatabaseRuntimeConfig,
     context: SupervisorCommandContext,
 ) -> Result<(String, LlmResponseStream), CoreError>
 where
     C: CodeHostProvider + ?Sized,
 {
     let command_id = command_ids::WORKFLOW_RECONCILE_PR_MERGE;
-    let mut store = open_event_store(event_store_path)?;
+    let mut store = open_event_store(event_store_path, database_runtime_config)?;
     let runtime = resolve_runtime_mapping_for_context_with_command(&store, &context, command_id)?;
     let pr = match resolve_pull_request_for_mapping_with_vcs_fallback(
         &mut store, &runtime, command_id, code_host,
@@ -533,13 +535,14 @@ where
 async fn execute_workflow_merge_pr<C>(
     code_host: &C,
     event_store_path: &str,
+    database_runtime_config: &DatabaseRuntimeConfig,
     context: SupervisorCommandContext,
 ) -> Result<(String, LlmResponseStream), CoreError>
 where
     C: CodeHostProvider + ?Sized,
 {
     let command_id = command_ids::WORKFLOW_MERGE_PR;
-    let mut store = open_event_store(event_store_path)?;
+    let mut store = open_event_store(event_store_path, database_runtime_config)?;
     let runtime = resolve_runtime_mapping_for_context_with_command(&store, &context, command_id)?;
     let pr = resolve_pull_request_for_mapping_with_vcs_fallback(
         &mut store, &runtime, command_id, code_host,
@@ -617,7 +620,13 @@ where
         );
     }
 
-    execute_workflow_reconcile_pr_merge(code_host, event_store_path, context).await
+    execute_workflow_reconcile_pr_merge(
+        code_host,
+        event_store_path,
+        database_runtime_config,
+        context,
+    )
+    .await
 }
 
 fn rollback_merge_to_review_state(
@@ -657,6 +666,7 @@ fn rollback_merge_to_review_state(
 
 fn append_supervisor_event(
     event_store_path: &str,
+    database_runtime_config: &DatabaseRuntimeConfig,
     event_id: String,
     occurred_at: String,
     work_item_id: Option<WorkItemId>,
@@ -666,7 +676,7 @@ fn append_supervisor_event(
     let mut delay_ms = 25u64;
     let mut last_error: Option<CoreError> = None;
     for _ in 0..4 {
-        let mut store = match open_event_store(event_store_path) {
+        let mut store = match open_event_store(event_store_path, database_runtime_config) {
             Ok(store) => store,
             Err(error) => {
                 if is_sqlite_busy_error(&error) {
@@ -710,6 +720,7 @@ fn is_sqlite_busy_error(error: &CoreError) -> bool {
 
 fn append_supervisor_event_best_effort(
     event_store_path: &str,
+    database_runtime_config: &DatabaseRuntimeConfig,
     event_id: String,
     occurred_at: String,
     work_item_id: Option<WorkItemId>,
@@ -718,6 +729,7 @@ fn append_supervisor_event_best_effort(
 ) {
     if let Err(error) = append_supervisor_event(
         event_store_path,
+        database_runtime_config,
         event_id,
         occurred_at,
         work_item_id,
@@ -733,6 +745,7 @@ fn append_supervisor_event_best_effort(
 
 struct SupervisorLifecycleRecordingStream {
     event_store_path: String,
+    database_config: DatabaseRuntimeConfig,
     work_item_id: Option<WorkItemId>,
     session_id: Option<WorkerSessionId>,
     query_id: String,
@@ -755,6 +768,7 @@ struct SupervisorLifecycleRecordingStream {
 impl SupervisorLifecycleRecordingStream {
     fn new(
         event_store_path: String,
+        database_config: DatabaseRuntimeConfig,
         work_item_id: Option<WorkItemId>,
         session_id: Option<WorkerSessionId>,
         query_id: String,
@@ -766,6 +780,8 @@ impl SupervisorLifecycleRecordingStream {
     ) -> Self {
         Self {
             event_store_path,
+            chunk_flush_interval: supervisor_chunk_event_flush_interval(&database_config),
+            database_config,
             work_item_id,
             session_id,
             query_id,
@@ -773,7 +789,6 @@ impl SupervisorLifecycleRecordingStream {
             started_at,
             started_time,
             cancellation_requested_by_user,
-            chunk_flush_interval: supervisor_chunk_event_flush_interval(),
             pending_chunk_count: 0,
             pending_output_chars: 0,
             pending_usage: None,
@@ -820,6 +835,7 @@ impl SupervisorLifecycleRecordingStream {
         let observed_at = now_timestamp();
         append_supervisor_event_best_effort(
             self.event_store_path.as_str(),
+            &self.database_config,
             next_event_id("supervisor-query-chunk"),
             observed_at.clone(),
             self.work_item_id.clone(),
@@ -872,6 +888,7 @@ impl SupervisorLifecycleRecordingStream {
 
         append_supervisor_event_best_effort(
             self.event_store_path.as_str(),
+            &self.database_config,
             next_event_id("supervisor-query-finished"),
             finished_at.clone(),
             self.work_item_id.clone(),
@@ -921,6 +938,7 @@ impl Drop for SupervisorLifecycleRecordingStream {
             let cancelled_at = now_timestamp();
             append_supervisor_event_best_effort(
                 self.event_store_path.as_str(),
+                &self.database_config,
                 next_event_id("supervisor-query-cancelled"),
                 cancelled_at.clone(),
                 self.work_item_id.clone(),
@@ -961,7 +979,11 @@ impl LlmResponseSubscription for SupervisorLifecycleRecordingStream {
     }
 }
 
-pub(crate) fn record_user_initiated_supervisor_cancel(event_store_path: &str, stream_id: &str) {
+pub(crate) fn record_user_initiated_supervisor_cancel(
+    event_store_path: &str,
+    database_runtime_config: &DatabaseRuntimeConfig,
+    stream_id: &str,
+) {
     let Some(state) = mark_user_cancellation_requested(event_store_path, stream_id) else {
         return;
     };
@@ -969,6 +991,7 @@ pub(crate) fn record_user_initiated_supervisor_cancel(event_store_path: &str, st
     let cancelled_at = now_timestamp();
     append_supervisor_event_best_effort(
         event_store_path,
+        database_runtime_config,
         next_event_id("supervisor-query-cancelled"),
         cancelled_at.clone(),
         state.work_item_id,
@@ -986,6 +1009,8 @@ async fn execute_supervisor_query<P>(
     supervisor: &P,
     ticketing: &(dyn TicketingProvider + Send + Sync),
     event_store_path: &str,
+    supervisor_runtime_config: &SupervisorRuntimeConfig,
+    database_runtime_config: &DatabaseRuntimeConfig,
     args: SupervisorQueryArgs,
     fallback_context: SupervisorCommandContext,
 ) -> Result<(String, LlmResponseStream), CoreError>
@@ -1015,7 +1040,12 @@ where
     let stream_id = next_runtime_stream_id();
 
     for iteration in 0..MAX_TOOL_LOOP_ITERATIONS {
-        let turn = run_supervisor_turn(supervisor, messages.clone()).await?;
+        let turn = run_supervisor_turn(
+            supervisor,
+            supervisor_runtime_config.model.as_str(),
+            messages.clone(),
+        )
+        .await?;
         for chunk in turn.chunks {
             queued_chunks.push_back(chunk);
         }
@@ -1100,6 +1130,7 @@ where
 
     append_supervisor_event(
         event_store_path,
+        database_runtime_config,
         next_event_id("supervisor-query-started"),
         started_at.clone(),
         work_item_id.clone(),
@@ -1128,6 +1159,7 @@ where
 
     let stream = SupervisorLifecycleRecordingStream::new(
         event_store_path.to_owned(),
+        database_runtime_config.clone(),
         work_item_id,
         session_id,
         query_id,
@@ -1144,10 +1176,11 @@ where
 async fn execute_github_open_review_tabs_with_opener(
     code_host: &impl CodeHostProvider,
     event_store_path: &str,
+    database_runtime_config: &DatabaseRuntimeConfig,
     context: SupervisorCommandContext,
     url_opener: &impl UrlOpener,
 ) -> Result<(String, LlmResponseStream), CoreError> {
-    let mut store = open_event_store(event_store_path)?;
+    let mut store = open_event_store(event_store_path, database_runtime_config)?;
     let runtime = resolve_runtime_mapping_for_context_with_command(
         &store,
         &context,
@@ -1177,10 +1210,18 @@ async fn execute_github_open_review_tabs_with_opener(
 async fn execute_github_open_review_tabs(
     code_host: &impl CodeHostProvider,
     event_store_path: &str,
+    database_runtime_config: &DatabaseRuntimeConfig,
     context: SupervisorCommandContext,
 ) -> Result<(String, LlmResponseStream), CoreError> {
     let opener = default_system_url_opener()?;
-    execute_github_open_review_tabs_with_opener(code_host, event_store_path, context, &opener).await
+    execute_github_open_review_tabs_with_opener(
+        code_host,
+        event_store_path,
+        database_runtime_config,
+        context,
+        &opener,
+    )
+    .await
 }
 
 pub(crate) async fn dispatch_supervisor_runtime_command<P>(
@@ -1188,6 +1229,8 @@ pub(crate) async fn dispatch_supervisor_runtime_command<P>(
     code_host: &impl CodeHostProvider,
     ticketing: &(dyn TicketingProvider + Send + Sync),
     event_store_path: &str,
+    supervisor_runtime_config: &SupervisorRuntimeConfig,
+    database_runtime_config: &DatabaseRuntimeConfig,
     invocation: orchestrator_core::UntypedCommandInvocation,
     context: SupervisorCommandContext,
 ) -> Result<(String, LlmResponseStream), CoreError>
@@ -1198,19 +1241,52 @@ where
     let command = CommandRegistry::default().parse_invocation(&typed_invocation)?;
     match command {
         Command::SupervisorQuery(args) => {
-            execute_supervisor_query(supervisor, ticketing, event_store_path, args, context).await
+            execute_supervisor_query(
+                supervisor,
+                ticketing,
+                event_store_path,
+                supervisor_runtime_config,
+                database_runtime_config,
+                args,
+                context,
+            )
+            .await
         }
         Command::WorkflowApprovePrReady => {
-            execute_workflow_approve_pr_ready(code_host, event_store_path, context).await
+            execute_workflow_approve_pr_ready(
+                code_host,
+                event_store_path,
+                database_runtime_config,
+                context,
+            )
+            .await
         }
         Command::WorkflowReconcilePrMerge => {
-            execute_workflow_reconcile_pr_merge(code_host, event_store_path, context).await
+            execute_workflow_reconcile_pr_merge(
+                code_host,
+                event_store_path,
+                database_runtime_config,
+                context,
+            )
+            .await
         }
         Command::WorkflowMergePr => {
-            execute_workflow_merge_pr(code_host, event_store_path, context).await
+            execute_workflow_merge_pr(
+                code_host,
+                event_store_path,
+                database_runtime_config,
+                context,
+            )
+            .await
         }
         Command::GithubOpenReviewTabs => {
-            execute_github_open_review_tabs(code_host, event_store_path, context).await
+            execute_github_open_review_tabs(
+                code_host,
+                event_store_path,
+                database_runtime_config,
+                context,
+            )
+            .await
         }
         command => Err(invalid_supervisor_runtime_usage(command.id())),
     }

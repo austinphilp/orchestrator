@@ -28,8 +28,8 @@ use serde_json::{json, Value};
 use tracing::warn;
 
 use super::{
-    open_event_store, open_owned_event_store, supervisor_chunk_event_flush_interval,
-    supervisor_model_from_env, AppEventStore,
+    open_event_store, open_owned_event_store, supervisor_chunk_event_flush_interval, AppEventStore,
+    DatabaseRuntimeConfig, SupervisorRuntimeConfig,
 };
 use crate::{
     commands::{
@@ -282,6 +282,7 @@ struct SupervisorTurnState {
 
 async fn run_supervisor_turn<P>(
     supervisor: &P,
+    supervisor_model: &str,
     messages: Vec<LlmMessage>,
 ) -> Result<SupervisorTurnState, CoreError>
 where
@@ -289,7 +290,7 @@ where
 {
     let (stream_id, mut stream) = supervisor
         .stream_chat(LlmChatRequest {
-            model: supervisor_model_from_env(),
+            model: supervisor_model.to_owned(),
             messages,
             tools: supervisor_tools(),
             temperature: Some(0.2),

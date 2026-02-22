@@ -119,6 +119,23 @@ impl<S: Supervisor, G: GithubClient> App<S, G> {
         }
     }
 
+    fn database_runtime_config(&self) -> DatabaseRuntimeConfig {
+        self.config.database_runtime()
+    }
+
+    fn supervisor_runtime_config(&self) -> SupervisorRuntimeConfig {
+        self.config.supervisor_runtime()
+    }
+
+    fn git_binary(&self) -> String {
+        self.config.git_runtime().binary
+    }
+
+    fn open_event_store(&self) -> Result<AppEventStore, CoreError> {
+        let database_config = self.database_runtime_config();
+        open_event_store(&self.config.event_store_path, &database_config)
+    }
+
     pub async fn startup_state(&self) -> Result<StartupState, CoreError> {
         self.supervisor.health_check().await?;
         self.github.health_check().await?;
@@ -132,7 +149,7 @@ impl<S: Supervisor, G: GithubClient> App<S, G> {
     }
 
     pub fn projection_state(&self) -> Result<ProjectionState, CoreError> {
-        let store = open_event_store(&self.config.event_store_path)?;
+        let store = self.open_event_store()?;
         let events = store.read_ordered()?;
         let mut projection = rebuild_projection(&events);
         let session_working_states = store.list_session_working_states()?;
@@ -171,7 +188,7 @@ impl<S: Supervisor, G: GithubClient> App<S, G> {
             .unwrap_or_else(|| request.work_item_id.as_str());
         let inbox_item_id = InboxItemId::new(format!("inbox-{coalesce_scope}-{coalesce_key}"));
 
-        let mut store = open_event_store(&self.config.event_store_path)?;
+        let mut store = self.open_event_store()?;
         let existing_events = store.read_ordered()?;
         let projection = rebuild_projection(&existing_events);
         if let Some(existing) = projection.inbox_items.get(&inbox_item_id) {
@@ -208,7 +225,7 @@ impl<S: Supervisor, G: GithubClient> App<S, G> {
         &self,
         request: &InboxResolveRequest,
     ) -> Result<Option<StoredEventEnvelope>, CoreError> {
-        let mut store = open_event_store(&self.config.event_store_path)?;
+        let mut store = self.open_event_store()?;
         let projection = rebuild_projection(&store.read_ordered()?);
         let Some(inbox_item) = projection.inbox_items.get(&request.inbox_item_id) else {
             return Err(CoreError::InvalidCommandArgs {
@@ -310,7 +327,7 @@ impl<S: Supervisor, G: GithubClient> App<S, G> {
         session_id: &WorkerSessionId,
         reason: &str,
     ) -> Result<(), CoreError> {
-        let mut store = open_event_store(&self.config.event_store_path)?;
+        let mut store = self.open_event_store()?;
         let mapping = store.find_runtime_mapping_by_session_id(session_id)?;
         if let Some(mut mapping) = mapping {
             mapping.session.status = WorkerSessionStatus::Crashed;
@@ -383,7 +400,7 @@ impl<S: Supervisor, G: GithubClient> App<S, G> {
         session_id: &WorkerSessionId,
         is_working: bool,
     ) -> Result<(), CoreError> {
-        let store = open_event_store(&self.config.event_store_path)?;
+        let store = self.open_event_store()?;
         store.set_session_working_state(session_id, is_working)
     }
 
@@ -430,7 +447,7 @@ impl<S: Supervisor, G: GithubClient> App<S, G> {
         &self,
         session_id: &WorkerSessionId,
     ) -> Result<orchestrator_ui::SessionWorktreeDiff, CoreError> {
-        let store = open_event_store(&self.config.event_store_path)?;
+        let store = self.open_event_store()?;
         let mapping = store
             .find_runtime_mapping_by_session_id(session_id)?
             .ok_or_else(|| {
@@ -449,7 +466,7 @@ impl<S: Supervisor, G: GithubClient> App<S, G> {
             )));
         }
 
-        let git_bin = std::ffi::OsString::from(git_binary_from_config());
+        let git_bin = std::ffi::OsString::from(self.git_binary());
 
         let run_git = |args: &[&str]| -> Result<std::process::Output, CoreError> {
             Command::new(&git_bin)
@@ -583,7 +600,7 @@ impl<S: Supervisor, G: GithubClient> App<S, G> {
         &self,
         session_id: &WorkerSessionId,
     ) -> Result<SessionWorkflowAdvanceOutcome, CoreError> {
-        let mut store = open_event_store(&self.config.event_store_path)?;
+        let mut store = self.open_event_store()?;
         let mapping = store
             .find_runtime_mapping_by_session_id(session_id)?
             .ok_or_else(|| {
@@ -635,7 +652,7 @@ impl<S: Supervisor, G: GithubClient> App<S, G> {
         summary: &str,
     ) -> Result<(StoredEventEnvelope, Vec<String>), CoreError> {
         let existing_mapping = {
-            let store = open_event_store(&self.config.event_store_path)?;
+            let store = self.open_event_store()?;
             store
                 .find_runtime_mapping_by_session_id(session_id)?
                 .ok_or_else(|| {
@@ -660,14 +677,16 @@ impl<S: Supervisor, G: GithubClient> App<S, G> {
             }
         }
 
+        let git_binary = self.git_binary();
         if let Err(error) = cleanup_worktree_after_merge(
             existing_mapping.worktree.path.as_str(),
             existing_mapping.worktree.branch.as_str(),
+            git_binary.as_str(),
         ) {
             cleanup_warnings.push(error.to_string());
         }
 
-        let mut store = open_event_store(&self.config.event_store_path)?;
+        let mut store = self.open_event_store()?;
         let mut mapping = store
             .find_runtime_mapping_by_session_id(session_id)?
             .ok_or_else(|| {
@@ -783,18 +802,23 @@ fn latest_inbox_created_event_for_id(
         })
 }
 
-fn cleanup_worktree_after_merge(worktree_path_raw: &str, branch: &str) -> Result<(), CoreError> {
+fn cleanup_worktree_after_merge(
+    worktree_path_raw: &str,
+    branch: &str,
+    git_binary: &str,
+) -> Result<(), CoreError> {
     let worktree_path = PathBuf::from(worktree_path_raw.trim());
     if worktree_path.as_os_str().is_empty() || !worktree_path.exists() {
         return Ok(());
     }
 
-    let repository_root = resolve_repository_root_from_worktree(&worktree_path)?;
+    let repository_root = resolve_repository_root_from_worktree(&worktree_path, git_binary)?;
     let worktree_arg = worktree_path.to_string_lossy().to_string();
 
     let remove_output = run_git_command(
         repository_root.as_path(),
         &["worktree", "remove", "--force", worktree_arg.as_str()],
+        git_binary,
     )?;
     if !remove_output.status.success() {
         let detail = git_output_detail(&remove_output);
@@ -814,7 +838,8 @@ fn cleanup_worktree_after_merge(worktree_path_raw: &str, branch: &str) -> Result
         return Ok(());
     }
 
-    let delete_output = run_git_command(repository_root.as_path(), &["branch", "-d", branch])?;
+    let delete_output =
+        run_git_command(repository_root.as_path(), &["branch", "-d", branch], git_binary)?;
     if delete_output.status.success() {
         return Ok(());
     }
@@ -826,7 +851,7 @@ fn cleanup_worktree_after_merge(worktree_path_raw: &str, branch: &str) -> Result
     }
 
     let force_delete_output =
-        run_git_command(repository_root.as_path(), &["branch", "-D", branch])?;
+        run_git_command(repository_root.as_path(), &["branch", "-D", branch], git_binary)?;
     if force_delete_output.status.success() {
         return Ok(());
     }
@@ -842,8 +867,15 @@ fn cleanup_worktree_after_merge(worktree_path_raw: &str, branch: &str) -> Result
     )))
 }
 
-fn resolve_repository_root_from_worktree(worktree_path: &PathBuf) -> Result<PathBuf, CoreError> {
-    let output = run_git_command(worktree_path.as_path(), &["rev-parse", "--show-toplevel"])?;
+fn resolve_repository_root_from_worktree(
+    worktree_path: &PathBuf,
+    git_binary: &str,
+) -> Result<PathBuf, CoreError> {
+    let output = run_git_command(
+        worktree_path.as_path(),
+        &["rev-parse", "--show-toplevel"],
+        git_binary,
+    )?;
     if !output.status.success() {
         return Err(CoreError::DependencyUnavailable(format!(
             "failed to resolve repository root for worktree '{}': {}",
@@ -863,10 +895,12 @@ fn resolve_repository_root_from_worktree(worktree_path: &PathBuf) -> Result<Path
     Ok(PathBuf::from(root))
 }
 
-fn run_git_command(cwd: &std::path::Path, args: &[&str]) -> Result<std::process::Output, CoreError> {
-    let git_bin = std::ffi::OsString::from(git_binary_from_config());
-
-    Command::new(&git_bin)
+fn run_git_command(
+    cwd: &std::path::Path,
+    args: &[&str],
+    git_binary: &str,
+) -> Result<std::process::Output, CoreError> {
+    Command::new(git_binary)
         .arg("-C")
         .arg(cwd)
         .args(args)
@@ -918,39 +952,6 @@ fn sanitize_terminal_display_text(input: &str) -> String {
     output
 }
 
-static SUPERVISOR_MODEL_CONFIG: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-static GIT_BINARY_CONFIG: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-
-pub fn set_supervisor_model_config(model: String) {
-    let trimmed = model.trim();
-    if trimmed.is_empty() {
-        return;
-    }
-    let _ = SUPERVISOR_MODEL_CONFIG.set(trimmed.to_owned());
-}
-
-pub fn set_git_binary_config(binary: String) {
-    let trimmed = binary.trim();
-    if trimmed.is_empty() {
-        return;
-    }
-    let _ = GIT_BINARY_CONFIG.set(trimmed.to_owned());
-}
-
-pub(crate) fn supervisor_model_from_env() -> String {
-    SUPERVISOR_MODEL_CONFIG
-        .get()
-        .cloned()
-        .unwrap_or_else(|| SupervisorConfig::default().model)
-}
-
-fn git_binary_from_config() -> String {
-    GIT_BINARY_CONFIG
-        .get()
-        .cloned()
-        .unwrap_or_else(|| "git".to_owned())
-}
-
 #[async_trait::async_trait]
 impl<S, G> SupervisorCommandDispatcher for App<S, G>
 where
@@ -962,11 +963,15 @@ where
         invocation: orchestrator_core::UntypedCommandInvocation,
         context: SupervisorCommandContext,
     ) -> Result<(String, orchestrator_supervisor::LlmResponseStream), CoreError> {
+        let supervisor_config = self.supervisor_runtime_config();
+        let database_config = self.database_runtime_config();
         command_dispatch::dispatch_supervisor_runtime_command(
             &self.supervisor,
             &self.github,
             self.ticketing.as_ref(),
             &self.config.event_store_path,
+            &supervisor_config,
+            &database_config,
             invocation,
             context,
         )
@@ -974,8 +979,10 @@ where
     }
 
     async fn cancel_supervisor_command(&self, stream_id: &str) -> Result<(), CoreError> {
+        let database_config = self.database_runtime_config();
         command_dispatch::record_user_initiated_supervisor_cancel(
             &self.config.event_store_path,
+            &database_config,
             stream_id,
         );
         self.supervisor.cancel_stream(stream_id).await

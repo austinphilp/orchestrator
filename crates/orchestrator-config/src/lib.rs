@@ -100,6 +100,11 @@ pub struct SupervisorRuntimeConfig {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GitRuntimeConfig {
+    pub binary: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DatabaseRuntimeConfig {
     pub max_connections: u32,
     pub busy_timeout_ms: u64,
@@ -134,6 +139,12 @@ impl OrchestratorConfig {
         SupervisorRuntimeConfig {
             model: self.supervisor.model.clone(),
             openrouter_base_url: self.supervisor.openrouter_base_url.clone(),
+        }
+    }
+
+    pub fn git_runtime(&self) -> GitRuntimeConfig {
+        GitRuntimeConfig {
+            binary: self.git.binary.clone(),
         }
     }
 
@@ -1297,6 +1308,12 @@ mod tests {
                 model: "c/gpt-5-codex".to_owned(),
                 openrouter_base_url: "https://example.invalid/router".to_owned(),
             },
+            git: GitConfigToml {
+                binary: "/usr/local/bin/git-custom".to_owned(),
+                allow_delete_unmerged_branches: false,
+                allow_destructive_automation: true,
+                allow_force_push: false,
+            },
             database: DatabaseConfigToml {
                 max_connections: 16,
                 busy_timeout_ms: 1_500,
@@ -1319,6 +1336,7 @@ mod tests {
 
         let providers = config.providers();
         let supervisor = config.supervisor_runtime();
+        let git = config.git_runtime();
         let database = config.database_runtime();
         let ui = config.ui_view();
 
@@ -1331,6 +1349,7 @@ mod tests {
             supervisor.openrouter_base_url,
             "https://example.invalid/router"
         );
+        assert_eq!(git.binary, "/usr/local/bin/git-custom");
         assert_eq!(database.max_connections, 16);
         assert_eq!(database.busy_timeout_ms, 1_500);
         assert!(!database.wal_enabled);

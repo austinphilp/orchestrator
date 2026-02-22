@@ -2,9 +2,9 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
-use async_trait::async_trait;
 use crate::commands::{Command, CommandRegistry};
 use crate::projection::ProjectionState;
+use async_trait::async_trait;
 use orchestrator_core::{
     CoreError, LlmChatRequest, LlmMessage, LlmProvider, LlmRole, SelectedTicketFlowResult,
     Supervisor, WorkerBackend, WorkerSessionId, WorkerSessionStatus, WorkflowState,
@@ -12,14 +12,14 @@ use orchestrator_core::{
 use orchestrator_ticketing::{
     ArchiveTicketRequest, CreateTicketRequest, TicketQuery, TicketSummary, TicketingProvider,
 };
-use orchestrator_vcs::VcsProvider;
-use orchestrator_vcs_repos::{CodeHostProvider, GithubClient};
 use orchestrator_ui::{
     CiCheckStatus, CreateTicketFromPickerRequest, InboxPublishRequest, InboxResolveRequest,
     MergeQueueCommandKind, MergeQueueEvent, SessionArchiveOutcome, SessionMergeFinalizeOutcome,
-    SessionWorktreeDiff, SessionWorkflowAdvanceOutcome, SupervisorCommandContext,
+    SessionWorkflowAdvanceOutcome, SessionWorktreeDiff, SupervisorCommandContext,
     SupervisorCommandDispatcher, TicketPickerProvider,
 };
+use orchestrator_vcs::VcsProvider;
+use orchestrator_vcs_repos::{CodeHostProvider, GithubClient};
 use std::path::PathBuf;
 use tokio::sync::{mpsc, watch, Mutex};
 use tracing::warn;
@@ -152,7 +152,13 @@ where
             });
         }
 
-        let (title, description) = draft_ticket_from_brief(&self.app.supervisor, brief).await?;
+        let supervisor_runtime_config = self.app.config.supervisor_runtime();
+        let (title, description) = draft_ticket_from_brief(
+            &self.app.supervisor,
+            supervisor_runtime_config.model.as_str(),
+            brief,
+        )
+        .await?;
         let project = request
             .selected_project
             .map(|value| value.trim().to_owned())
@@ -231,15 +237,13 @@ where
         is_working: bool,
     ) -> Result<(), CoreError> {
         let app = self.app.clone();
-        tokio::task::spawn_blocking(move || {
-            app.set_session_working_state(&session_id, is_working)
-        })
-        .await
-        .map_err(|error| {
-            CoreError::Configuration(format!(
-                "ticket picker task failed while persisting session working state: {error}"
-            ))
-        })?
+        tokio::task::spawn_blocking(move || app.set_session_working_state(&session_id, is_working))
+            .await
+            .map_err(|error| {
+                CoreError::Configuration(format!(
+                    "ticket picker task failed while persisting session working state: {error}"
+                ))
+            })?
     }
 
     async fn session_worktree_diff(
@@ -387,10 +391,9 @@ where
                 "PR merge queue is unavailable: polling service is not running".to_owned(),
             )
         })?;
-        sender
-            .send(session_id)
-            .await
-            .map_err(|error| CoreError::DependencyUnavailable(format!("PR merge queue closed: {error}")))
+        sender.send(session_id).await.map_err(|error| {
+            CoreError::DependencyUnavailable(format!("PR merge queue closed: {error}"))
+        })
     }
 }
 
@@ -486,10 +489,14 @@ where
 {
     tokio::task::spawn_blocking(move || app.projection_state())
         .await
-        .map_err(|error| CoreError::Configuration(format!("projection polling task failed: {error}")))?
+        .map_err(|error| {
+            CoreError::Configuration(format!("projection polling task failed: {error}"))
+        })?
 }
 
-fn review_session_contexts(projection: &ProjectionState) -> Vec<(WorkerSessionId, SupervisorCommandContext)> {
+fn review_session_contexts(
+    projection: &ProjectionState,
+) -> Vec<(WorkerSessionId, SupervisorCommandContext)> {
     projection
         .sessions
         .iter()
@@ -500,7 +507,8 @@ fn review_session_contexts(projection: &ProjectionState) -> Vec<(WorkerSessionId
             if !session_is_in_review_stage(projection, session_id) {
                 return None;
             }
-            supervisor_context_for_session(projection, session_id).map(|context| (session_id.clone(), context))
+            supervisor_context_for_session(projection, session_id)
+                .map(|context| (session_id.clone(), context))
         })
         .collect()
 }
@@ -847,11 +855,12 @@ const MAX_GENERATED_TITLE_LEN: usize = 180;
 
 async fn draft_ticket_from_brief(
     supervisor: &dyn LlmProvider,
+    supervisor_model: &str,
     brief: &str,
 ) -> Result<(String, String), CoreError> {
     let (_stream_id, mut stream) = supervisor
         .stream_chat(LlmChatRequest {
-            model: supervisor_model_from_env(),
+            model: supervisor_model.to_owned(),
             tools: Vec::new(),
             messages: vec![
                 LlmMessage {
@@ -973,10 +982,7 @@ fn fallback_title_from_brief(brief: &str) -> String {
 }
 
 fn compact_preview(value: &str, max_chars: usize) -> String {
-    let single_line = value
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ");
+    let single_line = value.split_whitespace().collect::<Vec<_>>().join(" ");
     let compact = single_line.trim();
     if compact.is_empty() {
         return "<empty>".to_owned();
@@ -997,10 +1003,6 @@ fn truncate_to_char_boundary(value: &str, max_chars: usize) -> &str {
         }
     }
     &value[..end]
-}
-
-fn supervisor_model_from_env() -> String {
-    super::supervisor_model_from_env()
 }
 
 #[cfg(test)]
@@ -1029,7 +1031,8 @@ Allow creating tickets with n.
 
     #[test]
     fn parse_ticket_draft_uses_fallback_when_description_missing() {
-        let (title, description) = parse_ticket_draft("Title: New work item", "fallback brief text");
+        let (title, description) =
+            parse_ticket_draft("Title: New work item", "fallback brief text");
         assert_eq!(title, "New work item");
         assert_eq!(description, "fallback brief text");
     }

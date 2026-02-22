@@ -55,10 +55,5 @@ mod module_tree_tests {
             TypeId::of::<crate::WorkerManagerBackend>(),
             TypeId::of::<crate::bootstrap::WorkerManagerBackend>()
         );
-
-        let _set_supervisor_model: fn(String) = crate::set_supervisor_model_config;
-        let _set_git_binary: fn(String) = crate::set_git_binary_config;
-        let _set_database_runtime: fn(crate::DatabaseConfigToml) =
-            crate::set_database_runtime_config;
     }
 }

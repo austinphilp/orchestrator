@@ -1,4 +1,5 @@
 use anyhow::Result;
+use orchestrator_app::composition::runtime_config_slices;
 use orchestrator_app::events::OrchestrationEventPayload;
 use orchestrator_app::{
     load_app_config_from_env, App, AppConfig, AppError, AppFrontendController, FrontendController,
@@ -59,18 +60,12 @@ async fn main() -> Result<()> {
     config.vcs_repo_provider =
         resolve_provider_name(cli.vcs_repo_provider.as_deref(), &config.vcs_repo_provider)?;
     validate_provider_selections(&config)?;
-
-    orchestrator_app::set_supervisor_model_config(config.supervisor.model.clone());
-    orchestrator_app::set_git_binary_config(config.git.binary.clone());
-    orchestrator_ui::set_ui_runtime_config_from_view(
-        config.ui_view(),
-        config.supervisor.model.clone(),
-    );
+    let runtime_config = runtime_config_slices(&config);
 
     let openrouter_api_key = required_env(ENV_OPENROUTER_API_KEY)?;
     let supervisor = OpenRouterSupervisor::with_base_url(
         openrouter_api_key,
-        config.supervisor.openrouter_base_url.clone(),
+        runtime_config.supervisor.openrouter_base_url.clone(),
     )?;
     // Build once at startup so invalid provider keys/binary settings fail fast.
     let _vcs = build_vcs_provider(&config, &config.vcs_provider)?;
@@ -101,7 +96,9 @@ async fn main() -> Result<()> {
         &state,
     ));
     frontend_controller.start().await?;
-    let mut ui = Ui::init()?.with_frontend_controller(frontend_controller.clone());
+    let mut ui =
+        Ui::init_with_view_config(runtime_config.ui_view, runtime_config.supervisor.model)?
+            .with_frontend_controller(frontend_controller.clone());
     app.start_linear_polling(linear_ticketing.as_deref())
         .await?;
     let frontend_snapshot = frontend_controller.snapshot().await?;

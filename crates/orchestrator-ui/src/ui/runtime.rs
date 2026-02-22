@@ -5,6 +5,14 @@ pub struct Ui {
 }
 
 impl Ui {
+    pub fn init_with_view_config(
+        ui_config: UiViewConfig,
+        supervisor_model: String,
+    ) -> io::Result<Self> {
+        set_ui_runtime_config_from_view(ui_config, supervisor_model);
+        Self::init()
+    }
+
     pub fn init() -> io::Result<Self> {
         enable_raw_mode()?;
         let mut stdout = io::stdout();
