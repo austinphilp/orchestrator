@@ -2186,7 +2186,6 @@ impl UiShellState {
         for session_id in pending_needs_input_sessions {
             changed |= self.autopilot_handle_needs_input_for_session(&session_id);
         }
-        changed |= self.autopilot_reconcile_session_actions();
         changed |= self.autopilot_control_open_sessions();
         changed
     }
@@ -2235,10 +2234,6 @@ impl UiShellState {
             }
         }
         changed
-    }
-
-    fn autopilot_reconcile_session_actions(&mut self) -> bool {
-        false
     }
 
     fn autopilot_handle_needs_input_for_session(&mut self, session_id: &WorkerSessionId) -> bool {
