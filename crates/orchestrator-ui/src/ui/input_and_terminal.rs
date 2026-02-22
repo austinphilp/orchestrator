@@ -36,7 +36,7 @@ enum UiCommand {
 }
 
 impl UiCommand {
-    const ALL: [Self; 32] = [
+    const ALL: [Self; 33] = [
         Self::EnterNormalMode,
         Self::EnterInsertMode,
         Self::ToggleGlobalSupervisorChat,
