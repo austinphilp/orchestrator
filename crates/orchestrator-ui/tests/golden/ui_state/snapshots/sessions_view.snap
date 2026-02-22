@@ -1,0 +1,23 @@
+status: ready
+mode: Normal
+selected_inbox_index: 1
+selected_inbox_item_id: inbox-session-review
+center_stack: Terminal
+center_title: Terminal session sess-session-review
+
+[inbox]
+Batch lanes: [2] Approvals 1 | [3] PR Reviews 1
+
+󰄬 Approvals:
+  [ ] Approve runtime verification checklist
+
+󰳴 PR Reviews:
+> [ ] Review split UI verification output
+
+[center]
+Stack: Terminal
+
+No terminal output available yet.
+
+[which-key]
+(none)

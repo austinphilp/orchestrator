@@ -13,6 +13,18 @@ use std::path::{Path, PathBuf};
 const FIXTURE_DIR: &str = "tests/golden/ui_state/fixtures";
 const SNAPSHOT_DIR: &str = "tests/golden/ui_state/snapshots";
 const UPDATE_GOLDENS_ENV: &str = "ORCHESTRATOR_UPDATE_GOLDENS";
+const INBOX_FIXTURE: &str = "inbox_view.json";
+const FOCUS_CARD_FIXTURE: &str = "focus_card_view.json";
+const TERMINAL_OVERLAY_FIXTURE: &str = "terminal_overlay_view.json";
+const SESSIONS_FIXTURE: &str = "sessions_view.json";
+const INSPECTOR_FIXTURE: &str = "inspector_view.json";
+const EXPECTED_GOLDEN_FIXTURES: &[&str] = &[
+    INBOX_FIXTURE,
+    FOCUS_CARD_FIXTURE,
+    TERMINAL_OVERLAY_FIXTURE,
+    SESSIONS_FIXTURE,
+    INSPECTOR_FIXTURE,
+];
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -130,17 +142,27 @@ impl FixtureEvent {
 
 #[test]
 fn inbox_view_golden_snapshot_from_recorded_events() {
-    assert_fixture_matches_snapshot("inbox_view.json");
+    assert_fixture_matches_snapshot(INBOX_FIXTURE);
 }
 
 #[test]
 fn focus_card_golden_snapshot_from_recorded_events() {
-    assert_fixture_matches_snapshot("focus_card_view.json");
+    assert_fixture_matches_snapshot(FOCUS_CARD_FIXTURE);
 }
 
 #[test]
 fn terminal_overlay_golden_snapshot_from_recorded_events() {
-    assert_fixture_matches_snapshot("terminal_overlay_view.json");
+    assert_fixture_matches_snapshot(TERMINAL_OVERLAY_FIXTURE);
+}
+
+#[test]
+fn sessions_view_golden_snapshot_from_recorded_events() {
+    assert_fixture_matches_snapshot(SESSIONS_FIXTURE);
+}
+
+#[test]
+fn inspector_view_golden_snapshot_from_recorded_events() {
+    assert_fixture_matches_snapshot(INSPECTOR_FIXTURE);
 }
 
 fn assert_fixture_matches_snapshot(fixture_name: &str) {
@@ -461,4 +483,61 @@ fn fixture_schema_rejects_unknown_top_level_fields() {
     let error =
         serde_json::from_str::<GoldenUiFixture>(raw).expect_err("unknown fields should fail");
     assert!(error.to_string().contains("unknown field"));
+}
+
+#[test]
+fn golden_fixture_and_snapshot_inventory_stays_in_sync() {
+    let fixture_files = read_sorted_dir_entries(Path::new(env!("CARGO_MANIFEST_DIR")).join(FIXTURE_DIR))
+        .into_iter()
+        .filter(|name| name.ends_with(".json"))
+        .collect::<Vec<_>>();
+    let mut expected_fixtures = EXPECTED_GOLDEN_FIXTURES
+        .iter()
+        .map(|name| (*name).to_owned())
+        .collect::<Vec<_>>();
+    expected_fixtures.sort();
+    assert_eq!(
+        fixture_files, expected_fixtures,
+        "fixture inventory changed; add/remove entries in EXPECTED_GOLDEN_FIXTURES and update matching tests/snapshots"
+    );
+
+    let snapshot_files =
+        read_sorted_dir_entries(Path::new(env!("CARGO_MANIFEST_DIR")).join(SNAPSHOT_DIR))
+            .into_iter()
+            .filter(|name| name.ends_with(".snap"))
+            .collect::<Vec<_>>();
+    let mut expected_snapshots = EXPECTED_GOLDEN_FIXTURES
+        .iter()
+        .map(|fixture| {
+            fixture
+                .strip_suffix(".json")
+                .unwrap_or(fixture)
+                .to_owned()
+                + ".snap"
+        })
+        .collect::<Vec<_>>();
+    expected_snapshots.sort();
+    assert_eq!(
+        snapshot_files, expected_snapshots,
+        "snapshot inventory changed; ensure every golden fixture has a matching snapshot"
+    );
+}
+
+fn read_sorted_dir_entries(path: PathBuf) -> Vec<String> {
+    let mut entries = fs::read_dir(path.as_path())
+        .unwrap_or_else(|error| panic!("failed to read directory {}: {error}", path.display()))
+        .map(|entry| {
+            entry
+                .unwrap_or_else(|error| {
+                    panic!("failed to read directory entry under {}: {error}", path.display())
+                })
+                .file_name()
+                .into_string()
+                .unwrap_or_else(|name| {
+                    panic!("directory entry under {} is not utf-8: {:?}", path.display(), name)
+                })
+        })
+        .collect::<Vec<_>>();
+    entries.sort();
+    entries
 }

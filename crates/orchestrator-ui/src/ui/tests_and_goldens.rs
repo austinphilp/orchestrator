@@ -1161,6 +1161,29 @@ mod tests {
         projection
     }
 
+    fn selection_focus_projection_with_inspector_artifact() -> ProjectionState {
+        let mut projection = selection_focus_projection();
+        let work_item_id = WorkItemId::new("wi-approval");
+        let artifact_id = ArtifactId::new("artifact-approval-diff");
+        projection
+            .work_items
+            .get_mut(&work_item_id)
+            .expect("approval work item")
+            .artifacts
+            .push(artifact_id.clone());
+        projection.artifacts.insert(
+            artifact_id.clone(),
+            ArtifactProjection {
+                id: artifact_id,
+                work_item_id,
+                kind: ArtifactKind::Diff,
+                label: "Approval work item diff".to_owned(),
+                uri: "artifact://diff/wi-approval?files=2&insertions=24&deletions=5".to_owned(),
+            },
+        );
+        projection
+    }
+
     fn sample_worktree_diff_content(additions: usize) -> String {
         let mut lines = vec![
             "diff --git a/src/demo.rs b/src/demo.rs".to_owned(),
@@ -6795,6 +6818,120 @@ mod tests {
             .ui_state()
             .status
             .contains("selected inbox item has no active session"));
+    }
+
+    #[test]
+    fn input_routing_walks_terminal_sessions_inbox_and_inspector_flows() {
+        let mut shell_state = UiShellState::new(
+            "ready".to_owned(),
+            selection_focus_projection_with_inspector_artifact(),
+        );
+        let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
+        let rows = shell_state.ui_state().inbox_rows;
+        let decision_index = rows
+            .iter()
+            .position(|row| row.kind == InboxItemKind::NeedsDecision)
+            .expect("needs decision row");
+        shell_state.set_selection(Some(decision_index), &rows);
+
+        assert!(matches!(
+            shell_state.view_stack.active_center(),
+            Some(CenterView::TerminalView { session_id }) if session_id.as_str() == "sess-decision"
+        ));
+        assert_eq!(shell_state.mode, UiMode::Terminal);
+
+        handle_key_press(&mut shell_state, key(KeyCode::Esc));
+        assert_eq!(shell_state.mode, UiMode::Normal);
+
+        let rows = shell_state.ui_state().inbox_rows;
+        let approval_index = rows
+            .iter()
+            .position(|row| row.kind == InboxItemKind::NeedsApproval)
+            .expect("needs approval row");
+        shell_state.set_selection(Some(approval_index), &rows);
+        assert_eq!(
+            shell_state
+                .selected_inbox_item_id
+                .as_ref()
+                .map(|id| id.as_str()),
+            Some("inbox-approval")
+        );
+        assert_eq!(
+            shell_state
+                .selected_session_id_for_panel()
+                .as_ref()
+                .map(|id| id.as_str()),
+            Some("sess-approval")
+        );
+
+        handle_key_press(&mut shell_state, key(KeyCode::Char('v')));
+        assert!(shell_state.which_key_overlay.is_some());
+        handle_key_press(&mut shell_state, key(KeyCode::Char('d')));
+        assert!(shell_state.which_key_overlay.is_none());
+        assert!(matches!(
+            shell_state.view_stack.active_center(),
+            Some(CenterView::InspectorView {
+                work_item_id,
+                inspector: ArtifactInspectorKind::Diff,
+            }) if work_item_id.as_str() == "wi-approval"
+        ));
+
+        handle_key_press(&mut shell_state, key(KeyCode::Esc));
+        assert_eq!(shell_state.mode, UiMode::Normal);
+
+        handle_key_press(&mut shell_state, key(KeyCode::Char('o')));
+        assert!(matches!(
+            shell_state.view_stack.active_center(),
+            Some(CenterView::TerminalView { session_id }) if session_id.as_str() == "sess-approval"
+        ));
+        assert_eq!(shell_state.mode, UiMode::Terminal);
+    }
+
+    #[test]
+    fn view_state_regression_keeps_selected_session_when_switching_inspector_and_terminal() {
+        let mut shell_state = UiShellState::new(
+            "ready".to_owned(),
+            selection_focus_projection_with_inspector_artifact(),
+        );
+        let rows = shell_state.ui_state().inbox_rows;
+        let approval_index = rows
+            .iter()
+            .position(|row| row.kind == InboxItemKind::NeedsApproval)
+            .expect("needs approval row");
+        shell_state.set_selection(Some(approval_index), &rows);
+
+        assert_eq!(shell_state.mode, UiMode::Normal);
+        assert_eq!(
+            shell_state
+                .selected_session_id_for_panel()
+                .as_ref()
+                .map(|id| id.as_str()),
+            Some("sess-approval")
+        );
+
+        shell_state.open_inspector_for_selected(ArtifactInspectorKind::Diff);
+        assert!(matches!(
+            shell_state.view_stack.active_center(),
+            Some(CenterView::InspectorView {
+                work_item_id,
+                inspector: ArtifactInspectorKind::Diff,
+            }) if work_item_id.as_str() == "wi-approval"
+        ));
+
+        shell_state.open_terminal_for_selected();
+        assert!(matches!(
+            shell_state.view_stack.active_center(),
+            Some(CenterView::TerminalView { session_id }) if session_id.as_str() == "sess-approval"
+        ));
+        assert_eq!(shell_state.view_stack.center_views().len(), 1);
+        assert_eq!(shell_state.mode, UiMode::Terminal);
+        assert_eq!(
+            shell_state
+                .selected_inbox_item_id
+                .as_ref()
+                .map(|id| id.as_str()),
+            Some("inbox-approval")
+        );
     }
 
     #[test]

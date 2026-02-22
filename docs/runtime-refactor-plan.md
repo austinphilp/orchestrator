@@ -4,6 +4,7 @@
 - Date: 2026-02-22
 - Scope: planning/spec document
 - Decision: replace `crates/orchestrator-runtime` entirely (no compatibility shim)
+- Completion: RRP26 implementation waves are closed through D09.
 - Implementation update (RRP26 A01): scaffold crates added for `orchestrator-worker-protocol`, `orchestrator-worker-lifecycle`, `orchestrator-worker-eventbus`, `orchestrator-worker-scheduler`, and `orchestrator-worker-runtime`; protocol/event/error trait boundaries and minimal registry/scheduler/event envelope scaffolds are in place; `crates/orchestrator-runtime` is feature-frozen.
 - Implementation update (RRP26 A02): canonical worker protocol IDs/events/errors/session+backend trait contracts are owned by `orchestrator-worker-protocol`; `orchestrator-runtime` re-exports compatibility aliases for existing consumers while protocol imports are adopted downstream where feasible.
 - Implementation update (RRP26 A03): `backend-opencode` now depends on `orchestrator-worker-protocol` for worker runtime contracts and implements `WorkerSessionControl`, `WorkerSessionStreamSource`, and `WorkerBackendInfo` directly; `orchestrator-runtime::WorkerBackend` now has a blanket impl over that trait set for transitional compatibility.
@@ -40,6 +41,7 @@
 - Implementation update (RRP26 D06): workflow/merge/inbox/polling/supervisor action runners now live under `orchestrator-app::controller::action_runners`, UI runtime paths call those controller runners via contract event adapters, and runner coverage moved to app-controller tests while preserving UI intent/state behavior.
 - Implementation update (RRP26 D07): `orchestrator-app::frontend::ui_boundary` now provides the canonical UI-facing boundary exports (view contracts/read models/events plus controller-owned action contracts/runners), `orchestrator-ui` now resolves those symbols exclusively through that boundary (no direct `orchestrator-core`/`orchestrator-worker-protocol` imports), and boundary guard tests enforce direct business-crate dependency/import bans in the UI crate.
 - Implementation update (RRP26 D08): `orchestrator-ui` crate root now uses explicit `mod ui` wiring (no crate-root `include!` flattening), UI domain modules are declared under `ui/{bootstrap,view_state,input,render,features,theme,tests}`, legacy include-fragment source files under `src/ui` were removed, and boundary tests now guard against regressions in `include!` usage and missing domain module declarations.
+- Implementation update (RRP26 D09): UI split verification was finalized with refreshed render goldens for terminal/sessions/inbox/inspector flows, targeted input-routing and view-state regression coverage across those flows, and full-workspace `cargo test --workspace` + `cargo check --workspace` validation to close the runtime refactor plan acceptance criteria with no new warnings.
 
 ## Why This Refactor
 `orchestrator-runtime` currently combines too many concerns:

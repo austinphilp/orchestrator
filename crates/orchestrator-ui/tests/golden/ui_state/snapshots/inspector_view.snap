@@ -1,0 +1,23 @@
+status: ready
+mode: Normal
+selected_inbox_index: 0
+selected_inbox_item_id: inbox-inspector
+center_stack: FocusCard(inbox-inspector) > Inspector(diff:wi-inspector)
+center_title: Diff Inspector wi-inspector
+
+[inbox]
+Batch lanes: [2] Approvals 1
+
+󰄬 Approvals:
+> [ ] Inspect split UI artifact evidence
+
+[center]
+Stack: FocusCard(inbox-inspector) > Inspector(diff:wi-inspector)
+
+Work item: wi-inspector
+Diff artifacts:
+- UI module split diff -> artifact://diff/wi-inspector?files=7&insertions=128&deletions=54
+  Diffstat: 7 files changed, +128/-54
+
+[which-key]
+(none)
