@@ -8,7 +8,6 @@ license.workspace = true
 integration-linear = { path = "../integration-linear" }
 integration-shortcut = { path = "../integration-shortcut" }
 integration-git = { path = "../integration-git" }
-backend-codex = { path = "../backend-codex" }
 async-trait.workspace = true
 anyhow.workspace = true
 orchestrator-core = { path = "../orchestrator-core" }

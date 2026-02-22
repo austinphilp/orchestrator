@@ -5,12 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
-async-trait.workspace = true
-orchestrator-worker-protocol = { path = "../orchestrator-worker-protocol" }
-serde_json.workspace = true
-tokio = { workspace = true, features = ["io-util", "process", "sync", "time"] }
-tracing.workspace = true
+orchestrator-harness = { path = "../orchestrator-harness" }
 
 [dev-dependencies]
 orchestrator-core = { path = "../orchestrator-core" }
-tokio.workspace = true

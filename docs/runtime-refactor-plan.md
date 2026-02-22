@@ -18,6 +18,7 @@
 - Implementation update (RRP26 A12): `orchestrator-app`/`orchestrator-ui` now consume only worker runtime crates via protocol-backed core runtime contracts, legacy runtime bridge tests/utilities were removed from harness backends, and `crates/orchestrator-runtime` was deleted from the workspace.
 - Implementation update (RRP26 B01): scaffold crates `orchestrator-harness`, `orchestrator-ticketing`, `orchestrator-vcs`, and `orchestrator-vcs-repos` now exist with standardized `interface` + `providers/*` + `factory` + `lib` module layout, namespaced provider key factories, and baseline factory resolution tests; no provider implementation moves are included in this phase.
 - Implementation update (RRP26 B02): harness contracts remain owned by `orchestrator-harness::interface`, `backend-opencode` implementation is ported into `orchestrator-harness::providers::opencode`, and the harness factory `harness.opencode` now constructs the real OpenCode provider implementation.
+- Implementation update (RRP26 B03): `backend-codex` implementation is ported into `orchestrator-harness::providers::codex`, `orchestrator-app` harness selection now instantiates both providers via the harness factory configuration path, and harness contract coverage for both codex/opencode lives under `orchestrator-harness` tests.
 
 ## Why This Refactor
 `orchestrator-runtime` currently combines too many concerns:

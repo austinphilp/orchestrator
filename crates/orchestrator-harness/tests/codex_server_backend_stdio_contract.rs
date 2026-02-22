@@ -1,9 +1,9 @@
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use backend_codex::{CodexBackend, CodexBackendConfig};
+use orchestrator_harness::{CodexBackend, CodexBackendConfig};
 use orchestrator_worker_protocol::{
     WorkerBackendInfo, WorkerBackendKind as BackendKind, WorkerEvent as BackendEvent,
     WorkerEventStream, WorkerRuntimeError as RuntimeError, WorkerRuntimeResult as RuntimeResult,
@@ -71,15 +71,41 @@ fn collect_output_text(events: &[BackendEvent]) -> String {
         .join("")
 }
 
-fn fake_codex_binary() -> PathBuf {
+struct FakeCodexBinary {
+    path: PathBuf,
+}
+
+impl FakeCodexBinary {
+    fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl Drop for FakeCodexBinary {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.path);
+    }
+}
+
+fn test_temp_dir() -> PathBuf {
+    if let Some(path) = std::env::var_os("CARGO_TARGET_TMPDIR") {
+        return PathBuf::from(path);
+    }
+    std::env::temp_dir()
+}
+
+fn fake_codex_binary() -> FakeCodexBinary {
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .expect("system clock")
         .as_nanos();
-    let path = std::env::temp_dir().join(format!(
+    let path = test_temp_dir().join(format!(
         "orchestrator-fake-codex-{}-{nanos}.py",
         std::process::id()
     ));
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).expect("create fake codex parent directory");
+    }
     let script = r#"#!/usr/bin/env python3
 import json
 import sys
@@ -165,12 +191,13 @@ for raw in sys.stdin:
         permissions.set_mode(0o755);
         fs::set_permissions(&path, permissions).expect("set fake codex mode");
     }
-    path
+    FakeCodexBinary { path }
 }
 
 #[tokio::test]
 async fn codex_backend_uses_app_server_stdio_contract() {
-    let backend = backend_with_binary(fake_codex_binary());
+    let fake_codex = fake_codex_binary();
+    let backend = backend_with_binary(fake_codex.path().to_path_buf());
     backend.health_check().await.expect("health check");
 
     let handle = backend
@@ -212,7 +239,8 @@ async fn codex_backend_uses_app_server_stdio_contract() {
 
 #[tokio::test]
 async fn codex_backend_replays_terminal_history_to_late_subscribers() {
-    let backend = backend_with_binary(fake_codex_binary());
+    let fake_codex = fake_codex_binary();
+    let backend = backend_with_binary(fake_codex.path().to_path_buf());
     backend.health_check().await.expect("health check");
 
     let handle = backend

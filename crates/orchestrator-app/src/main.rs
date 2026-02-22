@@ -1,5 +1,4 @@
 use anyhow::Result;
-use backend_codex::{CodexBackend, CodexBackendConfig};
 use integration_linear::{
     LinearConfig, LinearRuntimeSettings, LinearTicketingProvider, WorkflowStateMapSetting,
 };
@@ -14,7 +13,10 @@ use orchestrator_core::{
     WorkflowState,
 };
 use orchestrator_github::{GhCliClient, ProcessCommandRunner as GhProcessCommandRunner};
-use orchestrator_harness::{OpenCodeHarnessProvider, OpenCodeHarnessProviderConfig};
+use orchestrator_harness::{
+    build_provider_with_config, CodexHarnessProviderConfig, HarnessProviderFactoryConfig,
+    HarnessProviderFactoryOutput, OpenCodeHarnessProviderConfig,
+};
 use orchestrator_supervisor::OpenRouterSupervisor;
 use orchestrator_ui::Ui;
 use std::path::{Path, PathBuf};
@@ -353,9 +355,18 @@ fn build_harness_provider(
     config: &AppConfig,
     provider: &str,
 ) -> Result<Arc<dyn WorkerBackend + Send + Sync>, CoreError> {
-    match provider {
-        "opencode" => Ok(Arc::new(OpenCodeHarnessProvider::new(
-            OpenCodeHarnessProviderConfig {
+    let provider_key = match provider {
+        "opencode" | "harness.opencode" => "harness.opencode",
+        "codex" | "harness.codex" => "harness.codex",
+        other => Err(CoreError::Configuration(format!(
+            "Unknown harness provider '{other}'. Expected 'opencode', 'codex', 'harness.opencode', or 'harness.codex'."
+        ))),
+    }?;
+
+    let provider = build_provider_with_config(
+        provider_key,
+        HarnessProviderFactoryConfig {
+            opencode: OpenCodeHarnessProviderConfig {
                 binary: PathBuf::from(config.runtime.opencode_binary.as_str()),
                 base_args: Vec::new(),
                 output_buffer: 256,
@@ -367,20 +378,23 @@ fn build_harness_provider(
                 harness_log_raw_events: config.runtime.harness_log_raw_events,
                 harness_log_normalized_events: config.runtime.harness_log_normalized_events,
             },
-        ))),
-        "codex" => Ok(Arc::new(CodexBackend::new(CodexBackendConfig {
-            binary: PathBuf::from(config.runtime.codex_binary.as_str()),
-            base_args: Vec::new(),
-            server_startup_timeout: std::time::Duration::from_secs(
-                config.runtime.harness_server_startup_timeout_secs,
-            ),
-            legacy_server_base_url: None,
-            harness_log_raw_events: config.runtime.harness_log_raw_events,
-            harness_log_normalized_events: config.runtime.harness_log_normalized_events,
-        }))),
-        other => Err(CoreError::Configuration(format!(
-            "Unknown harness provider '{other}'. Expected 'opencode' or 'codex'."
-        ))),
+            codex: CodexHarnessProviderConfig {
+                binary: PathBuf::from(config.runtime.codex_binary.as_str()),
+                base_args: Vec::new(),
+                server_startup_timeout: std::time::Duration::from_secs(
+                    config.runtime.harness_server_startup_timeout_secs,
+                ),
+                legacy_server_base_url: None,
+                harness_log_raw_events: config.runtime.harness_log_raw_events,
+                harness_log_normalized_events: config.runtime.harness_log_normalized_events,
+            },
+        },
+    )
+    .map_err(|error| CoreError::Configuration(error.to_string()))?;
+
+    match provider {
+        HarnessProviderFactoryOutput::OpenCode(provider) => Ok(Arc::new(provider)),
+        HarnessProviderFactoryOutput::Codex(provider) => Ok(Arc::new(provider)),
     }
 }
 
