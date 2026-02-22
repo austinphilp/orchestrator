@@ -734,6 +734,7 @@ mod tests {
                 worktree_id: None,
                 inbox_items: vec![inbox_id.clone()],
                 artifacts: vec![],
+                profile_override: None,
             },
         );
         projection.sessions.insert(
@@ -1175,6 +1176,7 @@ mod tests {
                 worktree_id: None,
                 inbox_items: vec![pinned_item.clone()],
                 artifacts: vec![],
+                profile_override: None,
             },
         );
         projection.sessions.insert(
@@ -1258,6 +1260,7 @@ mod tests {
                     worktree_id: None,
                     inbox_items: vec![inbox_item_id.clone()],
                     artifacts: vec![],
+                    profile_override: None,
                 },
             );
             projection.sessions.insert(
@@ -1345,6 +1348,7 @@ mod tests {
                     worktree_id: None,
                     inbox_items: vec![inbox_item_id.clone()],
                     artifacts: vec![],
+                    profile_override: None,
                 },
             );
             projection.sessions.insert(
