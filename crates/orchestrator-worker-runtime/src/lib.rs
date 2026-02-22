@@ -1,8 +1,13 @@
 //! Worker runtime composition scaffold.
 
-use orchestrator_worker_eventbus::WorkerEventBus;
+use orchestrator_worker_eventbus::{WorkerEventBus, WorkerEventBusPerfSnapshot};
 use orchestrator_worker_lifecycle::WorkerLifecycleRegistry;
 use orchestrator_worker_scheduler::WorkerScheduler;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkerRuntimePerfSnapshot {
+    pub eventbus: WorkerEventBusPerfSnapshot,
+}
 
 #[derive(Debug, Default)]
 pub struct WorkerRuntime {
@@ -41,6 +46,12 @@ impl WorkerRuntime {
     pub fn into_parts(self) -> (WorkerLifecycleRegistry, WorkerEventBus, WorkerScheduler) {
         (self.lifecycle, self.eventbus, self.scheduler)
     }
+
+    pub fn perf_snapshot(&self) -> WorkerRuntimePerfSnapshot {
+        WorkerRuntimePerfSnapshot {
+            eventbus: self.eventbus.perf_snapshot(),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -67,5 +78,12 @@ mod tests {
     fn runtime_can_be_decomposed_back_into_parts() {
         let runtime = WorkerRuntime::default();
         let _ = runtime.into_parts();
+    }
+
+    #[test]
+    fn runtime_perf_snapshot_exposes_eventbus_metrics() {
+        let runtime = WorkerRuntime::default();
+        let snapshot = runtime.perf_snapshot();
+        assert_eq!(snapshot.eventbus.events_received_total, 0);
     }
 }

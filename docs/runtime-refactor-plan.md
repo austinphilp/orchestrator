@@ -9,6 +9,7 @@
 - Implementation update (RRP26 A03): `backend-opencode` now depends on `orchestrator-worker-protocol` for worker runtime contracts and implements `WorkerSessionControl`, `WorkerSessionStreamSource`, and `WorkerBackendInfo` directly; `orchestrator-runtime::WorkerBackend` now has a blanket impl over that trait set for transitional compatibility.
 - Implementation update (RRP26 A04): `backend-codex` now depends on `orchestrator-worker-protocol`, implements `WorkerSessionControl` + `WorkerSessionStreamSource` + `WorkerBackendInfo` directly, and codex harness contract tests target the protocol traits with a legacy-runtime bridge compile check.
 - Implementation update (RRP26 A05): `orchestrator-worker-eventbus` now provides core publish/fanout APIs with `WorkerEventEnvelope` sequencing, bounded non-blocking broadcast queues, `subscribe_session(session_id)` + `subscribe_all()` consumption paths, and explicit `remove_session(session_id)` teardown support with fanout correctness tests.
+- Implementation update (RRP26 A06): `orchestrator-worker-eventbus` now owns lag/drop accounting for session/global subscribers, emits synthetic stderr truncation markers for lagged session subscriptions, exposes eventbus perf snapshots (drop/lag/clone/dispatch counters), and minimizes publish-path clones based on active receiver classes.
 
 ## Why This Refactor
 `orchestrator-runtime` currently combines too many concerns:
