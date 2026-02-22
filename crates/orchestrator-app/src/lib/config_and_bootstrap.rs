@@ -83,6 +83,9 @@ const DEFAULT_EVENT_PRUNE_ENABLED: bool = true;
 const DEFAULT_PR_PIPELINE_POLL_INTERVAL_SECS: u64 = 15;
 const DEFAULT_UI_THEME: &str = "nord";
 const DEFAULT_UI_TRANSCRIPT_LINE_LIMIT: usize = 100;
+const DEFAULT_UI_FULL_REDRAW_INTERVAL_SECS: u64 = 300;
+const MIN_UI_FULL_REDRAW_INTERVAL_SECS: u64 = 60;
+const MAX_UI_FULL_REDRAW_INTERVAL_SECS: u64 = 1800;
 const DEFAULT_TICKET_PICKER_PRIORITY_STATES: &[&str] =
     &["In Progress", "Final Approval", "Todo", "Backlog"];
 
@@ -326,6 +329,8 @@ pub struct UiConfigToml {
     pub workflow_interaction_profiles: Vec<WorkflowInteractionProfile>,
     #[serde(default = "default_workflow_profile_name")]
     pub default_workflow_profile: String,
+    #[serde(default = "default_ui_full_redraw_interval_secs")]
+    pub full_redraw_interval_secs: u64,
 }
 
 impl Default for UiConfigToml {
@@ -341,6 +346,7 @@ impl Default for UiConfigToml {
             merge_poll_backoff_multiplier: default_ui_merge_poll_backoff_multiplier(),
             workflow_interaction_profiles: default_workflow_interaction_profiles(),
             default_workflow_profile: default_workflow_profile_name(),
+            full_redraw_interval_secs: default_ui_full_redraw_interval_secs(),
         }
     }
 }
@@ -467,6 +473,10 @@ fn default_workflow_interaction_profiles() -> Vec<WorkflowInteractionProfile> {
 
 fn default_workflow_profile_name() -> String {
     WorkflowInteractionProfilesConfig::default().default_profile
+}
+
+fn default_ui_full_redraw_interval_secs() -> u64 {
+    DEFAULT_UI_FULL_REDRAW_INTERVAL_SECS
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -822,6 +832,15 @@ fn normalize_config(config: &mut AppConfig) -> bool {
         config.ui.merge_poll_backoff_multiplier = normalized_merge_poll_backoff_multiplier;
         changed = true;
     }
+    let normalized_full_redraw_interval_secs = config.ui.full_redraw_interval_secs.clamp(
+        MIN_UI_FULL_REDRAW_INTERVAL_SECS,
+        MAX_UI_FULL_REDRAW_INTERVAL_SECS,
+    );
+    if normalized_full_redraw_interval_secs != config.ui.full_redraw_interval_secs {
+        config.ui.full_redraw_interval_secs = normalized_full_redraw_interval_secs;
+        changed = true;
+    }
+
     changed |= normalize_workflow_profiles(&mut config.ui);
 
     changed

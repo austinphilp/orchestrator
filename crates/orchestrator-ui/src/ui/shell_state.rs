@@ -2184,12 +2184,54 @@ impl UiShellState {
         for session_id in pending_needs_input_sessions {
             changed |= self.autopilot_handle_needs_input_for_session(&session_id);
         }
-        changed |= self.autopilot_reconcile_session_actions();
+        changed |= self.autopilot_control_open_sessions();
         changed
     }
 
-    fn autopilot_reconcile_session_actions(&mut self) -> bool {
-        false
+    fn autopilot_control_open_sessions(&mut self) -> bool {
+        let session_ids = self
+            .domain
+            .sessions
+            .values()
+            .filter(|session| is_open_session_status(session.status.as_ref()))
+            .map(|session| session.id.clone())
+            .collect::<Vec<_>>();
+        let mut changed = false;
+
+        for session_id in session_ids {
+            if self.session_is_actively_working(&session_id) {
+                continue;
+            }
+
+            let Some(workflow_state) = self.workflow_state_for_session(&session_id) else {
+                continue;
+            };
+
+            if matches!(workflow_state, WorkflowState::Done | WorkflowState::Abandoned) {
+                if self.autopilot_archiving_sessions.insert(session_id.clone()) {
+                    self.spawn_session_archive(session_id);
+                    changed = true;
+                }
+                continue;
+            }
+
+            if !matches!(
+                workflow_state,
+                WorkflowState::Planning | WorkflowState::Implementing
+            ) {
+                continue;
+            }
+
+            if !self.session_requires_progression_approval(&session_id) {
+                continue;
+            }
+
+            if self.autopilot_advancing_sessions.insert(session_id.clone()) {
+                self.spawn_session_workflow_advance(session_id);
+                changed = true;
+            }
+        }
+        changed
     }
 
     fn autopilot_handle_needs_input_for_session(&mut self, session_id: &WorkerSessionId) -> bool {
@@ -5308,6 +5350,7 @@ impl UiShellState {
         now: Instant,
         animation_state: AnimationState,
         last_animation_frame: Instant,
+        full_redraw_deadline: Instant,
     ) -> Option<Instant> {
         let animation_deadline = match animation_state {
             AnimationState::ActiveTurn => Some(last_animation_frame + Duration::from_millis(200)),
@@ -5335,6 +5378,7 @@ impl UiShellState {
             summary_deadline,
             background_flush_deadline,
             merge_dispatch_deadline,
+            Some(full_redraw_deadline),
         ]
         .into_iter()
         .flatten()

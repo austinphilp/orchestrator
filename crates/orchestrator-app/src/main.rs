@@ -55,6 +55,7 @@ async fn main() -> Result<()> {
             default_profile: config.ui.default_workflow_profile.clone(),
             profiles: config.ui.workflow_interaction_profiles.clone(),
         },
+        config.ui.full_redraw_interval_secs,
     );
 
     let openrouter_api_key = required_env(ENV_OPENROUTER_API_KEY)?;

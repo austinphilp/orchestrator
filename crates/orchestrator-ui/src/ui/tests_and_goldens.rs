@@ -8722,4 +8722,51 @@ mod tests {
             assert_ne!(style.fg, style.bg, "foreground and background must differ");
         }
     }
+
+    #[test]
+    fn full_redraw_interval_config_clamps_to_supported_bounds() {
+        set_ui_runtime_config(
+            "nord".to_owned(),
+            Vec::new(),
+            "model".to_owned(),
+            100,
+            15,
+            15,
+            15,
+            120,
+            2,
+            0,
+        );
+        assert_eq!(full_redraw_interval_config_value(), Duration::from_secs(60));
+
+        set_ui_runtime_config(
+            "nord".to_owned(),
+            Vec::new(),
+            "model".to_owned(),
+            100,
+            15,
+            15,
+            15,
+            120,
+            2,
+            9_999,
+        );
+        assert_eq!(full_redraw_interval_config_value(), Duration::from_secs(1_800));
+    }
+
+    #[test]
+    fn next_wake_deadline_includes_full_redraw_deadline() {
+        let shell_state = UiShellState::new("ready".to_owned(), triage_projection());
+        let now = Instant::now();
+        let full_redraw_deadline = now + Duration::from_secs(5);
+
+        let wake = shell_state.next_wake_deadline(
+            now,
+            AnimationState::None,
+            now,
+            full_redraw_deadline,
+        );
+
+        assert_eq!(wake, Some(full_redraw_deadline));
+    }
 }
