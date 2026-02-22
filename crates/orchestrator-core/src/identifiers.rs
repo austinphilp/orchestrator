@@ -1,4 +1,4 @@
-use orchestrator_runtime::RuntimeSessionId;
+use crate::runtime_contract::RuntimeSessionId;
 use serde::{Deserialize, Serialize};
 
 macro_rules! string_id {

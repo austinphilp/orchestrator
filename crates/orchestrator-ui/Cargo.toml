@@ -6,7 +6,6 @@ license.workspace = true
 
 [dependencies]
 orchestrator-core = { path = "../orchestrator-core" }
-orchestrator-runtime = { path = "../orchestrator-runtime" }
 orchestrator-worker-protocol = { path = "../orchestrator-worker-protocol" }
 crossterm.workspace = true
 ratatui.workspace = true

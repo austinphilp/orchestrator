@@ -7,6 +7,7 @@ mod frontend;
 mod identifiers;
 mod normalization;
 mod projection;
+mod runtime_contract;
 mod status;
 mod store;
 #[cfg(any(test, feature = "test-support"))]
@@ -62,17 +63,18 @@ pub use normalization::{
     normalize_backend_event, BackendEventNormalizationContext, NormalizedBackendEvent,
     NormalizedDomainEvent, DOMAIN_EVENT_SCHEMA_VERSION,
 };
-pub use orchestrator_runtime::{
-    BackendArtifactEvent, BackendArtifactKind, BackendBlockedEvent, BackendCapabilities,
-    BackendCheckpointEvent, BackendCrashedEvent, BackendDoneEvent, BackendEvent, BackendKind,
-    BackendNeedsInputAnswer, BackendNeedsInputEvent, BackendOutputEvent, BackendOutputStream,
-    BackendTurnStateEvent, ManagedSessionStatus, RuntimeArtifactId, RuntimeError, RuntimeResult,
-    RuntimeSessionId, SessionEventSubscription, SessionHandle, SessionLifecycle, SpawnSpec,
-    WorkerBackend, WorkerEventStream, WorkerEventSubscription, WorkerManager, WorkerManagerConfig,
-};
 pub use projection::{
     apply_event, rebuild_projection, retrieve_events, ArtifactProjection, InboxItemProjection,
     ProjectionState, SessionProjection, SessionRuntimeProjection, WorkItemProjection,
+};
+pub use runtime_contract::{
+    BackendArtifactEvent, BackendArtifactKind, BackendBlockedEvent, BackendCapabilities,
+    BackendCheckpointEvent, BackendCrashedEvent, BackendDoneEvent, BackendEvent, BackendKind,
+    BackendNeedsInputAnswer, BackendNeedsInputEvent, BackendNeedsInputOption,
+    BackendNeedsInputQuestion, BackendOutputEvent, BackendOutputStream, BackendTurnStateEvent,
+    RuntimeArtifactId, RuntimeError, RuntimeResult, RuntimeSessionId, SessionHandle,
+    SessionLifecycle, SpawnSpec, WorkerBackend, WorkerEventStream, WorkerEventSubscription,
+    WorkerManagerConfig,
 };
 pub use status::{ArtifactKind, InboxItemKind, WorkerSessionStatus, WorkflowState};
 pub use store::{

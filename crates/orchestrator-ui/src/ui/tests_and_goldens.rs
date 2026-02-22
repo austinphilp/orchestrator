@@ -14,11 +14,11 @@ mod tests {
         LlmStreamChunk, OrchestrationEventPayload, OrchestrationEventType, SessionBlockedPayload,
         SessionCheckpointPayload,
         SessionCompletedPayload, SessionNeedsInputPayload, SessionProjection,
-        SessionRuntimeProjection, StoredEventEnvelope, SupervisorQueryFinishedPayload,
-        TicketProvider, UserRespondedPayload, WorkItemProjection, WorkflowTransitionPayload,
+        SessionLifecycle, SessionRuntimeProjection, StoredEventEnvelope,
+        SupervisorQueryFinishedPayload, TicketProvider, UserRespondedPayload,
+        WorkItemProjection, WorkerEventStream, WorkflowTransitionPayload,
         WorkflowTransitionReason, WorkflowState,
     };
-    use orchestrator_runtime::{SessionLifecycle, WorkerEventStream};
     use orchestrator_worker_protocol::{
         WorkerBackendCapabilities as BackendCapabilities, WorkerBackendKind as BackendKind,
         WorkerEvent as BackendEvent, WorkerNeedsInputEvent as BackendNeedsInputEvent,
@@ -686,7 +686,7 @@ mod tests {
     struct EmptyEventStream;
 
     #[async_trait]
-    impl orchestrator_runtime::WorkerEventSubscription for EmptyEventStream {
+    impl orchestrator_core::WorkerEventSubscription for EmptyEventStream {
         async fn next_event(&mut self) -> RuntimeResult<Option<BackendEvent>> {
             Ok(None)
         }

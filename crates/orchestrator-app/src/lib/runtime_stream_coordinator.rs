@@ -530,7 +530,6 @@ mod runtime_stream_coordinator {
                     global_event_buffer: 1,
                     checkpoint_prompt_interval: None,
                     checkpoint_prompt_message: "Emit a checkpoint now.".to_owned(),
-                    perf_metrics_enabled: true,
                 },
             );
             let handle = coordinator

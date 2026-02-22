@@ -1,4 +1,4 @@
-use orchestrator_runtime::RuntimeError;
+use crate::runtime_contract::RuntimeError;
 use thiserror::Error;
 
 #[derive(Debug, Error)]

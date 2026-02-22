@@ -16,5 +16,5 @@ tracing.workspace = true
 
 [dev-dependencies]
 axum = "0.8"
-orchestrator-runtime = { path = "../orchestrator-runtime" }
+orchestrator-core = { path = "../orchestrator-core" }
 tokio.workspace = true

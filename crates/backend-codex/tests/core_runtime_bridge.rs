@@ -1,15 +1,15 @@
 use backend_codex::{CodexBackend, CodexBackendConfig};
-use orchestrator_runtime::{BackendCapabilities, BackendKind, WorkerBackend};
+use orchestrator_core::{BackendCapabilities, BackendKind, WorkerBackend};
 
-fn assert_legacy_worker_backend<T: WorkerBackend>() {}
+fn assert_core_worker_backend<T: WorkerBackend>() {}
 
 #[test]
-fn codex_backend_still_satisfies_legacy_worker_backend_trait() {
-    assert_legacy_worker_backend::<CodexBackend>();
+fn codex_backend_satisfies_core_worker_backend_trait() {
+    assert_core_worker_backend::<CodexBackend>();
 }
 
 #[test]
-fn codex_backend_runtime_bridge_reports_kind_and_capabilities() {
+fn codex_backend_reports_expected_kind_and_capabilities() {
     let backend = CodexBackend::new(CodexBackendConfig::default());
     let runtime_backend: &dyn WorkerBackend = &backend;
 

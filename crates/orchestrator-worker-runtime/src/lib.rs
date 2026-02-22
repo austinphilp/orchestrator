@@ -816,4 +816,133 @@ mod tests {
         wait_for_status(&runtime, &session_id, WorkerSessionState::Killed).await;
         assert_eq!(runtime.scheduler().task_count(), 0);
     }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[ignore]
+    async fn perf_fanout_overhead_50_100_200_workers() {
+        for workers in [50usize, 100, 200] {
+            let backend = Arc::new(MockBackend::default());
+            let runtime = WorkerRuntime::with_eventbus_and_scheduler_config(
+                backend.clone(),
+                WorkerEventBus::default(),
+                WorkerRuntimeSchedulerConfig {
+                    checkpoint_prompt_interval: None,
+                    checkpoint_prompt_message: "Emit a checkpoint now.".to_owned(),
+                },
+            );
+
+            let mut subscriptions = Vec::with_capacity(workers);
+            let mut session_ids = Vec::with_capacity(workers);
+            for idx in 0..workers {
+                let handle = runtime
+                    .spawn(spawn_request(&format!("perf-fanout-{workers}-{idx}")))
+                    .await
+                    .expect("spawn perf fanout worker");
+                let subscription = runtime
+                    .subscribe_session(&handle.session_id)
+                    .await
+                    .expect("subscribe perf fanout worker");
+                subscriptions.push(subscription);
+                session_ids.push(handle.session_id);
+            }
+
+            let started = tokio::time::Instant::now();
+            for session_id in &session_ids {
+                backend.emit_event(
+                    session_id,
+                    WorkerEvent::Output(WorkerOutputEvent {
+                        stream: WorkerOutputStream::Stdout,
+                        bytes: b"fanout".to_vec(),
+                    }),
+                );
+            }
+
+            for subscription in &mut subscriptions {
+                let event = timeout(Duration::from_secs(5), subscription.next_event())
+                    .await
+                    .expect("fanout receive timeout")
+                    .expect("fanout receive event");
+                assert!(matches!(event.event, WorkerEvent::Output(_)));
+            }
+
+            let elapsed_ms = started.elapsed().as_millis();
+            let snapshot = runtime.perf_snapshot().await;
+            eprintln!(
+                "perf fanout workers={workers} elapsed_ms={elapsed_ms} stream_events_forwarded_total={} events_published_total={} queue_pressure_dropped_events_total={} output_truncation_markers_total={}",
+                snapshot.lifecycle.stream_events_forwarded_total,
+                snapshot.eventbus.events_published_total,
+                snapshot.eventbus.queue_pressure_dropped_events_total,
+                snapshot.eventbus.output_truncation_markers_total,
+            );
+
+            assert_eq!(snapshot.lifecycle.running_sessions as usize, workers);
+            assert_eq!(snapshot.eventbus.events_published_total as usize, workers);
+
+            for session_id in &session_ids {
+                runtime
+                    .kill(session_id)
+                    .await
+                    .expect("kill perf fanout worker");
+            }
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[ignore]
+    async fn perf_scheduler_overhead_50_100_200_workers() {
+        for workers in [50usize, 100, 200] {
+            let backend = Arc::new(MockBackend::default());
+            let runtime = WorkerRuntime::with_eventbus_and_scheduler_config(
+                backend.clone(),
+                WorkerEventBus::default(),
+                WorkerRuntimeSchedulerConfig {
+                    checkpoint_prompt_interval: Some(Duration::from_millis(35)),
+                    checkpoint_prompt_message: "Emit a checkpoint now.".to_owned(),
+                },
+            );
+
+            let mut session_ids = Vec::with_capacity(workers);
+            for idx in 0..workers {
+                let handle = runtime
+                    .spawn(spawn_request(&format!("perf-scheduler-{workers}-{idx}")))
+                    .await
+                    .expect("spawn perf scheduler worker");
+                session_ids.push(handle.session_id);
+            }
+
+            let started = tokio::time::Instant::now();
+            timeout(Duration::from_secs(10), async {
+                loop {
+                    let snapshot = runtime.perf_snapshot().await;
+                    if snapshot.scheduler.checkpoint_send_attempts_total as usize >= workers {
+                        break;
+                    }
+                    sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect("scheduler perf timeout");
+
+            let elapsed_ms = started.elapsed().as_millis();
+            let snapshot = runtime.perf_snapshot().await;
+            eprintln!(
+                "perf scheduler workers={workers} elapsed_ms={elapsed_ms} task_dispatches_total={} checkpoint_send_attempts_total={} checkpoint_send_failures_total={} active_tasks={}",
+                snapshot.scheduler.task_dispatches_total,
+                snapshot.scheduler.checkpoint_send_attempts_total,
+                snapshot.scheduler.checkpoint_send_failures_total,
+                runtime.scheduler().task_count(),
+            );
+
+            assert!(snapshot.scheduler.checkpoint_send_attempts_total as usize >= workers);
+            assert_eq!(snapshot.scheduler.checkpoint_send_failures_total, 0);
+            assert_eq!(runtime.scheduler().task_count(), workers);
+
+            for session_id in &session_ids {
+                runtime
+                    .kill(session_id)
+                    .await
+                    .expect("kill perf scheduler worker");
+            }
+        }
+    }
 }

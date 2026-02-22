@@ -12,5 +12,5 @@ tokio = { workspace = true, features = ["io-util", "process", "sync", "time"] }
 tracing.workspace = true
 
 [dev-dependencies]
-orchestrator-runtime = { path = "../orchestrator-runtime" }
+orchestrator-core = { path = "../orchestrator-core" }
 tokio.workspace = true

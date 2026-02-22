@@ -1,7 +1,7 @@
 use std::ops::{Deref, DerefMut};
 use std::path::Path;
 
-use orchestrator_runtime::BackendKind;
+use crate::runtime_contract::BackendKind;
 use rusqlite::{params, Connection, OptionalExtension, Transaction};
 use serde_json::Value;
 use time::{format_description::well_known::Rfc3339, OffsetDateTime};

@@ -6,7 +6,11 @@ Rust workspace for the Orchestrator bootstrap architecture.
 
 - `orchestrator-app`: composition root and process entrypoint.
 - `orchestrator-core`: shared domain models, traits, and errors.
-- `orchestrator-runtime`: session lifecycle interfaces and runtime boundaries.
+- `orchestrator-worker-protocol`: canonical worker protocol IDs/events/errors and backend traits.
+- `orchestrator-worker-lifecycle`: worker session lifecycle state machine and control APIs.
+- `orchestrator-worker-eventbus`: worker event fanout and backpressure semantics.
+- `orchestrator-worker-scheduler`: shared scheduling and checkpoint policy.
+- `orchestrator-worker-runtime`: runtime composition facade for app wiring.
 - `backend-opencode`: OpenCode `WorkerBackend` adapter over event-stream sessions.
 - `backend-codex`: Codex-compatible `WorkerBackend` adapter (uses `backend-opencode` transport).
 - `orchestrator-ui`: minimal ratatui-based interface loop.

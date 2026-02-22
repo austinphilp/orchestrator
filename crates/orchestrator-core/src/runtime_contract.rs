@@ -1,16 +1,6 @@
-//! Legacy runtime crate.
-//!
-//! Frozen for feature work as of RRP26 A01. Additive runtime decomposition work
-//! must land in the `orchestrator-worker-*` crates instead.
+use std::time::Duration;
 
 use async_trait::async_trait;
-
-mod worker_manager;
-pub use worker_manager::{
-    ManagedSessionStatus, ManagedSessionSummary, SessionEventSubscription, SessionVisibility,
-    WorkerManager, WorkerManagerConfig, WorkerManagerEvent, WorkerManagerEventSubscription,
-    WorkerManagerPerfSessionSnapshot, WorkerManagerPerfSnapshot, WorkerManagerPerfTotals,
-};
 
 pub use orchestrator_worker_protocol::backend::{
     WorkerBackendCapabilities as BackendCapabilities, WorkerBackendInfo,
@@ -36,6 +26,32 @@ pub use orchestrator_worker_protocol::ids::{
 pub use orchestrator_worker_protocol::session::{
     WorkerSessionHandle as SessionHandle, WorkerSpawnRequest as SpawnSpec,
 };
+
+const DEFAULT_SESSION_EVENT_BUFFER: usize = 256;
+const DEFAULT_GLOBAL_EVENT_BUFFER: usize = 1_024;
+const DEFAULT_CHECKPOINT_PROMPT_INTERVAL_SECS: u64 = 120;
+const DEFAULT_CHECKPOINT_PROMPT_MESSAGE: &str = "Emit a checkpoint now.";
+
+#[derive(Debug, Clone)]
+pub struct WorkerManagerConfig {
+    pub session_event_buffer: usize,
+    pub global_event_buffer: usize,
+    pub checkpoint_prompt_interval: Option<Duration>,
+    pub checkpoint_prompt_message: String,
+}
+
+impl Default for WorkerManagerConfig {
+    fn default() -> Self {
+        Self {
+            session_event_buffer: DEFAULT_SESSION_EVENT_BUFFER,
+            global_event_buffer: DEFAULT_GLOBAL_EVENT_BUFFER,
+            checkpoint_prompt_interval: Some(Duration::from_secs(
+                DEFAULT_CHECKPOINT_PROMPT_INTERVAL_SECS,
+            )),
+            checkpoint_prompt_message: DEFAULT_CHECKPOINT_PROMPT_MESSAGE.to_owned(),
+        }
+    }
+}
 
 #[async_trait]
 pub trait WorkerBackend: SessionLifecycle + Send + Sync {
@@ -77,8 +93,9 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::path::PathBuf;
+
+    use super::*;
 
     struct EmptyWorkerStream;
 

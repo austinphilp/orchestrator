@@ -24,9 +24,8 @@ use orchestrator_core::{
     LlmRole, LlmTokenUsage, OrchestrationEventPayload, ProjectId, ProjectionState,
     SelectedTicketFlowResult, SessionProjection, StoredEventEnvelope, SupervisorQueryArgs,
     SupervisorQueryContextArgs, TicketId, TicketSummary, UntypedCommandInvocation, WorkItemId,
-    WorkerSessionId, WorkerSessionStatus, WorkflowState,
+    WorkerBackend, WorkerSessionId, WorkerSessionStatus, WorkflowState,
 };
-use orchestrator_runtime::WorkerBackend;
 use orchestrator_worker_protocol::{
     WorkerBackendKind as BackendKind, WorkerNeedsInputAnswer as BackendNeedsInputAnswer,
     WorkerNeedsInputEvent as BackendNeedsInputEvent,

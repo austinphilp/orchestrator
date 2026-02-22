@@ -8,7 +8,7 @@ license.workspace = true
 test-support = []
 
 [dependencies]
-orchestrator-runtime = { path = "../orchestrator-runtime" }
+orchestrator-worker-protocol = { path = "../orchestrator-worker-protocol" }
 async-trait.workspace = true
 serde.workspace = true
 thiserror.workspace = true
