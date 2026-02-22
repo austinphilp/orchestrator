@@ -9,7 +9,6 @@ async-trait.workspace = true
 anyhow.workspace = true
 orchestrator-core = { path = "../orchestrator-core" }
 orchestrator-supervisor = { path = "../orchestrator-supervisor" }
-orchestrator-ui = { path = "../orchestrator-ui" }
 orchestrator-harness = { path = "../orchestrator-harness" }
 orchestrator-ticketing = { path = "../orchestrator-ticketing" }
 orchestrator-vcs = { path = "../orchestrator-vcs" }

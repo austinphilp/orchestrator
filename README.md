@@ -4,7 +4,8 @@ Rust workspace for the Orchestrator bootstrap architecture.
 
 ## Workspace crates
 
-- `orchestrator-app`: composition root and process entrypoint.
+- `orchestrator-app`: composition root and app/controller contracts.
+- `orchestrator`: process entrypoint binary.
 - `orchestrator-core`: shared domain models, traits, and errors.
 - `orchestrator-worker-protocol`: canonical worker protocol IDs/events/errors and backend traits.
 - `orchestrator-worker-lifecycle`: worker session lifecycle state machine and control APIs.
@@ -25,7 +26,7 @@ cargo check --workspace
 cargo test --workspace
 cargo ci-check
 cargo ci-test
-cargo run -p orchestrator-app
+cargo run -p orchestrator
 ```
 
 Configuration:

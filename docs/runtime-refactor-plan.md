@@ -36,6 +36,7 @@
 - Implementation update (RRP26 D02): canonical env/path resolution and config normalize/default behaviors are now owned by `orchestrator-config`; duplicate app/UI config normalization was removed so `orchestrator-app` and `orchestrator-ui` consume already-normalized typed config slices.
 - Implementation update (RRP26 D03): app bootstrap/runtime wiring now injects typed config slices (`SupervisorRuntimeConfig`, `DatabaseRuntimeConfig`, `GitRuntimeConfig`) from `orchestrator-config` through command/runtime composition paths, and app-level runtime config globals/setters were removed in favor of explicit constructor/composition flow.
 - Implementation update (RRP26 D04): `orchestrator-ui` startup/run now carries an injected `UiRuntimeConfig` derived from `UiViewConfig`, UI runtime config singleton/setter APIs were removed, and UI state/runtime behavior now reads config exclusively from explicit constructor-injected state.
+- Implementation update (RRP26 D05): `orchestrator-app::controller::contracts` now owns UI-facing action contracts (ticket picker, merge queue, supervisor dispatch), app runtime/ticket-picker paths now import these contracts from the app controller boundary, and `orchestrator-ui` consumes these contracts via app-controller re-exports instead of defining orchestration/provider action traits in the UI crate.
 
 ## Why This Refactor
 `orchestrator-runtime` currently combines too many concerns:

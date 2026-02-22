@@ -20,7 +20,6 @@ use orchestrator_ticketing::{
     AddTicketCommentRequest, GetTicketRequest, TicketAttachment, TicketId, TicketQuery,
     TicketingProvider, UpdateTicketDescriptionRequest, UpdateTicketStateRequest,
 };
-use orchestrator_ui::SupervisorCommandContext;
 use orchestrator_vcs_repos::{default_system_url_opener, CodeHostProvider, UrlOpener};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -31,6 +30,7 @@ use super::{
     open_event_store, open_owned_event_store, supervisor_chunk_event_flush_interval, AppEventStore,
     DatabaseRuntimeConfig, SupervisorRuntimeConfig,
 };
+use crate::controller::contracts::SupervisorCommandContext;
 use crate::{
     commands::{
         ids as command_ids, resolve_supervisor_query_scope, Command, CommandRegistry,

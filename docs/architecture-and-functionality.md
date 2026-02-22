@@ -11,6 +11,7 @@
 The repository is a Rust workspace with a layered design:
 
 1. Product/runtime composition layer
+- `orchestrator`: process entrypoint binary that wires app + UI composition.
 - `orchestrator-app`: composition root, startup/shutdown, provider/backend selection, command routing.
 - `orchestrator-ui`: terminal UI, stateful views, keymaps, interaction modes.
 

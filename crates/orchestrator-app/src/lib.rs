@@ -33,6 +33,7 @@ mod module_tree_tests {
         use crate::commands as _;
         use crate::composition as _;
         use crate::controller as _;
+        use crate::controller::contracts as _;
         use crate::error as _;
         use crate::events as _;
         use crate::frontend as _;

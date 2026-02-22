@@ -3,6 +3,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::commands::{Command, CommandRegistry};
+use crate::controller::contracts::{
+    CiCheckStatus, CreateTicketFromPickerRequest, InboxPublishRequest, InboxResolveRequest,
+    MergeQueueCommandKind, MergeQueueEvent, SessionArchiveOutcome, SessionMergeFinalizeOutcome,
+    SessionWorkflowAdvanceOutcome, SessionWorktreeDiff, SupervisorCommandContext,
+    SupervisorCommandDispatcher, TicketPickerProvider,
+};
 use crate::projection::ProjectionState;
 use async_trait::async_trait;
 use orchestrator_core::{
@@ -11,12 +17,6 @@ use orchestrator_core::{
 };
 use orchestrator_ticketing::{
     ArchiveTicketRequest, CreateTicketRequest, TicketQuery, TicketSummary, TicketingProvider,
-};
-use orchestrator_ui::{
-    CiCheckStatus, CreateTicketFromPickerRequest, InboxPublishRequest, InboxResolveRequest,
-    MergeQueueCommandKind, MergeQueueEvent, SessionArchiveOutcome, SessionMergeFinalizeOutcome,
-    SessionWorkflowAdvanceOutcome, SessionWorktreeDiff, SupervisorCommandContext,
-    SupervisorCommandDispatcher, TicketPickerProvider,
 };
 use orchestrator_vcs::VcsProvider;
 use orchestrator_vcs_repos::{CodeHostProvider, GithubClient};

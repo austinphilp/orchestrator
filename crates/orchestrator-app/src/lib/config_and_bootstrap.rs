@@ -2,6 +2,11 @@ use crate::events::{
     InboxItemCreatedPayload, InboxItemResolvedPayload, NewEventEnvelope, OrchestrationEventPayload,
     SessionCompletedPayload, SessionCrashedPayload, StoredEventEnvelope, WorkflowTransitionPayload,
 };
+use crate::controller::contracts::{
+    InboxPublishRequest, InboxResolveRequest, SessionArchiveOutcome, SessionMergeFinalizeOutcome,
+    SessionWorkflowAdvanceOutcome, SessionWorktreeDiff, SupervisorCommandContext,
+    SupervisorCommandDispatcher,
+};
 use crate::normalization::DOMAIN_EVENT_SCHEMA_VERSION;
 use crate::projection::{rebuild_projection, ProjectionState, SessionRuntimeProjection};
 #[cfg(test)]
@@ -19,10 +24,6 @@ use orchestrator_core::{
 use orchestrator_supervisor::{LlmProvider, Supervisor};
 use orchestrator_ticketing::{
     GetTicketRequest, LinearTicketingProvider, TicketSummary, TicketingProvider,
-};
-use orchestrator_ui::{
-    InboxPublishRequest, InboxResolveRequest, SessionArchiveOutcome, SessionMergeFinalizeOutcome,
-    SessionWorkflowAdvanceOutcome, SupervisorCommandContext, SupervisorCommandDispatcher,
 };
 use orchestrator_vcs::VcsProvider;
 use orchestrator_vcs_repos::{CodeHostProvider, GithubClient};

@@ -290,7 +290,7 @@ fn parse_cli_flags_from(args: impl IntoIterator<Item = String>) -> Result<CliFla
 }
 
 fn print_cli_help() {
-    println!("Usage: orchestrator-app [--ticketing-provider <ticketing.linear|ticketing.shortcut>] [--harness-provider <harness.opencode|harness.codex>] [--vcs-provider <vcs.git_cli>] [--vcs-repo-provider <vcs_repos.github_gh_cli>]");
+    println!("Usage: orchestrator [--ticketing-provider <ticketing.linear|ticketing.shortcut>] [--harness-provider <harness.opencode|harness.codex>] [--vcs-provider <vcs.git_cli>] [--vcs-repo-provider <vcs_repos.github_gh_cli>]");
     println!();
     println!(
         "  --ticketing-provider <provider>   Configure ticketing provider (ticketing.linear or ticketing.shortcut)"
@@ -555,7 +555,7 @@ fn build_vcs_repo_provider(
 fn required_env(name: &str) -> Result<String, CoreError> {
     let value = std::env::var(name).map_err(|_| {
         CoreError::Configuration(format!(
-            "{name} is not set. Export a valid value before starting orchestrator-app."
+            "{name} is not set. Export a valid value before starting orchestrator."
         ))
     })?;
     let value = value.trim().to_owned();

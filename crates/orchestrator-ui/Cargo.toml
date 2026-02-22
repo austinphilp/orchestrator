@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+orchestrator-app = { path = "../orchestrator-app" }
 orchestrator-core = { path = "../orchestrator-core" }
 orchestrator-worker-protocol = { path = "../orchestrator-worker-protocol" }
 orchestrator-config = { path = "../orchestrator-config" }

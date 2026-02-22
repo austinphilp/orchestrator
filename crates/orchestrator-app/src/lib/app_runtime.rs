@@ -446,7 +446,7 @@ impl<S: Supervisor, G: GithubClient> App<S, G> {
     pub fn session_worktree_diff(
         &self,
         session_id: &WorkerSessionId,
-    ) -> Result<orchestrator_ui::SessionWorktreeDiff, CoreError> {
+    ) -> Result<SessionWorktreeDiff, CoreError> {
         let store = self.open_event_store()?;
         let mapping = store
             .find_runtime_mapping_by_session_id(session_id)?
@@ -589,7 +589,7 @@ impl<S: Supervisor, G: GithubClient> App<S, G> {
         }
 
         let diff = sanitize_terminal_display_text(String::from_utf8_lossy(&output.stdout).as_ref());
-        Ok(orchestrator_ui::SessionWorktreeDiff {
+        Ok(SessionWorktreeDiff {
             session_id: session_id.clone(),
             base_branch,
             diff,

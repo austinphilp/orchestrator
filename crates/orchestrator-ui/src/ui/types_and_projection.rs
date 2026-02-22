@@ -4,7 +4,12 @@ use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use async_trait::async_trait;
+pub use orchestrator_app::controller::contracts::{
+    CiCheckStatus, CreateTicketFromPickerRequest, InboxPublishRequest, InboxResolveRequest,
+    MergeQueueCommandKind, MergeQueueEvent, SessionArchiveOutcome, SessionMergeFinalizeOutcome,
+    SessionWorkflowAdvanceOutcome, SessionWorktreeDiff, SupervisorCommandContext,
+    SupervisorCommandDispatcher, TicketCreateSubmitMode, TicketPickerProvider,
+};
 use orchestrator_config::{
     normalize_supervisor_model, normalize_ui_config, SupervisorConfig, UiConfigToml, UiViewConfig,
 };
@@ -25,10 +30,12 @@ use orchestrator_core::{
     InboxItemId, InboxItemKind,
     LlmChatRequest, LlmFinishReason, LlmMessage, LlmProvider, LlmRateLimitState, LlmResponseStream,
     LlmRole, LlmTokenUsage, OrchestrationEventPayload, ProjectId, ProjectionState,
-    SelectedTicketFlowResult, SessionProjection, StoredEventEnvelope, SupervisorQueryArgs,
+    SessionProjection, StoredEventEnvelope, SupervisorQueryArgs,
     SupervisorQueryContextArgs, TicketId, TicketSummary, UntypedCommandInvocation, WorkItemId,
     WorkerBackend, WorkerSessionId, WorkerSessionStatus, WorkflowState,
 };
+#[cfg(test)]
+use orchestrator_core::SelectedTicketFlowResult;
 use orchestrator_worker_protocol::{
     WorkerBackendKind as BackendKind, WorkerNeedsInputAnswer as BackendNeedsInputAnswer,
     WorkerNeedsInputEvent as BackendNeedsInputEvent,
@@ -161,205 +168,6 @@ impl UiRuntimeConfig {
     fn merge_poll_backoff_multiplier(&self) -> u64 {
         self.merge_poll_backoff_multiplier
     }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum TicketCreateSubmitMode {
-    CreateOnly,
-    CreateAndStart,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CreateTicketFromPickerRequest {
-    pub brief: String,
-    pub selected_project: Option<String>,
-    pub submit_mode: TicketCreateSubmitMode,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SessionArchiveOutcome {
-    pub warning: Option<String>,
-    pub event: StoredEventEnvelope,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SessionMergeFinalizeOutcome {
-    pub event: StoredEventEnvelope,
-}
-
-#[async_trait]
-pub trait TicketPickerProvider: Send + Sync {
-    async fn list_unfinished_tickets(&self) -> Result<Vec<TicketSummary>, CoreError>;
-    async fn list_projects(&self) -> Result<Vec<String>, CoreError> {
-        Ok(Vec::new())
-    }
-    async fn start_or_resume_ticket(
-        &self,
-        ticket: TicketSummary,
-        repository_override: Option<PathBuf>,
-    ) -> Result<SelectedTicketFlowResult, CoreError>;
-    async fn create_ticket_from_brief(
-        &self,
-        request: CreateTicketFromPickerRequest,
-    ) -> Result<TicketSummary, CoreError>;
-    async fn archive_ticket(&self, _ticket: TicketSummary) -> Result<(), CoreError> {
-        Err(CoreError::DependencyUnavailable(
-            "ticket archiving is not supported by this ticket provider".to_owned(),
-        ))
-    }
-    async fn archive_session(
-        &self,
-        _session_id: WorkerSessionId,
-    ) -> Result<SessionArchiveOutcome, CoreError> {
-        Err(CoreError::DependencyUnavailable(
-            "session archiving is not supported by this ticket provider".to_owned(),
-        ))
-    }
-    async fn reload_projection(&self) -> Result<ProjectionState, CoreError>;
-    async fn mark_session_crashed(
-        &self,
-        _session_id: WorkerSessionId,
-        _reason: String,
-    ) -> Result<(), CoreError> {
-        Ok(())
-    }
-    async fn set_session_working_state(
-        &self,
-        _session_id: WorkerSessionId,
-        _is_working: bool,
-    ) -> Result<(), CoreError> {
-        Ok(())
-    }
-    async fn session_worktree_diff(
-        &self,
-        _session_id: WorkerSessionId,
-    ) -> Result<SessionWorktreeDiff, CoreError> {
-        Err(CoreError::Configuration(
-            "session worktree diff is not supported by this ticket provider".to_owned(),
-        ))
-    }
-    async fn advance_session_workflow(
-        &self,
-        _session_id: WorkerSessionId,
-    ) -> Result<SessionWorkflowAdvanceOutcome, CoreError> {
-        Err(CoreError::Configuration(
-            "session workflow advance is not supported by this ticket provider".to_owned(),
-        ))
-    }
-    async fn complete_session_after_merge(
-        &self,
-        _session_id: WorkerSessionId,
-    ) -> Result<SessionMergeFinalizeOutcome, CoreError> {
-        Err(CoreError::DependencyUnavailable(
-            "session merge finalization is not supported by this ticket provider".to_owned(),
-        ))
-    }
-    async fn publish_inbox_item(
-        &self,
-        _request: InboxPublishRequest,
-    ) -> Result<StoredEventEnvelope, CoreError> {
-        Err(CoreError::DependencyUnavailable(
-            "inbox publishing is not supported by this ticket provider".to_owned(),
-        ))
-    }
-    async fn resolve_inbox_item(
-        &self,
-        _request: InboxResolveRequest,
-    ) -> Result<Option<StoredEventEnvelope>, CoreError> {
-        Err(CoreError::DependencyUnavailable(
-            "inbox resolution is not supported by this ticket provider".to_owned(),
-        ))
-    }
-    async fn start_pr_pipeline_polling(
-        &self,
-        _sender: mpsc::Sender<MergeQueueEvent>,
-    ) -> Result<(), CoreError> {
-        Ok(())
-    }
-    async fn stop_pr_pipeline_polling(&self) -> Result<(), CoreError> {
-        Ok(())
-    }
-    async fn enqueue_pr_merge(&self, _session_id: WorkerSessionId) -> Result<(), CoreError> {
-        Err(CoreError::DependencyUnavailable(
-            "PR merge queueing is not supported by this ticket provider".to_owned(),
-        ))
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct InboxPublishRequest {
-    pub work_item_id: WorkItemId,
-    pub session_id: Option<WorkerSessionId>,
-    pub kind: InboxItemKind,
-    pub title: String,
-    pub coalesce_key: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct InboxResolveRequest {
-    pub inbox_item_id: InboxItemId,
-    pub work_item_id: WorkItemId,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SessionWorktreeDiff {
-    pub session_id: WorkerSessionId,
-    pub base_branch: String,
-    pub diff: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SessionWorkflowAdvanceOutcome {
-    pub session_id: WorkerSessionId,
-    pub work_item_id: WorkItemId,
-    pub from: WorkflowState,
-    pub to: WorkflowState,
-    pub instruction: Option<String>,
-    pub event: StoredEventEnvelope,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum MergeQueueCommandKind {
-    Reconcile,
-    Merge,
-}
-
-#[derive(Debug, Clone)]
-pub enum MergeQueueEvent {
-    Completed {
-        session_id: WorkerSessionId,
-        kind: MergeQueueCommandKind,
-        completed: bool,
-        merge_conflict: bool,
-        base_branch: Option<String>,
-        head_branch: Option<String>,
-        ci_checks: Vec<CiCheckStatus>,
-        ci_failures: Vec<String>,
-        ci_has_failures: bool,
-        ci_status_error: Option<String>,
-        error: Option<String>,
-    },
-    SessionFinalized {
-        session_id: WorkerSessionId,
-        event: StoredEventEnvelope,
-    },
-    SessionFinalizeFailed {
-        session_id: WorkerSessionId,
-        message: String,
-    },
-}
-
-pub type SupervisorCommandContext = SupervisorQueryContextArgs;
-
-#[async_trait]
-pub trait SupervisorCommandDispatcher: Send + Sync {
-    async fn dispatch_supervisor_command(
-        &self,
-        invocation: UntypedCommandInvocation,
-        context: SupervisorCommandContext,
-    ) -> Result<(String, LlmResponseStream), CoreError>;
-
-    async fn cancel_supervisor_command(&self, stream_id: &str) -> Result<(), CoreError>;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -808,15 +616,6 @@ struct SessionInfoSummaryCache {
 struct SessionCiStatusCache {
     checks: Vec<CiCheckStatus>,
     error: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CiCheckStatus {
-    pub name: String,
-    pub workflow: Option<String>,
-    pub bucket: String,
-    pub state: String,
-    pub link: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
