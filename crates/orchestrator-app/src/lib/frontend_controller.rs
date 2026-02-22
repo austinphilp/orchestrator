@@ -166,7 +166,10 @@ impl<S: Supervisor, G: GithubClient> AppFrontendController<S, G> {
             session_id: RuntimeSessionId::from(session_id.clone()),
             backend: worker_backend.kind(),
         };
-        worker_backend.send_input(&handle, payload.as_bytes()).await?;
+        worker_backend
+            .send_input(&handle, payload.as_bytes())
+            .await
+            .map_err(CoreError::Runtime)?;
         Ok(())
     }
 
@@ -188,7 +191,8 @@ impl<S: Supervisor, G: GithubClient> AppFrontendController<S, G> {
         };
         worker_backend
             .respond_to_needs_input(&handle, prompt_id, answers)
-            .await?;
+            .await
+            .map_err(CoreError::Runtime)?;
         Ok(())
     }
 }

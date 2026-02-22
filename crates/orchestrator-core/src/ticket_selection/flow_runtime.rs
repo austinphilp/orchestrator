@@ -279,7 +279,8 @@ async fn spawn_resume_session(
                 persisted_harness_session_id,
             ),
         })
-        .await?;
+        .await
+        .map_err(CoreError::Runtime)?;
 
     if spawned.session_id.as_str() != mapping.session.session_id.as_str() {
         return Err(CoreError::Runtime(RuntimeError::Internal(format!(

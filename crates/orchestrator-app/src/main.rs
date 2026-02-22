@@ -1,8 +1,8 @@
 use anyhow::Result;
 use orchestrator_app::events::OrchestrationEventPayload;
 use orchestrator_app::{
-    set_database_runtime_config, App, AppConfig, AppFrontendController, FrontendController,
-    WorkerManagerBackend,
+    set_database_runtime_config, App, AppConfig, AppError, AppFrontendController,
+    FrontendController, WorkerManagerBackend,
 };
 use orchestrator_core::{
     BackendKind, CoreError, EventPrunePolicy, SpawnSpec, SqliteEventStore, TicketProvider,
@@ -408,7 +408,7 @@ fn build_ticketing_provider(
         Arc<dyn TicketingProvider + Send + Sync>,
         Option<Arc<LinearTicketingProvider>>,
     ),
-    CoreError,
+    AppError,
 > {
     match resolve_ticketing_provider_key(provider)? {
         "ticketing.linear" => {
@@ -438,10 +438,9 @@ fn build_ticketing_provider(
                     linear: linear_config,
                     ..TicketingProviderFactoryConfig::default()
                 },
-            )
-            .map_err(|error| CoreError::Configuration(error.to_string()))?;
+            )?;
             let TicketingProviderFactoryOutput::Linear(provider) = provider else {
-                return Err(CoreError::Configuration(
+                return Err(AppError::configuration(
                     "ticketing provider factory returned a non-linear provider for ticketing.linear"
                         .to_owned(),
                 ));
@@ -464,10 +463,9 @@ fn build_ticketing_provider(
                     shortcut: shortcut_config,
                     ..TicketingProviderFactoryConfig::default()
                 },
-            )
-            .map_err(|error| CoreError::Configuration(error.to_string()))?;
+            )?;
             let TicketingProviderFactoryOutput::Shortcut(provider) = provider else {
-                return Err(CoreError::Configuration(
+                return Err(AppError::configuration(
                     "ticketing provider factory returned a non-shortcut provider for ticketing.shortcut"
                         .to_owned(),
                 ));
@@ -483,7 +481,7 @@ fn build_ticketing_provider(
 fn build_harness_provider(
     config: &AppConfig,
     provider: &str,
-) -> Result<Arc<dyn HarnessRuntimeProvider + Send + Sync>, CoreError> {
+) -> Result<Arc<dyn HarnessRuntimeProvider + Send + Sync>, AppError> {
     let provider_key = resolve_harness_provider_key(provider)?;
 
     let provider = build_provider_with_config(
@@ -512,8 +510,7 @@ fn build_harness_provider(
                 harness_log_normalized_events: config.runtime.harness_log_normalized_events,
             },
         },
-    )
-    .map_err(|error| CoreError::Configuration(error.to_string()))?;
+    )?;
 
     match provider {
         HarnessProviderFactoryOutput::OpenCode(provider) => {
@@ -530,7 +527,7 @@ fn build_harness_provider(
 fn build_vcs_provider(
     config: &AppConfig,
     provider: &str,
-) -> Result<Arc<dyn VcsProvider + Send + Sync>, CoreError> {
+) -> Result<Arc<dyn VcsProvider + Send + Sync>, AppError> {
     let provider_key = resolve_vcs_provider_key(provider)?;
 
     let provider = build_vcs_provider_with_config(
@@ -544,8 +541,7 @@ fn build_vcs_provider(
                 allow_unsafe_command_paths: config.runtime.allow_unsafe_command_paths,
             },
         },
-    )
-    .map_err(|error| CoreError::Configuration(error.to_string()))?;
+    )?;
 
     let VcsProviderFactoryOutput::GitCli(provider) = provider;
     let provider: Arc<dyn VcsProvider + Send + Sync> = Arc::new(provider);
@@ -555,7 +551,7 @@ fn build_vcs_provider(
 fn build_vcs_repo_provider(
     config: &AppConfig,
     provider: &str,
-) -> Result<GitHubGhCliRepoProvider, CoreError> {
+) -> Result<GitHubGhCliRepoProvider, AppError> {
     let provider_key = resolve_vcs_repo_provider_key(provider)?;
     let provider = build_vcs_repo_provider_with_config(
         provider_key,
@@ -565,8 +561,7 @@ fn build_vcs_repo_provider(
                 allow_unsafe_command_paths: config.runtime.allow_unsafe_command_paths,
             },
         },
-    )
-    .map_err(|error| CoreError::Configuration(error.to_string()))?;
+    )?;
 
     let VcsRepoProviderFactoryOutput::GitHubGhCli(provider) = provider;
     Ok(provider)

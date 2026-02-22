@@ -12,6 +12,7 @@ pub mod projection;
 
 // Temporary compatibility bridge while C-phase tickets move symbols into domain modules.
 pub use bootstrap::*;
+pub use error::{AppError, AppResult};
 
 #[cfg(test)]
 mod module_tree_tests {

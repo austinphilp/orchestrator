@@ -1398,6 +1398,7 @@ dependencies = [
  "r2d2_sqlite",
  "serde",
  "serde_json",
+ "thiserror 2.0.18",
  "time",
  "tokio",
  "toml",
