@@ -709,6 +709,49 @@ enum TicketPickerEvent {
     },
 }
 
+impl From<ControllerWorkflowAdvanceRunnerEvent> for TicketPickerEvent {
+    fn from(value: ControllerWorkflowAdvanceRunnerEvent) -> Self {
+        match value {
+            ControllerWorkflowAdvanceRunnerEvent::Advanced { outcome } => {
+                Self::SessionWorkflowAdvanced { outcome }
+            }
+            ControllerWorkflowAdvanceRunnerEvent::Failed {
+                session_id,
+                message,
+            } => Self::SessionWorkflowAdvanceFailed {
+                session_id,
+                message,
+            },
+        }
+    }
+}
+
+impl From<ControllerInboxPublishRunnerEvent> for TicketPickerEvent {
+    fn from(value: ControllerInboxPublishRunnerEvent) -> Self {
+        match value {
+            ControllerInboxPublishRunnerEvent::Published { event } => {
+                Self::InboxItemPublished { event }
+            }
+            ControllerInboxPublishRunnerEvent::Failed { message } => {
+                Self::InboxItemPublishFailed { message }
+            }
+        }
+    }
+}
+
+impl From<ControllerInboxResolveRunnerEvent> for TicketPickerEvent {
+    fn from(value: ControllerInboxResolveRunnerEvent) -> Self {
+        match value {
+            ControllerInboxResolveRunnerEvent::Resolved { event } => {
+                Self::InboxItemResolved { event }
+            }
+            ControllerInboxResolveRunnerEvent::Failed { message } => {
+                Self::InboxItemResolveFailed { message }
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct WorktreeDiffModalState {
     session_id: WorkerSessionId,

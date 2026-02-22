@@ -10,6 +10,15 @@ pub use orchestrator_app::controller::contracts::{
     SessionWorkflowAdvanceOutcome, SessionWorktreeDiff, SupervisorCommandContext,
     SupervisorCommandDispatcher, TicketCreateSubmitMode, TicketPickerProvider,
 };
+pub use orchestrator_app::controller::action_runners::{
+    run_publish_inbox_item_task, run_resolve_inbox_item_task, run_session_merge_finalize_task,
+    run_session_workflow_advance_task, run_start_pr_pipeline_polling_task,
+    run_stop_pr_pipeline_polling_task, run_supervisor_command_task, run_supervisor_stream_task,
+    InboxPublishRunnerEvent as ControllerInboxPublishRunnerEvent,
+    InboxResolveRunnerEvent as ControllerInboxResolveRunnerEvent,
+    SupervisorStreamRunnerEvent as ControllerSupervisorStreamRunnerEvent,
+    WorkflowAdvanceRunnerEvent as ControllerWorkflowAdvanceRunnerEvent,
+};
 use orchestrator_config::{
     normalize_supervisor_model, normalize_ui_config, SupervisorConfig, UiConfigToml, UiViewConfig,
 };
@@ -27,9 +36,8 @@ use orchestrator_core::{
     FrontendController, FrontendEvent, FrontendIntent, FrontendNotification,
     FrontendNotificationLevel, FrontendSnapshot,
     FrontendTerminalEvent,
-    InboxItemId, InboxItemKind,
-    LlmChatRequest, LlmFinishReason, LlmMessage, LlmProvider, LlmRateLimitState, LlmResponseStream,
-    LlmRole, LlmTokenUsage, OrchestrationEventPayload, ProjectId, ProjectionState,
+    InboxItemId, InboxItemKind, LlmChatRequest, LlmFinishReason, LlmMessage, LlmProvider,
+    LlmRateLimitState, LlmRole, LlmTokenUsage, OrchestrationEventPayload, ProjectId, ProjectionState,
     SessionProjection, StoredEventEnvelope, SupervisorQueryArgs,
     SupervisorQueryContextArgs, TicketId, TicketSummary, UntypedCommandInvocation, WorkItemId,
     WorkerBackend, WorkerSessionId, WorkerSessionStatus, WorkflowState,
@@ -1414,6 +1422,27 @@ enum SupervisorStreamEvent {
     Failed {
         message: String,
     },
+}
+
+impl From<ControllerSupervisorStreamRunnerEvent> for SupervisorStreamEvent {
+    fn from(value: ControllerSupervisorStreamRunnerEvent) -> Self {
+        match value {
+            ControllerSupervisorStreamRunnerEvent::Started { stream_id } => {
+                Self::Started { stream_id }
+            }
+            ControllerSupervisorStreamRunnerEvent::Delta { text } => Self::Delta { text },
+            ControllerSupervisorStreamRunnerEvent::RateLimit { state } => {
+                Self::RateLimit { state }
+            }
+            ControllerSupervisorStreamRunnerEvent::Usage { usage } => Self::Usage { usage },
+            ControllerSupervisorStreamRunnerEvent::Finished { reason, usage } => {
+                Self::Finished { reason, usage }
+            }
+            ControllerSupervisorStreamRunnerEvent::Failed { message } => {
+                Self::Failed { message }
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

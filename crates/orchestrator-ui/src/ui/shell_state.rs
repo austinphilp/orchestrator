@@ -2721,7 +2721,7 @@ impl UiShellState {
         match TokioHandle::try_current() {
             Ok(runtime) => {
                 runtime.spawn(async move {
-                    let _ = provider.start_pr_pipeline_polling(sender).await;
+                    let _ = run_start_pr_pipeline_polling_task(provider, sender).await;
                 });
             }
             Err(_) => {
@@ -5222,7 +5222,7 @@ impl Drop for UiShellState {
         };
         if let Ok(runtime) = TokioHandle::try_current() {
             runtime.spawn(async move {
-                let _ = provider.stop_pr_pipeline_polling().await;
+                let _ = run_stop_pr_pipeline_polling_task(provider).await;
             });
         }
     }
