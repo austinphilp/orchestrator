@@ -473,6 +473,18 @@ fn render_session_info_panel(
     }
 
     lines.push(String::new());
+    lines.push("Workflow profile:".to_owned());
+    let profiles = workflow_profiles_config_value();
+    lines.push(format!("- Default: {}", profiles.default_profile));
+    if let Some(work_item) = work_item {
+        if let Some(profile_override) = work_item.profile_override.as_deref() {
+            lines.push(format!("- Override: {}", profile_override));
+        } else {
+            lines.push("- Override: <none>".to_owned());
+        }
+    }
+
+    lines.push(String::new());
     lines.push("Open inbox:".to_owned());
     if let Some(work_item) = work_item {
         let mut has_open = false;
@@ -1670,6 +1682,74 @@ fn render_ticket_picker_overlay(
     }
 }
 
+fn render_workflow_profiles_modal(
+    frame: &mut ratatui::Frame<'_>,
+    anchor_area: Rect,
+    modal: &WorkflowProfilesModalState,
+) {
+    let Some(popup) = workflow_profiles_modal_popup(anchor_area) else {
+        return;
+    };
+
+    frame.render_widget(Clear, popup);
+    let title = if modal.saving {
+        "workflow profiles (saving...)"
+    } else {
+        "workflow profiles"
+    };
+
+    let mut lines = Vec::new();
+    lines.push(
+        "h/l: profile | j/k: state | Enter/Space: toggle | g: default | c: new | d: delete | r: rename | s: save | Esc/`: close"
+            .to_owned(),
+    );
+    lines.push(String::new());
+
+    if let Some(profile) = modal.selected_profile() {
+        let is_default = modal.default_profile == profile.name;
+        lines.push(format!(
+            "Profile: {}{} ({}/{})",
+            profile.name,
+            if is_default { " [default]" } else { "" },
+            modal.selected_profile_index.saturating_add(1),
+            modal.profiles.len()
+        ));
+        if modal.renaming {
+            lines.push(format!("Rename: {}", modal.rename_input.text()));
+        }
+        lines.push(String::new());
+        for (index, level) in profile.levels.iter().enumerate() {
+            let selected = if index == modal.selected_state_index {
+                ">"
+            } else {
+                " "
+            };
+            lines.push(format!(
+                "{selected} {:<20} {}",
+                format!("{:?}", level.state),
+                match level.level {
+                    WorkflowInteractionLevel::Manual => "Manual",
+                    WorkflowInteractionLevel::Auto => "Auto",
+                }
+            ));
+        }
+    } else {
+        lines.push("No workflow profiles available.".to_owned());
+    }
+
+    if let Some(error) = modal.error.as_ref() {
+        lines.push(String::new());
+        lines.push(format!("Error: {}", compact_focus_card_text(error.as_str())));
+    }
+
+    frame.render_widget(
+        Paragraph::new(lines.join("\n"))
+            .block(Block::default().title(title).borders(Borders::ALL))
+            .wrap(Wrap { trim: false }),
+        popup,
+    );
+}
+
 const TERMINAL_COMPOSE_MIN_HEIGHT: u16 = 6;
 const TERMINAL_COMPOSE_MAX_HEIGHT: u16 = 14;
 const TICKET_PICKER_BRIEF_MIN_HEIGHT: u16 = 4;
@@ -2691,6 +2771,24 @@ fn ticket_picker_popup(anchor_area: Rect) -> Option<Rect> {
     let height = ((anchor_area.height as f32) * 0.82).round() as u16;
     let width = width.clamp(20, anchor_area.width.saturating_sub(2));
     let height = height.clamp(10, anchor_area.height.saturating_sub(2));
+
+    Some(Rect {
+        x: anchor_area.x + (anchor_area.width.saturating_sub(width)) / 2,
+        y: anchor_area.y + (anchor_area.height.saturating_sub(height)) / 2,
+        width,
+        height,
+    })
+}
+
+fn workflow_profiles_modal_popup(anchor_area: Rect) -> Option<Rect> {
+    if anchor_area.width < 50 || anchor_area.height < 14 {
+        return None;
+    }
+
+    let width = ((anchor_area.width as f32) * 0.62).round() as u16;
+    let height = ((anchor_area.height as f32) * 0.72).round() as u16;
+    let width = width.clamp(50, anchor_area.width.saturating_sub(2));
+    let height = height.clamp(14, anchor_area.height.saturating_sub(2));
 
     Some(Rect {
         x: anchor_area.x + (anchor_area.width.saturating_sub(width)) / 2,

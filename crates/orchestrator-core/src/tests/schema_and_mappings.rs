@@ -7,7 +7,7 @@ fn initialization_creates_required_schema_and_version() {
     let db = unique_db("init");
 
     let store = SqliteEventStore::open(db.path()).expect("open store");
-    assert_eq!(store.schema_version().expect("schema version"), 9);
+    assert_eq!(store.schema_version().expect("schema version"), 10);
 
     let conn = rusqlite::Connection::open(db.path()).expect("open sqlite for inspection");
     let tables = [
@@ -22,6 +22,7 @@ fn initialization_creates_required_schema_and_version() {
         "event_artifact_refs",
         "project_repositories",
         "harness_session_bindings",
+        "ticket_profile_overrides",
     ];
     for table in tables {
         let exists: Option<i64> = conn
@@ -64,7 +65,7 @@ fn initialization_creates_required_schema_and_version() {
             row.get(0)
         })
         .expect("count migrations");
-    assert_eq!(applied_migrations, 9);
+    assert_eq!(applied_migrations, 10);
 
     drop(store);
 }
@@ -74,11 +75,11 @@ fn startup_is_idempotent_and_does_not_duplicate_migrations() {
     let db = unique_db("idempotent");
 
     let first = SqliteEventStore::open(db.path()).expect("first open");
-    assert_eq!(first.schema_version().expect("schema version"), 9);
+    assert_eq!(first.schema_version().expect("schema version"), 10);
     drop(first);
 
     let second = SqliteEventStore::open(db.path()).expect("second open");
-    assert_eq!(second.schema_version().expect("schema version"), 9);
+    assert_eq!(second.schema_version().expect("schema version"), 10);
     drop(second);
 
     let conn = rusqlite::Connection::open(db.path()).expect("open sqlite for inspection");
@@ -87,7 +88,7 @@ fn startup_is_idempotent_and_does_not_duplicate_migrations() {
             row.get(0)
         })
         .expect("count migrations");
-    assert_eq!(migration_count, 9);
+    assert_eq!(migration_count, 10);
 }
 
 #[test]
@@ -128,7 +129,7 @@ fn startup_adopts_legacy_events_schema_without_recreating_events_table() {
     drop(conn);
 
     let store = SqliteEventStore::open(db.path()).expect("open store");
-    assert_eq!(store.schema_version().expect("schema version"), 9);
+    assert_eq!(store.schema_version().expect("schema version"), 10);
 
     let events = store.read_ordered().expect("read ordered");
     assert_eq!(events.len(), 1);
@@ -147,6 +148,7 @@ fn startup_adopts_legacy_events_schema_without_recreating_events_table() {
         "event_artifact_refs",
         "project_repositories",
         "harness_session_bindings",
+        "ticket_profile_overrides",
     ];
     for table in tables {
         let exists: Option<i64> = conn

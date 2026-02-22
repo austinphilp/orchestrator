@@ -631,6 +631,81 @@ impl SqliteEventStore {
         Ok(())
     }
 
+    pub fn upsert_ticket_profile_override(
+        &self,
+        ticket_id: &TicketId,
+        profile_name: &str,
+    ) -> Result<(), CoreError> {
+        let profile_name = profile_name.trim();
+        if profile_name.is_empty() {
+            return Err(CoreError::Configuration(
+                "ticket profile override cannot be empty".to_owned(),
+            ));
+        }
+
+        self.conn
+            .execute(
+                "
+                INSERT INTO ticket_profile_overrides (ticket_id, profile_name, updated_at)
+                VALUES (?1, ?2, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+                ON CONFLICT(ticket_id) DO UPDATE SET
+                    profile_name = excluded.profile_name,
+                    updated_at = excluded.updated_at
+                ",
+                params![ticket_id.as_str(), profile_name],
+            )
+            .map_err(|err| CoreError::Persistence(err.to_string()))?;
+        Ok(())
+    }
+
+    pub fn find_ticket_profile_override(
+        &self,
+        ticket_id: &TicketId,
+    ) -> Result<Option<String>, CoreError> {
+        self.conn
+            .query_row(
+                "
+                SELECT profile_name
+                FROM ticket_profile_overrides
+                WHERE ticket_id = ?1
+                ",
+                params![ticket_id.as_str()],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(|err| CoreError::Persistence(err.to_string()))
+    }
+
+    pub fn delete_ticket_profile_override(&self, ticket_id: &TicketId) -> Result<(), CoreError> {
+        self.conn
+            .execute(
+                "
+                DELETE FROM ticket_profile_overrides
+                WHERE ticket_id = ?1
+                ",
+                params![ticket_id.as_str()],
+            )
+            .map_err(|err| CoreError::Persistence(err.to_string()))?;
+        Ok(())
+    }
+
+    pub fn list_ticket_profile_overrides(
+        &self,
+        ticket_ids: &[TicketId],
+    ) -> Result<Vec<(TicketId, String)>, CoreError> {
+        if ticket_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut items = Vec::new();
+        for ticket_id in ticket_ids {
+            if let Some(profile_name) = self.find_ticket_profile_override(ticket_id)? {
+                items.push((ticket_id.clone(), profile_name));
+            }
+        }
+        Ok(items)
+    }
+
     pub fn upsert_runtime_mapping(
         &mut self,
         mapping: &RuntimeMappingRecord,
@@ -1215,6 +1290,12 @@ impl SqliteEventStore {
                     FOREIGN KEY(session_id) REFERENCES sessions(session_id)
                 );
 
+                CREATE TABLE IF NOT EXISTS ticket_profile_overrides (
+                    ticket_id TEXT PRIMARY KEY,
+                    profile_name TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+
                 INSERT OR IGNORE INTO session_runtime_flags (session_id, is_working, updated_at)
                 SELECT session_id, 0, strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
                 FROM sessions;
@@ -1430,6 +1511,17 @@ impl SqliteEventStore {
                 .execute_batch(
                     "
                     CREATE INDEX IF NOT EXISTS idx_sessions_status_updated_lookup ON sessions(status, updated_at);
+                    ",
+                )
+                .map_err(|err| CoreError::Persistence(err.to_string())),
+            10 => tx
+                .execute_batch(
+                    "
+                    CREATE TABLE IF NOT EXISTS ticket_profile_overrides (
+                        ticket_id TEXT PRIMARY KEY,
+                        profile_name TEXT NOT NULL,
+                        updated_at TEXT NOT NULL
+                    );
                     ",
                 )
                 .map_err(|err| CoreError::Persistence(err.to_string())),

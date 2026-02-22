@@ -22,7 +22,6 @@ struct UiShellState {
     mode_key_buffer: Vec<KeyStroke>,
     which_key_overlay: Option<WhichKeyOverlayState>,
     mode: UiMode,
-    application_mode: ApplicationMode,
     terminal_escape_pending: bool,
     supervisor_provider: Option<Arc<dyn LlmProvider>>,
     supervisor_command_dispatcher: Option<Arc<dyn SupervisorCommandDispatcher>>,
@@ -34,6 +33,7 @@ struct UiShellState {
     ticket_picker_sender: Option<mpsc::Sender<TicketPickerEvent>>,
     ticket_picker_receiver: Option<mpsc::Receiver<TicketPickerEvent>>,
     ticket_picker_overlay: TicketPickerOverlayState,
+    workflow_profiles_modal: WorkflowProfilesModalState,
     ticket_picker_create_refresh_deadline: Option<Instant>,
     ticket_picker_priority_states: Vec<String>,
     startup_session_feed_opened: bool,
@@ -132,6 +132,9 @@ impl UiShellState {
         ticket_picker_provider: Option<Arc<dyn TicketPickerProvider>>,
         worker_backend: Option<Arc<dyn WorkerBackend>>,
     ) -> Self {
+        #[cfg(test)]
+        set_workflow_profiles_config(WorkflowInteractionProfilesConfig::default());
+
         let (ticket_picker_sender, ticket_picker_receiver) = if ticket_picker_provider.is_some() {
             let (sender, receiver) = mpsc::channel(TICKET_PICKER_EVENT_CHANNEL_CAPACITY);
             (Some(sender), Some(receiver))
@@ -169,7 +172,6 @@ impl UiShellState {
             mode_key_buffer: Vec::new(),
             which_key_overlay: None,
             mode: UiMode::Normal,
-            application_mode: ApplicationMode::Manual,
             terminal_escape_pending: false,
             supervisor_provider,
             supervisor_command_dispatcher,
@@ -181,6 +183,7 @@ impl UiShellState {
             ticket_picker_sender,
             ticket_picker_receiver,
             ticket_picker_overlay: TicketPickerOverlayState::default(),
+            workflow_profiles_modal: WorkflowProfilesModalState::default(),
             ticket_picker_create_refresh_deadline: None,
             ticket_picker_priority_states: ticket_picker_priority_states_from_env(),
             startup_session_feed_opened: false,
@@ -1494,6 +1497,187 @@ impl UiShellState {
         self.ticket_picker_create_refresh_deadline = None;
     }
 
+    fn toggle_workflow_profiles_modal(&mut self) {
+        if self.workflow_profiles_modal.visible {
+            self.workflow_profiles_modal.close();
+            return;
+        }
+        self.open_workflow_profiles_modal();
+    }
+
+    fn open_workflow_profiles_modal(&mut self) {
+        let config = workflow_profiles_config_value();
+        self.workflow_profiles_modal.open(config);
+        self.enter_normal_mode();
+    }
+
+    fn close_workflow_profiles_modal(&mut self) {
+        self.workflow_profiles_modal.close();
+    }
+
+    fn set_application_mode_autopilot(&mut self) {
+        let mut config = workflow_profiles_config_value();
+        let target = config
+            .profiles
+            .iter()
+            .find(|profile| profile.name.eq_ignore_ascii_case("auto"))
+            .map(|profile| profile.name.clone())
+            .or_else(|| {
+                config.profiles.iter().find_map(|profile| {
+                    let all_auto = profile.levels.iter().all(|level| {
+                        matches!(level.level, WorkflowInteractionLevel::Auto)
+                    });
+                    all_auto.then(|| profile.name.clone())
+                })
+            });
+        if let Some(target) = target {
+            config.default_profile = target;
+            set_workflow_profiles_config(config);
+        }
+    }
+
+    fn set_application_mode_manual(&mut self) {
+        let mut config = workflow_profiles_config_value();
+        let target = config
+            .profiles
+            .iter()
+            .find(|profile| profile.name.eq_ignore_ascii_case("manual"))
+            .map(|profile| profile.name.clone())
+            .or_else(|| {
+                config.profiles.iter().find_map(|profile| {
+                    let all_manual = profile.levels.iter().all(|level| {
+                        matches!(level.level, WorkflowInteractionLevel::Manual)
+                    });
+                    all_manual.then(|| profile.name.clone())
+                })
+            });
+        if let Some(target) = target {
+            config.default_profile = target;
+            set_workflow_profiles_config(config);
+        }
+    }
+
+    #[cfg(test)]
+    fn application_mode_label(&self) -> &'static str {
+        let config = workflow_profiles_config_value();
+        let default_profile = config
+            .profiles
+            .iter()
+            .find(|profile| profile.name == config.default_profile);
+        if default_profile
+            .map(|profile| {
+                profile
+                    .levels
+                    .iter()
+                    .all(|level| matches!(level.level, WorkflowInteractionLevel::Auto))
+            })
+            .unwrap_or(false)
+        {
+            "Autopilot"
+        } else {
+            "Manual"
+        }
+    }
+
+    fn cycle_workflow_profile_selection(&mut self, delta: isize) {
+        if !self.workflow_profiles_modal.visible || self.workflow_profiles_modal.saving {
+            return;
+        }
+        self.workflow_profiles_modal.cycle_profile(delta);
+    }
+
+    fn move_workflow_profile_state_selection(&mut self, delta: isize) {
+        if !self.workflow_profiles_modal.visible || self.workflow_profiles_modal.saving {
+            return;
+        }
+        self.workflow_profiles_modal.move_state_selection(delta);
+    }
+
+    fn toggle_selected_workflow_profile_state_level(&mut self) {
+        if !self.workflow_profiles_modal.visible || self.workflow_profiles_modal.saving {
+            return;
+        }
+        self.workflow_profiles_modal.toggle_selected_state_level();
+    }
+
+    fn add_workflow_profile(&mut self) {
+        if !self.workflow_profiles_modal.visible || self.workflow_profiles_modal.saving {
+            return;
+        }
+        self.workflow_profiles_modal.add_profile();
+    }
+
+    fn delete_selected_workflow_profile(&mut self) {
+        if !self.workflow_profiles_modal.visible || self.workflow_profiles_modal.saving {
+            return;
+        }
+        self.workflow_profiles_modal.delete_selected_profile();
+    }
+
+    fn set_selected_workflow_profile_as_default(&mut self) {
+        if !self.workflow_profiles_modal.visible || self.workflow_profiles_modal.saving {
+            return;
+        }
+        self.workflow_profiles_modal.set_selected_default();
+    }
+
+    fn begin_workflow_profile_rename(&mut self) {
+        if !self.workflow_profiles_modal.visible || self.workflow_profiles_modal.saving {
+            return;
+        }
+        self.workflow_profiles_modal.begin_rename_selected_profile();
+    }
+
+    fn cancel_workflow_profile_rename(&mut self) {
+        if !self.workflow_profiles_modal.visible {
+            return;
+        }
+        self.workflow_profiles_modal.cancel_rename();
+    }
+
+    fn append_workflow_profile_rename_char(&mut self, ch: char) {
+        if !self.workflow_profiles_modal.visible
+            || !self.workflow_profiles_modal.renaming
+            || self.workflow_profiles_modal.saving
+        {
+            return;
+        }
+        self.workflow_profiles_modal.rename_input.insert_char(ch);
+    }
+
+    fn pop_workflow_profile_rename_char(&mut self) {
+        if !self.workflow_profiles_modal.visible
+            || !self.workflow_profiles_modal.renaming
+            || self.workflow_profiles_modal.saving
+        {
+            return;
+        }
+        self.workflow_profiles_modal.rename_input.delete_char_backward();
+    }
+
+    fn submit_workflow_profile_rename(&mut self) {
+        if !self.workflow_profiles_modal.visible
+            || !self.workflow_profiles_modal.renaming
+            || self.workflow_profiles_modal.saving
+        {
+            return;
+        }
+        self.workflow_profiles_modal.submit_rename();
+    }
+
+    fn save_workflow_profiles(&mut self) {
+        if !self.workflow_profiles_modal.visible
+            || self.workflow_profiles_modal.saving
+            || self.workflow_profiles_modal.renaming
+        {
+            return;
+        }
+        let config = self.workflow_profiles_modal.as_config();
+        self.workflow_profiles_modal.saving = true;
+        self.workflow_profiles_modal.error = None;
+        self.spawn_workflow_profiles_save(config);
+    }
+
     fn begin_create_ticket_from_picker(&mut self) {
         if !self.ticket_picker_overlay.visible {
             return;
@@ -1542,7 +1726,11 @@ impl UiShellState {
         if self.ticket_picker_overlay.starting_ticket_id.is_some() {
             return;
         }
-        self.spawn_ticket_picker_start_with_override(ticket, None);
+        let profile_override = self
+            .ticket_picker_overlay
+            .ticket_override_for(&ticket.ticket_id)
+            .map(ToOwned::to_owned);
+        self.spawn_ticket_picker_start_with_override(ticket, None, profile_override);
     }
 
     fn start_selected_ticket_from_picker_with_override(
@@ -1555,7 +1743,11 @@ impl UiShellState {
         }
         self.ticket_picker_overlay.error = None;
         self.ticket_picker_overlay.starting_ticket_id = Some(ticket.ticket_id.clone());
-        self.spawn_ticket_picker_start_with_override(ticket, repository_override);
+        let profile_override = self
+            .ticket_picker_overlay
+            .ticket_override_for(&ticket.ticket_id)
+            .map(ToOwned::to_owned);
+        self.spawn_ticket_picker_start_with_override(ticket, repository_override, profile_override);
     }
 
     fn begin_archive_selected_ticket_from_picker(&mut self) {
@@ -1619,6 +1811,43 @@ impl UiShellState {
 
     fn cancel_ticket_picker_repository_prompt(&mut self) {
         self.ticket_picker_overlay.cancel_repository_prompt();
+    }
+
+    fn cycle_selected_ticket_profile_override(&mut self) {
+        if !self.ticket_picker_overlay.visible
+            || self.ticket_picker_overlay.loading
+            || self.ticket_picker_overlay.new_ticket_mode
+            || self.ticket_picker_overlay.starting_ticket_id.is_some()
+        {
+            return;
+        }
+        let Some(ticket) = self.ticket_picker_overlay.selected_ticket().cloned() else {
+            return;
+        };
+
+        let profiles = workflow_profiles_config_value();
+        let mut options = vec![None];
+        options.extend(profiles.profiles.iter().map(|profile| Some(profile.name.clone())));
+
+        let current = self
+            .ticket_picker_overlay
+            .ticket_profile_overrides
+            .get(&ticket.ticket_id)
+            .cloned();
+        let current_index = options
+            .iter()
+            .position(|option| option.as_ref() == current.as_ref())
+            .unwrap_or(0);
+        let next_index = (current_index + 1) % options.len();
+        let next = options[next_index].clone();
+        self.spawn_ticket_profile_override_update(ticket.ticket_id.clone(), next.clone());
+
+        let next_display = next.unwrap_or_else(|| "<default>".to_owned());
+        self.status_warning = Some(format!(
+            "ticket {} profile -> {}",
+            ticket.identifier.as_str(),
+            next_display
+        ));
     }
 
     fn append_repository_prompt_char(&mut self, ch: char) {
@@ -1699,6 +1928,7 @@ impl UiShellState {
         &mut self,
         ticket: TicketSummary,
         repository_override: Option<PathBuf>,
+        profile_override: Option<String>,
     ) {
         let Some(provider) = self.ticket_picker_provider.clone() else {
             self.ticket_picker_overlay.starting_ticket_id = None;
@@ -1716,14 +1946,89 @@ impl UiShellState {
         match TokioHandle::try_current() {
             Ok(handle) => {
                 handle.spawn(async move {
-                    run_ticket_picker_start_task(provider, ticket, repository_override, sender)
-                        .await;
+                    run_ticket_picker_start_task(
+                        provider,
+                        ticket,
+                        repository_override,
+                        profile_override,
+                        sender,
+                    )
+                    .await;
                 });
             }
             Err(_) => {
                 self.ticket_picker_overlay.starting_ticket_id = None;
                 self.ticket_picker_overlay.error =
                     Some("tokio runtime unavailable; cannot start ticket".to_owned());
+            }
+        }
+    }
+
+    fn spawn_ticket_profile_override_update(
+        &mut self,
+        ticket_id: TicketId,
+        profile_name: Option<String>,
+    ) {
+        let Some(provider) = self.ticket_picker_provider.clone() else {
+            self.ticket_picker_overlay.error =
+                Some("ticket profile override unavailable: ticket provider is not configured".to_owned());
+            return;
+        };
+        let Some(sender) = self.ticket_picker_sender.clone() else {
+            self.ticket_picker_overlay.error = Some(
+                "ticket profile override unavailable: ticket event channel is not available"
+                    .to_owned(),
+            );
+            return;
+        };
+
+        match TokioHandle::try_current() {
+            Ok(handle) => {
+                handle.spawn(async move {
+                    run_ticket_profile_override_update_task(
+                        provider,
+                        ticket_id,
+                        profile_name,
+                        sender,
+                    )
+                    .await;
+                });
+            }
+            Err(_) => {
+                self.ticket_picker_overlay.error = Some(
+                    "ticket profile override unavailable: tokio runtime is not active".to_owned(),
+                );
+            }
+        }
+    }
+
+    fn spawn_workflow_profiles_save(&mut self, config: WorkflowInteractionProfilesConfig) {
+        let Some(provider) = self.ticket_picker_provider.clone() else {
+            self.workflow_profiles_modal.saving = false;
+            self.workflow_profiles_modal.error = Some(
+                "workflow profiles unavailable: ticket provider is not configured".to_owned(),
+            );
+            return;
+        };
+        let Some(sender) = self.ticket_picker_sender.clone() else {
+            self.workflow_profiles_modal.saving = false;
+            self.workflow_profiles_modal.error = Some(
+                "workflow profiles unavailable: ticket event channel is not available".to_owned(),
+            );
+            return;
+        };
+
+        match TokioHandle::try_current() {
+            Ok(handle) => {
+                handle.spawn(async move {
+                    run_workflow_profiles_save_task(provider, config, sender).await;
+                });
+            }
+            Err(_) => {
+                self.workflow_profiles_modal.saving = false;
+                self.workflow_profiles_modal.error = Some(
+                    "workflow profiles unavailable: tokio runtime is not active".to_owned(),
+                );
             }
         }
     }
@@ -1839,7 +2144,12 @@ impl UiShellState {
     }
 
     fn tick_autopilot_and_report(&mut self) -> bool {
-        if self.application_mode != ApplicationMode::Autopilot {
+        let has_auto_sessions = self
+            .domain
+            .sessions
+            .keys()
+            .any(|session_id| matches!(self.session_interaction_level(session_id), Some(WorkflowInteractionLevel::Auto)));
+        if !has_auto_sessions {
             return false;
         }
 
@@ -1861,7 +2171,12 @@ impl UiShellState {
             .terminal_session_states
             .iter()
             .filter_map(|(session_id, view)| {
-                if view.active_needs_input.is_some() {
+                if view.active_needs_input.is_some()
+                    && matches!(
+                        self.session_interaction_level(session_id),
+                        Some(WorkflowInteractionLevel::Auto)
+                    )
+                {
                     Some(session_id.clone())
                 } else {
                     None
@@ -1876,42 +2191,7 @@ impl UiShellState {
     }
 
     fn autopilot_reconcile_session_actions(&mut self) -> bool {
-        let mut changed = false;
-        let session_ids = self.domain.sessions.keys().cloned().collect::<Vec<_>>();
-
-        for session_id in session_ids {
-            if !is_open_session_status(
-                self.domain
-                    .sessions
-                    .get(&session_id)
-                    .and_then(|session| session.status.as_ref()),
-            ) {
-                continue;
-            }
-            if self.session_is_actively_working(&session_id) {
-                continue;
-            }
-
-            match self.workflow_state_for_session(&session_id) {
-                Some(WorkflowState::Done | WorkflowState::Abandoned) => {
-                    if self.autopilot_archiving_sessions.insert(session_id.clone()) {
-                        self.spawn_session_archive(session_id);
-                        changed = true;
-                    }
-                }
-                Some(WorkflowState::Implementing | WorkflowState::PRDrafted) => {
-                    if self.session_requires_progression_approval(&session_id)
-                        && self.autopilot_advancing_sessions.insert(session_id.clone())
-                    {
-                        self.spawn_session_workflow_advance(session_id);
-                        changed = true;
-                    }
-                }
-                _ => {}
-            }
-        }
-
-        changed
+        false
     }
 
     fn autopilot_handle_needs_input_for_session(&mut self, session_id: &WorkerSessionId) -> bool {
@@ -2877,6 +3157,23 @@ impl UiShellState {
             "ui projection perf counters"
         );
     }
+    fn session_interaction_level(
+        &self,
+        session_id: &WorkerSessionId,
+    ) -> Option<WorkflowInteractionLevel> {
+        let work_item = self
+            .domain
+            .sessions
+            .get(session_id)
+            .and_then(|session| session.work_item_id.as_ref())
+            .and_then(|work_item_id| self.domain.work_items.get(work_item_id))?;
+        let workflow_state = work_item.workflow_state.as_ref()?;
+        Some(profile_level_for_state(
+            work_item.profile_override.as_deref(),
+            workflow_state,
+        ))
+    }
+
     fn session_requires_manual_needs_input_activation(&self, session_id: &WorkerSessionId) -> bool {
         self.domain
             .sessions
@@ -3138,9 +3435,14 @@ impl UiShellState {
 
     fn apply_ticket_picker_event(&mut self, event: TicketPickerEvent) {
         match event {
-            TicketPickerEvent::TicketsLoaded { tickets, projects } => {
+            TicketPickerEvent::TicketsLoaded {
+                tickets,
+                projects,
+                profile_overrides,
+            } => {
                 self.ticket_picker_overlay.loading = false;
                 self.ticket_picker_overlay.error = None;
+                self.ticket_picker_overlay.ticket_profile_overrides = profile_overrides;
                 let tickets = self.filtered_ticket_picker_tickets(tickets);
                 self.ticket_picker_overlay
                     .apply_tickets(tickets, projects, &self.ticket_picker_priority_states);
@@ -3206,6 +3508,7 @@ impl UiShellState {
                 started_session_id,
                 projection,
                 tickets,
+                profile_overrides,
                 warning,
             } => {
                 self.ticket_picker_overlay.starting_ticket_id = None;
@@ -3220,6 +3523,9 @@ impl UiShellState {
                     let projects = self.ticket_picker_overlay.project_names();
                     self.ticket_picker_overlay
                         .apply_tickets(tickets, projects, &self.ticket_picker_priority_states);
+                }
+                if let Some(profile_overrides) = profile_overrides {
+                    self.ticket_picker_overlay.ticket_profile_overrides = profile_overrides;
                 }
                 self.focus_and_stream_session(started_session_id);
                 if let Some(message) = warning {
@@ -3243,6 +3549,44 @@ impl UiShellState {
                     repository_path_hint,
                 );
                 self.ticket_picker_overlay.error = Some(message);
+            }
+            TicketPickerEvent::TicketProfileOverrideUpdated {
+                ticket_id,
+                profile_name,
+            } => {
+                if let Some(profile_name) = profile_name {
+                    self.ticket_picker_overlay
+                        .ticket_profile_overrides
+                        .insert(ticket_id, profile_name);
+                } else {
+                    self.ticket_picker_overlay
+                        .ticket_profile_overrides
+                        .remove(&ticket_id);
+                }
+            }
+            TicketPickerEvent::TicketProfileOverrideUpdateFailed { ticket_id, message } => {
+                self.status_warning = Some(format!(
+                    "ticket profile override warning for {}: {}",
+                    ticket_id.as_str(),
+                    compact_focus_card_text(message.as_str())
+                ));
+            }
+            TicketPickerEvent::WorkflowProfilesSaved { config } => {
+                self.workflow_profiles_modal.saving = false;
+                self.workflow_profiles_modal.open(config.clone());
+                set_workflow_profiles_config(config.clone());
+                self.status_warning = Some(format!(
+                    "workflow profiles saved (default: {})",
+                    config.default_profile
+                ));
+            }
+            TicketPickerEvent::WorkflowProfilesSaveFailed { message } => {
+                self.workflow_profiles_modal.saving = false;
+                self.workflow_profiles_modal.error = Some(message.clone());
+                self.status_warning = Some(format!(
+                    "workflow profiles save warning: {}",
+                    compact_focus_card_text(message.as_str())
+                ));
             }
             TicketPickerEvent::TicketStartFailed { message } => {
                 self.ticket_picker_overlay.starting_ticket_id = None;
@@ -4228,20 +4572,6 @@ impl UiShellState {
             self.selected_session_index = Some(index);
             self.selected_session_id = Some(session_id);
         }
-    }
-
-    fn application_mode_label(&self) -> &'static str {
-        self.application_mode.label()
-    }
-
-    fn set_application_mode_autopilot(&mut self) {
-        self.application_mode = ApplicationMode::Autopilot;
-        self.status_warning = Some("application mode: autopilot".to_owned());
-    }
-
-    fn set_application_mode_manual(&mut self) {
-        self.application_mode = ApplicationMode::Manual;
-        self.status_warning = Some("application mode: manual".to_owned());
     }
 
     fn enter_normal_mode(&mut self) {

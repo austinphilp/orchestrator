@@ -43,7 +43,7 @@ pub enum TicketProvider {
     Shortcut,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct TicketId(String);
 
 impl TicketId {

@@ -20,7 +20,9 @@ use orchestrator_core::{
     LlmTokenUsage, OrchestrationEventPayload, ProjectId,
     ProjectionState, SelectedTicketFlowResult, SessionProjection, SupervisorQueryArgs,
     StoredEventEnvelope, SupervisorQueryContextArgs, TicketId, TicketSummary,
-    UntypedCommandInvocation, WorkItemId, WorkerSessionId, WorkerSessionStatus, WorkflowState,
+    UntypedCommandInvocation, WorkItemId, WorkerSessionId, WorkerSessionStatus,
+    WorkflowInteractionLevel, WorkflowInteractionProfile, WorkflowInteractionProfilesConfig,
+    WorkflowInteractionStateLevel, WorkflowState,
 };
 use orchestrator_runtime::{
     BackendEvent, BackendKind, BackendNeedsInputAnswer, BackendNeedsInputEvent,
@@ -86,6 +88,7 @@ struct UiRuntimeConfig {
     merge_poll_base_interval_secs: u64,
     merge_poll_max_backoff_secs: u64,
     merge_poll_backoff_multiplier: u64,
+    workflow_profiles: WorkflowInteractionProfilesConfig,
 }
 
 impl Default for UiRuntimeConfig {
@@ -103,6 +106,7 @@ impl Default for UiRuntimeConfig {
             merge_poll_base_interval_secs: DEFAULT_MERGE_POLL_BASE_INTERVAL_SECS,
             merge_poll_max_backoff_secs: DEFAULT_MERGE_POLL_MAX_BACKOFF_SECS,
             merge_poll_backoff_multiplier: DEFAULT_MERGE_POLL_BACKOFF_MULTIPLIER,
+            workflow_profiles: WorkflowInteractionProfilesConfig::default(),
         }
     }
 }
@@ -123,6 +127,7 @@ pub fn set_ui_runtime_config(
     merge_poll_base_interval_secs: u64,
     merge_poll_max_backoff_secs: u64,
     merge_poll_backoff_multiplier: u64,
+    workflow_profiles: WorkflowInteractionProfilesConfig,
 ) {
     let mut parsed_states = ticket_picker_priority_states
         .into_iter()
@@ -174,10 +179,24 @@ pub fn set_ui_runtime_config(
             MIN_MERGE_POLL_BACKOFF_MULTIPLIER,
             MAX_MERGE_POLL_BACKOFF_MULTIPLIER,
         ),
+        workflow_profiles,
     };
 
     if let Ok(mut guard) = ui_runtime_config_store().write() {
         *guard = config;
+    }
+}
+
+fn workflow_profiles_config_value() -> WorkflowInteractionProfilesConfig {
+    ui_runtime_config_store()
+        .read()
+        .map(|guard| guard.workflow_profiles.clone())
+        .unwrap_or_else(|_| WorkflowInteractionProfilesConfig::default())
+}
+
+fn set_workflow_profiles_config(config: WorkflowInteractionProfilesConfig) {
+    if let Ok(mut guard) = ui_runtime_config_store().write() {
+        guard.workflow_profiles = config;
     }
 }
 
@@ -305,6 +324,7 @@ pub trait TicketPickerProvider: Send + Sync {
         &self,
         ticket: TicketSummary,
         repository_override: Option<PathBuf>,
+        profile_override: Option<String>,
     ) -> Result<SelectedTicketFlowResult, CoreError>;
     async fn create_ticket_from_brief(
         &self,
@@ -391,6 +411,30 @@ pub trait TicketPickerProvider: Send + Sync {
         Err(CoreError::DependencyUnavailable(
             "PR merge queueing is not supported by this ticket provider".to_owned(),
         ))
+    }
+    async fn save_workflow_interaction_profiles(
+        &self,
+        _config: WorkflowInteractionProfilesConfig,
+    ) -> Result<WorkflowInteractionProfilesConfig, CoreError> {
+        Err(CoreError::DependencyUnavailable(
+            "saving workflow interaction profiles is not supported by this ticket provider"
+                .to_owned(),
+        ))
+    }
+    async fn set_ticket_profile_override(
+        &self,
+        _ticket_id: TicketId,
+        _profile_name: Option<String>,
+    ) -> Result<(), CoreError> {
+        Err(CoreError::DependencyUnavailable(
+            "setting ticket profile override is not supported by this ticket provider".to_owned(),
+        ))
+    }
+    async fn list_ticket_profile_overrides(
+        &self,
+        _ticket_ids: Vec<TicketId>,
+    ) -> Result<HashMap<TicketId, String>, CoreError> {
+        Ok(HashMap::new())
     }
 }
 
@@ -551,20 +595,27 @@ impl UiMode {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
-pub enum ApplicationMode {
-    #[default]
-    Manual,
-    Autopilot,
-}
+fn profile_level_for_state(
+    profile_name: Option<&str>,
+    state: &WorkflowState,
+) -> WorkflowInteractionLevel {
+    let config = workflow_profiles_config_value();
+    let requested = profile_name
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+        .or_else(|| {
+            let default = config.default_profile.trim();
+            (!default.is_empty()).then(|| default.to_owned())
+        });
 
-impl ApplicationMode {
-    fn label(self) -> &'static str {
-        match self {
-            Self::Manual => "Manual",
-            Self::Autopilot => "Autopilot",
-        }
-    }
+    let selected = requested
+        .as_deref()
+        .and_then(|name| config.profiles.iter().find(|profile| profile.name == name))
+        .or_else(|| config.profiles.first());
+    selected
+        .map(|profile| profile.level_for_state(state))
+        .unwrap_or(WorkflowInteractionLevel::Manual)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

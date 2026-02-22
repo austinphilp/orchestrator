@@ -642,6 +642,8 @@ fn collect_timeline(
             OrchestrationEventPayload::TicketSynced(_)
             | OrchestrationEventPayload::TicketDetailsSynced(_)
             | OrchestrationEventPayload::WorkItemCreated(_)
+            | OrchestrationEventPayload::WorkItemProfileOverrideSet(_)
+            | OrchestrationEventPayload::WorkItemProfileOverrideCleared(_)
             | OrchestrationEventPayload::WorktreeCreated(_)
             | OrchestrationEventPayload::SupervisorQueryStarted(_)
             | OrchestrationEventPayload::SupervisorQueryChunk(_)
@@ -732,6 +734,7 @@ mod tests {
                 worktree_id: None,
                 inbox_items: vec![inbox_id.clone()],
                 artifacts: vec![],
+                profile_override: None,
             },
         );
         projection.sessions.insert(
@@ -1173,6 +1176,7 @@ mod tests {
                 worktree_id: None,
                 inbox_items: vec![pinned_item.clone()],
                 artifacts: vec![],
+                profile_override: None,
             },
         );
         projection.sessions.insert(
@@ -1256,6 +1260,7 @@ mod tests {
                     worktree_id: None,
                     inbox_items: vec![inbox_item_id.clone()],
                     artifacts: vec![],
+                    profile_override: None,
                 },
             );
             projection.sessions.insert(
@@ -1343,6 +1348,7 @@ mod tests {
                     worktree_id: None,
                     inbox_items: vec![inbox_item_id.clone()],
                     artifacts: vec![],
+                    profile_override: None,
                 },
             );
             projection.sessions.insert(
