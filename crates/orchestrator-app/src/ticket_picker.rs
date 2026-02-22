@@ -3,13 +3,13 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use crate::commands::{Command, CommandRegistry};
 use crate::projection::ProjectionState;
 use orchestrator_core::{
-    ArchiveTicketRequest, CodeHostProvider, Command, CommandRegistry, CoreError,
-    CreateTicketRequest, GithubClient, LlmChatRequest, LlmMessage, LlmProvider, LlmRole,
-    SelectedTicketFlowResult, Supervisor, TicketId, TicketQuery, TicketSummary, TicketingProvider,
-    WorkerBackend, WorkerSessionId, WorkerSessionStatus, WorkflowInteractionProfilesConfig,
-    WorkflowState,
+    ArchiveTicketRequest, CodeHostProvider, CoreError, CreateTicketRequest, GithubClient,
+    LlmChatRequest, LlmMessage, LlmProvider, LlmRole, SelectedTicketFlowResult, Supervisor,
+    TicketId, TicketQuery, TicketSummary, TicketingProvider, WorkerBackend, WorkerSessionId,
+    WorkerSessionStatus, WorkflowInteractionProfilesConfig, WorkflowState,
 };
 use orchestrator_vcs::VcsProvider;
 use orchestrator_ui::{
@@ -652,7 +652,7 @@ where
 
     let (_, mut stream) = match SupervisorCommandDispatcher::dispatch_supervisor_command(
         app.as_ref(),
-        invocation,
+        invocation.into(),
         context,
     )
     .await

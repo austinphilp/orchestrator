@@ -993,7 +993,7 @@ where
     P: LlmProvider + Send + Sync + ?Sized,
 {
     let context = merge_supervisor_query_context(fallback_context, args_context(&args));
-    let scope = resolve_supervisor_query_scope(&context)?;
+    let scope = resolve_supervisor_query_scope(&SupervisorQueryContextArgs::from(context.clone()))?;
     let store = open_owned_event_store(event_store_path)?;
     let query_engine = SupervisorQueryEngine::default();
     let context_pack =
@@ -1188,13 +1188,14 @@ pub(crate) async fn dispatch_supervisor_runtime_command<P>(
     code_host: &impl CodeHostProvider,
     ticketing: &(dyn TicketingProvider + Send + Sync),
     event_store_path: &str,
-    invocation: UntypedCommandInvocation,
+    invocation: orchestrator_core::UntypedCommandInvocation,
     context: SupervisorCommandContext,
 ) -> Result<(String, LlmResponseStream), CoreError>
 where
     P: LlmProvider + Send + Sync + ?Sized,
 {
-    let command = CommandRegistry::default().parse_invocation(&invocation)?;
+    let typed_invocation = crate::commands::UntypedCommandInvocation::from(invocation);
+    let command = CommandRegistry::default().parse_invocation(&typed_invocation)?;
     match command {
         Command::SupervisorQuery(args) => {
             execute_supervisor_query(supervisor, ticketing, event_store_path, args, context).await

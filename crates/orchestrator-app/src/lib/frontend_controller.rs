@@ -331,6 +331,10 @@ struct FrontendBroadcastSubscription {
     receiver: tokio::sync::broadcast::Receiver<FrontendEvent>,
 }
 
+struct CoreFrontendSubscriptionAdapter {
+    inner: FrontendEventStream,
+}
+
 #[async_trait::async_trait]
 impl FrontendEventSubscription for FrontendBroadcastSubscription {
     async fn next_event(&mut self) -> Result<Option<FrontendEvent>, CoreError> {
@@ -341,6 +345,13 @@ impl FrontendEventSubscription for FrontendBroadcastSubscription {
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => return Ok(None),
             }
         }
+    }
+}
+
+#[async_trait::async_trait]
+impl orchestrator_core::FrontendEventSubscription for CoreFrontendSubscriptionAdapter {
+    async fn next_event(&mut self) -> Result<Option<orchestrator_core::FrontendEvent>, CoreError> {
+        Ok(self.inner.next_event().await?.map(Into::into))
     }
 }
 
@@ -386,6 +397,26 @@ where
         Ok(Box::new(FrontendBroadcastSubscription {
             receiver: self.event_tx.subscribe(),
         }))
+    }
+}
+
+#[async_trait::async_trait]
+impl<S, G> orchestrator_core::FrontendController for AppFrontendController<S, G>
+where
+    S: Supervisor + Send + Sync + 'static,
+    G: GithubClient + Send + Sync + 'static,
+{
+    async fn snapshot(&self) -> Result<orchestrator_core::FrontendSnapshot, CoreError> {
+        Ok(<Self as FrontendController>::snapshot(self).await?.into())
+    }
+
+    async fn submit_intent(&self, intent: orchestrator_core::FrontendIntent) -> Result<(), CoreError> {
+        <Self as FrontendController>::submit_intent(self, intent.into()).await
+    }
+
+    async fn subscribe(&self) -> Result<orchestrator_core::FrontendEventStream, CoreError> {
+        let stream = <Self as FrontendController>::subscribe(self).await?;
+        Ok(Box::new(CoreFrontendSubscriptionAdapter { inner: stream }))
     }
 }
 

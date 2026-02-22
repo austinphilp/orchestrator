@@ -6,14 +6,12 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use orchestrator_core::{
-    apply_workflow_transition, command_ids, resolve_supervisor_query_scope,
-    AddTicketCommentRequest, ArtifactId, ArtifactKind, ArtifactRecord, CodeHostProvider, Command,
-    CommandRegistry, CoreError, EventStore, GetTicketRequest, LlmChatRequest, LlmFinishReason,
+    apply_workflow_transition, AddTicketCommentRequest, ArtifactId, ArtifactKind, ArtifactRecord,
+    CodeHostProvider, CoreError, EventStore, GetTicketRequest, LlmChatRequest, LlmFinishReason,
     LlmMessage, LlmProvider, LlmResponseStream, LlmResponseSubscription, LlmRole, LlmStreamChunk,
     LlmTokenUsage, LlmTool, LlmToolCall, LlmToolCallOutput, LlmToolFunction, PullRequestRef,
-    RepositoryRef, RetrievalScope, RuntimeMappingRecord, SupervisorQueryArgs,
-    SupervisorQueryContextArgs, TicketAttachment, TicketId, TicketQuery, TicketingProvider,
-    UntypedCommandInvocation, UpdateTicketDescriptionRequest, UpdateTicketStateRequest, UrlOpener,
+    RepositoryRef, RetrievalScope, RuntimeMappingRecord, TicketAttachment, TicketId, TicketQuery,
+    TicketingProvider, UpdateTicketDescriptionRequest, UpdateTicketStateRequest, UrlOpener,
     WorkItemId, WorkerSessionId, WorkflowGuardContext, WorkflowState, WorkflowTransitionReason,
 };
 use orchestrator_supervisor::{
@@ -27,6 +25,10 @@ use serde_json::{json, Value};
 use tracing::warn;
 
 use crate::{
+    commands::{
+        ids as command_ids, resolve_supervisor_query_scope, Command, CommandRegistry,
+        SupervisorQueryArgs, SupervisorQueryContextArgs,
+    },
     events::{
         ArtifactCreatedPayload, NewEventEnvelope, OrchestrationEventPayload,
         SupervisorQueryCancellationSource, SupervisorQueryCancelledPayload,
