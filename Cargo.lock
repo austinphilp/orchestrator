@@ -1539,6 +1539,7 @@ name = "orchestrator-worker-eventbus"
 version = "0.1.0"
 dependencies = [
  "orchestrator-worker-protocol",
+ "tokio",
 ]
 
 [[package]]

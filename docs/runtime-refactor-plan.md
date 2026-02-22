@@ -8,6 +8,7 @@
 - Implementation update (RRP26 A02): canonical worker protocol IDs/events/errors/session+backend trait contracts are owned by `orchestrator-worker-protocol`; `orchestrator-runtime` re-exports compatibility aliases for existing consumers while protocol imports are adopted downstream where feasible.
 - Implementation update (RRP26 A03): `backend-opencode` now depends on `orchestrator-worker-protocol` for worker runtime contracts and implements `WorkerSessionControl`, `WorkerSessionStreamSource`, and `WorkerBackendInfo` directly; `orchestrator-runtime::WorkerBackend` now has a blanket impl over that trait set for transitional compatibility.
 - Implementation update (RRP26 A04): `backend-codex` now depends on `orchestrator-worker-protocol`, implements `WorkerSessionControl` + `WorkerSessionStreamSource` + `WorkerBackendInfo` directly, and codex harness contract tests target the protocol traits with a legacy-runtime bridge compile check.
+- Implementation update (RRP26 A05): `orchestrator-worker-eventbus` now provides core publish/fanout APIs with `WorkerEventEnvelope` sequencing, bounded non-blocking broadcast queues, `subscribe_session(session_id)` + `subscribe_all()` consumption paths, and explicit `remove_session(session_id)` teardown support with fanout correctness tests.
 
 ## Why This Refactor
 `orchestrator-runtime` currently combines too many concerns:
@@ -119,10 +120,11 @@ Owns:
 - envelopes:
   - `WorkerEventEnvelope { session_id, sequence, received_at_monotonic_nanos, event }`
 - publish interface:
-  - `publish(session_id, envelope)`
+  - `publish(session_id, event)`
 - consumption interfaces:
   - `subscribe_session(session_id)`
   - `subscribe_all()`
+  - `remove_session(session_id)`
 - buffer/backpressure policy:
   - bounded queues
   - lag accounting
