@@ -120,26 +120,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "backend-codex"
-version = "0.1.0"
-dependencies = [
- "orchestrator-core",
- "orchestrator-harness",
-]
-
-[[package]]
-name = "backend-opencode"
-version = "0.1.0"
-dependencies = [
- "axum",
- "orchestrator-core",
- "orchestrator-harness",
- "orchestrator-worker-protocol",
- "serde",
- "tokio",
-]
-
-[[package]]
 name = "base64"
 version = "0.22.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1075,27 +1055,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "integration-git"
-version = "0.1.0"
-dependencies = [
- "orchestrator-vcs",
-]
-
-[[package]]
-name = "integration-linear"
-version = "0.1.0"
-dependencies = [
- "orchestrator-ticketing",
-]
-
-[[package]]
-name = "integration-shortcut"
-version = "0.1.0"
-dependencies = [
- "orchestrator-ticketing",
-]
-
-[[package]]
 name = "ipnet"
 version = "2.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1457,13 +1416,6 @@ dependencies = [
  "thiserror 2.0.18",
  "time",
  "tokio",
-]
-
-[[package]]
-name = "orchestrator-github"
-version = "0.1.0"
-dependencies = [
- "orchestrator-vcs-repos",
 ]
 
 [[package]]

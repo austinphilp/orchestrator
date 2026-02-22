@@ -11,14 +11,12 @@ Rust workspace for the Orchestrator bootstrap architecture.
 - `orchestrator-worker-eventbus`: worker event fanout and backpressure semantics.
 - `orchestrator-worker-scheduler`: shared scheduling and checkpoint policy.
 - `orchestrator-worker-runtime`: runtime composition facade for app wiring.
-- `backend-opencode`: OpenCode `WorkerBackend` adapter over event-stream sessions.
-- `backend-codex`: Codex-compatible `WorkerBackend` adapter (uses `backend-opencode` transport).
+- `orchestrator-harness`: harness contracts, provider factory, and OpenCode/Codex provider implementations.
 - `orchestrator-ui`: minimal ratatui-based interface loop.
 - `orchestrator-supervisor`: OpenRouter supervisor adapter.
-- `orchestrator-github`: `gh` CLI adapter with process abstraction.
-- `integration-git`: Git CLI adapter for repository discovery and worktree lifecycle.
-- `integration-linear`: Linear GraphQL adapter with polling-backed ticket cache.
-- `integration-shortcut`: Shortcut adapter for tickets.
+- `orchestrator-ticketing`: ticketing contracts, provider factory, and Linear/Shortcut implementations.
+- `orchestrator-vcs`: local git operations contracts, provider factory, and git CLI implementation.
+- `orchestrator-vcs-repos`: repo host contracts, provider factory, and GitHub `gh` implementation.
 
 ## Quick start
 

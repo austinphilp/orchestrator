@@ -1,8 +1,0 @@
-[package]
-name = "orchestrator-github"
-version.workspace = true
-edition.workspace = true
-license.workspace = true
-
-[dependencies]
-orchestrator-vcs-repos = { path = "../orchestrator-vcs-repos" }

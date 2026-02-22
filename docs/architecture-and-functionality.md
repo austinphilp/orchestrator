@@ -18,15 +18,13 @@ The repository is a Rust workspace with a layered design:
 - `orchestrator-core`: domain model, workflow states, commands/events, normalization, attention engine, projections, event store abstractions.
 
 3. Harness/runtime layer
-- `orchestrator-runtime`: session/runtime primitives (worker/session lifecycle and stream-first event handling).
-- `backend-opencode`: harness adapter for OpenCode-style backend streams and annotations.
-- `backend-codex`: Codex backend wrapper using same backend abstraction model.
+- `orchestrator-worker-runtime`: runtime composition facade over worker lifecycle, eventbus, and scheduler crates.
+- `orchestrator-harness`: harness contracts, provider factory, and OpenCode/Codex provider implementations.
 
 4. Integration/adapters layer
-- `integration-linear`: Linear ticket provider + polling/sync behavior.
-- `integration-shortcut`: Shortcut ticket provider.
-- `integration-git`: git operations used by workflow automation and helper commands.
-- `orchestrator-github`: GitHub operations through `gh`.
+- `orchestrator-ticketing`: Linear/Shortcut ticket provider contracts + implementations.
+- `orchestrator-vcs`: local git operations contracts + git CLI implementation.
+- `orchestrator-vcs-repos`: GitHub repo-host contracts + `gh` implementation.
 - `orchestrator-supervisor`: LLM-backed supervisor query engine (OpenRouter-based).
 
 ## Fundamental architecture
@@ -105,17 +103,17 @@ The repository is a Rust workspace with a layered design:
 - Backend abstraction consumed by app/runtime.
 - OpenCode backend:
   - Streams/parses structured markers (checkpoint, input requests, etc.).
-  - Implemented in `backend-opencode/src/lib.rs`.
+  - Implemented in `orchestrator-harness/src/providers/opencode/provider_impl.rs`.
 - Codex backend:
   - Wrapper/adaptation around shared backend model.
-  - Implemented in `backend-codex/src/lib.rs`.
+  - Implemented in `orchestrator-harness/src/providers/codex/provider_impl.rs`.
 
 ## Git and GitHub automation
 
 - Local git operations abstraction:
-  - `integration-git/src/lib.rs`
+  - `orchestrator-vcs/src/providers/git_cli/provider_impl.rs`
 - GitHub operations via `gh`:
-  - `orchestrator-github/src/lib.rs`
+  - `orchestrator-vcs-repos/src/providers/github_gh_cli/provider_impl.rs`
 - App command path currently includes workflows such as PR-ready approval and opening review tabs in:
   - `orchestrator-app/src/command_dispatch.rs`
 - PR completion flow includes:
