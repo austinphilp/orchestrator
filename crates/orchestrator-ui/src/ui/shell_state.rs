@@ -1876,42 +1876,7 @@ impl UiShellState {
     }
 
     fn autopilot_reconcile_session_actions(&mut self) -> bool {
-        let mut changed = false;
-        let session_ids = self.domain.sessions.keys().cloned().collect::<Vec<_>>();
-
-        for session_id in session_ids {
-            if !is_open_session_status(
-                self.domain
-                    .sessions
-                    .get(&session_id)
-                    .and_then(|session| session.status.as_ref()),
-            ) {
-                continue;
-            }
-            if self.session_is_actively_working(&session_id) {
-                continue;
-            }
-
-            match self.workflow_state_for_session(&session_id) {
-                Some(WorkflowState::Done | WorkflowState::Abandoned) => {
-                    if self.autopilot_archiving_sessions.insert(session_id.clone()) {
-                        self.spawn_session_archive(session_id);
-                        changed = true;
-                    }
-                }
-                Some(WorkflowState::Implementing | WorkflowState::PRDrafted) => {
-                    if self.session_requires_progression_approval(&session_id)
-                        && self.autopilot_advancing_sessions.insert(session_id.clone())
-                    {
-                        self.spawn_session_workflow_advance(session_id);
-                        changed = true;
-                    }
-                }
-                _ => {}
-            }
-        }
-
-        changed
+        false
     }
 
     fn autopilot_handle_needs_input_for_session(&mut self, session_id: &WorkerSessionId) -> bool {
