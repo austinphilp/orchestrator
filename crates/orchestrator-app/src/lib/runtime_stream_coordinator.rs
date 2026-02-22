@@ -2,6 +2,9 @@ mod runtime_stream_coordinator {
     use std::sync::Arc;
 
     use async_trait::async_trait;
+    use orchestrator_harness::{
+        HarnessBackendInfo, HarnessRuntimeProvider, HarnessSessionControl, HarnessSessionStreamSource,
+    };
     use orchestrator_core::{
         BackendCapabilities, BackendEvent, BackendKind, RuntimeResult, SessionHandle,
         SessionLifecycle, SpawnSpec, WorkerBackend, WorkerEventStream, WorkerEventSubscription,
@@ -25,6 +28,14 @@ mod runtime_stream_coordinator {
     impl WorkerManagerBackend {
         pub fn new(backend: Arc<dyn WorkerBackend + Send + Sync>) -> Self {
             Self::with_config(backend, WorkerManagerConfig::default())
+        }
+
+        pub fn from_harness_provider(
+            provider: Arc<dyn HarnessRuntimeProvider + Send + Sync>,
+        ) -> Self {
+            let backend: Arc<dyn WorkerBackend + Send + Sync> =
+                Arc::new(HarnessRuntimeProviderAdapter::new(provider));
+            Self::new(backend)
         }
 
         pub fn with_config(
@@ -55,6 +66,72 @@ mod runtime_stream_coordinator {
     impl WorkerBackendProtocolAdapter {
         fn new(backend: Arc<dyn WorkerBackend + Send + Sync>) -> Self {
             Self { backend }
+        }
+    }
+
+    struct HarnessRuntimeProviderAdapter {
+        provider: Arc<dyn HarnessRuntimeProvider + Send + Sync>,
+    }
+
+    impl HarnessRuntimeProviderAdapter {
+        fn new(provider: Arc<dyn HarnessRuntimeProvider + Send + Sync>) -> Self {
+            Self { provider }
+        }
+    }
+
+    #[async_trait]
+    impl SessionLifecycle for HarnessRuntimeProviderAdapter {
+        async fn spawn(&self, spec: SpawnSpec) -> RuntimeResult<SessionHandle> {
+            self.provider.spawn(spec).await
+        }
+
+        async fn kill(&self, session: &SessionHandle) -> RuntimeResult<()> {
+            self.provider.kill(session).await
+        }
+
+        async fn send_input(&self, session: &SessionHandle, input: &[u8]) -> RuntimeResult<()> {
+            self.provider.send_input(session, input).await
+        }
+
+        async fn respond_to_needs_input(
+            &self,
+            session: &SessionHandle,
+            prompt_id: &str,
+            answers: &[BackendNeedsInputAnswer],
+        ) -> RuntimeResult<()> {
+            self.provider
+                .respond_to_needs_input(session, prompt_id, answers)
+                .await
+        }
+
+        async fn resize(&self, session: &SessionHandle, cols: u16, rows: u16) -> RuntimeResult<()> {
+            self.provider.resize(session, cols, rows).await
+        }
+    }
+
+    #[async_trait]
+    impl WorkerBackend for HarnessRuntimeProviderAdapter {
+        fn kind(&self) -> BackendKind {
+            HarnessBackendInfo::kind(self.provider.as_ref())
+        }
+
+        fn capabilities(&self) -> BackendCapabilities {
+            HarnessBackendInfo::capabilities(self.provider.as_ref())
+        }
+
+        async fn health_check(&self) -> RuntimeResult<()> {
+            HarnessBackendInfo::health_check(self.provider.as_ref()).await
+        }
+
+        async fn subscribe(&self, session: &SessionHandle) -> RuntimeResult<WorkerEventStream> {
+            HarnessSessionStreamSource::subscribe(self.provider.as_ref(), session).await
+        }
+
+        async fn harness_session_id(
+            &self,
+            session: &SessionHandle,
+        ) -> RuntimeResult<Option<String>> {
+            HarnessSessionStreamSource::harness_session_id(self.provider.as_ref(), session).await
         }
     }
 
@@ -218,6 +295,11 @@ mod runtime_stream_coordinator {
         use orchestrator_core::{
             BackendOutputEvent, BackendOutputStream, RuntimeError, RuntimeSessionId,
         };
+        use orchestrator_harness::{
+            HarnessBackendInfo, HarnessBackendKind, HarnessBackendCapabilities, HarnessProvider,
+            HarnessProviderKind, HarnessRuntimeProvider, HarnessSessionControl,
+            HarnessSessionStreamSource, HarnessSpawnRequest, HarnessSessionHandle,
+        };
         use tokio::sync::mpsc;
         use tokio::time::timeout;
 
@@ -245,6 +327,93 @@ mod runtime_stream_coordinator {
 
         struct MockEventStream {
             receiver: mpsc::UnboundedReceiver<StreamMessage>,
+        }
+
+        struct MockHarnessProvider {
+            backend: Arc<MockBackend>,
+        }
+
+        impl MockHarnessProvider {
+            fn new(backend: Arc<MockBackend>) -> Self {
+                Self { backend }
+            }
+        }
+
+        impl HarnessProvider for MockHarnessProvider {
+            fn kind(&self) -> HarnessProviderKind {
+                HarnessProviderKind::OpenCode
+            }
+        }
+
+        #[async_trait]
+        impl HarnessSessionControl for MockHarnessProvider {
+            async fn spawn(&self, spec: HarnessSpawnRequest) -> RuntimeResult<HarnessSessionHandle> {
+                self.backend.spawn(spec).await
+            }
+
+            async fn kill(&self, session: &HarnessSessionHandle) -> RuntimeResult<()> {
+                self.backend.kill(session).await
+            }
+
+            async fn send_input(
+                &self,
+                session: &HarnessSessionHandle,
+                input: &[u8],
+            ) -> RuntimeResult<()> {
+                self.backend.send_input(session, input).await
+            }
+
+            async fn respond_to_needs_input(
+                &self,
+                session: &HarnessSessionHandle,
+                prompt_id: &str,
+                answers: &[BackendNeedsInputAnswer],
+            ) -> RuntimeResult<()> {
+                self.backend
+                    .respond_to_needs_input(session, prompt_id, answers)
+                    .await
+            }
+
+            async fn resize(
+                &self,
+                session: &HarnessSessionHandle,
+                cols: u16,
+                rows: u16,
+            ) -> RuntimeResult<()> {
+                self.backend.resize(session, cols, rows).await
+            }
+        }
+
+        #[async_trait]
+        impl HarnessSessionStreamSource for MockHarnessProvider {
+            async fn subscribe(
+                &self,
+                session: &HarnessSessionHandle,
+            ) -> RuntimeResult<WorkerEventStream> {
+                self.backend.subscribe(session).await
+            }
+
+            async fn harness_session_id(
+                &self,
+                session: &HarnessSessionHandle,
+            ) -> RuntimeResult<Option<String>> {
+                Ok(Some(format!("mock-harness-{}", session.session_id.as_str())))
+            }
+        }
+
+        #[async_trait]
+        impl HarnessBackendInfo for MockHarnessProvider {
+            fn kind(&self) -> HarnessBackendKind {
+                BackendKind::OpenCode
+            }
+
+            fn capabilities(&self) -> HarnessBackendCapabilities {
+                self.backend.capabilities()
+            }
+
+            async fn health_check(&self) -> RuntimeResult<()> {
+                Ok(())
+            }
         }
 
         impl MockBackend {
@@ -584,6 +753,48 @@ mod runtime_stream_coordinator {
                 }
                 other => panic!("expected crashed event, got {other:?}"),
             }
+        }
+
+        #[tokio::test]
+        async fn coordinator_from_harness_provider_streams_and_delegates_session_metadata() {
+            let backend = Arc::new(MockBackend::default());
+            let harness_provider: Arc<dyn HarnessRuntimeProvider + Send + Sync> =
+                Arc::new(MockHarnessProvider::new(backend.clone()));
+            let coordinator = WorkerManagerBackend::from_harness_provider(harness_provider);
+            let handle = coordinator
+                .spawn(spawn_spec("wm-coordinator-harness"))
+                .await
+                .expect("spawn session");
+            let mut subscriber = coordinator.subscribe(&handle).await.expect("subscribe");
+
+            backend.emit_event(
+                &handle.session_id,
+                BackendEvent::Output(BackendOutputEvent {
+                    stream: BackendOutputStream::Stdout,
+                    bytes: b"harness-adapter".to_vec(),
+                }),
+            );
+
+            let received = subscriber
+                .next_event()
+                .await
+                .expect("event result")
+                .expect("event");
+            match received {
+                BackendEvent::Output(output) => {
+                    assert_eq!(output.stream, BackendOutputStream::Stdout);
+                    assert_eq!(output.bytes, b"harness-adapter".to_vec());
+                }
+                other => panic!("expected output event, got {other:?}"),
+            }
+
+            assert_eq!(
+                coordinator
+                    .harness_session_id(&handle)
+                    .await
+                    .expect("harness session id"),
+                Some(format!("mock-harness-{}", handle.session_id.as_str()))
+            );
         }
     }
 }

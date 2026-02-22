@@ -39,6 +39,10 @@ pub struct AppConfig {
     pub ticketing_provider: String,
     #[serde(default = "default_harness_provider")]
     pub harness_provider: String,
+    #[serde(default = "default_vcs_provider")]
+    pub vcs_provider: String,
+    #[serde(default = "default_vcs_repo_provider")]
+    pub vcs_repo_provider: String,
     #[serde(default)]
     pub supervisor: SupervisorConfig,
     #[serde(default)]
@@ -61,6 +65,8 @@ const LEGACY_DEFAULT_WORKSPACE_PATH: &str = "./";
 const LEGACY_DEFAULT_EVENT_STORE_PATH: &str = "./orchestrator-events.db";
 const DEFAULT_TICKETING_PROVIDER: &str = "linear";
 const DEFAULT_HARNESS_PROVIDER: &str = "codex";
+const DEFAULT_VCS_PROVIDER: &str = "vcs.git_cli";
+const DEFAULT_VCS_REPO_PROVIDER: &str = "vcs_repos.github_gh_cli";
 const DEFAULT_SUPERVISOR_MODEL: &str = "c/claude-haiku-4.5";
 const DEFAULT_OPENROUTER_BASE_URL: &str = "https://openrouter.ai/api/v1";
 const DEFAULT_LINEAR_API_URL: &str = "https://api.linear.app/graphql";
@@ -111,6 +117,13 @@ fn default_ticketing_provider() -> String {
 }
 fn default_harness_provider() -> String {
     DEFAULT_HARNESS_PROVIDER.to_owned()
+}
+fn default_vcs_provider() -> String {
+    DEFAULT_VCS_PROVIDER.to_owned()
+}
+
+fn default_vcs_repo_provider() -> String {
+    DEFAULT_VCS_REPO_PROVIDER.to_owned()
 }
 
 fn default_linear_sync_states() -> Vec<String> {
@@ -509,6 +522,8 @@ impl Default for AppConfig {
             event_store_path: default_event_store_path(),
             ticketing_provider: default_ticketing_provider(),
             harness_provider: default_harness_provider(),
+            vcs_provider: default_vcs_provider(),
+            vcs_repo_provider: default_vcs_repo_provider(),
             supervisor: SupervisorConfig::default(),
             linear: LinearConfigToml::default(),
             shortcut: ShortcutConfigToml::default(),
@@ -729,6 +744,26 @@ fn normalize_config(config: &mut AppConfig) -> bool {
         let normalized = config.harness_provider.trim().to_ascii_lowercase();
         if normalized != config.harness_provider {
             config.harness_provider = normalized;
+            changed = true;
+        }
+    }
+    if config.vcs_provider.trim().is_empty() {
+        config.vcs_provider = default_vcs_provider();
+        changed = true;
+    } else {
+        let normalized = config.vcs_provider.trim().to_ascii_lowercase();
+        if normalized != config.vcs_provider {
+            config.vcs_provider = normalized;
+            changed = true;
+        }
+    }
+    if config.vcs_repo_provider.trim().is_empty() {
+        config.vcs_repo_provider = default_vcs_repo_provider();
+        changed = true;
+    } else {
+        let normalized = config.vcs_repo_provider.trim().to_ascii_lowercase();
+        if normalized != config.vcs_repo_provider {
+            config.vcs_repo_provider = normalized;
             changed = true;
         }
     }
@@ -1057,4 +1092,39 @@ fn open_event_store(path: &str) -> Result<AppEventStore, CoreError> {
 fn open_owned_event_store(path: &str) -> Result<SqliteEventStore, CoreError> {
     ensure_event_store_parent_dir(path)?;
     SqliteEventStore::open(path)
+}
+
+#[cfg(test)]
+mod config_normalization_tests {
+    use super::*;
+
+    #[test]
+    fn normalize_config_defaults_missing_vcs_provider_keys() {
+        let mut config = AppConfig {
+            vcs_provider: String::new(),
+            vcs_repo_provider: String::new(),
+            ..AppConfig::default()
+        };
+
+        let changed = normalize_config(&mut config);
+
+        assert!(changed);
+        assert_eq!(config.vcs_provider, "vcs.git_cli");
+        assert_eq!(config.vcs_repo_provider, "vcs_repos.github_gh_cli");
+    }
+
+    #[test]
+    fn normalize_config_trims_and_lowercases_vcs_provider_keys() {
+        let mut config = AppConfig {
+            vcs_provider: "  VCS.GIT_CLI  ".to_owned(),
+            vcs_repo_provider: "  VCS_REPOS.GITHUB_GH_CLI ".to_owned(),
+            ..AppConfig::default()
+        };
+
+        let changed = normalize_config(&mut config);
+
+        assert!(changed);
+        assert_eq!(config.vcs_provider, "vcs.git_cli");
+        assert_eq!(config.vcs_repo_provider, "vcs_repos.github_gh_cli");
+    }
 }

@@ -10,15 +10,20 @@ use orchestrator_core::{
 };
 use orchestrator_harness::{
     build_provider_with_config, CodexHarnessProviderConfig, HarnessProviderFactoryConfig,
-    HarnessProviderFactoryOutput, OpenCodeHarnessProviderConfig,
+    HarnessProviderFactoryOutput, HarnessProviderKind, HarnessRuntimeProvider,
+    OpenCodeHarnessProviderConfig,
 };
 use orchestrator_supervisor::OpenRouterSupervisor;
 use orchestrator_ticketing::{
     build_provider_with_config as build_ticketing_provider_with_config, LinearConfig,
     LinearRuntimeSettings, LinearTicketingProvider, ShortcutConfig, TicketingProviderFactoryConfig,
-    TicketingProviderFactoryOutput, WorkflowStateMapSetting,
+    TicketingProviderFactoryOutput, TicketingProviderKind, WorkflowStateMapSetting,
 };
 use orchestrator_ui::Ui;
+use orchestrator_vcs::{
+    build_provider_with_config as build_vcs_provider_with_config, GitCliVcsProviderConfig,
+    VcsProvider, VcsProviderFactoryConfig, VcsProviderFactoryOutput, VcsProviderKind,
+};
 use orchestrator_vcs_repos::{
     build_provider_with_config as build_vcs_repo_provider_with_config, GitHubGhCliRepoProvider,
     GitHubGhCliRepoProviderConfig, VcsRepoProviderFactoryConfig, VcsRepoProviderFactoryOutput,
@@ -50,6 +55,10 @@ async fn main() -> Result<()> {
     )?;
     config.harness_provider =
         resolve_provider_name(cli.harness_provider.as_deref(), &config.harness_provider)?;
+    config.vcs_provider = resolve_provider_name(cli.vcs_provider.as_deref(), &config.vcs_provider)?;
+    config.vcs_repo_provider =
+        resolve_provider_name(cli.vcs_repo_provider.as_deref(), &config.vcs_repo_provider)?;
+    canonicalize_provider_selections(&mut config)?;
 
     orchestrator_app::set_supervisor_model_config(config.supervisor.model.clone());
     orchestrator_app::set_git_binary_config(config.git.binary.clone());
@@ -75,14 +84,17 @@ async fn main() -> Result<()> {
         openrouter_api_key,
         config.supervisor.openrouter_base_url.clone(),
     )?;
-    let github = build_vcs_repo_provider(&config)?;
+    // Build once at startup so invalid provider keys/binary settings fail fast.
+    let _vcs = build_vcs_provider(&config, &config.vcs_provider)?;
+    let github = build_vcs_repo_provider(&config, &config.vcs_repo_provider)?;
     let (ticketing, linear_ticketing) =
         build_ticketing_provider(&config, &config.ticketing_provider)?;
     let raw_worker_backend = build_harness_provider(&config, &config.harness_provider)?;
     ticketing.health_check().await?;
     raw_worker_backend.health_check().await?;
-    let worker_backend: Arc<dyn WorkerBackend + Send + Sync> =
-        Arc::new(WorkerManagerBackend::new(raw_worker_backend));
+    let worker_backend: Arc<dyn WorkerBackend + Send + Sync> = Arc::new(
+        WorkerManagerBackend::from_harness_provider(raw_worker_backend),
+    );
 
     let app = Arc::new(App {
         config,
@@ -214,6 +226,8 @@ fn log_file_path(event_store_path: &str) -> PathBuf {
 struct CliFlags {
     ticketing_provider: Option<String>,
     harness_provider: Option<String>,
+    vcs_provider: Option<String>,
+    vcs_repo_provider: Option<String>,
 }
 
 fn parse_cli_flags() -> Result<CliFlags, CoreError> {
@@ -238,7 +252,29 @@ fn parse_cli_flags() -> Result<CliFlags, CoreError> {
                     &arg,
                     args.next().ok_or_else(|| {
                         CoreError::Configuration(
-                            "Missing value after --harness-provider. Use --harness-provider <opencode|codex>."
+                            "Missing value after --harness-provider. Use --harness-provider <opencode|codex|harness.opencode|harness.codex>."
+                                .to_owned(),
+                        )
+                    })?,
+                )?);
+            }
+            "--vcs-provider" => {
+                flags.vcs_provider = Some(read_cli_value(
+                    &arg,
+                    args.next().ok_or_else(|| {
+                        CoreError::Configuration(
+                            "Missing value after --vcs-provider. Use --vcs-provider <git|git_cli|vcs.git_cli>."
+                                .to_owned(),
+                        )
+                    })?,
+                )?);
+            }
+            "--vcs-repo-provider" => {
+                flags.vcs_repo_provider = Some(read_cli_value(
+                    &arg,
+                    args.next().ok_or_else(|| {
+                        CoreError::Configuration(
+                            "Missing value after --vcs-repo-provider. Use --vcs-repo-provider <github|github_gh_cli|vcs_repos.github_gh_cli>."
                                 .to_owned(),
                         )
                     })?,
@@ -265,12 +301,20 @@ fn parse_cli_flags() -> Result<CliFlags, CoreError> {
 }
 
 fn print_cli_help() {
-    println!("Usage: orchestrator-app [--ticketing-provider <linear|shortcut|ticketing.linear|ticketing.shortcut>] [--harness-provider <opencode|codex>]");
+    println!("Usage: orchestrator-app [--ticketing-provider <linear|shortcut|ticketing.linear|ticketing.shortcut>] [--harness-provider <opencode|codex|harness.opencode|harness.codex>] [--vcs-provider <git|git_cli|vcs.git_cli>] [--vcs-repo-provider <github|github_gh_cli|vcs_repos.github_gh_cli>]");
     println!();
     println!(
         "  --ticketing-provider <provider>   Configure ticketing provider (linear/shortcut or namespaced key)"
     );
-    println!("  --harness-provider <provider>     Configure harness/backend provider (opencode or codex)");
+    println!(
+        "  --harness-provider <provider>     Configure harness/backend provider (opencode/codex or namespaced key)"
+    );
+    println!(
+        "  --vcs-provider <provider>         Configure local VCS provider (git/git_cli or namespaced key)"
+    );
+    println!(
+        "  --vcs-repo-provider <provider>    Configure repo/code-host provider (github/github_gh_cli or namespaced key)"
+    );
     println!("  --help                            Show this help message");
 }
 
@@ -297,6 +341,55 @@ fn resolve_provider_name(cli: Option<&str>, config_value: &str) -> Result<String
     }
 }
 
+fn resolve_ticketing_provider_key(provider: &str) -> Result<&'static str, CoreError> {
+    match provider {
+        "linear" | "ticketing.linear" => Ok(TicketingProviderKind::Linear.as_key()),
+        "shortcut" | "ticketing.shortcut" => Ok(TicketingProviderKind::Shortcut.as_key()),
+        other => Err(CoreError::Configuration(format!(
+            "Unknown ticketing provider '{other}'. Expected 'linear', 'shortcut', 'ticketing.linear', or 'ticketing.shortcut'."
+        ))),
+    }
+}
+
+fn resolve_harness_provider_key(provider: &str) -> Result<&'static str, CoreError> {
+    match provider {
+        "opencode" | "harness.opencode" => Ok(HarnessProviderKind::OpenCode.as_key()),
+        "codex" | "harness.codex" => Ok(HarnessProviderKind::Codex.as_key()),
+        other => Err(CoreError::Configuration(format!(
+            "Unknown harness provider '{other}'. Expected 'opencode', 'codex', 'harness.opencode', or 'harness.codex'."
+        ))),
+    }
+}
+
+fn resolve_vcs_provider_key(provider: &str) -> Result<&'static str, CoreError> {
+    match provider {
+        "git" | "git_cli" | "vcs.git_cli" => Ok(VcsProviderKind::GitCli.as_key()),
+        other => Err(CoreError::Configuration(format!(
+            "Unknown VCS provider '{other}'. Expected 'git', 'git_cli', or 'vcs.git_cli'."
+        ))),
+    }
+}
+
+fn resolve_vcs_repo_provider_key(provider: &str) -> Result<&'static str, CoreError> {
+    match provider {
+        "github" | "github_gh_cli" | "vcs_repos.github_gh_cli" => {
+            Ok(VcsRepoProviderKind::GitHubGhCli.as_key())
+        }
+        other => Err(CoreError::Configuration(format!(
+            "Unknown VCS repo provider '{other}'. Expected 'github', 'github_gh_cli', or 'vcs_repos.github_gh_cli'."
+        ))),
+    }
+}
+
+fn canonicalize_provider_selections(config: &mut AppConfig) -> Result<(), CoreError> {
+    config.ticketing_provider =
+        resolve_ticketing_provider_key(&config.ticketing_provider)?.to_owned();
+    config.harness_provider = resolve_harness_provider_key(&config.harness_provider)?.to_owned();
+    config.vcs_provider = resolve_vcs_provider_key(&config.vcs_provider)?.to_owned();
+    config.vcs_repo_provider = resolve_vcs_repo_provider_key(&config.vcs_repo_provider)?.to_owned();
+    Ok(())
+}
+
 fn build_ticketing_provider(
     config: &AppConfig,
     provider: &str,
@@ -307,8 +400,8 @@ fn build_ticketing_provider(
     ),
     CoreError,
 > {
-    match provider {
-        "linear" | "ticketing.linear" => {
+    match resolve_ticketing_provider_key(provider)? {
+        "ticketing.linear" => {
             let api_key = required_env(ENV_LINEAR_API_KEY)?;
             let settings = LinearRuntimeSettings {
                 api_url: config.linear.api_url.clone(),
@@ -348,7 +441,7 @@ fn build_ticketing_provider(
             let ticketing: Arc<dyn TicketingProvider + Send + Sync> = provider;
             Ok((ticketing, Some(linear_ticketing)))
         }
-        "shortcut" | "ticketing.shortcut" => {
+        "ticketing.shortcut" => {
             let api_key = required_env(ENV_SHORTCUT_API_KEY)?;
             let shortcut_config = ShortcutConfig::from_settings(
                 api_key,
@@ -373,23 +466,15 @@ fn build_ticketing_provider(
             let ticketing: Arc<dyn TicketingProvider + Send + Sync> = provider;
             Ok((ticketing, None))
         }
-        other => Err(CoreError::Configuration(format!(
-            "Unknown ticketing provider '{other}'. Expected 'linear', 'shortcut', 'ticketing.linear', or 'ticketing.shortcut'."
-        ))),
+        _ => unreachable!("ticketing provider key resolver returned unsupported key"),
     }
 }
 
 fn build_harness_provider(
     config: &AppConfig,
     provider: &str,
-) -> Result<Arc<dyn WorkerBackend + Send + Sync>, CoreError> {
-    let provider_key = match provider {
-        "opencode" | "harness.opencode" => "harness.opencode",
-        "codex" | "harness.codex" => "harness.codex",
-        other => Err(CoreError::Configuration(format!(
-            "Unknown harness provider '{other}'. Expected 'opencode', 'codex', 'harness.opencode', or 'harness.codex'."
-        ))),
-    }?;
+) -> Result<Arc<dyn HarnessRuntimeProvider + Send + Sync>, CoreError> {
+    let provider_key = resolve_harness_provider_key(provider)?;
 
     let provider = build_provider_with_config(
         provider_key,
@@ -421,14 +506,49 @@ fn build_harness_provider(
     .map_err(|error| CoreError::Configuration(error.to_string()))?;
 
     match provider {
-        HarnessProviderFactoryOutput::OpenCode(provider) => Ok(Arc::new(provider)),
-        HarnessProviderFactoryOutput::Codex(provider) => Ok(Arc::new(provider)),
+        HarnessProviderFactoryOutput::OpenCode(provider) => {
+            let provider: Arc<dyn HarnessRuntimeProvider + Send + Sync> = Arc::new(provider);
+            Ok(provider)
+        }
+        HarnessProviderFactoryOutput::Codex(provider) => {
+            let provider: Arc<dyn HarnessRuntimeProvider + Send + Sync> = Arc::new(provider);
+            Ok(provider)
+        }
     }
 }
 
-fn build_vcs_repo_provider(config: &AppConfig) -> Result<GitHubGhCliRepoProvider, CoreError> {
+fn build_vcs_provider(
+    config: &AppConfig,
+    provider: &str,
+) -> Result<Arc<dyn VcsProvider + Send + Sync>, CoreError> {
+    let provider_key = resolve_vcs_provider_key(provider)?;
+
+    let provider = build_vcs_provider_with_config(
+        provider_key,
+        VcsProviderFactoryConfig {
+            git_cli: GitCliVcsProviderConfig {
+                binary: PathBuf::from(config.git.binary.as_str()),
+                allow_destructive_automation: config.git.allow_destructive_automation,
+                allow_force_push: config.git.allow_force_push,
+                allow_delete_unmerged_branches: config.git.allow_delete_unmerged_branches,
+                allow_unsafe_command_paths: config.runtime.allow_unsafe_command_paths,
+            },
+        },
+    )
+    .map_err(|error| CoreError::Configuration(error.to_string()))?;
+
+    let VcsProviderFactoryOutput::GitCli(provider) = provider;
+    let provider: Arc<dyn VcsProvider + Send + Sync> = Arc::new(provider);
+    Ok(provider)
+}
+
+fn build_vcs_repo_provider(
+    config: &AppConfig,
+    provider: &str,
+) -> Result<GitHubGhCliRepoProvider, CoreError> {
+    let provider_key = resolve_vcs_repo_provider_key(provider)?;
     let provider = build_vcs_repo_provider_with_config(
-        VcsRepoProviderKind::GitHubGhCli.as_key(),
+        provider_key,
         VcsRepoProviderFactoryConfig {
             github_gh_cli: GitHubGhCliRepoProviderConfig {
                 binary: PathBuf::from(config.github.binary.as_str()),
@@ -691,5 +811,64 @@ mod tests {
         let planning = startup_rehydrate_nudge(&WorkflowState::Planning, false);
         assert!(!planning.contains("End planning mode now."));
         assert!(!planning.contains(STARTUP_RESUME_NUDGE));
+    }
+
+    #[test]
+    fn provider_key_resolution_accepts_legacy_and_namespaced_values() {
+        assert_eq!(
+            resolve_ticketing_provider_key("linear").expect("resolve linear"),
+            "ticketing.linear"
+        );
+        assert_eq!(
+            resolve_ticketing_provider_key("ticketing.shortcut").expect("resolve shortcut"),
+            "ticketing.shortcut"
+        );
+        assert_eq!(
+            resolve_harness_provider_key("codex").expect("resolve codex"),
+            "harness.codex"
+        );
+        assert_eq!(
+            resolve_vcs_provider_key("git_cli").expect("resolve git cli"),
+            "vcs.git_cli"
+        );
+        assert_eq!(
+            resolve_vcs_repo_provider_key("github_gh_cli").expect("resolve github gh"),
+            "vcs_repos.github_gh_cli"
+        );
+    }
+
+    #[test]
+    fn provider_key_resolution_rejects_unknown_values() {
+        assert!(resolve_ticketing_provider_key("jira").is_err());
+        assert!(resolve_harness_provider_key("other").is_err());
+        assert!(resolve_vcs_provider_key("svn").is_err());
+        assert!(resolve_vcs_repo_provider_key("gitlab").is_err());
+    }
+
+    #[test]
+    fn canonicalize_provider_selections_maps_legacy_aliases_to_namespaced_keys() {
+        let mut config = AppConfig {
+            ticketing_provider: "linear".to_owned(),
+            harness_provider: "codex".to_owned(),
+            vcs_provider: "git_cli".to_owned(),
+            vcs_repo_provider: "github_gh_cli".to_owned(),
+            ..AppConfig::default()
+        };
+
+        canonicalize_provider_selections(&mut config).expect("canonicalize providers");
+
+        assert_eq!(config.ticketing_provider, "ticketing.linear");
+        assert_eq!(config.harness_provider, "harness.codex");
+        assert_eq!(config.vcs_provider, "vcs.git_cli");
+        assert_eq!(config.vcs_repo_provider, "vcs_repos.github_gh_cli");
+    }
+
+    #[test]
+    fn canonicalize_provider_selections_rejects_unknown_values() {
+        let mut config = AppConfig {
+            ticketing_provider: "jira".to_owned(),
+            ..AppConfig::default()
+        };
+        assert!(canonicalize_provider_selections(&mut config).is_err());
     }
 }
