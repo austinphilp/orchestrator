@@ -1,9 +1,3 @@
-include!("ui/types_and_projection.rs");
-include!("ui/inspector_and_supervisor.rs");
-include!("ui/focus_card_and_ticket_picker.rs");
-include!("ui/shell_state.rs");
-include!("ui/async_tasks_and_overlay_routing.rs");
-include!("ui/runtime.rs");
-include!("ui/rendering.rs");
-include!("ui/input_and_terminal.rs");
-include!("ui/tests_and_goldens.rs");
+mod ui;
+
+pub use ui::*;

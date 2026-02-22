@@ -1,3 +1,5 @@
+use crate::ui::*;
+
 #[cfg(test)]
 #[path = "../golden_tests.rs"]
 mod golden_tests;
