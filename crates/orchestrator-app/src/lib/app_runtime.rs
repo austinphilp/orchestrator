@@ -1,3 +1,5 @@
+const NEW_TO_PLANNING_TRANSITION_INSTRUCTION: &str = "Workflow transition approved: New -> Planning. Begin planning mode for this ticket. Write the full detailed implementation plan to IMPLEMENTATION_PLAN.md in the worktree root, and in chat provide only a concise 2-4 paragraph summary with no code fences or excessive formatting.";
+
 pub struct App<S: Supervisor, G: GithubClient> {
     pub config: AppConfig,
     pub ticketing: Arc<dyn TicketingProvider + Send + Sync>,
@@ -39,7 +41,7 @@ impl<S: Supervisor, G: GithubClient> App<S, G> {
                 WorkflowState::Planning,
                 WorkflowTransitionReason::TicketAccepted,
                 WorkflowGuardContext::default(),
-                Some("Workflow transition approved: New -> Planning. Begin planning mode for this ticket and produce a concrete implementation plan before coding."),
+                Some(NEW_TO_PLANNING_TRANSITION_INSTRUCTION),
             )),
             WorkflowState::Planning => Ok((
                 WorkflowState::Implementing,

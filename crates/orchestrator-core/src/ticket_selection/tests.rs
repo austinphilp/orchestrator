@@ -267,6 +267,14 @@ mod tests {
             String::from_utf8_lossy(&backend.send_inputs.lock().expect("lock")[0].1)
                 .contains("Begin work on AP-126")
         );
+        assert!(
+            String::from_utf8_lossy(&backend.send_inputs.lock().expect("lock")[0].1)
+                .contains("IMPLEMENTATION_PLAN.md")
+        );
+        assert!(
+            String::from_utf8_lossy(&backend.send_inputs.lock().expect("lock")[0].1)
+                .contains("concise summary of the strategy and major phases in 2-4 paragraphs")
+        );
         assert!(backend
             .spawn_specs
             .lock()
@@ -276,6 +284,15 @@ mod tests {
             .instruction_prelude
             .as_deref()
             .is_some_and(|prelude| prelude.contains("Begin planning for AP-126")));
+        assert!(backend
+            .spawn_specs
+            .lock()
+            .expect("lock")
+            .first()
+            .expect("spawn spec")
+            .instruction_prelude
+            .as_deref()
+            .is_some_and(|prelude| prelude.contains("IMPLEMENTATION_PLAN.md")));
 
         let mapping = store
             .find_runtime_mapping_by_ticket(&TicketProvider::Linear, "issue-126")
@@ -580,6 +597,14 @@ mod tests {
         assert!(
             String::from_utf8_lossy(&backend.send_inputs.lock().expect("lock")[0].1)
                 .contains("Resume work on AP-126")
+        );
+        assert!(
+            String::from_utf8_lossy(&backend.send_inputs.lock().expect("lock")[0].1)
+                .contains("IMPLEMENTATION_PLAN.md")
+        );
+        assert!(
+            String::from_utf8_lossy(&backend.send_inputs.lock().expect("lock")[0].1)
+                .contains("concise 2-4 paragraph summary")
         );
 
         let updated = store

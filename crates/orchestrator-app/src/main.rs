@@ -504,7 +504,7 @@ fn resume_instruction_from_ticket(ticket: &TicketRecord, workflow_state: &Workfl
         );
     }
     format!(
-        "Ticket provider: {provider_name}. Resume work on {}: {} in Planning mode. Reconcile the current state, refresh the plan, and wait for an explicit workflow transition command before implementation. For ticket operations, use the {provider_name} ticketing integration/skill.",
+        "Ticket provider: {provider_name}. Resume work on {}: {} in Planning mode. Reconcile the current state, refresh the plan, and write the full detailed plan to IMPLEMENTATION_PLAN.md in the worktree root. In chat, provide only a concise 2-4 paragraph summary with no code fences or excessive formatting. Wait for an explicit workflow transition command before implementation. For ticket operations, use the {provider_name} ticketing integration/skill.",
         ticket.identifier, ticket.title
     )
 }
@@ -559,6 +559,14 @@ mod tests {
             resume_instruction_from_ticket(&sample_ticket(), &WorkflowState::Implementing);
         assert!(instruction.contains("Planning is already complete"));
         assert!(!instruction.contains("in Planning mode"));
+    }
+
+    #[test]
+    fn planning_resume_instruction_requires_plan_file_and_summary_only_output() {
+        let instruction = resume_instruction_from_ticket(&sample_ticket(), &WorkflowState::Planning);
+        assert!(instruction.contains("IMPLEMENTATION_PLAN.md"));
+        assert!(instruction.contains("concise 2-4 paragraph summary"));
+        assert!(instruction.contains("no code fences or excessive formatting"));
     }
 
     #[test]
