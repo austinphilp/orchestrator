@@ -1911,6 +1911,9 @@ impl UiShellState {
             }
         }
 
+        changed
+    }
+
     fn autopilot_handle_needs_input_for_session(&mut self, session_id: &WorkerSessionId) -> bool {
         let should_submit = {
             let Some(prompt) = self
