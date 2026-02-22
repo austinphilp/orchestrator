@@ -92,7 +92,7 @@ where
     }
 
     async fn list_projects(&self) -> Result<Vec<String>, CoreError> {
-        self.ticketing.list_projects().await
+        self.ticketing.list_projects().await.map_err(Into::into)
     }
 
     async fn start_or_resume_ticket(
@@ -185,6 +185,7 @@ where
                 ticket_id: ticket.ticket_id,
             })
             .await
+            .map_err(Into::into)
     }
 
     async fn archive_session(

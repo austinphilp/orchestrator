@@ -11,16 +11,24 @@ mod tests {
     use crate::normalization::DOMAIN_EVENT_SCHEMA_VERSION;
     use orchestrator_domain::test_support::{with_env_var, with_env_vars, TestDbPath};
     use orchestrator_domain::{
-        AddTicketCommentRequest, ArtifactId, ArtifactKind, ArtifactRecord, BackendCapabilities,
-        BackendKind, CodeHostKind,
-        CreateTicketRequest, GetTicketRequest, LlmChatRequest, LlmFinishReason, LlmProviderKind,
-        LlmResponseStream, LlmResponseSubscription, LlmRole, LlmStreamChunk, LlmToolCall,
-        RuntimeMappingRecord, RuntimeResult, SessionHandle, SessionRecord, SpawnSpec,
-        SupervisorQueryCancellationSource, TicketDetails, TicketId, TicketProvider, TicketQuery,
-        TicketRecord, TicketSummary, UpdateTicketDescriptionRequest, UpdateTicketStateRequest,
-        WorkItemId, WorkerSessionId, WorkerSessionStatus, WorktreeId, WorktreeRecord, WorktreeStatus,
+        ArtifactId, ArtifactKind, ArtifactRecord, BackendCapabilities, BackendKind, LlmChatRequest,
+        LlmFinishReason, LlmProviderKind, LlmResponseStream, LlmResponseSubscription, LlmRole,
+        LlmStreamChunk, LlmToolCall, RuntimeMappingRecord, RuntimeResult, SessionHandle,
+        SessionRecord, SpawnSpec, SupervisorQueryCancellationSource, TicketId, TicketProvider,
+        TicketRecord, WorkItemId, WorkerSessionId, WorkerSessionStatus, WorktreeId,
+        WorktreeRecord, WorktreeStatus,
     };
-    use orchestrator_ticketing::{self as integration_linear, TicketingProvider};
+    use orchestrator_ticketing::{
+        self as integration_linear, AddTicketCommentRequest, CoreError as TicketingCoreError,
+        CreateTicketRequest, GetTicketRequest, TicketDetails, TicketId as TicketingTicketId,
+        TicketProvider as TicketingTicketProvider, TicketQuery, TicketSummary, TicketingProvider,
+        UpdateTicketDescriptionRequest, UpdateTicketStateRequest,
+    };
+    use orchestrator_vcs::CoreError as VcsCoreError;
+    use orchestrator_vcs_repos::{
+        CodeHostKind, CoreError as VcsRepoCoreError, CreatePullRequestRequest,
+        PullRequestMergeState, PullRequestRef, PullRequestSummary, ReviewerRequest,
+    };
     use serde_json::json;
     use std::collections::{BTreeMap, VecDeque};
     use std::path::{Path, PathBuf};
@@ -63,14 +71,16 @@ mod tests {
         async fn execute(
             &self,
             _request: integration_linear::GraphqlRequest,
-        ) -> Result<serde_json::Value, CoreError> {
+        ) -> Result<serde_json::Value, TicketingCoreError> {
             self.call_count.fetch_add(1, Ordering::SeqCst);
             let mut responses = self
                 .responses
                 .lock()
                 .expect("linear polling transport response lock");
             responses.pop_front().ok_or_else(|| {
-                CoreError::DependencyUnavailable("No stub Linear response available".to_owned())
+                TicketingCoreError::DependencyUnavailable(
+                    "No stub Linear response available".to_owned(),
+                )
             })
         }
     }
@@ -142,7 +152,7 @@ mod tests {
 
     #[async_trait::async_trait]
     impl GithubClient for Healthy {
-        async fn health_check(&self) -> Result<(), CoreError> {
+        async fn health_check(&self) -> Result<(), VcsRepoCoreError> {
             Ok(())
         }
     }
@@ -153,45 +163,45 @@ mod tests {
             CodeHostKind::Github
         }
 
-        async fn health_check(&self) -> Result<(), CoreError> {
+        async fn health_check(&self) -> Result<(), VcsRepoCoreError> {
             Ok(())
         }
 
         async fn create_draft_pull_request(
             &self,
-            _request: orchestrator_domain::CreatePullRequestRequest,
-        ) -> Result<orchestrator_domain::PullRequestSummary, CoreError> {
-            Err(CoreError::DependencyUnavailable(
+            _request: CreatePullRequestRequest,
+        ) -> Result<PullRequestSummary, VcsRepoCoreError> {
+            Err(VcsRepoCoreError::DependencyUnavailable(
                 "healthy mock does not create pull requests in unit tests".to_owned(),
             ))
         }
 
         async fn mark_ready_for_review(
             &self,
-            _pr: &orchestrator_domain::PullRequestRef,
-        ) -> Result<(), CoreError> {
+            _pr: &PullRequestRef,
+        ) -> Result<(), VcsRepoCoreError> {
             Ok(())
         }
 
         async fn request_reviewers(
             &self,
-            _pr: &orchestrator_domain::PullRequestRef,
-            _reviewers: orchestrator_domain::ReviewerRequest,
-        ) -> Result<(), CoreError> {
+            _pr: &PullRequestRef,
+            _reviewers: ReviewerRequest,
+        ) -> Result<(), VcsRepoCoreError> {
             Ok(())
         }
 
         async fn list_waiting_for_my_review(
             &self,
-        ) -> Result<Vec<orchestrator_domain::PullRequestSummary>, CoreError> {
+        ) -> Result<Vec<PullRequestSummary>, VcsRepoCoreError> {
             Ok(Vec::new())
         }
 
         async fn get_pull_request_merge_state(
             &self,
-            _pr: &orchestrator_domain::PullRequestRef,
-        ) -> Result<orchestrator_domain::PullRequestMergeState, CoreError> {
-            Ok(orchestrator_domain::PullRequestMergeState {
+            _pr: &PullRequestRef,
+        ) -> Result<PullRequestMergeState, VcsRepoCoreError> {
+            Ok(PullRequestMergeState {
                 merged: false,
                 is_draft: true,
                 state: None,
@@ -205,8 +215,8 @@ mod tests {
 
         async fn merge_pull_request(
             &self,
-            _pr: &orchestrator_domain::PullRequestRef,
-        ) -> Result<(), CoreError> {
+            _pr: &PullRequestRef,
+        ) -> Result<(), VcsRepoCoreError> {
             Ok(())
         }
     }
@@ -296,7 +306,7 @@ mod tests {
 
     #[derive(Clone, Default)]
     struct MockCodeHost {
-        ready_calls: Arc<Mutex<Vec<orchestrator_domain::PullRequestRef>>>,
+        ready_calls: Arc<Mutex<Vec<PullRequestRef>>>,
         ready_error: Arc<Mutex<Option<String>>>,
     }
 
@@ -308,7 +318,7 @@ mod tests {
             }
         }
 
-        fn ready_calls(&self) -> Vec<orchestrator_domain::PullRequestRef> {
+        fn ready_calls(&self) -> Vec<PullRequestRef> {
             self.ready_calls.lock().expect("ready calls lock").clone()
         }
     }
@@ -319,16 +329,16 @@ mod tests {
             CodeHostKind::Github
         }
 
-        async fn health_check(&self) -> Result<(), CoreError> {
+        async fn health_check(&self) -> Result<(), VcsRepoCoreError> {
             Ok(())
         }
 
         async fn create_draft_pull_request(
             &self,
-            request: orchestrator_domain::CreatePullRequestRequest,
-        ) -> Result<orchestrator_domain::PullRequestSummary, CoreError> {
-            Ok(orchestrator_domain::PullRequestSummary {
-                reference: orchestrator_domain::PullRequestRef {
+            request: CreatePullRequestRequest,
+        ) -> Result<PullRequestSummary, VcsRepoCoreError> {
+            Ok(PullRequestSummary {
+                reference: PullRequestRef {
                     repository: request.repository,
                     number: 1,
                     url: "https://github.com/example/placeholder/pull/1".to_owned(),
@@ -340,8 +350,8 @@ mod tests {
 
         async fn mark_ready_for_review(
             &self,
-            pr: &orchestrator_domain::PullRequestRef,
-        ) -> Result<(), CoreError> {
+            pr: &PullRequestRef,
+        ) -> Result<(), VcsRepoCoreError> {
             self.ready_calls
                 .lock()
                 .expect("ready calls lock")
@@ -349,30 +359,30 @@ mod tests {
 
             let maybe_error = self.ready_error.lock().expect("ready error lock").clone();
             match maybe_error {
-                Some(message) => Err(CoreError::DependencyUnavailable(message)),
+                Some(message) => Err(VcsRepoCoreError::DependencyUnavailable(message)),
                 None => Ok(()),
             }
         }
 
         async fn request_reviewers(
             &self,
-            _pr: &orchestrator_domain::PullRequestRef,
-            _reviewers: orchestrator_domain::ReviewerRequest,
-        ) -> Result<(), CoreError> {
+            _pr: &PullRequestRef,
+            _reviewers: ReviewerRequest,
+        ) -> Result<(), VcsRepoCoreError> {
             Ok(())
         }
 
         async fn list_waiting_for_my_review(
             &self,
-        ) -> Result<Vec<orchestrator_domain::PullRequestSummary>, CoreError> {
+        ) -> Result<Vec<PullRequestSummary>, VcsRepoCoreError> {
             Ok(Vec::new())
         }
 
         async fn get_pull_request_merge_state(
             &self,
-            _pr: &orchestrator_domain::PullRequestRef,
-        ) -> Result<orchestrator_domain::PullRequestMergeState, CoreError> {
-            Ok(orchestrator_domain::PullRequestMergeState {
+            _pr: &PullRequestRef,
+        ) -> Result<PullRequestMergeState, VcsRepoCoreError> {
+            Ok(PullRequestMergeState {
                 merged: false,
                 is_draft: true,
                 state: None,
@@ -386,15 +396,15 @@ mod tests {
 
         async fn merge_pull_request(
             &self,
-            _pr: &orchestrator_domain::PullRequestRef,
-        ) -> Result<(), CoreError> {
+            _pr: &PullRequestRef,
+        ) -> Result<(), VcsRepoCoreError> {
             Ok(())
         }
     }
 
     #[async_trait::async_trait]
     impl GithubClient for MockCodeHost {
-        async fn health_check(&self) -> Result<(), CoreError> {
+        async fn health_check(&self) -> Result<(), VcsRepoCoreError> {
             Ok(())
         }
     }
@@ -1042,23 +1052,26 @@ mod tests {
 
     #[async_trait::async_trait]
     impl TicketingProvider for MockTicketingProvider {
-        fn provider(&self) -> TicketProvider {
-            TicketProvider::Linear
+        fn provider(&self) -> TicketingTicketProvider {
+            TicketingTicketProvider::Linear
         }
 
-        async fn health_check(&self) -> Result<(), CoreError> {
+        async fn health_check(&self) -> Result<(), TicketingCoreError> {
             Ok(())
         }
 
-        async fn list_tickets(&self, _query: TicketQuery) -> Result<Vec<TicketSummary>, CoreError> {
+        async fn list_tickets(
+            &self,
+            _query: TicketQuery,
+        ) -> Result<Vec<TicketSummary>, TicketingCoreError> {
             Ok(Vec::new())
         }
 
         async fn create_ticket(
             &self,
             _request: CreateTicketRequest,
-        ) -> Result<TicketSummary, CoreError> {
-            Err(CoreError::DependencyUnavailable(
+        ) -> Result<TicketSummary, TicketingCoreError> {
+            Err(TicketingCoreError::DependencyUnavailable(
                 "mock ticketing provider does not implement create_ticket in tests".to_owned(),
             ))
         }
@@ -1066,15 +1079,18 @@ mod tests {
         async fn update_ticket_state(
             &self,
             _request: UpdateTicketStateRequest,
-        ) -> Result<(), CoreError> {
-            Err(CoreError::DependencyUnavailable(
+        ) -> Result<(), TicketingCoreError> {
+            Err(TicketingCoreError::DependencyUnavailable(
                 "mock ticketing provider does not implement update_ticket_state in tests"
                     .to_owned(),
             ))
         }
 
-        async fn get_ticket(&self, _request: GetTicketRequest) -> Result<TicketDetails, CoreError> {
-            Err(CoreError::DependencyUnavailable(
+        async fn get_ticket(
+            &self,
+            _request: GetTicketRequest,
+        ) -> Result<TicketDetails, TicketingCoreError> {
+            Err(TicketingCoreError::DependencyUnavailable(
                 "mock ticketing provider does not implement get_ticket in tests".to_owned(),
             ))
         }
@@ -1082,41 +1098,44 @@ mod tests {
         async fn update_ticket_description(
             &self,
             _request: UpdateTicketDescriptionRequest,
-        ) -> Result<(), CoreError> {
-            Err(CoreError::DependencyUnavailable(
+        ) -> Result<(), TicketingCoreError> {
+            Err(TicketingCoreError::DependencyUnavailable(
                 "mock ticketing provider does not implement update_ticket_description in tests"
                     .to_owned(),
             ))
         }
 
-        async fn add_comment(&self, _request: AddTicketCommentRequest) -> Result<(), CoreError> {
+        async fn add_comment(
+            &self,
+            _request: AddTicketCommentRequest,
+        ) -> Result<(), TicketingCoreError> {
             Ok(())
         }
     }
 
     #[derive(Debug)]
     struct ScriptedTicketingProvider {
-        provider: TicketProvider,
+        provider: TicketingTicketProvider,
         list_tickets_calls: Arc<Mutex<Vec<TicketQuery>>>,
-        get_ticket_calls: Arc<Mutex<Vec<TicketId>>>,
-        update_ticket_state_calls: Arc<Mutex<Vec<(TicketId, String)>>>,
-        update_ticket_description_calls: Arc<Mutex<Vec<(TicketId, String)>>>,
-        add_comment_calls: Arc<Mutex<Vec<(TicketId, String)>>>,
-        list_tickets_result: Mutex<Option<Result<Vec<TicketSummary>, CoreError>>>,
-        get_ticket_result: Mutex<Option<Result<TicketDetails, CoreError>>>,
-        update_ticket_state_result: Mutex<Option<Result<(), CoreError>>>,
-        update_ticket_description_result: Mutex<Option<Result<(), CoreError>>>,
-        add_comment_result: Mutex<Option<Result<(), CoreError>>>,
+        get_ticket_calls: Arc<Mutex<Vec<TicketingTicketId>>>,
+        update_ticket_state_calls: Arc<Mutex<Vec<(TicketingTicketId, String)>>>,
+        update_ticket_description_calls: Arc<Mutex<Vec<(TicketingTicketId, String)>>>,
+        add_comment_calls: Arc<Mutex<Vec<(TicketingTicketId, String)>>>,
+        list_tickets_result: Mutex<Option<Result<Vec<TicketSummary>, TicketingCoreError>>>,
+        get_ticket_result: Mutex<Option<Result<TicketDetails, TicketingCoreError>>>,
+        update_ticket_state_result: Mutex<Option<Result<(), TicketingCoreError>>>,
+        update_ticket_description_result: Mutex<Option<Result<(), TicketingCoreError>>>,
+        add_comment_result: Mutex<Option<Result<(), TicketingCoreError>>>,
     }
 
     impl Default for ScriptedTicketingProvider {
         fn default() -> Self {
-            Self::new(TicketProvider::Linear)
+            Self::new(TicketingTicketProvider::Linear)
         }
     }
 
     impl ScriptedTicketingProvider {
-        fn new(provider: TicketProvider) -> Self {
+        fn new(provider: TicketingTicketProvider) -> Self {
             Self {
                 provider,
                 list_tickets_calls: Arc::new(Mutex::new(Vec::new())),
@@ -1127,7 +1146,7 @@ mod tests {
                 list_tickets_result: Mutex::new(Some(Ok(Vec::new()))),
                 get_ticket_result: Mutex::new(Some(Ok(TicketDetails {
                     summary: TicketSummary {
-                        ticket_id: TicketId::from("linear:missing"),
+                        ticket_id: TicketingTicketId::from("linear:missing"),
                         identifier: "MISSING".to_owned(),
                         title: "Missing".to_owned(),
                         project: Some("Missing".to_owned()),
@@ -1151,7 +1170,7 @@ mod tests {
             self
         }
 
-        fn with_update_state_result(&self, result: Result<(), CoreError>) -> &Self {
+        fn with_update_state_result(&self, result: Result<(), TicketingCoreError>) -> &Self {
             *self
                 .update_ticket_state_result
                 .lock()
@@ -1166,7 +1185,7 @@ mod tests {
                 .clone()
         }
 
-        fn update_ticket_state_calls(&self) -> Vec<(TicketId, String)> {
+        fn update_ticket_state_calls(&self) -> Vec<(TicketingTicketId, String)> {
             self.update_ticket_state_calls
                 .lock()
                 .expect("state calls lock")
@@ -1176,15 +1195,18 @@ mod tests {
 
     #[async_trait::async_trait]
     impl TicketingProvider for ScriptedTicketingProvider {
-        fn provider(&self) -> TicketProvider {
+        fn provider(&self) -> TicketingTicketProvider {
             self.provider.clone()
         }
 
-        async fn health_check(&self) -> Result<(), CoreError> {
+        async fn health_check(&self) -> Result<(), TicketingCoreError> {
             Ok(())
         }
 
-        async fn list_tickets(&self, query: TicketQuery) -> Result<Vec<TicketSummary>, CoreError> {
+        async fn list_tickets(
+            &self,
+            query: TicketQuery,
+        ) -> Result<Vec<TicketSummary>, TicketingCoreError> {
             self.list_tickets_calls
                 .lock()
                 .expect("record list call lock")
@@ -1199,8 +1221,8 @@ mod tests {
         async fn create_ticket(
             &self,
             _request: CreateTicketRequest,
-        ) -> Result<TicketSummary, CoreError> {
-            Err(CoreError::DependencyUnavailable(
+        ) -> Result<TicketSummary, TicketingCoreError> {
+            Err(TicketingCoreError::DependencyUnavailable(
                 "scripted mock ticketing provider does not implement create_ticket in tests"
                     .to_owned(),
             ))
@@ -1209,7 +1231,7 @@ mod tests {
         async fn update_ticket_state(
             &self,
             request: UpdateTicketStateRequest,
-        ) -> Result<(), CoreError> {
+        ) -> Result<(), TicketingCoreError> {
             self.update_ticket_state_calls
                 .lock()
                 .expect("record state call lock")
@@ -1221,7 +1243,10 @@ mod tests {
                 .unwrap_or_else(|| Ok(()))
         }
 
-        async fn get_ticket(&self, request: GetTicketRequest) -> Result<TicketDetails, CoreError> {
+        async fn get_ticket(
+            &self,
+            request: GetTicketRequest,
+        ) -> Result<TicketDetails, TicketingCoreError> {
             self.get_ticket_calls
                 .lock()
                 .expect("record get call lock")
@@ -1233,7 +1258,7 @@ mod tests {
                 .unwrap_or_else(|| {
                     Ok(TicketDetails {
                         summary: TicketSummary {
-                            ticket_id: TicketId::from("linear:missing"),
+                            ticket_id: TicketingTicketId::from("linear:missing"),
                             identifier: "MISSING".to_owned(),
                             title: "Missing".to_owned(),
                             project: Some("Missing".to_owned()),
@@ -1252,7 +1277,7 @@ mod tests {
         async fn update_ticket_description(
             &self,
             request: UpdateTicketDescriptionRequest,
-        ) -> Result<(), CoreError> {
+        ) -> Result<(), TicketingCoreError> {
             self.update_ticket_description_calls
                 .lock()
                 .expect("record description call lock")
@@ -1264,7 +1289,10 @@ mod tests {
                 .unwrap_or_else(|| Ok(()))
         }
 
-        async fn add_comment(&self, request: AddTicketCommentRequest) -> Result<(), CoreError> {
+        async fn add_comment(
+            &self,
+            request: AddTicketCommentRequest,
+        ) -> Result<(), TicketingCoreError> {
             self.add_comment_calls
                 .lock()
                 .expect("record comment call lock")
@@ -1359,36 +1387,49 @@ mod tests {
             orchestrator_vcs::VcsProviderKind::GitCli
         }
 
-        async fn health_check(&self) -> Result<(), CoreError> {
-            <Self as orchestrator_domain::VcsProvider>::health_check(self).await
+        async fn health_check(&self) -> Result<(), VcsCoreError> {
+            <Self as orchestrator_domain::VcsProvider>::health_check(self)
+                .await
+                .map_err(Into::into)
         }
 
         async fn discover_repositories(
             &self,
             roots: &[PathBuf],
-        ) -> Result<Vec<orchestrator_vcs::RepositoryRef>, CoreError> {
-            <Self as orchestrator_domain::VcsProvider>::discover_repositories(self, roots).await
+        ) -> Result<Vec<orchestrator_vcs::RepositoryRef>, VcsCoreError> {
+            <Self as orchestrator_domain::VcsProvider>::discover_repositories(self, roots)
+                .await
+                .map(|repositories| repositories.into_iter().map(Into::into).collect())
+                .map_err(Into::into)
         }
 
         async fn create_worktree(
             &self,
             request: orchestrator_vcs::CreateWorktreeRequest,
-        ) -> Result<orchestrator_vcs::WorktreeSummary, CoreError> {
-            <Self as orchestrator_domain::VcsProvider>::create_worktree(self, request).await
+        ) -> Result<orchestrator_vcs::WorktreeSummary, VcsCoreError> {
+            <Self as orchestrator_domain::VcsProvider>::create_worktree(self, request.into())
+                .await
+                .map(Into::into)
+                .map_err(Into::into)
         }
 
         async fn delete_worktree(
             &self,
             request: orchestrator_vcs::DeleteWorktreeRequest,
-        ) -> Result<(), CoreError> {
-            <Self as orchestrator_domain::VcsProvider>::delete_worktree(self, request).await
+        ) -> Result<(), VcsCoreError> {
+            <Self as orchestrator_domain::VcsProvider>::delete_worktree(self, request.into())
+                .await
+                .map_err(Into::into)
         }
 
         async fn worktree_status(
             &self,
             worktree_path: &Path,
-        ) -> Result<orchestrator_vcs::WorktreeStatus, CoreError> {
-            <Self as orchestrator_domain::VcsProvider>::worktree_status(self, worktree_path).await
+        ) -> Result<orchestrator_vcs::WorktreeStatus, VcsCoreError> {
+            <Self as orchestrator_domain::VcsProvider>::worktree_status(self, worktree_path)
+                .await
+                .map(Into::into)
+                .map_err(Into::into)
         }
     }
 
@@ -1481,7 +1522,7 @@ mod tests {
         let backend = StubBackend {
             spawn_calls: Mutex::new(Vec::new()),
         };
-        let ticket = TicketSummary {
+        let ticket: TicketSummary = orchestrator_domain::TicketSummary {
             ticket_id: TicketId::from_provider_uuid(TicketProvider::Linear, "issue-126"),
             identifier: "AP-126".to_owned(),
             title: "Implement ticket selected start resume orchestration flow".to_owned(),
@@ -1492,7 +1533,8 @@ mod tests {
             priority: Some(2),
             labels: vec!["orchestrator".to_owned()],
             updated_at: "2026-02-16T11:00:00Z".to_owned(),
-        };
+        }
+        .into();
 
         let result = app
             .start_or_resume_selected_ticket(
@@ -1731,9 +1773,9 @@ mod tests {
     async fn supervisor_query_dispatch_executes_list_tickets_tool() {
         let temp_db = TestDbPath::new("app-supervisor-query-list-tickets-tool");
         let ticketing = {
-            let ticketing = ScriptedTicketingProvider::new(TicketProvider::Linear);
+            let ticketing = ScriptedTicketingProvider::new(TicketingTicketProvider::Linear);
             ticketing.with_list_tickets_result(vec![TicketSummary {
-                ticket_id: TicketId::from("linear:issue-101"),
+                ticket_id: TicketingTicketId::from("linear:issue-101"),
                 identifier: "ISSUE-101".to_owned(),
                 title: "Validate tool calls".to_owned(),
                 project: Some("Orchestrator".to_owned()),
@@ -1848,7 +1890,7 @@ mod tests {
     #[tokio::test]
     async fn supervisor_query_dispatch_executes_update_ticket_state_tool() {
         let temp_db = TestDbPath::new("app-supervisor-query-update-state-tool");
-        let ticketing = Arc::new(ScriptedTicketingProvider::new(TicketProvider::Linear));
+        let ticketing = Arc::new(ScriptedTicketingProvider::new(TicketingTicketProvider::Linear));
         ticketing.with_update_state_result(Ok(()));
 
         let supervisor = QueryingSupervisor::with_chunk_sequences(vec![

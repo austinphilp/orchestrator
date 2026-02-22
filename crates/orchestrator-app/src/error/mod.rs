@@ -5,9 +5,9 @@
 
 use orchestrator_domain::{CoreError, RuntimeError};
 use orchestrator_harness::HarnessProviderError;
-use orchestrator_ticketing::TicketingProviderError;
-use orchestrator_vcs::VcsProviderError;
-use orchestrator_vcs_repos::VcsRepoProviderError;
+use orchestrator_ticketing::{CoreError as TicketingCoreError, TicketingProviderError};
+use orchestrator_vcs::{CoreError as VcsCoreError, VcsProviderError};
+use orchestrator_vcs_repos::{CoreError as VcsRepoCoreError, VcsRepoProviderError};
 use thiserror::Error;
 
 pub type AppResult<T> = Result<T, AppError>;
@@ -78,6 +78,37 @@ impl From<VcsProviderError> for AppError {
 impl From<VcsRepoProviderError> for AppError {
     fn from(value: VcsRepoProviderError) -> Self {
         Self::configuration(value.to_string())
+    }
+}
+
+impl From<TicketingCoreError> for AppError {
+    fn from(value: TicketingCoreError) -> Self {
+        match value {
+            TicketingCoreError::DependencyUnavailable(message) => {
+                Self::dependency_unavailable(message)
+            }
+            TicketingCoreError::Configuration(message) => Self::configuration(message),
+        }
+    }
+}
+
+impl From<VcsCoreError> for AppError {
+    fn from(value: VcsCoreError) -> Self {
+        match value {
+            VcsCoreError::DependencyUnavailable(message) => Self::dependency_unavailable(message),
+            VcsCoreError::Configuration(message) => Self::configuration(message),
+        }
+    }
+}
+
+impl From<VcsRepoCoreError> for AppError {
+    fn from(value: VcsRepoCoreError) -> Self {
+        match value {
+            VcsRepoCoreError::DependencyUnavailable(message) => {
+                Self::dependency_unavailable(message)
+            }
+            VcsRepoCoreError::Configuration(message) => Self::configuration(message),
+        }
     }
 }
 

@@ -5,35 +5,50 @@ struct CoreVcsProviderAdapter<'a> {
 #[async_trait::async_trait]
 impl orchestrator_domain::VcsProvider for CoreVcsProviderAdapter<'_> {
     async fn health_check(&self) -> Result<(), CoreError> {
-        self.inner.health_check().await
+        self.inner.health_check().await.map_err(Into::into)
     }
 
     async fn discover_repositories(
         &self,
         roots: &[PathBuf],
     ) -> Result<Vec<orchestrator_domain::RepositoryRef>, CoreError> {
-        self.inner.discover_repositories(roots).await
+        self.inner
+            .discover_repositories(roots)
+            .await
+            .map(|repositories| repositories.into_iter().map(Into::into).collect())
+            .map_err(Into::into)
     }
 
     async fn create_worktree(
         &self,
         request: orchestrator_domain::CreateWorktreeRequest,
     ) -> Result<orchestrator_domain::WorktreeSummary, CoreError> {
-        self.inner.create_worktree(request).await
+        self.inner
+            .create_worktree(request.into())
+            .await
+            .map(Into::into)
+            .map_err(Into::into)
     }
 
     async fn delete_worktree(
         &self,
         request: orchestrator_domain::DeleteWorktreeRequest,
     ) -> Result<(), CoreError> {
-        self.inner.delete_worktree(request).await
+        self.inner
+            .delete_worktree(request.into())
+            .await
+            .map_err(Into::into)
     }
 
     async fn worktree_status(
         &self,
         worktree_path: &std::path::Path,
     ) -> Result<orchestrator_domain::WorktreeStatus, CoreError> {
-        self.inner.worktree_status(worktree_path).await
+        self.inner
+            .worktree_status(worktree_path)
+            .await
+            .map(Into::into)
+            .map_err(Into::into)
     }
 }
 
@@ -309,10 +324,11 @@ impl<S: Supervisor, G: GithubClient> App<S, G> {
             .await
             .ok()
             .and_then(|details| details.description);
+        let selected_ticket: orchestrator_domain::TicketSummary = selected_ticket.clone().into();
 
         orchestrator_domain::start_or_resume_selected_ticket(
             &mut store,
-            selected_ticket,
+            &selected_ticket,
             selected_ticket_description.as_deref(),
             &flow_config,
             repository_override,

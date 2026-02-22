@@ -9,11 +9,13 @@ mod tests {
     use crate::normalization::DOMAIN_EVENT_SCHEMA_VERSION;
     use orchestrator_domain::test_support::TestDbPath;
     use orchestrator_domain::{
-        ArtifactId, ArtifactKind, ArtifactRecord, BackendKind, CodeHostKind, PullRequestCiStatus,
-        PullRequestMergeState, PullRequestRef, PullRequestSummary, RepositoryRef, ReviewerRequest,
-        RuntimeMappingRecord, SessionRecord, SqliteEventStore, TicketId, TicketProvider,
-        TicketRecord, WorkItemId, WorkerSessionId, WorkerSessionStatus, WorkflowState, WorktreeId,
-        WorktreeRecord,
+        ArtifactId, ArtifactKind, ArtifactRecord, BackendKind, RuntimeMappingRecord,
+        SessionRecord, SqliteEventStore, TicketId, TicketProvider, TicketRecord, WorkItemId,
+        WorkerSessionId, WorkerSessionStatus, WorkflowState, WorktreeId, WorktreeRecord,
+    };
+    use orchestrator_vcs_repos::{
+        CodeHostKind, CoreError as VcsRepoCoreError, PullRequestCiStatus, PullRequestMergeState,
+        PullRequestRef, PullRequestSummary, RepositoryRef, ReviewerRequest,
     };
     use serde_json::json;
     use std::sync::Mutex;
@@ -101,7 +103,7 @@ mod tests {
 
     #[async_trait::async_trait]
     impl UrlOpener for MockUrlOpener {
-        async fn open_url(&self, url: &str) -> Result<(), CoreError> {
+        async fn open_url(&self, url: &str) -> Result<(), VcsRepoCoreError> {
             self.calls.lock().expect("lock calls").push(url.to_owned());
             Ok(())
         }
@@ -111,8 +113,8 @@ mod tests {
 
     #[async_trait::async_trait]
     impl UrlOpener for FailingUrlOpener {
-        async fn open_url(&self, _url: &str) -> Result<(), CoreError> {
-            Err(CoreError::DependencyUnavailable(
+        async fn open_url(&self, _url: &str) -> Result<(), VcsRepoCoreError> {
+            Err(VcsRepoCoreError::DependencyUnavailable(
                 "open failed intentionally".to_owned(),
             ))
         }
@@ -257,26 +259,29 @@ mod tests {
             CodeHostKind::Github
         }
 
-        async fn health_check(&self) -> Result<(), CoreError> {
+        async fn health_check(&self) -> Result<(), VcsRepoCoreError> {
             Ok(())
         }
 
         async fn create_draft_pull_request(
             &self,
-            _request: orchestrator_domain::CreatePullRequestRequest,
-        ) -> Result<PullRequestSummary, CoreError> {
-            Err(CoreError::DependencyUnavailable(
+            _request: orchestrator_vcs_repos::CreatePullRequestRequest,
+        ) -> Result<PullRequestSummary, VcsRepoCoreError> {
+            Err(VcsRepoCoreError::DependencyUnavailable(
                 "not implemented in test mock".to_owned(),
             ))
         }
 
-        async fn mark_ready_for_review(&self, pr: &PullRequestRef) -> Result<(), CoreError> {
+        async fn mark_ready_for_review(
+            &self,
+            pr: &PullRequestRef,
+        ) -> Result<(), VcsRepoCoreError> {
             self.ready_calls
                 .lock()
                 .expect("ready calls lock")
                 .push(pr.clone());
             if let Some(message) = &self.ready_error {
-                return Err(CoreError::DependencyUnavailable(message.clone()));
+                return Err(VcsRepoCoreError::DependencyUnavailable(message.clone()));
             }
             Ok(())
         }
@@ -285,27 +290,32 @@ mod tests {
             &self,
             _pr: &PullRequestRef,
             _reviewers: ReviewerRequest,
-        ) -> Result<(), CoreError> {
+        ) -> Result<(), VcsRepoCoreError> {
             Ok(())
         }
 
-        async fn list_waiting_for_my_review(&self) -> Result<Vec<PullRequestSummary>, CoreError> {
+        async fn list_waiting_for_my_review(
+            &self,
+        ) -> Result<Vec<PullRequestSummary>, VcsRepoCoreError> {
             Ok(Vec::new())
         }
 
         async fn get_pull_request_merge_state(
             &self,
             _pr: &PullRequestRef,
-        ) -> Result<PullRequestMergeState, CoreError> {
+        ) -> Result<PullRequestMergeState, VcsRepoCoreError> {
             if let Some(message) = &self.merge_state_error {
-                return Err(CoreError::DependencyUnavailable(message.clone()));
+                return Err(VcsRepoCoreError::DependencyUnavailable(message.clone()));
             }
             Ok(self.merge_state.clone())
         }
 
-        async fn merge_pull_request(&self, _pr: &PullRequestRef) -> Result<(), CoreError> {
+        async fn merge_pull_request(
+            &self,
+            _pr: &PullRequestRef,
+        ) -> Result<(), VcsRepoCoreError> {
             if let Some(message) = &self.merge_error {
-                return Err(CoreError::DependencyUnavailable(message.clone()));
+                return Err(VcsRepoCoreError::DependencyUnavailable(message.clone()));
             }
             Ok(())
         }
@@ -313,9 +323,9 @@ mod tests {
         async fn list_pull_request_ci_statuses(
             &self,
             _pr: &PullRequestRef,
-        ) -> Result<Vec<PullRequestCiStatus>, CoreError> {
+        ) -> Result<Vec<PullRequestCiStatus>, VcsRepoCoreError> {
             if let Some(message) = &self.ci_status_error {
-                return Err(CoreError::DependencyUnavailable(message.clone()));
+                return Err(VcsRepoCoreError::DependencyUnavailable(message.clone()));
             }
             Ok(self.ci_statuses.clone())
         }
@@ -324,7 +334,7 @@ mod tests {
             &self,
             repository: &RepositoryRef,
             head_branch: &str,
-        ) -> Result<Option<PullRequestRef>, CoreError> {
+        ) -> Result<Option<PullRequestRef>, VcsRepoCoreError> {
             self.fallback_calls
                 .lock()
                 .expect("fallback calls lock")

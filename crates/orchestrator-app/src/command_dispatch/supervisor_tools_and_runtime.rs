@@ -9,9 +9,8 @@ use orchestrator_domain::{
     apply_workflow_transition, ArtifactId, ArtifactKind, ArtifactRecord, CoreError, EventStore,
     LlmChatRequest, LlmFinishReason, LlmMessage, LlmProvider, LlmResponseStream,
     LlmResponseSubscription, LlmRole, LlmStreamChunk, LlmTokenUsage, LlmTool, LlmToolCall,
-    LlmToolCallOutput, LlmToolFunction, PullRequestRef, RepositoryRef, RetrievalScope,
-    RuntimeMappingRecord, WorkItemId, WorkerSessionId, WorkflowGuardContext, WorkflowState,
-    WorkflowTransitionReason,
+    LlmToolCallOutput, LlmToolFunction, RetrievalScope, RuntimeMappingRecord, WorkItemId,
+    WorkerSessionId, WorkflowGuardContext, WorkflowState, WorkflowTransitionReason,
 };
 use orchestrator_supervisor::{
     build_freeform_messages, build_template_messages_with_variables, SupervisorQueryEngine,
@@ -20,7 +19,9 @@ use orchestrator_ticketing::{
     AddTicketCommentRequest, GetTicketRequest, TicketAttachment, TicketId, TicketQuery,
     TicketingProvider, UpdateTicketDescriptionRequest, UpdateTicketStateRequest,
 };
-use orchestrator_vcs_repos::{default_system_url_opener, CodeHostProvider, UrlOpener};
+use orchestrator_vcs_repos::{
+    default_system_url_opener, CodeHostProvider, PullRequestRef, RepositoryRef, UrlOpener,
+};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};

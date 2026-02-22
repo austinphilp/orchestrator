@@ -487,10 +487,11 @@ fn fixture_schema_rejects_unknown_top_level_fields() {
 
 #[test]
 fn golden_fixture_and_snapshot_inventory_stays_in_sync() {
-    let fixture_files = read_sorted_dir_entries(Path::new(env!("CARGO_MANIFEST_DIR")).join(FIXTURE_DIR))
-        .into_iter()
-        .filter(|name| name.ends_with(".json"))
-        .collect::<Vec<_>>();
+    let fixture_files =
+        read_sorted_dir_entries(Path::new(env!("CARGO_MANIFEST_DIR")).join(FIXTURE_DIR))
+            .into_iter()
+            .filter(|name| name.ends_with(".json"))
+            .collect::<Vec<_>>();
     let mut expected_fixtures = EXPECTED_GOLDEN_FIXTURES
         .iter()
         .map(|name| (*name).to_owned())
@@ -508,13 +509,7 @@ fn golden_fixture_and_snapshot_inventory_stays_in_sync() {
             .collect::<Vec<_>>();
     let mut expected_snapshots = EXPECTED_GOLDEN_FIXTURES
         .iter()
-        .map(|fixture| {
-            fixture
-                .strip_suffix(".json")
-                .unwrap_or(fixture)
-                .to_owned()
-                + ".snap"
-        })
+        .map(|fixture| fixture.strip_suffix(".json").unwrap_or(fixture).to_owned() + ".snap")
         .collect::<Vec<_>>();
     expected_snapshots.sort();
     assert_eq!(
@@ -529,12 +524,19 @@ fn read_sorted_dir_entries(path: PathBuf) -> Vec<String> {
         .map(|entry| {
             entry
                 .unwrap_or_else(|error| {
-                    panic!("failed to read directory entry under {}: {error}", path.display())
+                    panic!(
+                        "failed to read directory entry under {}: {error}",
+                        path.display()
+                    )
                 })
                 .file_name()
                 .into_string()
                 .unwrap_or_else(|name| {
-                    panic!("directory entry under {} is not utf-8: {:?}", path.display(), name)
+                    panic!(
+                        "directory entry under {} is not utf-8: {:?}",
+                        path.display(),
+                        name
+                    )
                 })
         })
         .collect::<Vec<_>>();

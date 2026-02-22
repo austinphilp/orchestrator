@@ -2,24 +2,15 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
-pub use orchestrator_domain::{
-    command_ids, ArtifactCreatedPayload, ArtifactId, ArtifactKind, ArtifactRecord, CoreError,
-    EventStore, InboxItemCreatedPayload, InboxItemId, InboxItemKind, LlmChatRequest,
-    LlmFinishReason, LlmMessage, LlmProvider, LlmProviderKind, LlmRateLimitState,
-    LlmResponseStream, LlmResponseSubscription, LlmRole, LlmStreamChunk, LlmTokenUsage,
-    LlmToolCall, NewEventEnvelope, OrchestrationEventPayload, OrchestrationEventType, ProjectId,
-    RetrievalScope, SessionNeedsInputPayload, SessionSpawnedPayload, SqliteEventStore,
-    StoredEventEnvelope, Supervisor, SupervisorQueryContextArgs, SupervisorQueryKind, TicketId,
-    TicketProvider, TicketRecord, TicketSyncedPayload, TicketWorkItemMapping, UserRespondedPayload,
-    WorkItemCreatedPayload, WorkItemId, WorkerSessionId, WorkflowState, WorkflowTransitionPayload,
-};
 use reqwest::header::HeaderMap;
 use serde_json::{Map, Value};
 use tokio::sync::{mpsc, Notify};
 
+pub mod interface;
 mod query_engine;
 mod template_library;
 
+pub use interface::*;
 pub use query_engine::{
     BoundedContextPack, RetrievalFocusFilters, RetrievalPackEvent, RetrievalPackEvidence,
     RetrievalPackLimits, RetrievalPackStats, SupervisorQueryEngine, SupervisorRetrievalSource,

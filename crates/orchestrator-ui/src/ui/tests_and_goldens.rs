@@ -9,21 +9,20 @@ mod tests {
     use super::*;
     use async_trait::async_trait;
     use orchestrator_app::frontend::ui_boundary::{
-        ArtifactId, ArtifactKind, ArtifactProjection, CoreError, FrontendApplicationMode,
-        FrontendCommandIntent, FrontendController, FrontendEvent, FrontendEventStream,
-        FrontendEventSubscription, FrontendIntent, FrontendSnapshot, InboxItemProjection,
-        InboxItemCreatedPayload, InboxItemResolvedPayload, LlmProviderKind, LlmResponseStream,
-        LlmResponseSubscription, LlmStreamChunk, OrchestrationEventPayload,
-        OrchestrationEventType, SessionBlockedPayload, SessionCheckpointPayload,
-        SessionCompletedPayload, SessionNeedsInputPayload, SessionProjection,
-        SessionLifecycle, SessionRuntimeProjection, StoredEventEnvelope,
-        SupervisorQueryFinishedPayload, TicketDetailsSyncedPayload, TicketProvider,
-        UserRespondedPayload, WorkItemProjection, WorkerEventStream, WorkerEventSubscription,
-        WorkflowTransitionPayload, WorkflowTransitionReason, WorktreeCreatedPayload, WorktreeId,
-        WorkflowState, BackendCapabilities, BackendKind, BackendEvent,
-        BackendNeedsInputEvent, BackendNeedsInputOption, BackendNeedsInputQuestion,
-        BackendOutputEvent, BackendOutputStream, RuntimeResult, SessionHandle,
-        RuntimeSessionId, SpawnSpec, BackendTurnStateEvent,
+        ArtifactId, ArtifactKind, ArtifactProjection, BackendCapabilities, BackendEvent,
+        BackendKind, BackendNeedsInputEvent, BackendNeedsInputOption, BackendNeedsInputQuestion,
+        BackendOutputEvent, BackendOutputStream, BackendTurnStateEvent, CoreError,
+        FrontendApplicationMode, FrontendCommandIntent, FrontendController, FrontendEvent,
+        FrontendEventStream, FrontendEventSubscription, FrontendIntent, FrontendSnapshot,
+        InboxItemCreatedPayload, InboxItemProjection, InboxItemResolvedPayload, LlmProviderKind,
+        LlmResponseStream, LlmResponseSubscription, LlmStreamChunk, OrchestrationEventPayload,
+        OrchestrationEventType, RuntimeResult, RuntimeSessionId, SessionBlockedPayload,
+        SessionCheckpointPayload, SessionCompletedPayload, SessionHandle, SessionLifecycle,
+        SessionNeedsInputPayload, SessionProjection, SessionRuntimeProjection, SpawnSpec,
+        StoredEventEnvelope, SupervisorQueryFinishedPayload, TicketDetailsSyncedPayload,
+        TicketProvider, UserRespondedPayload, WorkItemProjection, WorkerEventStream,
+        WorkerEventSubscription, WorkflowState, WorkflowTransitionPayload,
+        WorkflowTransitionReason, WorktreeCreatedPayload, WorktreeId,
     };
     use std::collections::VecDeque;
     use std::sync::{Arc, Mutex};
@@ -87,10 +86,7 @@ mod tests {
             &self,
             request: LlmChatRequest,
         ) -> Result<(String, LlmResponseStream), CoreError> {
-            self.requests
-                .lock()
-                .expect("request lock")
-                .push(request);
+            self.requests.lock().expect("request lock").push(request);
             let chunks = self
                 .chunks
                 .lock()
@@ -194,10 +190,7 @@ mod tests {
 
     impl RecordingFrontendController {
         fn intents(&self) -> Vec<FrontendIntent> {
-            self.intents
-                .lock()
-                .expect("frontend intents lock")
-                .clone()
+            self.intents.lock().expect("frontend intents lock").clone()
         }
     }
 
@@ -394,12 +387,10 @@ mod tests {
                 2,
                 Some(request.work_item_id.clone()),
                 None,
-                OrchestrationEventPayload::InboxItemResolved(
-                    InboxItemResolvedPayload {
-                        inbox_item_id: request.inbox_item_id,
-                        work_item_id: request.work_item_id,
-                    },
-                ),
+                OrchestrationEventPayload::InboxItemResolved(InboxItemResolvedPayload {
+                    inbox_item_id: request.inbox_item_id,
+                    work_item_id: request.work_item_id,
+                }),
             )))
         }
     }
@@ -570,7 +561,7 @@ mod tests {
 
     fn sample_ticket_summary(id_suffix: &str, identifier: &str, state: &str) -> TicketSummary {
         TicketSummary {
-            ticket_id: TicketId::from_provider_uuid(TicketProvider::Linear, id_suffix),
+            ticket_id: TicketId::from_provider_uuid(TicketProvider::Linear, id_suffix).into(),
             identifier: identifier.to_owned(),
             title: format!("{identifier} sample"),
             project: Some("Core".to_owned()),
@@ -595,8 +586,12 @@ mod tests {
             OrchestrationEventPayload::TicketDetailsSynced(_) => {
                 OrchestrationEventType::TicketDetailsSynced
             }
-            OrchestrationEventPayload::WorkItemCreated(_) => OrchestrationEventType::WorkItemCreated,
-            OrchestrationEventPayload::WorktreeCreated(_) => OrchestrationEventType::WorktreeCreated,
+            OrchestrationEventPayload::WorkItemCreated(_) => {
+                OrchestrationEventType::WorkItemCreated
+            }
+            OrchestrationEventPayload::WorktreeCreated(_) => {
+                OrchestrationEventType::WorktreeCreated
+            }
             OrchestrationEventPayload::SessionSpawned(_) => OrchestrationEventType::SessionSpawned,
             OrchestrationEventPayload::SessionCheckpoint(_) => {
                 OrchestrationEventType::SessionCheckpoint
@@ -615,11 +610,15 @@ mod tests {
                 OrchestrationEventType::SessionCompleted
             }
             OrchestrationEventPayload::SessionCrashed(_) => OrchestrationEventType::SessionCrashed,
-            OrchestrationEventPayload::ArtifactCreated(_) => OrchestrationEventType::ArtifactCreated,
+            OrchestrationEventPayload::ArtifactCreated(_) => {
+                OrchestrationEventType::ArtifactCreated
+            }
             OrchestrationEventPayload::WorkflowTransition(_) => {
                 OrchestrationEventType::WorkflowTransition
             }
-            OrchestrationEventPayload::InboxItemCreated(_) => OrchestrationEventType::InboxItemCreated,
+            OrchestrationEventPayload::InboxItemCreated(_) => {
+                OrchestrationEventType::InboxItemCreated
+            }
             OrchestrationEventPayload::InboxItemResolved(_) => {
                 OrchestrationEventType::InboxItemResolved
             }
@@ -900,10 +899,9 @@ mod tests {
                     latest_checkpoint: None,
                 },
             );
-            projection.session_runtime.insert(
-                session_id,
-                SessionRuntimeProjection { is_working: false },
-            );
+            projection
+                .session_runtime
+                .insert(session_id, SessionRuntimeProjection { is_working: false });
         }
 
         projection.sessions.insert(
@@ -1384,15 +1382,13 @@ mod tests {
             work_item_id: Some(work_item_id),
             session_id: None,
             event_type: OrchestrationEventType::TicketDetailsSynced,
-            payload: OrchestrationEventPayload::TicketDetailsSynced(
-                TicketDetailsSyncedPayload {
-                    ticket_id,
-                    description: Some(
-                        "Render PR status, diff stats, ticket details, and open inbox in sidebar."
-                            .to_owned(),
-                    ),
-                },
-            ),
+            payload: OrchestrationEventPayload::TicketDetailsSynced(TicketDetailsSyncedPayload {
+                ticket_id,
+                description: Some(
+                    "Render PR status, diff stats, ticket details, and open inbox in sidebar."
+                        .to_owned(),
+                ),
+            }),
             schema_version: 1,
         });
         projection
@@ -1718,16 +1714,14 @@ mod tests {
             work_item_id: Some(work_item_core),
             session_id: None,
             event_type: OrchestrationEventType::TicketSynced,
-            payload: OrchestrationEventPayload::TicketSynced(
-                TicketSyncedPayload {
-                    ticket_id: ticket_core,
-                    identifier: "AP-101".to_owned(),
-                    title: "Harden session lifecycle".to_owned(),
-                    state: "In Progress".to_owned(),
-                    assignee: None,
-                    priority: None,
-                },
-            ),
+            payload: OrchestrationEventPayload::TicketSynced(TicketSyncedPayload {
+                ticket_id: ticket_core,
+                identifier: "AP-101".to_owned(),
+                title: "Harden session lifecycle".to_owned(),
+                state: "In Progress".to_owned(),
+                assignee: None,
+                priority: None,
+            }),
             schema_version: 1,
         });
         projection.events.push(StoredEventEnvelope {
@@ -1737,16 +1731,14 @@ mod tests {
             work_item_id: Some(work_item_orchestrator),
             session_id: None,
             event_type: OrchestrationEventType::TicketSynced,
-            payload: OrchestrationEventPayload::TicketSynced(
-                TicketSyncedPayload {
-                    ticket_id: ticket_orchestrator,
-                    identifier: "AP-202".to_owned(),
-                    title: "Session list redesign".to_owned(),
-                    state: "In Progress".to_owned(),
-                    assignee: None,
-                    priority: None,
-                },
-            ),
+            payload: OrchestrationEventPayload::TicketSynced(TicketSyncedPayload {
+                ticket_id: ticket_orchestrator,
+                identifier: "AP-202".to_owned(),
+                title: "Session list redesign".to_owned(),
+                state: "In Progress".to_owned(),
+                assignee: None,
+                priority: None,
+            }),
             schema_version: 1,
         });
 
@@ -1779,7 +1771,8 @@ mod tests {
         let mut projection = ProjectionState::default();
         let work_item_id = WorkItemId::new("wi-repo-fallback");
         let session_id = WorkerSessionId::new("sess-repo-fallback");
-        let ticket_id = TicketId::from_provider_uuid(TicketProvider::Linear, "ticket-repo-fallback");
+        let ticket_id =
+            TicketId::from_provider_uuid(TicketProvider::Linear, "ticket-repo-fallback");
 
         projection.work_items.insert(
             work_item_id.clone(),
@@ -1812,15 +1805,13 @@ mod tests {
             work_item_id: Some(work_item_id.clone()),
             session_id: None,
             event_type: OrchestrationEventType::WorktreeCreated,
-            payload: OrchestrationEventPayload::WorktreeCreated(
-                WorktreeCreatedPayload {
-                    worktree_id: WorktreeId::new("wt-repo-fallback"),
-                    work_item_id: work_item_id.clone(),
-                    path: "/tmp/github/orchestrator".to_owned(),
-                    branch: "feature/repo-fallback".to_owned(),
-                    base_branch: "main".to_owned(),
-                },
-            ),
+            payload: OrchestrationEventPayload::WorktreeCreated(WorktreeCreatedPayload {
+                worktree_id: WorktreeId::new("wt-repo-fallback"),
+                work_item_id: work_item_id.clone(),
+                path: "/tmp/github/orchestrator".to_owned(),
+                branch: "feature/repo-fallback".to_owned(),
+                base_branch: "main".to_owned(),
+            }),
             schema_version: 1,
         });
         projection.events.push(StoredEventEnvelope {
@@ -1830,16 +1821,14 @@ mod tests {
             work_item_id: Some(work_item_id),
             session_id: None,
             event_type: OrchestrationEventType::TicketSynced,
-            payload: OrchestrationEventPayload::TicketSynced(
-                TicketSyncedPayload {
-                    ticket_id,
-                    identifier: "AP-303".to_owned(),
-                    title: "Repository label fallback".to_owned(),
-                    state: "In Progress".to_owned(),
-                    assignee: None,
-                    priority: None,
-                },
-            ),
+            payload: OrchestrationEventPayload::TicketSynced(TicketSyncedPayload {
+                ticket_id,
+                identifier: "AP-303".to_owned(),
+                title: "Repository label fallback".to_owned(),
+                state: "In Progress".to_owned(),
+                assignee: None,
+                priority: None,
+            }),
             schema_version: 1,
         });
 
@@ -1847,11 +1836,11 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].session_id, session_id);
         assert_eq!(rows[0].project, "orchestrator");
+        assert_eq!(rows[0].ticket_label, "Repository label fallback".to_owned());
         assert_eq!(
-            rows[0].ticket_label,
-            "Repository label fallback".to_owned()
+            rows[0].group,
+            SessionStateGroup::Other("waiting".to_owned())
         );
-        assert_eq!(rows[0].group, SessionStateGroup::Other("waiting".to_owned()));
         assert_eq!(rows[0].badge, "waiting".to_owned());
     }
 
@@ -1890,7 +1879,10 @@ mod tests {
         assert_eq!(rows[0].session_id, session_id);
         assert_eq!(rows[0].project, "Orchestrator");
         assert_eq!(rows[0].ticket_label, "session sess-no-ticket");
-        assert_eq!(rows[0].group, SessionStateGroup::Other("waiting".to_owned()));
+        assert_eq!(
+            rows[0].group,
+            SessionStateGroup::Other("waiting".to_owned())
+        );
         assert_eq!(rows[0].badge, "waiting".to_owned());
     }
 
@@ -2025,16 +2017,14 @@ mod tests {
                 work_item_id: Some(work_item_id),
                 session_id: None,
                 event_type: OrchestrationEventType::TicketSynced,
-                payload: OrchestrationEventPayload::TicketSynced(
-                    TicketSyncedPayload {
-                        ticket_id,
-                        identifier: identifier.to_owned(),
-                        title: title.to_owned(),
-                        state: "In Progress".to_owned(),
-                        assignee: None,
-                        priority: None,
-                    },
-                ),
+                payload: OrchestrationEventPayload::TicketSynced(TicketSyncedPayload {
+                    ticket_id,
+                    identifier: identifier.to_owned(),
+                    title: title.to_owned(),
+                    state: "In Progress".to_owned(),
+                    assignee: None,
+                    priority: None,
+                }),
                 schema_version: 1,
             });
         }
@@ -2181,11 +2171,9 @@ mod tests {
             .lines()
             .find(|line| line.contains("Active implementing session"))
             .expect("active session row");
-        assert!(
-            ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
-                .iter()
-                .any(|frame| active_line.contains(frame))
-        );
+        assert!(["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
+            .iter()
+            .any(|frame| active_line.contains(frame)));
         assert!(active_line.contains("[active]"));
         assert!(!active_line.contains("[implementation]"));
     }
@@ -2366,14 +2354,12 @@ mod tests {
                 work_item_id: Some(work_item_id.clone()),
                 session_id: Some(session_id.clone()),
                 event_type: OrchestrationEventType::InboxItemCreated,
-                payload: OrchestrationEventPayload::InboxItemCreated(
-                    InboxItemCreatedPayload {
-                        inbox_item_id: inbox_item_id.clone(),
-                        work_item_id: work_item_id.clone(),
-                        kind: InboxItemKind::NeedsApproval,
-                        title: "Review PR readiness".to_owned(),
-                    },
-                ),
+                payload: OrchestrationEventPayload::InboxItemCreated(InboxItemCreatedPayload {
+                    inbox_item_id: inbox_item_id.clone(),
+                    work_item_id: work_item_id.clone(),
+                    kind: InboxItemKind::NeedsApproval,
+                    title: "Review PR readiness".to_owned(),
+                }),
                 schema_version: 1,
             },
             StoredEventEnvelope {
@@ -2383,12 +2369,10 @@ mod tests {
                 work_item_id: Some(work_item_id.clone()),
                 session_id: Some(session_id.clone()),
                 event_type: OrchestrationEventType::InboxItemResolved,
-                payload: OrchestrationEventPayload::InboxItemResolved(
-                    InboxItemResolvedPayload {
-                        inbox_item_id,
-                        work_item_id: work_item_id.clone(),
-                    },
-                ),
+                payload: OrchestrationEventPayload::InboxItemResolved(InboxItemResolvedPayload {
+                    inbox_item_id,
+                    work_item_id: work_item_id.clone(),
+                }),
                 schema_version: 1,
             },
             StoredEventEnvelope {
@@ -2469,7 +2453,10 @@ mod tests {
 
         let mut shell_state = UiShellState::new("ready".to_owned(), projection);
         assert!(shell_state.move_to_first_session());
-        assert_eq!(shell_state.selected_session_id_for_panel(), Some(session_a.clone()));
+        assert_eq!(
+            shell_state.selected_session_id_for_panel(),
+            Some(session_a.clone())
+        );
         assert_eq!(
             shell_state.session_ids_for_navigation(),
             vec![session_a.clone(), session_b.clone()]
@@ -2640,13 +2627,11 @@ mod tests {
         assert!(without_session.view_stack.center_views().is_empty());
         assert_eq!(without_session.mode, UiMode::Normal);
         assert_eq!(backend.spawned_session_ids().len(), 0);
-        assert!(
-            without_session
-                .status_warning
-                .as_deref()
-                .unwrap_or_default()
-                .contains("no open session is currently selected")
-        );
+        assert!(without_session
+            .status_warning
+            .as_deref()
+            .unwrap_or_default()
+            .contains("no open session is currently selected"));
     }
 
     #[test]
@@ -2667,13 +2652,11 @@ mod tests {
         assert!(without_session.view_stack.center_views().is_empty());
         assert_eq!(without_session.mode, UiMode::Normal);
         assert_eq!(backend.spawned_session_ids().len(), 0);
-        assert!(
-            without_session
-                .status_warning
-                .as_deref()
-                .unwrap_or_default()
-                .contains("no open session is currently selected")
-        );
+        assert!(without_session
+            .status_warning
+            .as_deref()
+            .unwrap_or_default()
+            .contains("no open session is currently selected"));
     }
 
     #[tokio::test]
@@ -2699,7 +2682,10 @@ mod tests {
             Some(CenterView::TerminalView { session_id }) if session_id.as_str() == "sess-1"
         ));
         assert_eq!(
-            shell_state.selected_session_id_for_panel().as_ref().map(|id| id.as_str()),
+            shell_state
+                .selected_session_id_for_panel()
+                .as_ref()
+                .map(|id| id.as_str()),
             Some("sess-1")
         );
     }
@@ -2892,14 +2878,12 @@ mod tests {
         let _ = route_needs_input_modal_key(&mut shell_state, key(KeyCode::Enter));
         tokio::task::yield_now().await;
 
-        assert!(
-            shell_state
-                .domain
-                .inbox_items
-                .get(&InboxItemId::new("inbox-1"))
-                .map(|item| item.resolved)
-                .unwrap_or(false)
-        );
+        assert!(shell_state
+            .domain
+            .inbox_items
+            .get(&InboxItemId::new("inbox-1"))
+            .map(|item| item.resolved)
+            .unwrap_or(false));
         assert_eq!(
             controller.intents(),
             vec![FrontendIntent::RespondToNeedsInput {
@@ -3697,7 +3681,10 @@ mod tests {
         shell_state.flush_due_session_working_state_persists();
 
         wait_for_working_state_persist_count(provider.as_ref(), 1).await;
-        assert_eq!(provider.persisted_working_states(), vec![(session_id, true)]);
+        assert_eq!(
+            provider.persisted_working_states(),
+            vec![(session_id, true)]
+        );
     }
 
     #[tokio::test]
@@ -3802,8 +3789,7 @@ mod tests {
     #[tokio::test]
     async fn progression_approval_poll_only_scans_progression_eligible_sessions() {
         let mut projection = mixed_reconcile_projection();
-        let stale_review_inbox_id =
-            InboxItemId::new("sess-review-workflow-awaiting-progression");
+        let stale_review_inbox_id = InboxItemId::new("sess-review-workflow-awaiting-progression");
         let review_work_item_id = WorkItemId::new("wi-review");
         projection
             .work_items
@@ -4855,8 +4841,14 @@ mod tests {
                 latest_checkpoint: None,
             },
         );
-        let mut shell_state =
-            UiShellState::new_with_integrations("ready".to_owned(), projection, None, None, None, Some(backend));
+        let mut shell_state = UiShellState::new_with_integrations(
+            "ready".to_owned(),
+            projection,
+            None,
+            None,
+            None,
+            Some(backend),
+        );
         shell_state.open_terminal_and_enter_mode();
         assert!(matches!(
             shell_state.view_stack.active_center(),
@@ -4951,11 +4943,16 @@ mod tests {
             .get(&WorkerSessionId::new("sess-2"))
             .expect("offscreen state should exist");
         assert!(offscreen_before_focus.entries.is_empty());
-        assert_eq!(offscreen_before_focus.deferred_output, b"background line\n".to_vec());
+        assert_eq!(
+            offscreen_before_focus.deferred_output,
+            b"background line\n".to_vec()
+        );
 
-        shell_state.view_stack.replace_center(CenterView::TerminalView {
-            session_id: WorkerSessionId::new("sess-2"),
-        });
+        shell_state
+            .view_stack
+            .replace_center(CenterView::TerminalView {
+                session_id: WorkerSessionId::new("sess-2"),
+            });
         shell_state.tick_terminal_view_and_report();
 
         let offscreen_after_focus = shell_state
@@ -4967,9 +4964,7 @@ mod tests {
             .into_iter()
             .map(|line| line.text)
             .collect::<Vec<_>>();
-        assert!(rendered
-            .iter()
-            .any(|line| line.contains("background line")));
+        assert!(rendered.iter().any(|line| line.contains("background line")));
     }
 
     #[test]
@@ -5042,7 +5037,9 @@ mod tests {
             .into_iter()
             .map(|line| line.text)
             .collect::<Vec<_>>();
-        assert!(rendered.iter().any(|line| line.contains("deferred payload")));
+        assert!(rendered
+            .iter()
+            .any(|line| line.contains("deferred payload")));
     }
 
     #[test]
@@ -5227,8 +5224,7 @@ mod tests {
             &projection,
             &session_id,
             Some(&SessionInfoDiffCache {
-                content:
-                    "diff --git a/src/a.rs b/src/a.rs\n@@ -1 +1,2 @@\n+line\n".to_owned(),
+                content: "diff --git a/src/a.rs b/src/a.rs\n@@ -1 +1,2 @@\n+line\n".to_owned(),
                 loading: false,
                 error: None,
             }),
@@ -5381,11 +5377,9 @@ mod tests {
             .expect("active session");
 
         assert!(!shell_state.ensure_session_info_diff_loaded_for_active_session());
-        assert!(
-            shell_state
-                .session_info_diff_last_refresh_at
-                .contains_key(&session_id)
-        );
+        assert!(shell_state
+            .session_info_diff_last_refresh_at
+            .contains_key(&session_id));
 
         assert!(!shell_state.ensure_session_info_diff_loaded_for_active_session());
         shell_state
@@ -5674,7 +5668,9 @@ mod tests {
             SessionRuntimeProjection { is_working: false },
         );
         let now = Instant::now();
-        shell_state.merge_pending_sessions.insert(session_id.clone());
+        shell_state
+            .merge_pending_sessions
+            .insert(session_id.clone());
         shell_state.merge_poll_states.insert(
             session_id.clone(),
             MergeReconcilePollState {
@@ -5706,7 +5702,9 @@ mod tests {
         );
         let session_id = WorkerSessionId::new("sess-review");
         let now = Instant::now();
-        shell_state.merge_pending_sessions.insert(session_id.clone());
+        shell_state
+            .merge_pending_sessions
+            .insert(session_id.clone());
         shell_state
             .terminal_session_states
             .entry(session_id.clone())
@@ -6136,10 +6134,7 @@ mod tests {
             .supervisor_chat_stream
             .as_ref()
             .expect("failed query should surface terminal state");
-        assert_eq!(
-            stream.response_state,
-            SupervisorResponseState::NoContext
-        );
+        assert_eq!(stream.response_state, SupervisorResponseState::NoContext);
         let rendered = shell_state.ui_state().center_pane.lines.join("\n");
         assert!(rendered.contains("Supervisor state: no-context"));
         assert!(rendered.contains("query submission moved to frontend services"));
@@ -6945,14 +6940,12 @@ mod tests {
             Some(CenterView::TerminalView { session_id }) if session_id.as_str() == "sess-1"
         ));
         assert_eq!(shell_state.mode, UiMode::Terminal);
-        assert!(
-            shell_state
-                .domain
-                .inbox_items
-                .get(&InboxItemId::new("inbox-1"))
-                .map(|item| item.resolved)
-                .unwrap_or(false)
-        );
+        assert!(shell_state
+            .domain
+            .inbox_items
+            .get(&InboxItemId::new("inbox-1"))
+            .map(|item| item.resolved)
+            .unwrap_or(false));
     }
 
     #[test]
@@ -6964,19 +6957,18 @@ mod tests {
         assert!(!shell_state.is_terminal_view_active());
         let status = shell_state.ui_state().status;
         assert!(status.contains("selected inbox item has no active session"));
-        assert!(
-            !shell_state
-                .domain
-                .inbox_items
-                .get(&InboxItemId::new("inbox-1"))
-                .map(|item| item.resolved)
-                .unwrap_or(false)
-        );
+        assert!(!shell_state
+            .domain
+            .inbox_items
+            .get(&InboxItemId::new("inbox-1"))
+            .map(|item| item.resolved)
+            .unwrap_or(false));
     }
 
     #[test]
     fn workflow_advance_event_auto_advances_to_next_inbox_session() {
-        let mut shell_state = UiShellState::new("ready".to_owned(), workflow_auto_advance_projection());
+        let mut shell_state =
+            UiShellState::new("ready".to_owned(), workflow_auto_advance_projection());
 
         shell_state.apply_ticket_picker_event(TicketPickerEvent::SessionWorkflowAdvanced {
             outcome: SessionWorkflowAdvanceOutcome {
@@ -7016,7 +7008,8 @@ mod tests {
 
     #[test]
     fn workflow_advance_event_skips_immediate_row_without_session() {
-        let mut shell_state = UiShellState::new("ready".to_owned(), workflow_auto_advance_projection());
+        let mut shell_state =
+            UiShellState::new("ready".to_owned(), workflow_auto_advance_projection());
 
         shell_state.apply_ticket_picker_event(TicketPickerEvent::SessionWorkflowAdvanced {
             outcome: SessionWorkflowAdvanceOutcome {
@@ -7053,7 +7046,8 @@ mod tests {
 
     #[test]
     fn workflow_advance_event_on_last_inbox_item_keeps_current_selection() {
-        let mut shell_state = UiShellState::new("ready".to_owned(), workflow_last_item_projection());
+        let mut shell_state =
+            UiShellState::new("ready".to_owned(), workflow_last_item_projection());
         let rows = shell_state.ui_state().inbox_rows;
         shell_state.set_selection(Some(rows.len() - 1), &rows);
 
@@ -7094,11 +7088,16 @@ mod tests {
 
     #[test]
     fn workflow_advance_event_with_no_later_session_rows_keeps_current_selection() {
-        let mut shell_state = UiShellState::new("ready".to_owned(), workflow_auto_advance_projection());
+        let mut shell_state =
+            UiShellState::new("ready".to_owned(), workflow_auto_advance_projection());
         let rows = shell_state.ui_state().inbox_rows;
         let session_row_index = rows
             .iter()
-            .position(|row| row.session_id.as_ref().is_some_and(|id| id.as_str() == "sess-3"))
+            .position(|row| {
+                row.session_id
+                    .as_ref()
+                    .is_some_and(|id| id.as_str() == "sess-3")
+            })
             .expect("session row should exist");
         shell_state.set_selection(Some(session_row_index), &rows);
 
@@ -7317,9 +7316,8 @@ mod tests {
         assert!(long_height > 4);
         assert!(long_height <= 10);
 
-        let many_lines = insert_mode_editor_state_with_text(
-            "1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n11\n12\n13",
-        );
+        let many_lines =
+            insert_mode_editor_state_with_text("1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n11\n12\n13");
         assert_eq!(editor_widget_height(&many_lines, 24, 4, 10), 10);
     }
 
@@ -7458,7 +7456,10 @@ mod tests {
         shell_state.ticket_picker_overlay.open();
         shell_state.ticket_picker_overlay.begin_new_ticket_mode();
         assert_eq!(
-            shell_state.ticket_picker_overlay.new_ticket_brief_editor.mode,
+            shell_state
+                .ticket_picker_overlay
+                .new_ticket_brief_editor
+                .mode,
             EditorMode::Insert
         );
 
@@ -7488,7 +7489,10 @@ mod tests {
         shell_state.ticket_picker_overlay.open();
         shell_state.ticket_picker_overlay.begin_new_ticket_mode();
         assert_eq!(
-            shell_state.ticket_picker_overlay.new_ticket_brief_editor.mode,
+            shell_state
+                .ticket_picker_overlay
+                .new_ticket_brief_editor
+                .mode,
             EditorMode::Insert
         );
 
@@ -7535,15 +7539,15 @@ mod tests {
         let mut shell_state = UiShellState::new("ready".to_owned(), triage_projection());
         shell_state.ticket_picker_overlay.open();
         shell_state.ticket_picker_overlay.begin_new_ticket_mode();
-        shell_state
-            .ticket_picker_overlay
-            .new_ticket_brief_editor = EditorState::new(Lines::from("draft"));
+        shell_state.ticket_picker_overlay.new_ticket_brief_editor =
+            EditorState::new(Lines::from("draft"));
 
         route_ticket_picker_key(&mut shell_state, key(KeyCode::Esc));
         assert!(shell_state.ticket_picker_overlay.visible);
         assert!(!shell_state.ticket_picker_overlay.new_ticket_mode);
         assert!(
-            editor_state_text(&shell_state.ticket_picker_overlay.new_ticket_brief_editor).is_empty()
+            editor_state_text(&shell_state.ticket_picker_overlay.new_ticket_brief_editor)
+                .is_empty()
         );
     }
 
@@ -7561,7 +7565,10 @@ mod tests {
 
         let routed = route_ticket_picker_key(&mut shell_state, key(KeyCode::Char('x')));
         assert!(matches!(routed, RoutedInput::Ignore));
-        assert!(shell_state.ticket_picker_overlay.archive_confirm_ticket.is_some());
+        assert!(shell_state
+            .ticket_picker_overlay
+            .archive_confirm_ticket
+            .is_some());
     }
 
     #[test]
@@ -7573,7 +7580,10 @@ mod tests {
 
         route_ticket_picker_key(&mut shell_state, key(KeyCode::Esc));
         assert!(shell_state.ticket_picker_overlay.visible);
-        assert!(shell_state.ticket_picker_overlay.archive_confirm_ticket.is_none());
+        assert!(shell_state
+            .ticket_picker_overlay
+            .archive_confirm_ticket
+            .is_none());
     }
 
     #[tokio::test]
@@ -7769,7 +7779,7 @@ mod tests {
         shell_state.apply_ticket_picker_event(TicketPickerEvent::TicketsLoaded {
             tickets: vec![
                 TicketSummary {
-                    ticket_id: ticket_running,
+                    ticket_id: ticket_running.into(),
                     identifier: "AP-610".to_owned(),
                     title: "running".to_owned(),
                     project: Some("Core".to_owned()),
@@ -7781,7 +7791,7 @@ mod tests {
                     updated_at: "2026-02-19T00:00:00Z".to_owned(),
                 },
                 TicketSummary {
-                    ticket_id: ticket_waiting,
+                    ticket_id: ticket_waiting.into(),
                     identifier: "AP-611".to_owned(),
                     title: "waiting".to_owned(),
                     project: Some("Core".to_owned()),
@@ -7793,7 +7803,7 @@ mod tests {
                     updated_at: "2026-02-19T00:00:00Z".to_owned(),
                 },
                 TicketSummary {
-                    ticket_id: ticket_blocked,
+                    ticket_id: ticket_blocked.into(),
                     identifier: "AP-612".to_owned(),
                     title: "blocked".to_owned(),
                     project: Some("Core".to_owned()),
@@ -7805,7 +7815,7 @@ mod tests {
                     updated_at: "2026-02-19T00:00:00Z".to_owned(),
                 },
                 TicketSummary {
-                    ticket_id: ticket_done,
+                    ticket_id: ticket_done.into(),
                     identifier: "AP-613".to_owned(),
                     title: "done".to_owned(),
                     project: Some("Core".to_owned()),
@@ -7817,7 +7827,7 @@ mod tests {
                     updated_at: "2026-02-19T00:00:00Z".to_owned(),
                 },
                 TicketSummary {
-                    ticket_id: ticket_visible,
+                    ticket_id: ticket_visible.into(),
                     identifier: "AP-614".to_owned(),
                     title: "visible".to_owned(),
                     project: Some("Core".to_owned()),
@@ -8324,7 +8334,10 @@ mod tests {
         assert_eq!(shell_state.mode, UiMode::Terminal);
         assert_eq!(shell_state.terminal_compose_editor.mode, EditorMode::Insert);
         handle_key_press(&mut shell_state, key(KeyCode::Char('b')));
-        assert_eq!(editor_state_text(&shell_state.terminal_compose_editor), "ab");
+        assert_eq!(
+            editor_state_text(&shell_state.terminal_compose_editor),
+            "ab"
+        );
     }
 
     #[test]
@@ -8451,7 +8464,10 @@ mod tests {
         handle_key_press(&mut shell_state, shift_key(KeyCode::Enter));
         handle_key_press(&mut shell_state, key(KeyCode::Char('!')));
 
-        assert_eq!(editor_state_text(&shell_state.terminal_compose_editor), "hi\n!");
+        assert_eq!(
+            editor_state_text(&shell_state.terminal_compose_editor),
+            "hi\n!"
+        );
     }
 
     #[tokio::test]
@@ -8473,7 +8489,10 @@ mod tests {
 
         handle_key_press(&mut shell_state, key(KeyCode::Char('h')));
         handle_key_press(&mut shell_state, key(KeyCode::Char('i')));
-        assert_eq!(editor_state_text(&shell_state.terminal_compose_editor), "hi");
+        assert_eq!(
+            editor_state_text(&shell_state.terminal_compose_editor),
+            "hi"
+        );
         handle_key_press(&mut shell_state, key(KeyCode::Enter));
         tokio::task::yield_now().await;
 
@@ -8507,7 +8526,10 @@ mod tests {
 
         handle_key_press(&mut shell_state, key(KeyCode::Char('o')));
         handle_key_press(&mut shell_state, key(KeyCode::Char('k')));
-        assert_eq!(editor_state_text(&shell_state.terminal_compose_editor), "ok");
+        assert_eq!(
+            editor_state_text(&shell_state.terminal_compose_editor),
+            "ok"
+        );
 
         handle_key_press(&mut shell_state, ctrl_key(KeyCode::Enter));
         tokio::task::yield_now().await;
@@ -8822,12 +8844,8 @@ mod tests {
         let full_lines = render_terminal_transcript_lines(&state);
         let full = render_terminal_output_with_accents(&full_lines, width, theme);
 
-        let total = terminal_total_rendered_rows(
-            &mut state,
-            width,
-            TerminalActivityIndicator::None,
-            theme,
-        );
+        let total =
+            terminal_total_rendered_rows(&mut state, width, TerminalActivityIndicator::None, theme);
         assert_eq!(total, full.lines.len());
 
         let total_with_indicator = terminal_total_rendered_rows(
@@ -9005,7 +9023,10 @@ mod tests {
 
         let nav_pos = help.find("Navigate:").expect("navigation section");
         let views_pos = help.find("Views:").expect("views section");
-        assert!(nav_pos < views_pos, "navigation hints should appear before views");
+        assert!(
+            nav_pos < views_pos,
+            "navigation hints should appear before views"
+        );
     }
 
     #[test]

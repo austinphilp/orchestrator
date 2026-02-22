@@ -340,9 +340,10 @@ mod tests {
     use orchestrator_domain::{
         CoreError, InboxItemId, InboxItemKind, LlmProviderKind, LlmResponseSubscription,
         LlmStreamChunk, OrchestrationEventPayload, OrchestrationEventType,
-        SelectedTicketFlowResult, SessionCompletedPayload, TicketSummary, WorkItemId,
-        WorkerSessionId, WorkflowState,
+        SelectedTicketFlowResult, SessionCompletedPayload, WorkItemId, WorkerSessionId,
+        WorkflowState,
     };
+    use orchestrator_ticketing::TicketSummary;
     use std::collections::VecDeque;
     use std::path::PathBuf;
     use std::sync::Mutex;

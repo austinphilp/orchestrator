@@ -1,12 +1,12 @@
 use orchestrator_app::{App, AppConfig};
 use orchestrator_domain::test_support::TestDbPath;
-use orchestrator_domain::{
-    AddTicketCommentRequest, CoreError, CreateTicketRequest, GetTicketRequest, Supervisor,
-    TicketDetails, TicketProvider, TicketQuery, TicketSummary, UpdateTicketDescriptionRequest,
-    UpdateTicketStateRequest,
+use orchestrator_domain::{CoreError, Supervisor};
+use orchestrator_ticketing::{
+    AddTicketCommentRequest, CoreError as TicketingCoreError, CreateTicketRequest,
+    GetTicketRequest, TicketDetails, TicketProvider, TicketQuery, TicketSummary, TicketingProvider,
+    UpdateTicketDescriptionRequest, UpdateTicketStateRequest,
 };
-use orchestrator_ticketing::TicketingProvider;
-use orchestrator_vcs_repos::GithubClient;
+use orchestrator_vcs_repos::{CoreError as VcsRepoCoreError, GithubClient};
 use std::sync::Arc;
 
 struct MockAdapter {
@@ -28,19 +28,22 @@ impl TicketingProvider for MockTicketingProvider {
         TicketProvider::Linear
     }
 
-    async fn health_check(&self) -> Result<(), CoreError> {
+    async fn health_check(&self) -> Result<(), TicketingCoreError> {
         Ok(())
     }
 
-    async fn list_tickets(&self, _query: TicketQuery) -> Result<Vec<TicketSummary>, CoreError> {
+    async fn list_tickets(
+        &self,
+        _query: TicketQuery,
+    ) -> Result<Vec<TicketSummary>, TicketingCoreError> {
         Ok(Vec::new())
     }
 
     async fn create_ticket(
         &self,
         _request: CreateTicketRequest,
-    ) -> Result<TicketSummary, CoreError> {
-        Err(CoreError::DependencyUnavailable(
+    ) -> Result<TicketSummary, TicketingCoreError> {
+        Err(TicketingCoreError::DependencyUnavailable(
             "mock ticketing provider create_ticket".to_owned(),
         ))
     }
@@ -48,14 +51,17 @@ impl TicketingProvider for MockTicketingProvider {
     async fn update_ticket_state(
         &self,
         _request: UpdateTicketStateRequest,
-    ) -> Result<(), CoreError> {
-        Err(CoreError::DependencyUnavailable(
+    ) -> Result<(), TicketingCoreError> {
+        Err(TicketingCoreError::DependencyUnavailable(
             "mock ticketing provider update_ticket_state".to_owned(),
         ))
     }
 
-    async fn get_ticket(&self, _request: GetTicketRequest) -> Result<TicketDetails, CoreError> {
-        Err(CoreError::DependencyUnavailable(
+    async fn get_ticket(
+        &self,
+        _request: GetTicketRequest,
+    ) -> Result<TicketDetails, TicketingCoreError> {
+        Err(TicketingCoreError::DependencyUnavailable(
             "mock ticketing provider get_ticket".to_owned(),
         ))
     }
@@ -63,13 +69,16 @@ impl TicketingProvider for MockTicketingProvider {
     async fn update_ticket_description(
         &self,
         _request: UpdateTicketDescriptionRequest,
-    ) -> Result<(), CoreError> {
-        Err(CoreError::DependencyUnavailable(
+    ) -> Result<(), TicketingCoreError> {
+        Err(TicketingCoreError::DependencyUnavailable(
             "mock ticketing provider update_ticket_description".to_owned(),
         ))
     }
 
-    async fn add_comment(&self, _request: AddTicketCommentRequest) -> Result<(), CoreError> {
+    async fn add_comment(
+        &self,
+        _request: AddTicketCommentRequest,
+    ) -> Result<(), TicketingCoreError> {
         Ok(())
     }
 }
@@ -89,11 +98,11 @@ impl Supervisor for MockAdapter {
 
 #[async_trait::async_trait]
 impl GithubClient for MockAdapter {
-    async fn health_check(&self) -> Result<(), CoreError> {
+    async fn health_check(&self) -> Result<(), VcsRepoCoreError> {
         if self.pass {
             Ok(())
         } else {
-            Err(CoreError::DependencyUnavailable(
+            Err(VcsRepoCoreError::DependencyUnavailable(
                 "github unavailable".to_owned(),
             ))
         }

@@ -52,9 +52,10 @@ pub mod ui_boundary {
         LlmFinishReason, LlmMessage, LlmProvider, LlmProviderKind, LlmRateLimitState,
         LlmResponseStream, LlmResponseSubscription, LlmRole, LlmStreamChunk, LlmTokenUsage,
         ProjectId, SelectedTicketFlowResult, SessionLifecycle, TicketId, TicketProvider,
-        TicketSummary, WorkItemId, WorkerBackend, WorkerEventStream, WorkerEventSubscription,
-        WorkerSessionId, WorkerSessionStatus, WorkflowState, WorkflowTransitionReason, WorktreeId,
+        WorkItemId, WorkerBackend, WorkerEventStream, WorkerEventSubscription, WorkerSessionId,
+        WorkerSessionStatus, WorkflowState, WorkflowTransitionReason, WorktreeId,
     };
+    pub use orchestrator_ticketing::{TicketId as TicketingTicketId, TicketSummary};
     pub use orchestrator_worker_protocol::{
         WorkerBackendCapabilities as BackendCapabilities, WorkerBackendKind as BackendKind,
         WorkerEvent as BackendEvent, WorkerNeedsInputAnswer as BackendNeedsInputAnswer,
