@@ -16,6 +16,7 @@
 - Implementation update (RRP26 A10): checkpoint scheduling now sends prompts via lifecycle `send_input` with explicit running/focused suppression, repeated failure handling (`Disable` threshold and `Backoff` with optional disable threshold), and scheduler diagnostics surfaces (perf snapshot counters plus diagnostic event subscription for failure/backoff/disable transitions) wired into runtime perf aggregation.
 - Implementation update (RRP26 A11): `orchestrator-worker-runtime` now exposes a runtime-owned composition facade (`WorkerRuntimeBackend`, runtime config, runtime subscription wrappers) for app wiring without direct lifecycle/eventbus composition leakage, and runtime perf snapshots now aggregate lifecycle + eventbus + scheduler counters.
 - Implementation update (RRP26 A12): `orchestrator-app`/`orchestrator-ui` now consume only worker runtime crates via protocol-backed core runtime contracts, legacy runtime bridge tests/utilities were removed from harness backends, and `crates/orchestrator-runtime` was deleted from the workspace.
+- Implementation update (RRP26 B01): scaffold crates `orchestrator-harness`, `orchestrator-ticketing`, `orchestrator-vcs`, and `orchestrator-vcs-repos` now exist with standardized `interface` + `providers/*` + `factory` + `lib` module layout, namespaced provider key factories, and baseline factory resolution tests; no provider implementation moves are included in this phase.
 
 ## Why This Refactor
 `orchestrator-runtime` currently combines too many concerns:

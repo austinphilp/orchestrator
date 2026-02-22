@@ -1455,8 +1455,12 @@ dependencies = [
  "integration-shortcut",
  "orchestrator-core",
  "orchestrator-github",
+ "orchestrator-harness",
  "orchestrator-supervisor",
+ "orchestrator-ticketing",
  "orchestrator-ui",
+ "orchestrator-vcs",
+ "orchestrator-vcs-repos",
  "orchestrator-worker-protocol",
  "orchestrator-worker-runtime",
  "r2d2",
@@ -1495,6 +1499,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "orchestrator-harness"
+version = "0.1.0"
+dependencies = [
+ "orchestrator-worker-protocol",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "orchestrator-supervisor"
 version = "0.1.0"
 dependencies = [
@@ -1503,6 +1515,13 @@ dependencies = [
  "reqwest",
  "serde_json",
  "tokio",
+]
+
+[[package]]
+name = "orchestrator-ticketing"
+version = "0.1.0"
+dependencies = [
+ "thiserror 2.0.18",
 ]
 
 [[package]]
@@ -1521,6 +1540,20 @@ dependencies = [
  "serde_json",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "orchestrator-vcs"
+version = "0.1.0"
+dependencies = [
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "orchestrator-vcs-repos"
+version = "0.1.0"
+dependencies = [
+ "thiserror 2.0.18",
 ]
 
 [[package]]

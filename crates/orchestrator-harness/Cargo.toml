@@ -1,0 +1,9 @@
+[package]
+name = "orchestrator-harness"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+orchestrator-worker-protocol = { path = "../orchestrator-worker-protocol" }
+thiserror.workspace = true

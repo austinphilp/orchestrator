@@ -16,6 +16,10 @@ orchestrator-core = { path = "../orchestrator-core" }
 orchestrator-github = { path = "../orchestrator-github" }
 orchestrator-supervisor = { path = "../orchestrator-supervisor" }
 orchestrator-ui = { path = "../orchestrator-ui" }
+orchestrator-harness = { path = "../orchestrator-harness" }
+orchestrator-ticketing = { path = "../orchestrator-ticketing" }
+orchestrator-vcs = { path = "../orchestrator-vcs" }
+orchestrator-vcs-repos = { path = "../orchestrator-vcs-repos" }
 orchestrator-worker-protocol = { path = "../orchestrator-worker-protocol" }
 orchestrator-worker-runtime = { path = "../orchestrator-worker-runtime" }
 serde.workspace = true
