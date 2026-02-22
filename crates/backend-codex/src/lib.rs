@@ -7,12 +7,19 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use orchestrator_runtime::{
-    BackendCapabilities, BackendCrashedEvent, BackendDoneEvent, BackendEvent, BackendKind,
-    BackendNeedsInputAnswer, BackendNeedsInputEvent, BackendNeedsInputOption,
-    BackendNeedsInputQuestion, BackendOutputEvent, BackendOutputStream, BackendTurnStateEvent,
-    RuntimeError, RuntimeResult, RuntimeSessionId, SessionHandle, SessionLifecycle, SpawnSpec,
-    WorkerBackend, WorkerEventStream, WorkerEventSubscription,
+use orchestrator_worker_protocol::{
+    WorkerBackendCapabilities as BackendCapabilities, WorkerBackendInfo,
+    WorkerBackendKind as BackendKind, WorkerCrashedEvent as BackendCrashedEvent,
+    WorkerDoneEvent as BackendDoneEvent, WorkerEvent as BackendEvent, WorkerEventStream,
+    WorkerEventSubscription, WorkerNeedsInputAnswer as BackendNeedsInputAnswer,
+    WorkerNeedsInputEvent as BackendNeedsInputEvent,
+    WorkerNeedsInputOption as BackendNeedsInputOption,
+    WorkerNeedsInputQuestion as BackendNeedsInputQuestion, WorkerOutputEvent as BackendOutputEvent,
+    WorkerOutputStream as BackendOutputStream, WorkerRuntimeError as RuntimeError,
+    WorkerRuntimeResult as RuntimeResult, WorkerSessionControl,
+    WorkerSessionHandle as SessionHandle, WorkerSessionId as RuntimeSessionId,
+    WorkerSessionStreamSource, WorkerSpawnRequest as SpawnSpec,
+    WorkerTurnStateEvent as BackendTurnStateEvent,
 };
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -398,7 +405,7 @@ impl CodexBackend {
 }
 
 #[async_trait::async_trait]
-impl SessionLifecycle for CodexBackend {
+impl WorkerSessionControl for CodexBackend {
     async fn spawn(&self, spec: SpawnSpec) -> RuntimeResult<SessionHandle> {
         let connection = self.ensure_connection().await?;
 
@@ -693,22 +700,7 @@ impl SessionLifecycle for CodexBackend {
 }
 
 #[async_trait::async_trait]
-impl WorkerBackend for CodexBackend {
-    fn kind(&self) -> BackendKind {
-        BackendKind::Codex
-    }
-
-    fn capabilities(&self) -> BackendCapabilities {
-        BackendCapabilities {
-            structured_events: true,
-            ..BackendCapabilities::default()
-        }
-    }
-
-    async fn health_check(&self) -> RuntimeResult<()> {
-        self.ensure_connection().await.map(|_| ())
-    }
-
+impl WorkerSessionStreamSource for CodexBackend {
     async fn subscribe(&self, session: &SessionHandle) -> RuntimeResult<WorkerEventStream> {
         let session = self.session(&session.session_id).await?;
         if !session.history_seeded.swap(true, Ordering::SeqCst) {
@@ -743,6 +735,24 @@ impl WorkerBackend for CodexBackend {
     async fn harness_session_id(&self, session: &SessionHandle) -> RuntimeResult<Option<String>> {
         let session = self.session(&session.session_id).await?;
         Ok(Some(session.thread_id.clone()))
+    }
+}
+
+#[async_trait::async_trait]
+impl WorkerBackendInfo for CodexBackend {
+    fn kind(&self) -> BackendKind {
+        BackendKind::Codex
+    }
+
+    fn capabilities(&self) -> BackendCapabilities {
+        BackendCapabilities {
+            structured_events: true,
+            ..BackendCapabilities::default()
+        }
+    }
+
+    async fn health_check(&self) -> RuntimeResult<()> {
+        self.ensure_connection().await.map(|_| ())
     }
 }
 

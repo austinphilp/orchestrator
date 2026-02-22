@@ -13,8 +13,8 @@ mod store;
 pub mod test_support;
 mod ticket_selection;
 mod workflow;
-mod workflow_interaction;
 mod workflow_automation;
+mod workflow_interaction;
 
 pub use adapters::{
     AddTicketCommentRequest, ArchiveTicketRequest, CodeHostKind, CodeHostProvider,
@@ -88,16 +88,16 @@ pub use workflow::{
     apply_workflow_transition, initial_workflow_state, validate_workflow_transition, WorkflowGuard,
     WorkflowGuardContext, WorkflowTransitionError, WorkflowTransitionReason,
 };
-pub use workflow_interaction::{
-    all_workflow_states, WorkflowInteractionLevel, WorkflowInteractionProfile,
-    WorkflowInteractionProfilesConfig, WorkflowInteractionStateLevel,
-};
 pub use workflow_automation::{
     plan_workflow_automation, plan_workflow_automation_with_policy, HumanApprovalGateMode,
     WorkflowAutomationGatePolicy, WorkflowAutomationInboxIntent,
     WorkflowAutomationNotificationPolicy, WorkflowAutomationPlan, WorkflowAutomationPolicy,
     WorkflowAutomationStep, WorkflowAutomationTransitionIntent, WorkflowNotificationRoute,
     DRAFT_PULL_REQUEST_INBOX_TITLE, NEEDS_APPROVAL_INBOX_TITLE, READY_FOR_REVIEW_INBOX_TITLE,
+};
+pub use workflow_interaction::{
+    all_workflow_states, WorkflowInteractionLevel, WorkflowInteractionProfile,
+    WorkflowInteractionProfilesConfig, WorkflowInteractionStateLevel,
 };
 
 #[cfg(test)]

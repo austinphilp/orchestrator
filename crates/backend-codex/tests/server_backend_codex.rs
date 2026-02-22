@@ -4,9 +4,11 @@ use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use backend_codex::{CodexBackend, CodexBackendConfig};
-use orchestrator_runtime::{
-    BackendEvent, BackendKind, RuntimeError, RuntimeResult, RuntimeSessionId, SessionLifecycle,
-    SpawnSpec, WorkerBackend, WorkerEventStream,
+use orchestrator_worker_protocol::{
+    WorkerBackendInfo, WorkerBackendKind as BackendKind, WorkerEvent as BackendEvent,
+    WorkerEventStream, WorkerRuntimeError as RuntimeError, WorkerRuntimeResult as RuntimeResult,
+    WorkerSessionControl, WorkerSessionId as RuntimeSessionId, WorkerSessionStreamSource,
+    WorkerSpawnRequest as SpawnSpec,
 };
 use tokio::time::timeout;
 
@@ -54,6 +56,19 @@ async fn collect_until_terminal_event(
     })
     .await
     .expect("collect events timeout")
+}
+
+fn collect_output_text(events: &[BackendEvent]) -> String {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            BackendEvent::Output(output) => {
+                Some(String::from_utf8_lossy(&output.bytes).to_string())
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("")
 }
 
 fn fake_codex_binary() -> PathBuf {
@@ -163,6 +178,13 @@ async fn codex_backend_uses_app_server_stdio_contract() {
         .await
         .expect("spawn codex session");
     assert_eq!(handle.backend, BackendKind::Codex);
+    assert_eq!(
+        backend
+            .harness_session_id(&handle)
+            .await
+            .expect("harness session id"),
+        Some("thread-1".to_owned())
+    );
 
     let stream = backend
         .subscribe(&handle)
@@ -184,6 +206,44 @@ async fn codex_backend_uses_app_server_stdio_contract() {
                 if String::from_utf8_lossy(&output.bytes).contains("assistant:hello codex")
         )
     }));
+
+    backend.kill(&handle).await.expect("kill codex session");
+}
+
+#[tokio::test]
+async fn codex_backend_replays_terminal_history_to_late_subscribers() {
+    let backend = backend_with_binary(fake_codex_binary());
+    backend.health_check().await.expect("health check");
+
+    let handle = backend
+        .spawn(spawn_spec("sess-codex-history-replay"))
+        .await
+        .expect("spawn codex session");
+
+    let first_stream = backend.subscribe(&handle).await.expect("subscribe first");
+    backend
+        .send_input(&handle, b"history replay check\n")
+        .await
+        .expect("send codex input");
+
+    let first_events = collect_until_terminal_event(first_stream)
+        .await
+        .expect("collect first stream events");
+    let first_output = collect_output_text(&first_events);
+    assert!(first_output.contains("assistant:history replay check"));
+    assert!(first_events
+        .iter()
+        .any(|event| matches!(event, BackendEvent::Done(_))));
+
+    let second_stream = backend.subscribe(&handle).await.expect("subscribe second");
+    let replayed_events = collect_until_terminal_event(second_stream)
+        .await
+        .expect("collect replayed stream events");
+    let replayed_output = collect_output_text(&replayed_events);
+    assert!(replayed_output.contains("assistant:history replay check"));
+    assert!(replayed_events
+        .iter()
+        .any(|event| matches!(event, BackendEvent::Done(_))));
 
     backend.kill(&handle).await.expect("kill codex session");
 }

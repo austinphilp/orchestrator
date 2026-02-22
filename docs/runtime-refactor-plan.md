@@ -7,6 +7,7 @@
 - Implementation update (RRP26 A01): scaffold crates added for `orchestrator-worker-protocol`, `orchestrator-worker-lifecycle`, `orchestrator-worker-eventbus`, `orchestrator-worker-scheduler`, and `orchestrator-worker-runtime`; protocol/event/error trait boundaries and minimal registry/scheduler/event envelope scaffolds are in place; `crates/orchestrator-runtime` is feature-frozen.
 - Implementation update (RRP26 A02): canonical worker protocol IDs/events/errors/session+backend trait contracts are owned by `orchestrator-worker-protocol`; `orchestrator-runtime` re-exports compatibility aliases for existing consumers while protocol imports are adopted downstream where feasible.
 - Implementation update (RRP26 A03): `backend-opencode` now depends on `orchestrator-worker-protocol` for worker runtime contracts and implements `WorkerSessionControl`, `WorkerSessionStreamSource`, and `WorkerBackendInfo` directly; `orchestrator-runtime::WorkerBackend` now has a blanket impl over that trait set for transitional compatibility.
+- Implementation update (RRP26 A04): `backend-codex` now depends on `orchestrator-worker-protocol`, implements `WorkerSessionControl` + `WorkerSessionStreamSource` + `WorkerBackendInfo` directly, and codex harness contract tests target the protocol traits with a legacy-runtime bridge compile check.
 
 ## Why This Refactor
 `orchestrator-runtime` currently combines too many concerns:

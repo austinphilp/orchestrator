@@ -98,8 +98,7 @@ async fn main() -> Result<()> {
         &state,
     ));
     frontend_controller.start().await?;
-    let mut ui = Ui::init()?
-        .with_frontend_controller(frontend_controller.clone());
+    let mut ui = Ui::init()?.with_frontend_controller(frontend_controller.clone());
     app.start_linear_polling(linear_ticketing.as_deref())
         .await?;
     let frontend_snapshot = frontend_controller.snapshot().await?;
@@ -602,7 +601,8 @@ mod tests {
 
     #[test]
     fn planning_resume_instruction_requires_plan_file_and_summary_only_output() {
-        let instruction = resume_instruction_from_ticket(&sample_ticket(), &WorkflowState::Planning);
+        let instruction =
+            resume_instruction_from_ticket(&sample_ticket(), &WorkflowState::Planning);
         assert!(instruction.contains("IMPLEMENTATION_PLAN.md"));
         assert!(instruction.contains("concise 2-4 paragraph summary"));
         assert!(instruction.contains("no code fences or excessive formatting"));
