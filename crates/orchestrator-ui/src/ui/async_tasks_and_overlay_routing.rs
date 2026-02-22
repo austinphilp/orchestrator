@@ -611,7 +611,7 @@ fn render_ticket_picker_overlay_text(overlay: &TicketPickerOverlayState) -> Stri
     let default_profile = workflow_profiles_config_value().default_profile;
     let mut lines = if overlay.new_ticket_mode {
         vec![
-            "Describe ticket | Vim editor (i/Esc) | Enter: create (normal mode) | Shift+Enter: create + start (normal mode) | Esc: cancel"
+            "Describe ticket | Vim editor (i/Esc) | Enter: create | Shift+Enter: create + start | Esc: cancel"
                 .to_owned(),
         ]
     } else {
@@ -931,39 +931,10 @@ fn route_ticket_picker_key(shell_state: &mut UiShellState, key: KeyEvent) -> Rou
 
         match key.code {
             KeyCode::Enter if key.modifiers.is_empty() => {
-                if shell_state.ticket_picker_overlay.new_ticket_brief_editor.mode
-                    == EditorMode::Normal
-                {
-                    shell_state.submit_created_ticket_from_picker(TicketCreateSubmitMode::CreateOnly);
-                } else {
-                    let enter =
-                        edtui_key_input(KeyCode::Enter, KeyModifiers::NONE).expect("enter key conversion");
-                    shell_state
-                        .ticket_picker_overlay
-                        .new_ticket_brief_event_handler
-                        .on_key_event(
-                            enter,
-                            &mut shell_state.ticket_picker_overlay.new_ticket_brief_editor,
-                        );
-                }
+                shell_state.submit_created_ticket_from_picker(TicketCreateSubmitMode::CreateOnly);
             }
             KeyCode::Enter if key.modifiers == KeyModifiers::SHIFT => {
-                if shell_state.ticket_picker_overlay.new_ticket_brief_editor.mode
-                    == EditorMode::Normal
-                {
-                    shell_state
-                        .submit_created_ticket_from_picker(TicketCreateSubmitMode::CreateAndStart);
-                } else {
-                    let enter =
-                        edtui_key_input(KeyCode::Enter, KeyModifiers::NONE).expect("enter key conversion");
-                    shell_state
-                        .ticket_picker_overlay
-                        .new_ticket_brief_event_handler
-                        .on_key_event(
-                            enter,
-                            &mut shell_state.ticket_picker_overlay.new_ticket_brief_editor,
-                        );
-                }
+                shell_state.submit_created_ticket_from_picker(TicketCreateSubmitMode::CreateAndStart);
             }
             _ => {
                 if let Some(key_input) = map_edtui_key_input(key) {
