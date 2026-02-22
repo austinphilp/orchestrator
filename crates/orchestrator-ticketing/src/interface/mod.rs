@@ -1,4 +1,3 @@
-pub use orchestrator_core::TicketingProvider as CoreTicketingProvider;
 use thiserror::Error;
 
 pub use orchestrator_core::{
@@ -37,7 +36,41 @@ impl TicketingProviderKind {
     }
 }
 
-pub trait TicketingProvider: CoreTicketingProvider + Send + Sync {
+#[async_trait::async_trait]
+pub trait TicketingProvider: Send + Sync {
+    fn provider(&self) -> TicketProvider;
+    async fn health_check(&self) -> Result<(), CoreError>;
+    async fn list_tickets(&self, query: TicketQuery) -> Result<Vec<TicketSummary>, CoreError>;
+    async fn list_projects(&self) -> Result<Vec<String>, CoreError> {
+        Ok(Vec::new())
+    }
+    async fn create_ticket(&self, request: CreateTicketRequest)
+        -> Result<TicketSummary, CoreError>;
+    async fn get_ticket(&self, _request: GetTicketRequest) -> Result<TicketDetails, CoreError> {
+        Err(CoreError::DependencyUnavailable(format!(
+            "get_ticket is not implemented by {:?} provider",
+            self.provider()
+        )))
+    }
+    async fn update_ticket_state(&self, request: UpdateTicketStateRequest)
+        -> Result<(), CoreError>;
+    async fn update_ticket_description(
+        &self,
+        _request: UpdateTicketDescriptionRequest,
+    ) -> Result<(), CoreError> {
+        Err(CoreError::DependencyUnavailable(format!(
+            "update_ticket_description is not implemented by {:?} provider",
+            self.provider()
+        )))
+    }
+    async fn archive_ticket(&self, _request: ArchiveTicketRequest) -> Result<(), CoreError> {
+        Err(CoreError::DependencyUnavailable(format!(
+            "archive_ticket is not implemented by {:?} provider",
+            self.provider()
+        )))
+    }
+    async fn add_comment(&self, request: AddTicketCommentRequest) -> Result<(), CoreError>;
+
     fn kind(&self) -> TicketingProviderKind {
         TicketingProviderKind::from_provider(self.provider())
     }
@@ -46,8 +79,6 @@ pub trait TicketingProvider: CoreTicketingProvider + Send + Sync {
         self.kind().as_key()
     }
 }
-
-impl<T> TicketingProvider for T where T: CoreTicketingProvider + Send + Sync + ?Sized {}
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum TicketingProviderError {

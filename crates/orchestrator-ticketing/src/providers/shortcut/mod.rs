@@ -1,7 +1,7 @@
 use crate::interface::{
-    AddTicketCommentRequest, CoreError, CoreTicketingProvider, CreateTicketRequest,
-    GetTicketRequest, TicketAttachment, TicketDetails, TicketId, TicketProvider, TicketQuery,
-    TicketSummary, UpdateTicketDescriptionRequest, UpdateTicketStateRequest,
+    AddTicketCommentRequest, CoreError, CreateTicketRequest, GetTicketRequest, TicketAttachment,
+    TicketDetails, TicketId, TicketProvider, TicketQuery, TicketSummary, TicketingProvider,
+    UpdateTicketDescriptionRequest, UpdateTicketStateRequest,
 };
 use async_trait::async_trait;
 use reqwest::{header, Client};
@@ -318,7 +318,7 @@ impl ShortcutTicketingProvider {
 }
 
 #[async_trait]
-impl CoreTicketingProvider for ShortcutTicketingProvider {
+impl TicketingProvider for ShortcutTicketingProvider {
     fn provider(&self) -> TicketProvider {
         TicketProvider::Shortcut
     }
@@ -874,15 +874,12 @@ struct ShortcutWorkflowState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::interface::{CoreTicketingProvider, TicketingProvider, TicketingProviderKind};
+    use crate::interface::{TicketingProvider, TicketingProviderKind};
 
     #[test]
     fn scaffold_default_uses_shortcut_kind() {
         let provider = ShortcutTicketingProvider::scaffold_default();
-        assert_eq!(
-            CoreTicketingProvider::provider(&provider),
-            TicketProvider::Shortcut
-        );
+        assert_eq!(provider.provider(), TicketProvider::Shortcut);
         assert_eq!(provider.kind(), TicketingProviderKind::Shortcut);
         assert_eq!(provider.provider_key(), "ticketing.shortcut");
     }

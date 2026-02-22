@@ -7,10 +7,10 @@ pub use factory::{
     VcsRepoProviderFactoryConfig, VcsRepoProviderFactoryOutput,
 };
 pub use interface::{
-    CodeHostKind, CodeHostProvider, CoreCodeHostProvider, CoreError, CoreGithubClient,
-    CreatePullRequestRequest, GithubClient, PullRequestCiStatus, PullRequestMergeState,
-    PullRequestRef, PullRequestReviewSummary, PullRequestSummary, RepositoryRef, ReviewerRequest,
-    UrlOpener, VcsRepoProvider, VcsRepoProviderError, VcsRepoProviderKind,
+    CodeHostKind, CodeHostProvider, CoreError, CreatePullRequestRequest, GithubClient,
+    PullRequestCiStatus, PullRequestMergeState, PullRequestRef, PullRequestReviewSummary,
+    PullRequestSummary, RepositoryRef, ReviewerRequest, UrlOpener, VcsRepoProvider,
+    VcsRepoProviderError, VcsRepoProviderKind,
 };
 pub use providers::github_gh_cli::{
     default_system_url_opener, CommandRunner, GitHubGhCliRepoProvider,

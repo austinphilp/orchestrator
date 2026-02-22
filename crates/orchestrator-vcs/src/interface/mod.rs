@@ -1,6 +1,7 @@
+use std::path::{Path, PathBuf};
+
 use thiserror::Error;
 
-pub use orchestrator_core::VcsProvider as CoreVcsProvider;
 pub use orchestrator_core::{
     CoreError, CreateWorktreeRequest, DeleteWorktreeRequest, RepositoryRef, WorktreeId,
     WorktreeStatus, WorktreeSummary,
@@ -26,12 +27,25 @@ impl VcsProviderKind {
     }
 }
 
-pub trait VcsProvider: CoreVcsProvider + Send + Sync {
+#[async_trait::async_trait]
+pub trait VcsProvider: Send + Sync {
     fn kind(&self) -> VcsProviderKind;
 
     fn provider_key(&self) -> &'static str {
         self.kind().as_key()
     }
+
+    async fn health_check(&self) -> Result<(), CoreError>;
+    async fn discover_repositories(
+        &self,
+        roots: &[PathBuf],
+    ) -> Result<Vec<RepositoryRef>, CoreError>;
+    async fn create_worktree(
+        &self,
+        request: CreateWorktreeRequest,
+    ) -> Result<WorktreeSummary, CoreError>;
+    async fn delete_worktree(&self, request: DeleteWorktreeRequest) -> Result<(), CoreError>;
+    async fn worktree_status(&self, worktree_path: &Path) -> Result<WorktreeStatus, CoreError>;
 }
 
 pub trait WorktreeManager: VcsProvider {}

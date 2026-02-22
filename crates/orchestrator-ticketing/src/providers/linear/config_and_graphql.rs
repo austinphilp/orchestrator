@@ -6,9 +6,9 @@ use std::time::{Duration, SystemTime};
 use async_trait::async_trait;
 use crate::interface::{
     AddTicketCommentRequest, ArchiveTicketRequest, CoreError, CreateTicketRequest,
-    CoreTicketingProvider, GetTicketRequest, TicketAttachment, TicketDetails, TicketId,
+    GetTicketRequest, TicketAttachment, TicketDetails, TicketId,
     TicketProvider, TicketQuery, TicketSummary, UpdateTicketDescriptionRequest,
-    UpdateTicketStateRequest, WorkflowState,
+    UpdateTicketStateRequest, WorkflowState, TicketingProvider,
 };
 use serde::Deserialize;
 use serde_json::json;

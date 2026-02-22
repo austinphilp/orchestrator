@@ -1,6 +1,6 @@
 use orchestrator_ticketing::{
-    AddTicketCommentRequest, CoreError, CoreTicketingProvider, CreateTicketRequest,
-    GetTicketRequest, LinearTicketingProvider, ShortcutTicketingProvider, TicketId, TicketProvider,
+    AddTicketCommentRequest, CoreError, CreateTicketRequest, GetTicketRequest,
+    LinearTicketingProvider, ShortcutTicketingProvider, TicketId, TicketProvider,
     TicketingProvider, TicketingProviderKind, UpdateTicketDescriptionRequest,
     UpdateTicketStateRequest,
 };
@@ -11,10 +11,10 @@ async fn assert_shared_ticketing_contract<P>(
     valid_ticket_id: TicketId,
     invalid_ticket_id: TicketId,
 ) where
-    P: TicketingProvider + CoreTicketingProvider,
+    P: TicketingProvider,
 {
     let expected_kind = TicketingProviderKind::from_provider(expected_provider.clone());
-    assert_eq!(CoreTicketingProvider::provider(provider), expected_provider);
+    assert_eq!(provider.provider(), expected_provider);
     assert_eq!(provider.kind(), expected_kind);
     assert_eq!(provider.provider_key(), expected_kind.as_key());
 

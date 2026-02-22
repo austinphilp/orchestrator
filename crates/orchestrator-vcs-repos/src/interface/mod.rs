@@ -1,6 +1,3 @@
-pub use orchestrator_core::{
-    CodeHostProvider as CoreCodeHostProvider, GithubClient as CoreGithubClient,
-};
 use thiserror::Error;
 
 pub use orchestrator_core::{
@@ -29,13 +26,45 @@ impl VcsRepoProviderKind {
     }
 }
 
-pub trait GithubClient: CoreGithubClient + Send + Sync {}
+#[async_trait::async_trait]
+pub trait GithubClient: Send + Sync {
+    async fn health_check(&self) -> Result<(), CoreError>;
+}
 
-impl<T> GithubClient for T where T: CoreGithubClient + Send + Sync + ?Sized {}
-
-pub trait CodeHostProvider: CoreCodeHostProvider + Send + Sync {}
-
-impl<T> CodeHostProvider for T where T: CoreCodeHostProvider + Send + Sync + ?Sized {}
+#[async_trait::async_trait]
+pub trait CodeHostProvider: Send + Sync {
+    fn kind(&self) -> CodeHostKind;
+    async fn health_check(&self) -> Result<(), CoreError>;
+    async fn create_draft_pull_request(
+        &self,
+        request: CreatePullRequestRequest,
+    ) -> Result<PullRequestSummary, CoreError>;
+    async fn mark_ready_for_review(&self, pr: &PullRequestRef) -> Result<(), CoreError>;
+    async fn request_reviewers(
+        &self,
+        pr: &PullRequestRef,
+        reviewers: ReviewerRequest,
+    ) -> Result<(), CoreError>;
+    async fn list_waiting_for_my_review(&self) -> Result<Vec<PullRequestSummary>, CoreError>;
+    async fn get_pull_request_merge_state(
+        &self,
+        pr: &PullRequestRef,
+    ) -> Result<PullRequestMergeState, CoreError>;
+    async fn list_pull_request_ci_statuses(
+        &self,
+        _pr: &PullRequestRef,
+    ) -> Result<Vec<PullRequestCiStatus>, CoreError> {
+        Ok(Vec::new())
+    }
+    async fn merge_pull_request(&self, pr: &PullRequestRef) -> Result<(), CoreError>;
+    async fn find_open_pull_request_for_branch(
+        &self,
+        _repository: &RepositoryRef,
+        _head_branch: &str,
+    ) -> Result<Option<PullRequestRef>, CoreError> {
+        Ok(None)
+    }
+}
 
 pub trait VcsRepoProvider: CodeHostProvider + Send + Sync {
     fn kind(&self) -> VcsRepoProviderKind;
@@ -56,15 +85,15 @@ pub enum VcsRepoProviderError {
 #[cfg(test)]
 mod tests {
     use super::{
-        CodeHostKind, CodeHostProvider, CoreCodeHostProvider, CoreError, CreatePullRequestRequest,
-        PullRequestCiStatus, PullRequestMergeState, PullRequestRef, PullRequestSummary,
-        RepositoryRef, ReviewerRequest, VcsRepoProvider, VcsRepoProviderKind,
+        CodeHostKind, CodeHostProvider, CoreError, CreatePullRequestRequest, PullRequestCiStatus,
+        PullRequestMergeState, PullRequestRef, PullRequestSummary, RepositoryRef, ReviewerRequest,
+        VcsRepoProvider, VcsRepoProviderKind,
     };
 
     struct StubCodeHostProvider;
 
     #[async_trait::async_trait]
-    impl CoreCodeHostProvider for StubCodeHostProvider {
+    impl CodeHostProvider for StubCodeHostProvider {
         fn kind(&self) -> CodeHostKind {
             CodeHostKind::Other("stub".to_owned())
         }

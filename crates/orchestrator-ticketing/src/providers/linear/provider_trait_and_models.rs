@@ -1,5 +1,5 @@
 #[async_trait]
-impl CoreTicketingProvider for LinearTicketingProvider {
+impl TicketingProvider for LinearTicketingProvider {
     fn provider(&self) -> TicketProvider {
         TicketProvider::Linear
     }

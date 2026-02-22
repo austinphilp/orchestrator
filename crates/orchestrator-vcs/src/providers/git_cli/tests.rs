@@ -2,8 +2,7 @@
 mod tests {
     use super::*;
     use crate::interface::{
-        CoreVcsProvider, CreateWorktreeRequest, VcsProvider as LocalVcsProvider, WorktreeId,
-        WorktreeSummary,
+        CreateWorktreeRequest, VcsProvider as LocalVcsProvider, WorktreeId, WorktreeSummary,
     };
     use std::collections::VecDeque;
     use std::sync::Mutex;

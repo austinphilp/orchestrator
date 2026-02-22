@@ -7,8 +7,8 @@ pub use factory::{
     VcsProviderFactoryConfig, VcsProviderFactoryOutput,
 };
 pub use interface::{
-    CoreError, CoreVcsProvider, CreateWorktreeRequest, DeleteWorktreeRequest, RepositoryRef,
-    VcsProvider, VcsProviderError, VcsProviderKind, WorktreeId, WorktreeManager, WorktreeStatus,
+    CoreError, CreateWorktreeRequest, DeleteWorktreeRequest, RepositoryRef, VcsProvider,
+    VcsProviderError, VcsProviderKind, WorktreeId, WorktreeManager, WorktreeStatus,
     WorktreeSummary,
 };
 pub use providers::git_cli::{

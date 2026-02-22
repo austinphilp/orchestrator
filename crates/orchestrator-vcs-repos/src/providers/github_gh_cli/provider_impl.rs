@@ -5,7 +5,7 @@ use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 
 use crate::interface::{
-    CodeHostKind, CoreCodeHostProvider, CoreError, CoreGithubClient, CreatePullRequestRequest,
+    CodeHostKind, CodeHostProvider, CoreError, CreatePullRequestRequest, GithubClient,
     PullRequestCiStatus, PullRequestMergeState, PullRequestRef, PullRequestReviewSummary,
     PullRequestSummary, RepositoryRef, ReviewerRequest, UrlOpener,
 };
@@ -658,20 +658,20 @@ fn validate_command_binary_path(
 }
 
 #[async_trait::async_trait]
-impl<R: CommandRunner> CoreGithubClient for GitHubGhCliRepoProvider<R> {
+impl<R: CommandRunner> GithubClient for GitHubGhCliRepoProvider<R> {
     async fn health_check(&self) -> Result<(), CoreError> {
         self.run_gh(&Self::health_check_args(), None).map(|_| ())
     }
 }
 
 #[async_trait::async_trait]
-impl<R: CommandRunner> CoreCodeHostProvider for GitHubGhCliRepoProvider<R> {
+impl<R: CommandRunner> CodeHostProvider for GitHubGhCliRepoProvider<R> {
     fn kind(&self) -> CodeHostKind {
         CodeHostKind::Github
     }
 
     async fn health_check(&self) -> Result<(), CoreError> {
-        CoreGithubClient::health_check(self).await
+        GithubClient::health_check(self).await
     }
 
     async fn create_draft_pull_request(
@@ -1170,8 +1170,8 @@ struct GhBranchPullRequest {
 mod tests {
     use super::*;
     use crate::interface::{
-        CoreCodeHostProvider as CodeHostProvider, CoreGithubClient as GithubClient,
-        CreatePullRequestRequest, UrlOpener, VcsRepoProvider, VcsRepoProviderKind,
+        CodeHostProvider, CreatePullRequestRequest, GithubClient, UrlOpener, VcsRepoProvider,
+        VcsRepoProviderKind,
     };
     use std::collections::VecDeque;
     use std::path::{Path, PathBuf};

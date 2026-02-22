@@ -18,14 +18,12 @@ fn validate_command_binary_path(
     )))
 }
 
+#[async_trait::async_trait]
 impl<R: CommandRunner> crate::interface::VcsProvider for GitCliVcsProvider<R> {
     fn kind(&self) -> crate::interface::VcsProviderKind {
         crate::interface::VcsProviderKind::GitCli
     }
-}
 
-#[async_trait::async_trait]
-impl<R: CommandRunner> crate::interface::CoreVcsProvider for GitCliVcsProvider<R> {
     async fn health_check(&self) -> Result<(), CoreError> {
         self.run_git(&Self::health_check_args())?;
         Ok(())
