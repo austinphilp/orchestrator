@@ -138,6 +138,7 @@ dependencies = [
  "axum",
  "futures-util",
  "orchestrator-runtime",
+ "orchestrator-worker-protocol",
  "reqwest",
  "serde",
  "serde_json",

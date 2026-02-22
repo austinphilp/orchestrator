@@ -5,7 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
-orchestrator-runtime = { path = "../orchestrator-runtime" }
+orchestrator-worker-protocol = { path = "../orchestrator-worker-protocol" }
 async-trait.workspace = true
 futures-util = "0.3"
 reqwest = { workspace = true, features = ["stream"] }
@@ -16,4 +16,5 @@ tracing.workspace = true
 
 [dev-dependencies]
 axum = "0.8"
+orchestrator-runtime = { path = "../orchestrator-runtime" }
 tokio.workspace = true

@@ -49,9 +49,36 @@ pub trait WorkerBackend: SessionLifecycle + Send + Sync {
     }
 }
 
+#[async_trait]
+impl<T> WorkerBackend for T
+where
+    T: SessionLifecycle + WorkerSessionStreamSource + WorkerBackendInfo + Send + Sync,
+{
+    fn kind(&self) -> BackendKind {
+        WorkerBackendInfo::kind(self)
+    }
+
+    fn capabilities(&self) -> BackendCapabilities {
+        WorkerBackendInfo::capabilities(self)
+    }
+
+    async fn health_check(&self) -> RuntimeResult<()> {
+        WorkerBackendInfo::health_check(self).await
+    }
+
+    async fn subscribe(&self, session: &SessionHandle) -> RuntimeResult<WorkerEventStream> {
+        WorkerSessionStreamSource::subscribe(self, session).await
+    }
+
+    async fn harness_session_id(&self, session: &SessionHandle) -> RuntimeResult<Option<String>> {
+        WorkerSessionStreamSource::harness_session_id(self, session).await
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
 
     struct EmptyWorkerStream;
 
@@ -119,5 +146,113 @@ mod tests {
             RuntimeError::Process("boom".to_owned()).to_string(),
             "runtime process error: boom"
         );
+    }
+
+    #[derive(Debug)]
+    struct ProtocolOnlyBackend;
+
+    #[async_trait]
+    impl SessionLifecycle for ProtocolOnlyBackend {
+        async fn spawn(&self, spec: SpawnSpec) -> RuntimeResult<SessionHandle> {
+            Ok(SessionHandle {
+                session_id: spec.session_id,
+                backend: BackendKind::OpenCode,
+            })
+        }
+
+        async fn kill(&self, _session: &SessionHandle) -> RuntimeResult<()> {
+            Ok(())
+        }
+
+        async fn send_input(&self, _session: &SessionHandle, _input: &[u8]) -> RuntimeResult<()> {
+            Ok(())
+        }
+
+        async fn resize(
+            &self,
+            _session: &SessionHandle,
+            _cols: u16,
+            _rows: u16,
+        ) -> RuntimeResult<()> {
+            Ok(())
+        }
+    }
+
+    #[async_trait]
+    impl WorkerSessionStreamSource for ProtocolOnlyBackend {
+        async fn subscribe(&self, _session: &SessionHandle) -> RuntimeResult<WorkerEventStream> {
+            Ok(Box::new(EmptyWorkerStream))
+        }
+
+        async fn harness_session_id(
+            &self,
+            _session: &SessionHandle,
+        ) -> RuntimeResult<Option<String>> {
+            Ok(Some("harness-thread-1".to_owned()))
+        }
+    }
+
+    #[async_trait]
+    impl WorkerBackendInfo for ProtocolOnlyBackend {
+        fn kind(&self) -> BackendKind {
+            BackendKind::OpenCode
+        }
+
+        fn capabilities(&self) -> BackendCapabilities {
+            BackendCapabilities {
+                structured_events: true,
+                ..BackendCapabilities::default()
+            }
+        }
+
+        async fn health_check(&self) -> RuntimeResult<()> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn worker_backend_blanket_impl_bridges_protocol_trait_set() {
+        let backend = ProtocolOnlyBackend;
+        let worker_backend: &dyn WorkerBackend = &backend;
+        let session = worker_backend
+            .spawn(SpawnSpec {
+                session_id: RuntimeSessionId::new("sess-bridge"),
+                workdir: PathBuf::from("."),
+                model: None,
+                instruction_prelude: None,
+                environment: Vec::new(),
+            })
+            .await
+            .expect("spawn through worker backend trait");
+
+        assert_eq!(worker_backend.kind(), BackendKind::OpenCode);
+        assert_eq!(
+            worker_backend.capabilities(),
+            BackendCapabilities {
+                structured_events: true,
+                ..BackendCapabilities::default()
+            }
+        );
+        worker_backend
+            .health_check()
+            .await
+            .expect("health check through worker backend trait");
+        assert_eq!(
+            worker_backend
+                .harness_session_id(&session)
+                .await
+                .expect("harness session id through worker backend trait"),
+            Some("harness-thread-1".to_owned())
+        );
+
+        let mut stream = worker_backend
+            .subscribe(&session)
+            .await
+            .expect("subscribe through worker backend trait");
+        assert!(stream
+            .next_event()
+            .await
+            .expect("next event through worker backend trait")
+            .is_none());
     }
 }

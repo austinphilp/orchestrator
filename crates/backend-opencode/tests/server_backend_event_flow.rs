@@ -8,9 +8,11 @@ use axum::http::StatusCode;
 use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use backend_opencode::{OpenCodeBackend, OpenCodeBackendConfig};
-use orchestrator_runtime::{
-    BackendEvent, BackendKind, RuntimeResult, RuntimeSessionId, SessionHandle, SessionLifecycle,
-    SpawnSpec, WorkerBackend, WorkerEventStream,
+use orchestrator_worker_protocol::{
+    WorkerBackendInfo, WorkerBackendKind as BackendKind, WorkerEvent as BackendEvent,
+    WorkerEventStream, WorkerRuntimeResult as RuntimeResult, WorkerSessionControl,
+    WorkerSessionHandle as SessionHandle, WorkerSessionId as RuntimeSessionId,
+    WorkerSessionStreamSource, WorkerSpawnRequest as SpawnSpec,
 };
 use serde::{Deserialize, Serialize};
 use tokio::net::TcpListener;

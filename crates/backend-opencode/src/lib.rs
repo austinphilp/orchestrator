@@ -11,12 +11,19 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use futures_util::StreamExt;
-use orchestrator_runtime::{
-    BackendArtifactEvent, BackendArtifactKind, BackendBlockedEvent, BackendCapabilities,
-    BackendCheckpointEvent, BackendCrashedEvent, BackendDoneEvent, BackendEvent, BackendKind,
-    BackendNeedsInputEvent, BackendNeedsInputOption, BackendNeedsInputQuestion, BackendOutputEvent,
-    BackendOutputStream, RuntimeArtifactId, RuntimeError, RuntimeResult, RuntimeSessionId,
-    SessionHandle, SpawnSpec, WorkerBackend, WorkerEventStream, WorkerEventSubscription,
+use orchestrator_worker_protocol::{
+    WorkerArtifactEvent as BackendArtifactEvent, WorkerArtifactId as RuntimeArtifactId,
+    WorkerArtifactKind as BackendArtifactKind, WorkerBackendCapabilities as BackendCapabilities,
+    WorkerBackendInfo, WorkerBackendKind as BackendKind, WorkerBlockedEvent as BackendBlockedEvent,
+    WorkerCheckpointEvent as BackendCheckpointEvent, WorkerCrashedEvent as BackendCrashedEvent,
+    WorkerDoneEvent as BackendDoneEvent, WorkerEvent as BackendEvent, WorkerEventStream,
+    WorkerEventSubscription, WorkerNeedsInputEvent as BackendNeedsInputEvent,
+    WorkerNeedsInputOption as BackendNeedsInputOption,
+    WorkerNeedsInputQuestion as BackendNeedsInputQuestion, WorkerOutputEvent as BackendOutputEvent,
+    WorkerOutputStream as BackendOutputStream, WorkerRuntimeError as RuntimeError,
+    WorkerRuntimeResult as RuntimeResult, WorkerSessionControl,
+    WorkerSessionHandle as SessionHandle, WorkerSessionId as RuntimeSessionId,
+    WorkerSessionStreamSource, WorkerSpawnRequest as SpawnSpec,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -902,7 +909,7 @@ fn absolutize_path(path: PathBuf) -> PathBuf {
 }
 
 #[async_trait]
-impl orchestrator_runtime::SessionLifecycle for OpenCodeBackend {
+impl WorkerSessionControl for OpenCodeBackend {
     async fn spawn(&self, spec: SpawnSpec) -> RuntimeResult<SessionHandle> {
         validate_command_binary_path(&self.config.binary, self.config.allow_unsafe_command_paths)?;
         let session_id = spec.session_id.clone();
@@ -1000,7 +1007,17 @@ fn validate_command_binary_path(
 }
 
 #[async_trait]
-impl WorkerBackend for OpenCodeBackend {
+impl WorkerSessionStreamSource for OpenCodeBackend {
+    async fn subscribe(&self, session: &SessionHandle) -> RuntimeResult<WorkerEventStream> {
+        validate_session_backend(session, self.backend_kind.clone())?;
+        let session = self.session(&session.session_id).await?;
+        let output = session.event_tx.subscribe();
+        Ok(Box::new(OpenCodeEventSubscription { output }))
+    }
+}
+
+#[async_trait]
+impl WorkerBackendInfo for OpenCodeBackend {
     fn kind(&self) -> BackendKind {
         self.backend_kind.clone()
     }
@@ -1013,13 +1030,6 @@ impl WorkerBackend for OpenCodeBackend {
         validate_command_binary_path(&self.config.binary, self.config.allow_unsafe_command_paths)?;
         let base_url = self.ensure_server_base_url().await?;
         self.wait_for_server_health(&base_url).await
-    }
-
-    async fn subscribe(&self, session: &SessionHandle) -> RuntimeResult<WorkerEventStream> {
-        validate_session_backend(session, self.backend_kind.clone())?;
-        let session = self.session(&session.session_id).await?;
-        let output = session.event_tx.subscribe();
-        Ok(Box::new(OpenCodeEventSubscription { output }))
     }
 }
 
