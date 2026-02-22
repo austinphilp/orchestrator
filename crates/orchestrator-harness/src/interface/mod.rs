@@ -1,4 +1,13 @@
-use orchestrator_worker_protocol::{WorkerEvent, WorkerSessionHandle, WorkerSpawnRequest};
+pub use orchestrator_worker_protocol::{
+    WorkerBackendCapabilities as HarnessBackendCapabilities,
+    WorkerBackendInfo as HarnessBackendInfo, WorkerBackendKind as HarnessBackendKind,
+    WorkerEvent as HarnessEvent, WorkerEventStream as HarnessEventStream,
+    WorkerEventSubscription as HarnessEventSubscription, WorkerRuntimeError as HarnessRuntimeError,
+    WorkerRuntimeResult as HarnessRuntimeResult, WorkerSessionControl as HarnessSessionControl,
+    WorkerSessionHandle as HarnessSessionHandle, WorkerSessionId as HarnessSessionId,
+    WorkerSessionStreamSource as HarnessSessionStreamSource,
+    WorkerSpawnRequest as HarnessSpawnRequest,
+};
 use thiserror::Error;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -26,9 +35,9 @@ impl HarnessProviderKind {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HarnessProviderSessionContract {
-    pub spawn_request: WorkerSpawnRequest,
-    pub session_handle: WorkerSessionHandle,
-    pub bootstrap_events: Vec<WorkerEvent>,
+    pub spawn_request: HarnessSpawnRequest,
+    pub session_handle: HarnessSessionHandle,
+    pub bootstrap_events: Vec<HarnessEvent>,
 }
 
 pub trait HarnessProvider: Send + Sync {
@@ -37,6 +46,26 @@ pub trait HarnessProvider: Send + Sync {
     fn provider_key(&self) -> &'static str {
         self.kind().as_key()
     }
+}
+
+pub trait HarnessRuntimeProvider:
+    HarnessProvider
+    + HarnessSessionControl
+    + HarnessSessionStreamSource
+    + HarnessBackendInfo
+    + Send
+    + Sync
+{
+}
+
+impl<T> HarnessRuntimeProvider for T where
+    T: HarnessProvider
+        + HarnessSessionControl
+        + HarnessSessionStreamSource
+        + HarnessBackendInfo
+        + Send
+        + Sync
+{
 }
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]

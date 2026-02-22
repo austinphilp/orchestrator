@@ -1,15 +1,29 @@
 use crate::interface::{HarnessProviderError, HarnessProviderKind};
 use crate::providers::{codex::CodexHarnessProvider, opencode::OpenCodeHarnessProvider};
+use std::fmt;
 
 const SUPPORTED_PROVIDER_KEYS: [&str; 2] = [
     HarnessProviderKind::OpenCode.as_key(),
     HarnessProviderKind::Codex.as_key(),
 ];
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone)]
 pub enum HarnessProviderFactoryOutput {
     OpenCode(OpenCodeHarnessProvider),
     Codex(CodexHarnessProvider),
+}
+
+impl fmt::Debug for HarnessProviderFactoryOutput {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let kind = match self {
+            Self::OpenCode(_) => HarnessProviderKind::OpenCode.as_key(),
+            Self::Codex(_) => HarnessProviderKind::Codex.as_key(),
+        };
+        formatter
+            .debug_struct("HarnessProviderFactoryOutput")
+            .field("provider_key", &kind)
+            .finish()
+    }
 }
 
 pub fn supported_provider_keys() -> &'static [&'static str] {
@@ -44,7 +58,20 @@ mod tests {
         build_provider, resolve_provider_kind, supported_provider_keys,
         HarnessProviderFactoryOutput, SUPPORTED_PROVIDER_KEYS,
     };
-    use crate::interface::HarnessProviderKind;
+    use crate::interface::{
+        HarnessBackendInfo, HarnessProvider, HarnessProviderKind, HarnessRuntimeProvider,
+        HarnessSessionControl, HarnessSessionStreamSource,
+    };
+
+    fn assert_runtime_provider_contract<T>(provider: &T)
+    where
+        T: HarnessRuntimeProvider
+            + HarnessSessionControl
+            + HarnessSessionStreamSource
+            + HarnessBackendInfo,
+    {
+        let _ = provider;
+    }
 
     #[test]
     fn supported_provider_keys_are_namespaced() {
@@ -82,10 +109,18 @@ mod tests {
         let opencode = build_provider("harness.opencode").expect("build opencode provider");
         let codex = build_provider("harness.codex").expect("build codex provider");
 
-        assert!(matches!(
-            opencode,
-            HarnessProviderFactoryOutput::OpenCode(_)
-        ));
-        assert!(matches!(codex, HarnessProviderFactoryOutput::Codex(_)));
+        match opencode {
+            HarnessProviderFactoryOutput::OpenCode(provider) => {
+                assert_runtime_provider_contract(&provider);
+                assert_eq!(HarnessProvider::kind(&provider), HarnessProviderKind::OpenCode);
+            }
+            HarnessProviderFactoryOutput::Codex(_) => panic!("expected opencode provider"),
+        }
+        match codex {
+            HarnessProviderFactoryOutput::Codex(provider) => {
+                assert_eq!(provider.kind(), HarnessProviderKind::Codex);
+            }
+            HarnessProviderFactoryOutput::OpenCode(_) => panic!("expected codex provider"),
+        }
     }
 }

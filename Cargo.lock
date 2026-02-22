@@ -135,16 +135,12 @@ dependencies = [
 name = "backend-opencode"
 version = "0.1.0"
 dependencies = [
- "async-trait",
  "axum",
- "futures-util",
  "orchestrator-core",
+ "orchestrator-harness",
  "orchestrator-worker-protocol",
- "reqwest",
  "serde",
- "serde_json",
  "tokio",
- "tracing",
 ]
 
 [[package]]
@@ -1449,7 +1445,6 @@ dependencies = [
  "anyhow",
  "async-trait",
  "backend-codex",
- "backend-opencode",
  "integration-git",
  "integration-linear",
  "integration-shortcut",
@@ -1502,8 +1497,16 @@ dependencies = [
 name = "orchestrator-harness"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
+ "axum",
+ "futures-util",
  "orchestrator-worker-protocol",
+ "reqwest",
+ "serde",
+ "serde_json",
  "thiserror 2.0.18",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

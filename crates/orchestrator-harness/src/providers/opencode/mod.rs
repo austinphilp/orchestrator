@@ -1,35 +1,19 @@
-mod config;
-mod transport;
+mod provider_impl;
 
 use crate::interface::{HarnessProvider, HarnessProviderKind};
-pub use config::OpenCodeHarnessProviderConfig;
-pub use transport::OpenCodeHarnessTransport;
 
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct OpenCodeHarnessProvider {
-    config: OpenCodeHarnessProviderConfig,
-    transport: OpenCodeHarnessTransport,
-}
+pub use provider_impl::{OpenCodeBackend, OpenCodeBackendConfig};
 
-impl OpenCodeHarnessProvider {
-    pub fn new(config: OpenCodeHarnessProviderConfig, transport: OpenCodeHarnessTransport) -> Self {
-        Self { config, transport }
-    }
+pub type OpenCodeHarnessProvider = OpenCodeBackend;
+pub type OpenCodeHarnessProviderConfig = OpenCodeBackendConfig;
 
+impl OpenCodeBackend {
     pub fn scaffold_default() -> Self {
-        Self::default()
-    }
-
-    pub fn config(&self) -> &OpenCodeHarnessProviderConfig {
-        &self.config
-    }
-
-    pub fn transport(&self) -> &OpenCodeHarnessTransport {
-        &self.transport
+        Self::new(OpenCodeBackendConfig::default())
     }
 }
 
-impl HarnessProvider for OpenCodeHarnessProvider {
+impl HarnessProvider for OpenCodeBackend {
     fn kind(&self) -> HarnessProviderKind {
         HarnessProviderKind::OpenCode
     }
@@ -45,7 +29,5 @@ mod tests {
         let provider = OpenCodeHarnessProvider::scaffold_default();
         assert_eq!(provider.kind(), HarnessProviderKind::OpenCode);
         assert_eq!(provider.provider_key(), "harness.opencode");
-        assert_eq!(provider.config().binary_name, "opencode");
-        assert_eq!(provider.transport().protocol, "http");
     }
 }

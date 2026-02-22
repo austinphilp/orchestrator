@@ -1,6 +1,5 @@
 use anyhow::Result;
 use backend_codex::{CodexBackend, CodexBackendConfig};
-use backend_opencode::{OpenCodeBackend, OpenCodeBackendConfig};
 use integration_linear::{
     LinearConfig, LinearRuntimeSettings, LinearTicketingProvider, WorkflowStateMapSetting,
 };
@@ -15,6 +14,7 @@ use orchestrator_core::{
     WorkflowState,
 };
 use orchestrator_github::{GhCliClient, ProcessCommandRunner as GhProcessCommandRunner};
+use orchestrator_harness::{OpenCodeHarnessProvider, OpenCodeHarnessProviderConfig};
 use orchestrator_supervisor::OpenRouterSupervisor;
 use orchestrator_ui::Ui;
 use std::path::{Path, PathBuf};
@@ -354,18 +354,20 @@ fn build_harness_provider(
     provider: &str,
 ) -> Result<Arc<dyn WorkerBackend + Send + Sync>, CoreError> {
     match provider {
-        "opencode" => Ok(Arc::new(OpenCodeBackend::new(OpenCodeBackendConfig {
-            binary: PathBuf::from(config.runtime.opencode_binary.as_str()),
-            base_args: Vec::new(),
-            output_buffer: 256,
-            server_base_url: Some(config.runtime.opencode_server_base_url.clone()),
-            server_startup_timeout: std::time::Duration::from_secs(
-                config.runtime.harness_server_startup_timeout_secs,
-            ),
-            allow_unsafe_command_paths: config.runtime.allow_unsafe_command_paths,
-            harness_log_raw_events: config.runtime.harness_log_raw_events,
-            harness_log_normalized_events: config.runtime.harness_log_normalized_events,
-        }))),
+        "opencode" => Ok(Arc::new(OpenCodeHarnessProvider::new(
+            OpenCodeHarnessProviderConfig {
+                binary: PathBuf::from(config.runtime.opencode_binary.as_str()),
+                base_args: Vec::new(),
+                output_buffer: 256,
+                server_base_url: Some(config.runtime.opencode_server_base_url.clone()),
+                server_startup_timeout: std::time::Duration::from_secs(
+                    config.runtime.harness_server_startup_timeout_secs,
+                ),
+                allow_unsafe_command_paths: config.runtime.allow_unsafe_command_paths,
+                harness_log_raw_events: config.runtime.harness_log_raw_events,
+                harness_log_normalized_events: config.runtime.harness_log_normalized_events,
+            },
+        ))),
         "codex" => Ok(Arc::new(CodexBackend::new(CodexBackendConfig {
             binary: PathBuf::from(config.runtime.codex_binary.as_str()),
             base_args: Vec::new(),
