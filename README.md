@@ -110,7 +110,6 @@ ticket_picker_priority_states = ["In Progress", "Final Approval", "Todo", "Backl
 transcript_line_limit = 100
 background_session_refresh_secs = 15
 session_info_background_refresh_secs = 15
-full_redraw_interval_secs = 300
 ```
 
 Directory layout defaults:

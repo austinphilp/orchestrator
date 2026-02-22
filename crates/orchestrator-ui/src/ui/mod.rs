@@ -9253,8 +9253,6 @@ impl Ui {
     }
 
     pub fn run(&mut self, status: &str, projection: &ProjectionState) -> io::Result<()> {
-        const FULL_REDRAW_INTERVAL: Duration = Duration::from_secs(1);
-
         let mut shell_state = UiShellState::new_with_integrations_and_config(
             status.to_owned(),
             projection.clone(),
@@ -9268,7 +9266,6 @@ impl Ui {
         shell_state.set_frontend_terminal_streaming_enabled(self.frontend_controller.is_some());
         let mut force_draw = true;
         let mut last_animation_frame = Instant::now();
-        let mut last_full_redraw_at = Instant::now();
         let mut cached_ui_state: Option<UiState> = None;
         let mut frontend_event_receiver =
             spawn_frontend_event_bridge(self.frontend_controller.clone());
@@ -9296,25 +9293,16 @@ impl Ui {
             let animation_frame_ready = animation_frame_interval
                 .map(|interval| now.duration_since(last_animation_frame) >= interval)
                 .unwrap_or(false);
-            let full_redraw_interval = FULL_REDRAW_INTERVAL;
-            let full_redraw_due = now.duration_since(last_full_redraw_at) >= full_redraw_interval;
             let should_draw = force_draw
                 || changed
-                || full_redraw_due
                 || (animation_frame_interval.is_some() && animation_frame_ready);
             let should_refresh_ui_state = changed
                 || cached_ui_state.is_none()
-                || full_redraw_due
                 || matches!(animation_state, AnimationState::ResolvedOnly) && animation_frame_ready;
 
             if should_draw {
                 if animation_frame_ready {
                     last_animation_frame = now;
-                }
-                if full_redraw_due {
-                    self.terminal.clear()?;
-                    shell_state.invalidate_draw_caches();
-                    cached_ui_state = None;
                 }
                 let ui_state = if should_refresh_ui_state {
                     let state = shell_state.ui_state_for_draw(now);
@@ -9605,9 +9593,6 @@ impl Ui {
                         );
                     }
                 })?;
-                if full_redraw_due {
-                    last_full_redraw_at = now;
-                }
 
                 if shell_state.ticket_picker_overlay.has_repository_prompt()
                     || shell_state.terminal_needs_input_is_note_insert_mode()
