@@ -6570,7 +6570,7 @@ mod tests {
             shell_state.view_stack.active_center(),
             Some(CenterView::TerminalView { session_id }) if session_id.as_str() == "sess-decision"
         ));
-        assert_eq!(shell_state.mode, UiMode::Terminal);
+        assert_eq!(shell_state.mode, UiMode::Insert);
     }
 
     #[test]

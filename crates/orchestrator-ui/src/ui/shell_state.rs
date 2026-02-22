@@ -436,6 +436,7 @@ impl UiShellState {
         if let Some(session_id) = terminal_session_id {
             self.ensure_terminal_stream(session_id.clone());
             let _ = self.flush_deferred_terminal_output_for_session(&session_id);
+            self.enter_insert_mode_for_current_focus();
             self.schedule_session_info_summary_refresh_for_active_session();
         }
     }
@@ -475,6 +476,7 @@ impl UiShellState {
         });
         self.ensure_terminal_stream(session_id.clone());
         let _ = self.flush_deferred_terminal_output_for_session(&session_id);
+        self.enter_insert_mode_for_current_focus();
         self.status_warning = None;
 
         if acknowledge_selection {
@@ -811,6 +813,7 @@ impl UiShellState {
         }
         self.ensure_terminal_stream(session_id.clone());
         let _ = self.flush_deferred_terminal_output_for_session(&session_id);
+        self.enter_insert_mode_for_current_focus();
         self.schedule_session_info_summary_refresh_for_active_session();
     }
 
@@ -3373,6 +3376,7 @@ impl UiShellState {
                     session_id: new_session_id,
                 });
                 self.ensure_terminal_stream(started_session);
+                self.enter_insert_mode_for_current_focus();
                 let labels = session_display_labels(&self.domain, session_id);
                 self.status_warning = Some(format!(
                     "terminal {} was not found; opened a fresh terminal",
@@ -4582,8 +4586,8 @@ impl UiShellState {
                 let _ = self.activate_terminal_needs_input(true);
             }
             self.snap_active_terminal_output_to_bottom();
-            self.schedule_session_info_summary_refresh_for_active_session();
             self.apply_ui_mode(UiMode::Insert);
+            self.schedule_session_info_summary_refresh_for_active_session();
             return;
         }
 
