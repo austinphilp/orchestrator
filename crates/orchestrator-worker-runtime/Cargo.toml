@@ -1,0 +1,11 @@
+[package]
+name = "orchestrator-worker-runtime"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+orchestrator-worker-protocol = { path = "../orchestrator-worker-protocol" }
+orchestrator-worker-lifecycle = { path = "../orchestrator-worker-lifecycle" }
+orchestrator-worker-eventbus = { path = "../orchestrator-worker-eventbus" }
+orchestrator-worker-scheduler = { path = "../orchestrator-worker-scheduler" }

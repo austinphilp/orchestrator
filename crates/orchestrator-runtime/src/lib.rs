@@ -1,3 +1,8 @@
+//! Legacy runtime crate.
+//!
+//! Frozen for feature work as of RRP26 A01. Additive runtime decomposition work
+//! must land in the `orchestrator-worker-*` crates instead.
+
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;

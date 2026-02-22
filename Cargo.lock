@@ -1531,6 +1531,47 @@ dependencies = [
 ]
 
 [[package]]
+name = "orchestrator-worker-eventbus"
+version = "0.1.0"
+dependencies = [
+ "orchestrator-worker-protocol",
+]
+
+[[package]]
+name = "orchestrator-worker-lifecycle"
+version = "0.1.0"
+dependencies = [
+ "orchestrator-worker-protocol",
+]
+
+[[package]]
+name = "orchestrator-worker-protocol"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "orchestrator-worker-runtime"
+version = "0.1.0"
+dependencies = [
+ "orchestrator-worker-eventbus",
+ "orchestrator-worker-lifecycle",
+ "orchestrator-worker-protocol",
+ "orchestrator-worker-scheduler",
+]
+
+[[package]]
+name = "orchestrator-worker-scheduler"
+version = "0.1.0"
+dependencies = [
+ "orchestrator-worker-protocol",
+]
+
+[[package]]
 name = "ordered-float"
 version = "4.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

@@ -4,6 +4,7 @@
 - Date: 2026-02-22
 - Scope: planning/spec document
 - Decision: replace `crates/orchestrator-runtime` entirely (no compatibility shim)
+- Implementation update (RRP26 A01): scaffold crates added for `orchestrator-worker-protocol`, `orchestrator-worker-lifecycle`, `orchestrator-worker-eventbus`, `orchestrator-worker-scheduler`, and `orchestrator-worker-runtime`; protocol/event/error trait boundaries and minimal registry/scheduler/event envelope scaffolds are in place; `crates/orchestrator-runtime` is feature-frozen.
 
 ## Why This Refactor
 `orchestrator-runtime` currently combines too many concerns:
