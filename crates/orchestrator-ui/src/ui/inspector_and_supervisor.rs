@@ -443,6 +443,7 @@ fn latest_supervisor_query_metrics_line(
 fn build_supervisor_chat_request(
     selected_row: &UiInboxRow,
     domain: &ProjectionState,
+    supervisor_model: &str,
 ) -> LlmChatRequest {
     let workflow = selected_row
         .workflow_state
@@ -479,7 +480,7 @@ fn build_supervisor_chat_request(
     prompt_lines.push("- Recommended response to send to worker (single message)".to_owned());
 
     LlmChatRequest {
-        model: supervisor_model_from_env(),
+        model: supervisor_model.to_owned(),
         tools: Vec::new(),
         messages: vec![
             LlmMessage {
@@ -505,9 +506,9 @@ fn build_supervisor_chat_request(
 }
 
 #[allow(dead_code)]
-fn build_global_supervisor_chat_request(query: &str) -> LlmChatRequest {
+fn build_global_supervisor_chat_request(query: &str, supervisor_model: &str) -> LlmChatRequest {
     LlmChatRequest {
-        model: supervisor_model_from_env(),
+        model: supervisor_model.to_owned(),
         tools: Vec::new(),
         messages: vec![
             LlmMessage {
@@ -530,10 +531,6 @@ fn build_global_supervisor_chat_request(query: &str) -> LlmChatRequest {
         tool_choice: None,
         max_output_tokens: Some(700),
     }
-}
-
-fn supervisor_model_from_env() -> String {
-    supervisor_model_config_value()
 }
 
 fn classify_supervisor_stream_error(message: &str) -> SupervisorResponseState {

@@ -304,9 +304,10 @@ async fn run_session_diff_load_task(
 async fn run_session_info_summary_task(
     provider: Arc<dyn LlmProvider>,
     context: SessionInfoContext,
+    supervisor_model: String,
     sender: mpsc::Sender<SessionInfoSummaryEvent>,
 ) {
-    let request = summarize_text_output_request(context.prompt.as_str());
+    let request = summarize_text_output_request(context.prompt.as_str(), supervisor_model.as_str());
     let (_, mut stream) = match provider.stream_chat(request).await {
         Ok(response) => response,
         Err(error) => {

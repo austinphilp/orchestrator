@@ -53,6 +53,7 @@ mod tests {
     struct TestLlmProvider {
         chunks: Mutex<Option<Vec<Result<LlmStreamChunk, CoreError>>>>,
         cancelled_streams: Mutex<Vec<String>>,
+        requests: Mutex<Vec<LlmChatRequest>>,
     }
 
     impl TestLlmProvider {
@@ -60,6 +61,7 @@ mod tests {
             Self {
                 chunks: Mutex::new(Some(chunks)),
                 cancelled_streams: Mutex::new(Vec::new()),
+                requests: Mutex::new(Vec::new()),
             }
         }
 
@@ -68,6 +70,10 @@ mod tests {
                 .lock()
                 .expect("cancelled stream lock")
                 .clone()
+        }
+
+        fn requests(&self) -> Vec<LlmChatRequest> {
+            self.requests.lock().expect("request lock").clone()
         }
     }
 
@@ -83,8 +89,12 @@ mod tests {
 
         async fn stream_chat(
             &self,
-            _request: LlmChatRequest,
+            request: LlmChatRequest,
         ) -> Result<(String, LlmResponseStream), CoreError> {
+            self.requests
+                .lock()
+                .expect("request lock")
+                .push(request);
             let chunks = self
                 .chunks
                 .lock()
@@ -6155,6 +6165,46 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn supervisor_stream_uses_injected_runtime_model() {
+        let provider = Arc::new(TestLlmProvider::new(vec![Ok(LlmStreamChunk {
+            delta: String::new(),
+            tool_calls: Vec::new(),
+            finish_reason: Some(LlmFinishReason::Stop),
+            usage: None,
+            rate_limit: None,
+        })]));
+        let provider_dyn: Arc<dyn LlmProvider> = provider.clone();
+        let mut runtime_config = UiRuntimeConfig::default();
+        runtime_config.supervisor_model = "runtime-supervisor-model".to_owned();
+        let mut shell_state = UiShellState::new_with_integrations_and_config(
+            "ready".to_owned(),
+            inspector_projection(),
+            Some(provider_dyn),
+            None,
+            None,
+            None,
+            runtime_config,
+        );
+        shell_state.open_inspector_for_selected(ArtifactInspectorKind::Chat);
+        shell_state.start_supervisor_stream_for_selected();
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if !provider.requests().is_empty() {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("supervisor request should be submitted");
+
+        let requests = provider.requests();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].model, "runtime-supervisor-model");
+    }
+
+    #[tokio::test]
     async fn opening_new_dispatcher_chat_stream_cancels_active_stream_with_known_id() {
         let dispatcher = Arc::new(TestSupervisorDispatcher::new(vec![Ok(LlmStreamChunk {
             delta: String::new(),
@@ -8589,6 +8639,7 @@ mod tests {
 
     #[test]
     fn terminal_viewport_rendering_is_bounded_by_viewport_plus_overscan() {
+        let theme = ui_theme_from_config_value(UiRuntimeConfig::default().theme.as_str());
         let mut state = TerminalViewState {
             entries: (0..5_000)
                 .map(|index| TerminalTranscriptEntry::Message(format!("line {index}")))
@@ -8608,15 +8659,20 @@ mod tests {
                 overscan_rows,
                 indicator: TerminalActivityIndicator::None,
             },
+            theme,
         );
 
         assert_eq!(render.text.lines.len(), viewport_rows + (overscan_rows * 2));
-        assert_eq!(terminal_total_rendered_rows(&mut state, 90, TerminalActivityIndicator::None), 5_000);
+        assert_eq!(
+            terminal_total_rendered_rows(&mut state, 90, TerminalActivityIndicator::None, theme),
+            5_000
+        );
         assert_eq!(render.local_scroll_top, overscan_rows as u16);
     }
 
     #[test]
     fn terminal_viewport_total_rows_match_full_render_with_markdown() {
+        let theme = ui_theme_from_config_value(UiRuntimeConfig::default().theme.as_str());
         let mut state = TerminalViewState {
             entries: vec![
                 TerminalTranscriptEntry::Message("# Heading".to_owned()),
@@ -8631,14 +8687,94 @@ mod tests {
 
         let width = 72u16;
         let full_lines = render_terminal_transcript_lines(&state);
-        let full = render_terminal_output_with_accents(&full_lines, width);
+        let full = render_terminal_output_with_accents(&full_lines, width, theme);
 
-        let total = terminal_total_rendered_rows(&mut state, width, TerminalActivityIndicator::None);
+        let total = terminal_total_rendered_rows(
+            &mut state,
+            width,
+            TerminalActivityIndicator::None,
+            theme,
+        );
         assert_eq!(total, full.lines.len());
 
-        let total_with_indicator =
-            terminal_total_rendered_rows(&mut state, width, TerminalActivityIndicator::Working);
+        let total_with_indicator = terminal_total_rendered_rows(
+            &mut state,
+            width,
+            TerminalActivityIndicator::Working,
+            theme,
+        );
         assert_eq!(total_with_indicator, full.lines.len() + 2);
+    }
+
+    #[test]
+    fn ui_runtime_config_from_view_config_normalizes_invalid_inputs() {
+        let defaults = UiRuntimeConfig::default();
+        let config = UiRuntimeConfig::from_view_config(
+            UiViewConfig {
+                theme: " ".to_owned(),
+                ticket_picker_priority_states: vec![" ".to_owned()],
+                transcript_line_limit: 0,
+                background_session_refresh_secs: 99,
+                session_info_background_refresh_secs: 1,
+                merge_poll_base_interval_secs: 1,
+                merge_poll_max_backoff_secs: 9_999,
+                merge_poll_backoff_multiplier: 0,
+            },
+            " ".to_owned(),
+        );
+
+        assert_eq!(config.theme, defaults.theme);
+        assert_eq!(
+            config.ticket_picker_priority_states,
+            defaults.ticket_picker_priority_states
+        );
+        assert_eq!(config.supervisor_model, defaults.supervisor_model);
+        assert_eq!(config.transcript_line_limit, 1);
+        assert_eq!(config.background_session_refresh_secs, 15);
+        assert_eq!(config.session_info_background_refresh_secs, 15);
+        assert_eq!(config.merge_poll_base_interval_secs, 5);
+        assert_eq!(config.merge_poll_max_backoff_secs, 900);
+        assert_eq!(config.merge_poll_backoff_multiplier, 1);
+    }
+
+    #[test]
+    fn injected_transcript_line_limit_controls_terminal_truncation() {
+        let backend = Arc::new(ManualTerminalBackend::default());
+        let mut runtime_config = UiRuntimeConfig::default();
+        runtime_config.transcript_line_limit = 3;
+        let mut shell_state = UiShellState::new_with_integrations_and_config(
+            "ready".to_owned(),
+            sample_projection(true),
+            None,
+            None,
+            None,
+            Some(backend),
+            runtime_config,
+        );
+        shell_state.open_terminal_and_enter_mode();
+
+        let sender = shell_state
+            .terminal_session_sender
+            .clone()
+            .expect("terminal sender");
+        sender
+            .try_send(TerminalSessionEvent::Output {
+                session_id: WorkerSessionId::new("sess-1"),
+                output: BackendOutputEvent {
+                    stream: BackendOutputStream::Stdout,
+                    bytes: b"line 1\nline 2\nline 3\nline 4\nline 5\n".to_vec(),
+                },
+            })
+            .expect("queue output event");
+        shell_state.poll_terminal_session_events();
+
+        let view = shell_state
+            .terminal_session_states
+            .get(&WorkerSessionId::new("sess-1"))
+            .expect("terminal view");
+        assert_eq!(view.entries.len(), 3);
+        assert!(view.transcript_truncated);
+        assert_eq!(view.transcript_truncated_line_count, 2);
     }
 
     #[test]
@@ -8649,7 +8785,11 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n")
             + "\n";
-        append_terminal_assistant_output(&mut state, payload.into_bytes());
+        append_terminal_assistant_output(
+            &mut state,
+            payload.into_bytes(),
+            UiRuntimeConfig::default().transcript_line_limit,
+        );
 
         assert_eq!(state.entries.len(), 100);
         assert!(state.transcript_truncated);

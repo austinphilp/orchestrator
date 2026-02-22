@@ -13,6 +13,7 @@ struct PendingWorkingStatePersist {
 
 #[allow(dead_code)]
 struct UiShellState {
+    runtime_config: UiRuntimeConfig,
     base_status: String,
     status_warning: Option<String>,
     domain: ProjectionState,
@@ -102,8 +103,7 @@ struct MergeReconcilePollState {
 }
 
 impl MergeReconcilePollState {
-    fn new(now: Instant) -> Self {
-        let base = merge_poll_base_interval_config_value();
+    fn new(now: Instant, base: Duration) -> Self {
         Self {
             next_poll_at: now + base,
             backoff: base,
@@ -129,6 +129,7 @@ impl UiShellState {
         Self::new_with_integrations(status, domain, supervisor_provider, None, None, None)
     }
 
+    #[cfg(test)]
     fn new_with_integrations(
         status: String,
         domain: ProjectionState,
@@ -136,6 +137,26 @@ impl UiShellState {
         supervisor_command_dispatcher: Option<Arc<dyn SupervisorCommandDispatcher>>,
         ticket_picker_provider: Option<Arc<dyn TicketPickerProvider>>,
         worker_backend: Option<Arc<dyn WorkerBackend>>,
+    ) -> Self {
+        Self::new_with_integrations_and_config(
+            status,
+            domain,
+            supervisor_provider,
+            supervisor_command_dispatcher,
+            ticket_picker_provider,
+            worker_backend,
+            UiRuntimeConfig::default(),
+        )
+    }
+
+    fn new_with_integrations_and_config(
+        status: String,
+        domain: ProjectionState,
+        supervisor_provider: Option<Arc<dyn LlmProvider>>,
+        supervisor_command_dispatcher: Option<Arc<dyn SupervisorCommandDispatcher>>,
+        ticket_picker_provider: Option<Arc<dyn TicketPickerProvider>>,
+        worker_backend: Option<Arc<dyn WorkerBackend>>,
+        runtime_config: UiRuntimeConfig,
     ) -> Self {
         let (ticket_picker_sender, ticket_picker_receiver) = if ticket_picker_provider.is_some() {
             let (sender, receiver) = mpsc::channel(TICKET_PICKER_EVENT_CHANNEL_CAPACITY);
@@ -164,6 +185,7 @@ impl UiShellState {
         };
 
         let mut shell = Self {
+            runtime_config: runtime_config.clone(),
             base_status: status,
             status_warning: None,
             domain,
@@ -187,7 +209,7 @@ impl UiShellState {
             ticket_picker_receiver,
             ticket_picker_overlay: TicketPickerOverlayState::default(),
             ticket_picker_create_refresh_deadline: None,
-            ticket_picker_priority_states: ticket_picker_priority_states_from_env(),
+            ticket_picker_priority_states: runtime_config.ticket_picker_priority_states.clone(),
             startup_session_feed_opened: false,
             worker_backend,
             frontend_controller: None,
@@ -1226,15 +1248,20 @@ impl UiShellState {
         self.terminal_session_states.get_mut(&session_id)
     }
 
+    fn ui_theme(&self) -> UiTheme {
+        ui_theme_from_config_value(self.runtime_config.theme.as_str())
+    }
+
     fn terminal_total_rendered_rows_for_session(
         &mut self,
         session_id: &WorkerSessionId,
         width: u16,
         indicator: TerminalActivityIndicator,
     ) -> usize {
+        let theme = self.ui_theme();
         self.terminal_session_states
             .get_mut(session_id)
-            .map(|view| terminal_total_rendered_rows(view, width, indicator))
+            .map(|view| terminal_total_rendered_rows(view, width, indicator, theme))
             .unwrap_or(0)
     }
 
@@ -1243,8 +1270,9 @@ impl UiShellState {
         session_id: &WorkerSessionId,
         request: TerminalViewportRequest,
     ) -> Option<TerminalViewportRender> {
+        let theme = self.ui_theme();
         let view = self.terminal_session_states.get_mut(session_id)?;
-        Some(render_terminal_output_viewport(view, request))
+        Some(render_terminal_output_viewport(view, request, theme))
     }
 
     fn snap_active_terminal_output_to_bottom(&mut self) {
@@ -1650,7 +1678,7 @@ impl UiShellState {
             return false;
         }
         let bytes = std::mem::take(&mut view.deferred_output);
-        append_terminal_assistant_output(view, bytes);
+        append_terminal_assistant_output(view, bytes, self.runtime_config.transcript_line_limit);
         view.last_background_flush_at = None;
         self.recompute_background_terminal_flush_deadline();
         true
@@ -1673,7 +1701,7 @@ impl UiShellState {
             return false;
         }
         let active_session_id = self.active_terminal_session_id().cloned();
-        let interval = background_session_refresh_interval_config_value();
+        let interval = self.runtime_config.background_session_refresh_interval();
         let mut flushed_any = false;
 
         let session_ids = self
@@ -1704,7 +1732,11 @@ impl UiShellState {
                 continue;
             };
             let bytes = std::mem::take(&mut view.deferred_output);
-            append_terminal_assistant_output(view, bytes);
+            append_terminal_assistant_output(
+                view,
+                bytes,
+                self.runtime_config.transcript_line_limit,
+            );
             view.last_background_flush_at = Some(now);
             flushed_any = true;
         }
@@ -1715,7 +1747,7 @@ impl UiShellState {
 
     fn recompute_background_terminal_flush_deadline(&mut self) {
         let now = Instant::now();
-        let interval = background_session_refresh_interval_config_value();
+        let interval = self.runtime_config.background_session_refresh_interval();
         let active_session_id = self.active_terminal_session_id().cloned();
         self.background_terminal_flush_deadline = self
             .terminal_session_states
@@ -1762,16 +1794,28 @@ impl UiShellState {
                     if is_active_session {
                         if !view.deferred_output.is_empty() {
                             let deferred = std::mem::take(&mut view.deferred_output);
-                            append_terminal_assistant_output(view, deferred);
+                            append_terminal_assistant_output(
+                                view,
+                                deferred,
+                                self.runtime_config.transcript_line_limit,
+                            );
                             view.last_background_flush_at = Some(Instant::now());
                         }
-                        append_terminal_assistant_output(view, output.bytes);
+                        append_terminal_assistant_output(
+                            view,
+                            output.bytes,
+                            self.runtime_config.transcript_line_limit,
+                        );
                     } else {
                         view.deferred_output.extend_from_slice(output.bytes.as_slice());
                         if view.deferred_output.len() >= BACKGROUND_SESSION_DEFERRED_OUTPUT_MAX_BYTES
                         {
                             let deferred = std::mem::take(&mut view.deferred_output);
-                            append_terminal_assistant_output(view, deferred);
+                            append_terminal_assistant_output(
+                                view,
+                                deferred,
+                                self.runtime_config.transcript_line_limit,
+                            );
                             view.last_background_flush_at = Some(Instant::now());
                         } else if view.last_background_flush_at.is_none() {
                             view.last_background_flush_at = Some(Instant::now());
@@ -1864,10 +1908,17 @@ impl UiShellState {
                         .or_default();
                     if !view.deferred_output.is_empty() {
                         let deferred = std::mem::take(&mut view.deferred_output);
-                        append_terminal_assistant_output(view, deferred);
+                        append_terminal_assistant_output(
+                            view,
+                            deferred,
+                            self.runtime_config.transcript_line_limit,
+                        );
                     }
                     view.last_background_flush_at = None;
-                    flush_terminal_output_fragment(view);
+                    flush_terminal_output_fragment(
+                        view,
+                        self.runtime_config.transcript_line_limit,
+                    );
                     view.turn_active = false;
                     self.persist_session_working_state_immediately(session_id.clone(), false);
                     if self.active_terminal_session_id() == Some(&session_id) {
@@ -1884,11 +1935,11 @@ impl UiShellState {
     }
 
     fn reset_merge_poll_backoff(&mut self, session_id: &WorkerSessionId, now: Instant) {
-        let base = merge_poll_base_interval_config_value();
+        let base = self.runtime_config.merge_poll_base_interval();
         let state = self
             .merge_poll_states
             .entry(session_id.clone())
-            .or_insert_with(|| MergeReconcilePollState::new(now));
+            .or_insert_with(|| MergeReconcilePollState::new(now, base));
         if state.consecutive_failures > 0 {
             tracing::info!(
                 session_id = session_id.as_str(),
@@ -1909,13 +1960,13 @@ impl UiShellState {
         signature: &str,
         now: Instant,
     ) -> bool {
-        let base = merge_poll_base_interval_config_value();
-        let max_backoff = merge_poll_max_backoff_config_value();
-        let multiplier = merge_poll_backoff_multiplier_config_value().max(1);
+        let base = self.runtime_config.merge_poll_base_interval();
+        let max_backoff = self.runtime_config.merge_poll_max_backoff();
+        let multiplier = self.runtime_config.merge_poll_backoff_multiplier().max(1);
         let state = self
             .merge_poll_states
             .entry(session_id.clone())
-            .or_insert_with(|| MergeReconcilePollState::new(now));
+            .or_insert_with(|| MergeReconcilePollState::new(now, base));
         state.consecutive_failures = state.consecutive_failures.saturating_add(1);
         let mut next_secs = state.backoff.as_secs().max(base.as_secs());
         next_secs = next_secs.saturating_mul(multiplier).max(base.as_secs());
@@ -2606,7 +2657,11 @@ impl UiShellState {
             return;
         }
         if let Some(view) = self.terminal_session_states.get_mut(session_id) {
-            append_terminal_user_message(view, instruction);
+            append_terminal_user_message(
+                view,
+                instruction,
+                self.runtime_config.transcript_line_limit,
+            );
             view.error = None;
         }
 
@@ -3209,7 +3264,11 @@ impl UiShellState {
             return;
         };
 
-        let request = build_supervisor_chat_request(&selected_row, &self.domain);
+        let request = build_supervisor_chat_request(
+            &selected_row,
+            &self.domain,
+            self.runtime_config.supervisor_model.as_str(),
+        );
         let _ = self.start_supervisor_stream_with_provider(target, provider, request);
     }
 
@@ -4432,7 +4491,7 @@ impl UiShellState {
             let deadline = if self.session_info_is_foreground() {
                 now + Duration::from_millis(500)
             } else {
-                let interval = session_info_background_refresh_interval_config_value();
+                let interval = self.runtime_config.session_info_background_refresh_interval();
                 self.session_info_summary_last_refresh_at
                     .get(&session_id)
                     .map(|previous| (*previous + interval).max(now))
@@ -4512,7 +4571,7 @@ impl UiShellState {
                 self.session_info_summary_deadline = None;
                 return false;
             };
-            let interval = session_info_background_refresh_interval_config_value();
+            let interval = self.runtime_config.session_info_background_refresh_interval();
             if let Some(previous) = self.session_info_summary_last_refresh_at.get(&session_id) {
                 if now.duration_since(*previous) < interval {
                     self.session_info_summary_deadline = Some(*previous + interval);
@@ -4620,15 +4679,27 @@ impl UiShellState {
                 if is_active_session {
                     if !view.deferred_output.is_empty() {
                         let deferred = std::mem::take(&mut view.deferred_output);
-                        append_terminal_assistant_output(view, deferred);
+                        append_terminal_assistant_output(
+                            view,
+                            deferred,
+                            self.runtime_config.transcript_line_limit,
+                        );
                         view.last_background_flush_at = Some(Instant::now());
                     }
-                    append_terminal_assistant_output(view, output.bytes);
+                    append_terminal_assistant_output(
+                        view,
+                        output.bytes,
+                        self.runtime_config.transcript_line_limit,
+                    );
                 } else {
                     view.deferred_output.extend_from_slice(output.bytes.as_slice());
                     if view.deferred_output.len() >= BACKGROUND_SESSION_DEFERRED_OUTPUT_MAX_BYTES {
                         let deferred = std::mem::take(&mut view.deferred_output);
-                        append_terminal_assistant_output(view, deferred);
+                        append_terminal_assistant_output(
+                            view,
+                            deferred,
+                            self.runtime_config.transcript_line_limit,
+                        );
                         view.last_background_flush_at = Some(Instant::now());
                     } else if view.last_background_flush_at.is_none() {
                         view.last_background_flush_at = Some(Instant::now());
@@ -4698,10 +4769,17 @@ impl UiShellState {
                     .or_default();
                 if !view.deferred_output.is_empty() {
                     let deferred = std::mem::take(&mut view.deferred_output);
-                    append_terminal_assistant_output(view, deferred);
+                    append_terminal_assistant_output(
+                        view,
+                        deferred,
+                        self.runtime_config.transcript_line_limit,
+                    );
                 }
                 view.last_background_flush_at = None;
-                flush_terminal_output_fragment(view);
+                flush_terminal_output_fragment(
+                    view,
+                    self.runtime_config.transcript_line_limit,
+                );
                 view.turn_active = false;
                 true
             }
@@ -4790,8 +4868,9 @@ impl UiShellState {
             Ok(handle) => {
                 self.session_info_summary_last_refresh_at
                     .insert(context.session_id.clone(), Instant::now());
+                let supervisor_model = self.runtime_config.supervisor_model.clone();
                 handle.spawn(async move {
-                    run_session_info_summary_task(provider, context, sender).await;
+                    run_session_info_summary_task(provider, context, supervisor_model, sender).await;
                 });
             }
             Err(_) => {
@@ -4816,7 +4895,7 @@ impl UiShellState {
         }
         if !self.session_info_is_foreground() {
             let now = Instant::now();
-            let interval = session_info_background_refresh_interval_config_value();
+            let interval = self.runtime_config.session_info_background_refresh_interval();
             match self.session_info_diff_last_refresh_at.get(&session_id).copied() {
                 Some(previous) => {
                     if now.duration_since(previous) < interval {
@@ -4993,7 +5072,11 @@ impl UiShellState {
                 .terminal_session_states
                 .entry(session_id.clone())
                 .or_default();
-            append_terminal_user_message(view, user_message.as_str());
+            append_terminal_user_message(
+                view,
+                user_message.as_str(),
+                self.runtime_config.transcript_line_limit,
+            );
             view.error = None;
         }
 

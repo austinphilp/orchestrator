@@ -311,7 +311,11 @@ fn mode_help(mode: UiMode) -> String {
         .join(" | ")
 }
 
-fn append_terminal_output(state: &mut TerminalViewState, bytes: Vec<u8>) {
+fn append_terminal_output(
+    state: &mut TerminalViewState,
+    bytes: Vec<u8>,
+    transcript_line_limit: usize,
+) {
     let chunk = sanitize_terminal_display_text(String::from_utf8_lossy(&bytes).as_ref());
     if chunk.is_empty() {
         return;
@@ -347,15 +351,17 @@ fn append_terminal_output(state: &mut TerminalViewState, bytes: Vec<u8>) {
                             "> {}",
                             normalize_outgoing_user_line(before)
                         )),
+                        transcript_line_limit,
                     );
                 } else {
                     append_terminal_transcript_entry(
                         state,
                         TerminalTranscriptEntry::Message(before.to_owned()),
+                        transcript_line_limit,
                     );
                 }
             }
-            append_terminal_foldable_content(state, kind, content.as_str());
+            append_terminal_foldable_content(state, kind, content.as_str(), transcript_line_limit);
             continue;
         }
         if is_outgoing_transcript_line(line) {
@@ -365,22 +371,32 @@ fn append_terminal_output(state: &mut TerminalViewState, bytes: Vec<u8>) {
                     "> {}",
                     normalize_outgoing_user_line(line)
                 )),
+                transcript_line_limit,
             );
         } else {
             append_terminal_transcript_entry(
                 state,
                 TerminalTranscriptEntry::Message(line.to_owned()),
+                transcript_line_limit,
             );
         }
     }
 }
 
-fn append_terminal_assistant_output(state: &mut TerminalViewState, bytes: Vec<u8>) {
-    append_terminal_output(state, bytes);
+fn append_terminal_assistant_output(
+    state: &mut TerminalViewState,
+    bytes: Vec<u8>,
+    transcript_line_limit: usize,
+) {
+    append_terminal_output(state, bytes, transcript_line_limit);
 }
 
-fn append_terminal_user_message(state: &mut TerminalViewState, message: &str) {
-    flush_terminal_output_fragment(state);
+fn append_terminal_user_message(
+    state: &mut TerminalViewState,
+    message: &str,
+    transcript_line_limit: usize,
+) {
+    flush_terminal_output_fragment(state, transcript_line_limit);
     let text = sanitize_terminal_display_text(message);
     if text.trim().is_empty() {
         return;
@@ -395,6 +411,7 @@ fn append_terminal_user_message(state: &mut TerminalViewState, message: &str) {
         append_terminal_transcript_entry(
             state,
             TerminalTranscriptEntry::Message(format!("> {line}")),
+            transcript_line_limit,
         );
     }
 }
@@ -420,6 +437,7 @@ fn append_terminal_foldable_content(
     state: &mut TerminalViewState,
     kind: TerminalFoldKind,
     content: &str,
+    transcript_line_limit: usize,
 ) {
     invalidate_terminal_render_cache(state);
     let entry_content = if content.trim().is_empty() {
@@ -445,6 +463,7 @@ fn append_terminal_foldable_content(
             content: entry_content.to_owned(),
             folded: true,
         }),
+        transcript_line_limit,
     );
 }
 
@@ -455,7 +474,7 @@ fn is_outgoing_transcript_line(line: &str) -> bool {
         || normalized.starts_with("user:")
 }
 
-fn flush_terminal_output_fragment(state: &mut TerminalViewState) {
+fn flush_terminal_output_fragment(state: &mut TerminalViewState, transcript_line_limit: usize) {
     let fragment = std::mem::take(&mut state.output_fragment);
     let line = fragment.trim_end_matches('\r');
     if line.trim().is_empty() {
@@ -473,15 +492,17 @@ fn flush_terminal_output_fragment(state: &mut TerminalViewState) {
                         "> {}",
                         normalize_outgoing_user_line(before)
                     )),
+                    transcript_line_limit,
                 );
             } else {
                 append_terminal_transcript_entry(
                     state,
                     TerminalTranscriptEntry::Message(before.to_owned()),
+                    transcript_line_limit,
                 );
             }
         }
-        append_terminal_foldable_content(state, kind, content.as_str());
+        append_terminal_foldable_content(state, kind, content.as_str(), transcript_line_limit);
         return;
     }
 
@@ -489,15 +510,23 @@ fn flush_terminal_output_fragment(state: &mut TerminalViewState) {
         append_terminal_transcript_entry(
             state,
             TerminalTranscriptEntry::Message(format!("> {}", normalize_outgoing_user_line(line))),
+            transcript_line_limit,
         );
     } else {
-        append_terminal_transcript_entry(state, TerminalTranscriptEntry::Message(line.to_owned()));
+        append_terminal_transcript_entry(
+            state,
+            TerminalTranscriptEntry::Message(line.to_owned()),
+            transcript_line_limit,
+        );
     }
 }
 
-fn append_terminal_transcript_entry(state: &mut TerminalViewState, entry: TerminalTranscriptEntry) {
+fn append_terminal_transcript_entry(
+    state: &mut TerminalViewState,
+    entry: TerminalTranscriptEntry,
+    transcript_line_limit: usize,
+) {
     state.entries.push(entry);
-    let transcript_line_limit = transcript_line_limit_config_value();
     if state.entries.len() <= transcript_line_limit {
         return;
     }

@@ -1,5 +1,6 @@
 pub struct Ui {
     terminal: Terminal<CrosstermBackend<Stdout>>,
+    runtime_config: UiRuntimeConfig,
     frontend_controller: Option<Arc<dyn FrontendController>>,
     keyboard_enhancement_enabled: bool,
 }
@@ -9,11 +10,13 @@ impl Ui {
         ui_config: UiViewConfig,
         supervisor_model: String,
     ) -> io::Result<Self> {
-        set_ui_runtime_config_from_view(ui_config, supervisor_model);
-        Self::init()
+        Self::init_with_runtime_config(UiRuntimeConfig::from_view_config(
+            ui_config,
+            supervisor_model,
+        ))
     }
 
-    pub fn init() -> io::Result<Self> {
+    fn init_with_runtime_config(runtime_config: UiRuntimeConfig) -> io::Result<Self> {
         enable_raw_mode()?;
         let mut stdout = io::stdout();
         stdout.execute(EnterAlternateScreen)?;
@@ -31,6 +34,7 @@ impl Ui {
         let terminal = Terminal::new(backend)?;
         Ok(Self {
             terminal,
+            runtime_config,
             frontend_controller: None,
             keyboard_enhancement_enabled,
         })
@@ -47,13 +51,14 @@ impl Ui {
     pub fn run(&mut self, status: &str, projection: &ProjectionState) -> io::Result<()> {
         const FULL_REDRAW_INTERVAL: Duration = Duration::from_secs(1);
 
-        let mut shell_state = UiShellState::new_with_integrations(
+        let mut shell_state = UiShellState::new_with_integrations_and_config(
             status.to_owned(),
             projection.clone(),
             None,
             None,
             None,
             None,
+            self.runtime_config.clone(),
         );
         shell_state.set_frontend_controller(self.frontend_controller.clone());
         shell_state.set_frontend_terminal_streaming_enabled(self.frontend_controller.is_some());

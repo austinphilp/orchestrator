@@ -35,6 +35,7 @@
 - Implementation update (RRP26 D01): new crate `orchestrator-config` now owns canonical `OrchestratorConfig` schema + normalization/load behavior (`load_from_env`, `load_from_path`) with `ConfigError` and typed config slices (including `UiViewConfig`); `orchestrator-app` now loads through this crate and `orchestrator-ui` accepts `UiViewConfig`-based runtime config injection.
 - Implementation update (RRP26 D02): canonical env/path resolution and config normalize/default behaviors are now owned by `orchestrator-config`; duplicate app/UI config normalization was removed so `orchestrator-app` and `orchestrator-ui` consume already-normalized typed config slices.
 - Implementation update (RRP26 D03): app bootstrap/runtime wiring now injects typed config slices (`SupervisorRuntimeConfig`, `DatabaseRuntimeConfig`, `GitRuntimeConfig`) from `orchestrator-config` through command/runtime composition paths, and app-level runtime config globals/setters were removed in favor of explicit constructor/composition flow.
+- Implementation update (RRP26 D04): `orchestrator-ui` startup/run now carries an injected `UiRuntimeConfig` derived from `UiViewConfig`, UI runtime config singleton/setter APIs were removed, and UI state/runtime behavior now reads config exclusively from explicit constructor-injected state.
 
 ## Why This Refactor
 `orchestrator-runtime` currently combines too many concerns:

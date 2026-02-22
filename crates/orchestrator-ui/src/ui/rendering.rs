@@ -746,8 +746,9 @@ fn terminal_total_rendered_rows(
     state: &mut TerminalViewState,
     width: u16,
     indicator: TerminalActivityIndicator,
+    theme: UiTheme,
 ) -> usize {
-    ensure_terminal_render_metrics(state, width.max(1));
+    ensure_terminal_render_metrics(state, width.max(1), theme);
     let transcript_rows = state
         .render_cache
         .rendered_prefix_sums
@@ -760,9 +761,10 @@ fn terminal_total_rendered_rows(
 fn render_terminal_output_viewport(
     state: &mut TerminalViewState,
     request: TerminalViewportRequest,
+    theme: UiTheme,
 ) -> TerminalViewportRender {
     let width = request.width.max(1);
-    ensure_terminal_render_metrics(state, width);
+    ensure_terminal_render_metrics(state, width, theme);
     let transcript_rows = state
         .render_cache
         .rendered_prefix_sums
@@ -796,6 +798,7 @@ fn render_terminal_output_viewport(
             width,
             slice_start,
             transcript_slice_end,
+            theme,
         ));
     }
 
@@ -818,7 +821,7 @@ fn render_terminal_output_viewport(
 }
 
 #[cfg(test)]
-fn render_terminal_output_with_accents(lines: &[String], width: u16) -> Text<'static> {
+fn render_terminal_output_with_accents(lines: &[String], width: u16, theme: UiTheme) -> Text<'static> {
     let mut rendered = Vec::with_capacity(lines.len().saturating_mul(2));
     let mut active_fold_kind: Option<TerminalFoldKind> = None;
 
@@ -860,7 +863,7 @@ fn render_terminal_output_with_accents(lines: &[String], width: u16) -> Text<'st
             continue;
         }
 
-        let markdown = render_markdown_for_terminal(line.as_str(), width);
+        let markdown = render_markdown_for_terminal(line.as_str(), width, theme);
         if markdown.lines.is_empty() {
             rendered.push(Line::from(String::new()));
         } else {
@@ -871,7 +874,7 @@ fn render_terminal_output_with_accents(lines: &[String], width: u16) -> Text<'st
     Text::from(rendered)
 }
 
-fn ensure_terminal_render_metrics(state: &mut TerminalViewState, width: u16) {
+fn ensure_terminal_render_metrics(state: &mut TerminalViewState, width: u16, theme: UiTheme) {
     ensure_terminal_transcript_cache(state);
     if state.render_cache.width != width {
         state.render_cache.metrics_stale = true;
@@ -888,7 +891,12 @@ fn ensure_terminal_render_metrics(state: &mut TerminalViewState, width: u16) {
         .rendered_row_counts
         .reserve(state.render_cache.transcript_lines.len());
     for line in &state.render_cache.transcript_lines {
-        let row_count = terminal_rendered_row_count_for_line(line, width, &mut active_fold_kind);
+        let row_count = terminal_rendered_row_count_for_line(
+            line,
+            width,
+            &mut active_fold_kind,
+            theme,
+        );
         state.render_cache.rendered_row_counts.push(row_count.max(1));
     }
 
@@ -927,6 +935,7 @@ fn terminal_rendered_row_count_for_line(
     raw_line: &str,
     width: u16,
     active_fold_kind: &mut Option<TerminalFoldKind>,
+    theme: UiTheme,
 ) -> usize {
     let line = sanitize_terminal_display_text(raw_line);
     if line.trim().is_empty() {
@@ -943,7 +952,7 @@ fn terminal_rendered_row_count_for_line(
         return 1;
     }
 
-    let markdown = render_markdown_for_terminal(line.as_str(), width);
+    let markdown = render_markdown_for_terminal(line.as_str(), width, theme);
     markdown.lines.len().max(1)
 }
 
@@ -952,6 +961,7 @@ fn render_terminal_transcript_slice(
     width: u16,
     start_row: usize,
     end_row: usize,
+    theme: UiTheme,
 ) -> Vec<Line<'static>> {
     if start_row >= end_row || state.render_cache.transcript_lines.is_empty() {
         return Vec::new();
@@ -989,7 +999,8 @@ fn render_terminal_transcript_slice(
         }
 
         let line = &state.render_cache.transcript_lines[raw_index];
-        let mut expanded = render_terminal_line_with_context(line, width, &mut active_fold_kind);
+        let mut expanded =
+            render_terminal_line_with_context(line, width, &mut active_fold_kind, theme);
         let local_start = start_row.saturating_sub(line_start);
         let local_end = clamped_end.saturating_sub(line_start).min(expanded.len());
         if local_start < local_end {
@@ -1004,6 +1015,7 @@ fn render_terminal_line_with_context(
     raw_line: &str,
     width: u16,
     active_fold_kind: &mut Option<TerminalFoldKind>,
+    theme: UiTheme,
 ) -> Vec<Line<'static>> {
     let line = sanitize_terminal_display_text(raw_line);
     if line.trim().is_empty() {
@@ -1034,7 +1046,7 @@ fn render_terminal_line_with_context(
         return vec![Line::from(line)];
     }
 
-    let markdown = render_markdown_for_terminal(line.as_str(), width);
+    let markdown = render_markdown_for_terminal(line.as_str(), width, theme);
     if markdown.lines.is_empty() {
         vec![Line::from(String::new())]
     } else {
@@ -1258,13 +1270,13 @@ fn loading_spinner_frame() -> &'static str {
     FRAMES[index]
 }
 
-fn render_markdown_for_terminal(input: &str, width: u16) -> Text<'static> {
+fn render_markdown_for_terminal(input: &str, width: u16, theme: UiTheme) -> Text<'static> {
     if input.is_empty() {
         return Text::raw(String::new());
     }
 
     let source = preprocess_markdown_layout(input);
-    let lines = terminal_markdown_skin().parse(RatSkin::parse_text(source.as_str()), width);
+    let lines = terminal_markdown_skin(theme).parse(RatSkin::parse_text(source.as_str()), width);
     if lines.is_empty() {
         Text::raw(String::new())
     } else {
@@ -1323,11 +1335,16 @@ fn is_markdown_heading(line: &str) -> bool {
         .unwrap_or(false)
 }
 
-fn terminal_markdown_skin() -> &'static RatSkin {
-    static SKIN: OnceLock<RatSkin> = OnceLock::new();
-    SKIN.get_or_init(|| {
+fn terminal_markdown_skin(theme: UiTheme) -> &'static RatSkin {
+    static DEFAULT_SKIN: OnceLock<RatSkin> = OnceLock::new();
+    static NORD_SKIN: OnceLock<RatSkin> = OnceLock::new();
+    let cache = match theme {
+        UiTheme::Default => &DEFAULT_SKIN,
+        UiTheme::Nord => &NORD_SKIN,
+    };
+    cache.get_or_init(|| {
         let mut skin = RatSkin::default();
-        if matches!(ui_theme_from_env(), UiTheme::Nord) {
+        if matches!(theme, UiTheme::Nord) {
             apply_nord_markdown_theme(&mut skin);
         }
         skin.skin.paragraph.right_margin = 0;
@@ -1346,8 +1363,8 @@ enum UiTheme {
     Nord,
 }
 
-fn ui_theme_from_env() -> UiTheme {
-    let value = ui_theme_config_value().trim().to_ascii_lowercase();
+fn ui_theme_from_config_value(value: &str) -> UiTheme {
+    let value = value.trim().to_ascii_lowercase();
     match value.as_str() {
         "default" => UiTheme::Default,
         "nord" => UiTheme::Nord,
@@ -2785,10 +2802,6 @@ fn render_which_key_overlay_text(overlay: &WhichKeyOverlayState) -> String {
             .map(|hint| format!("{:>8}  {}", hint.key, hint.description)),
     );
     lines.join("\n")
-}
-
-fn ticket_picker_priority_states_from_env() -> Vec<String> {
-    ticket_picker_priority_states_config_value()
 }
 
 fn normalize_ticket_state(value: &str) -> String {
