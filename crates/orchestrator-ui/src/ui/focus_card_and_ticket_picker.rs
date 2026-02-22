@@ -327,7 +327,6 @@ struct TicketPickerOverlayState {
     repository_prompt_input: InputState,
     repository_prompt_missing_mapping: bool,
     archive_confirm_ticket: Option<TicketSummary>,
-    ticket_profile_overrides: HashMap<TicketId, String>,
 }
 
 impl Default for TicketPickerOverlayState {
@@ -350,7 +349,6 @@ impl Default for TicketPickerOverlayState {
             repository_prompt_input: InputState::empty(),
             repository_prompt_missing_mapping: false,
             archive_confirm_ticket: None,
-            ticket_profile_overrides: HashMap::new(),
         }
     }
 }
@@ -439,12 +437,6 @@ impl TicketPickerOverlayState {
         self.repository_prompt_input.clear();
         self.repository_prompt_missing_mapping = true;
         self.archive_confirm_ticket = None;
-    }
-
-    fn ticket_override_for(&self, ticket_id: &TicketId) -> Option<&str> {
-        self.ticket_profile_overrides
-            .get(ticket_id)
-            .map(String::as_str)
     }
 
     fn has_repository_prompt(&self) -> bool {
@@ -635,243 +627,11 @@ impl TicketPickerOverlayState {
 }
 
 #[derive(Debug, Clone)]
-struct WorkflowProfilesModalState {
-    visible: bool,
-    saving: bool,
-    profiles: Vec<WorkflowInteractionProfile>,
-    default_profile: String,
-    selected_profile_index: usize,
-    selected_state_index: usize,
-    renaming: bool,
-    rename_input: InputState,
-    error: Option<String>,
-}
-
-impl Default for WorkflowProfilesModalState {
-    fn default() -> Self {
-        Self {
-            visible: false,
-            saving: false,
-            profiles: Vec::new(),
-            default_profile: String::new(),
-            selected_profile_index: 0,
-            selected_state_index: 0,
-            renaming: false,
-            rename_input: InputState::empty(),
-            error: None,
-        }
-    }
-}
-
-impl WorkflowProfilesModalState {
-    fn open(&mut self, config: WorkflowInteractionProfilesConfig) {
-        self.visible = true;
-        self.saving = false;
-        self.renaming = false;
-        self.rename_input.clear();
-        self.error = None;
-        self.profiles = config.profiles;
-        self.default_profile = config.default_profile;
-        if self.profiles.is_empty() {
-            let fallback = WorkflowInteractionProfilesConfig::default();
-            self.profiles = fallback.profiles;
-            self.default_profile = fallback.default_profile;
-        }
-        if self.selected_profile_index >= self.profiles.len() {
-            self.selected_profile_index = 0;
-        }
-        self.selected_state_index = self.selected_state_index.min(
-            self.selected_profile()
-                .map(|profile| profile.levels.len().saturating_sub(1))
-                .unwrap_or(0),
-        );
-    }
-
-    fn close(&mut self) {
-        self.visible = false;
-        self.saving = false;
-        self.renaming = false;
-        self.rename_input.clear();
-        self.error = None;
-    }
-
-    fn selected_profile(&self) -> Option<&WorkflowInteractionProfile> {
-        self.profiles.get(self.selected_profile_index)
-    }
-
-    fn selected_profile_mut(&mut self) -> Option<&mut WorkflowInteractionProfile> {
-        self.profiles.get_mut(self.selected_profile_index)
-    }
-
-    fn cycle_profile(&mut self, delta: isize) {
-        if self.profiles.is_empty() {
-            return;
-        }
-        let len = self.profiles.len() as isize;
-        let current = self.selected_profile_index as isize;
-        let next = (current + delta).rem_euclid(len) as usize;
-        self.selected_profile_index = next;
-        self.selected_state_index = 0;
-        self.error = None;
-    }
-
-    fn move_state_selection(&mut self, delta: isize) {
-        let Some(profile) = self.selected_profile() else {
-            return;
-        };
-        if profile.levels.is_empty() {
-            self.selected_state_index = 0;
-            return;
-        }
-        let len = profile.levels.len() as isize;
-        let current = self.selected_state_index as isize;
-        let next = (current + delta).rem_euclid(len) as usize;
-        self.selected_state_index = next;
-    }
-
-    fn toggle_selected_state_level(&mut self) {
-        let selected_state_index = self.selected_state_index;
-        let Some(profile) = self.selected_profile_mut() else {
-            return;
-        };
-        let Some(level) = profile.levels.get_mut(selected_state_index) else {
-            return;
-        };
-        level.level = match level.level {
-            WorkflowInteractionLevel::Manual => WorkflowInteractionLevel::Auto,
-            WorkflowInteractionLevel::Auto => WorkflowInteractionLevel::Manual,
-        };
-        self.error = None;
-    }
-
-    fn add_profile(&mut self) {
-        let seed_levels = self
-            .selected_profile()
-            .map(|profile| profile.levels.clone())
-            .unwrap_or_else(|| {
-                orchestrator_core::all_workflow_states()
-                    .into_iter()
-                    .map(|state| WorkflowInteractionStateLevel {
-                        state,
-                        level: WorkflowInteractionLevel::Manual,
-                    })
-                    .collect()
-            });
-
-        let mut next_index = self.profiles.len() + 1;
-        let name = loop {
-            let candidate = format!("profile-{next_index}");
-            if !self
-                .profiles
-                .iter()
-                .any(|profile| profile.name.eq_ignore_ascii_case(candidate.as_str()))
-            {
-                break candidate;
-            }
-            next_index += 1;
-        };
-
-        self.profiles.push(WorkflowInteractionProfile {
-            name: name.clone(),
-            levels: seed_levels,
-        });
-        self.selected_profile_index = self.profiles.len().saturating_sub(1);
-        self.selected_state_index = 0;
-        self.default_profile = self.default_profile.trim().to_owned();
-        if self.default_profile.is_empty() {
-            self.default_profile = name;
-        }
-        self.error = None;
-    }
-
-    fn delete_selected_profile(&mut self) {
-        if self.profiles.len() <= 1 {
-            self.error = Some("at least one profile is required".to_owned());
-            return;
-        }
-        if self.selected_profile_index >= self.profiles.len() {
-            self.selected_profile_index = 0;
-        }
-        let removed = self.profiles.remove(self.selected_profile_index);
-        if self.default_profile == removed.name {
-            self.default_profile = self
-                .profiles
-                .first()
-                .map(|profile| profile.name.clone())
-                .unwrap_or_default();
-        }
-        if self.selected_profile_index >= self.profiles.len() {
-            self.selected_profile_index = self.profiles.len().saturating_sub(1);
-        }
-        self.selected_state_index = 0;
-        self.error = None;
-    }
-
-    fn set_selected_default(&mut self) {
-        if let Some(profile) = self.selected_profile() {
-            self.default_profile = profile.name.clone();
-            self.error = None;
-        }
-    }
-
-    fn begin_rename_selected_profile(&mut self) {
-        let Some(profile) = self.selected_profile() else {
-            return;
-        };
-        self.rename_input.set_text(profile.name.clone());
-        self.renaming = true;
-        self.error = None;
-    }
-
-    fn cancel_rename(&mut self) {
-        self.renaming = false;
-        self.rename_input.clear();
-    }
-
-    fn submit_rename(&mut self) {
-        let next_name = self.rename_input.text().trim().to_owned();
-        if next_name.is_empty() {
-            self.error = Some("profile name cannot be empty".to_owned());
-            return;
-        }
-        let selected_index = self.selected_profile_index;
-        if self.profiles.iter().enumerate().any(|(index, profile)| {
-            index != selected_index && profile.name.eq_ignore_ascii_case(next_name.as_str())
-        }) {
-            self.error = Some("profile name already exists".to_owned());
-            return;
-        }
-
-        let previous_name = self
-            .profiles
-            .get(selected_index)
-            .map(|profile| profile.name.clone())
-            .unwrap_or_default();
-        if let Some(profile) = self.profiles.get_mut(selected_index) {
-            profile.name = next_name.clone();
-        }
-        if self.default_profile == previous_name {
-            self.default_profile = next_name;
-        }
-        self.renaming = false;
-        self.rename_input.clear();
-        self.error = None;
-    }
-
-    fn as_config(&self) -> WorkflowInteractionProfilesConfig {
-        WorkflowInteractionProfilesConfig {
-            default_profile: self.default_profile.clone(),
-            profiles: self.profiles.clone(),
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
+#[allow(dead_code)]
 enum TicketPickerEvent {
     TicketsLoaded {
         tickets: Vec<TicketSummary>,
         projects: Vec<String>,
-        profile_overrides: HashMap<TicketId, String>,
     },
     TicketsLoadFailed {
         message: String,
@@ -887,7 +647,6 @@ enum TicketPickerEvent {
         started_session_id: WorkerSessionId,
         projection: Option<ProjectionState>,
         tickets: Option<Vec<TicketSummary>>,
-        profile_overrides: Option<HashMap<TicketId, String>>,
         warning: Option<String>,
     },
     TicketStartFailed {
@@ -918,20 +677,6 @@ enum TicketPickerEvent {
         ticket: TicketSummary,
         project_id: String,
         repository_path_hint: Option<String>,
-        message: String,
-    },
-    TicketProfileOverrideUpdated {
-        ticket_id: TicketId,
-        profile_name: Option<String>,
-    },
-    TicketProfileOverrideUpdateFailed {
-        ticket_id: TicketId,
-        message: String,
-    },
-    WorkflowProfilesSaved {
-        config: WorkflowInteractionProfilesConfig,
-    },
-    WorkflowProfilesSaveFailed {
         message: String,
     },
     SessionDiffLoaded {

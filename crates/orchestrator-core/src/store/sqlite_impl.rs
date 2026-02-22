@@ -1,17 +1,28 @@
-impl SqliteEventStore {
+impl SqliteEventStore<OwnedConnection> {
     pub fn open(path: impl AsRef<Path>) -> Result<Self, CoreError> {
         let conn = Connection::open(path).map_err(|err| CoreError::Persistence(err.to_string()))?;
-        let mut store = Self { conn };
-        store.bootstrap()?;
-        Ok(store)
+        Self::from_connection(OwnedConnection::new(conn))
     }
 
     pub fn in_memory() -> Result<Self, CoreError> {
         let conn =
             Connection::open_in_memory().map_err(|err| CoreError::Persistence(err.to_string()))?;
+        Self::from_connection(OwnedConnection::new(conn))
+    }
+}
+
+impl<C> SqliteEventStore<C>
+where
+    C: std::ops::Deref<Target = Connection> + std::ops::DerefMut,
+{
+    pub fn from_connection(conn: C) -> Result<Self, CoreError> {
         let mut store = Self { conn };
         store.bootstrap()?;
         Ok(store)
+    }
+
+    pub fn from_initialized_connection(conn: C) -> Self {
+        Self { conn }
     }
 
     pub fn schema_version(&self) -> Result<u32, CoreError> {
@@ -2169,7 +2180,8 @@ fn parse_unix_seconds(value: &str) -> Option<u64> {
         return None;
     }
 
-    if let Some(rfc3339) = SqliteEventStore::map_rfc3339_unix_seconds(trimmed) {
+    if let Some(rfc3339) = SqliteEventStore::<OwnedConnection>::map_rfc3339_unix_seconds(trimmed)
+    {
         return Some(rfc3339);
     }
 

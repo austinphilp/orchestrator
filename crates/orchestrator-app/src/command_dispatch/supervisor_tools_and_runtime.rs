@@ -3,7 +3,7 @@ use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use orchestrator_core::{
     apply_workflow_transition, command_ids, resolve_supervisor_query_scope,
@@ -12,7 +12,7 @@ use orchestrator_core::{
     LlmChatRequest, LlmFinishReason, LlmMessage, LlmProvider, LlmResponseStream,
     LlmResponseSubscription, LlmRole, LlmStreamChunk, LlmTokenUsage, LlmTool, LlmToolCall,
     LlmToolCallOutput, LlmToolFunction, NewEventEnvelope, OrchestrationEventPayload,
-    PullRequestRef, RepositoryRef, RetrievalScope, RuntimeMappingRecord, SqliteEventStore,
+    PullRequestRef, RepositoryRef, RetrievalScope, RuntimeMappingRecord,
     SupervisorQueryArgs, SupervisorQueryCancellationSource, SupervisorQueryCancelledPayload,
     SupervisorQueryChunkPayload, SupervisorQueryContextArgs, SupervisorQueryFinishedPayload,
     SupervisorQueryKind, SupervisorQueryStartedPayload, TicketAttachment, TicketId, TicketQuery,
@@ -31,7 +31,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tracing::warn;
 
-use crate::{open_event_store, supervisor_model_from_env};
+use crate::{
+    open_event_store, open_owned_event_store, supervisor_chunk_event_flush_interval,
+    supervisor_model_from_env, AppEventStore,
+};
 
 const MAX_TOOL_LOOP_ITERATIONS: usize = 8;
 const TOOL_CALL_PROGRESS_PREFIX: &str = "[tool-call]";
@@ -800,4 +803,3 @@ fn parse_pull_request_repository(url: &str) -> Result<(String, String), CoreErro
     let repository = format!("{owner}/{name}");
     Ok((repository.clone(), repository))
 }
-

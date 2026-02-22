@@ -90,6 +90,13 @@ opencode_server_base_url = "http://127.0.0.1:8787"
 codex_binary = "codex"
 pr_pipeline_poll_interval_secs = 15
 
+[database]
+max_connections = 8
+busy_timeout_ms = 5000
+wal_enabled = true
+synchronous = "NORMAL"
+chunk_event_flush_ms = 250
+
 [ui]
 theme = "nord"
 ticket_picker_priority_states = ["In Progress", "Final Approval", "Todo", "Backlog"]

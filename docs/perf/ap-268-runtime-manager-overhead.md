@@ -67,3 +67,24 @@
 
 ## Follow-up tickets
 Create implementation tickets in Linear after the above ranking is finalized, then link them back to AP-268.
+
+## AP-276 follow-up outcome (2026-02-22)
+
+`AP-276` optimized fanout dispatch to skip clone/send work when no corresponding receivers are attached.
+
+### Re-run command
+
+- `cargo test -p orchestrator-runtime perf_fanout_overhead_10_20_30_sessions -- --ignored --nocapture`
+
+### Updated fanout results
+
+| Scenario | Sessions | Elapsed ms | `event_dispatch_nanos_total` | Delta vs AP-268 |
+|---|---:|---:|---:|---:|
+| fanout_overhead | 10 | 122 | 196843 | -33.4% |
+| fanout_overhead | 20 | 121 | 374801 | -34.8% |
+| fanout_overhead | 30 | 122 | 550043 | -43.3% |
+
+### Observations
+
+- `event_clone_ops_total` is now `0` in global-only fanout scenarios (previously one clone per event).
+- Terminal done/crashed handling semantics remain unchanged and existing lifecycle tests stayed green.

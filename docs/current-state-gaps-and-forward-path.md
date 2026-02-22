@@ -16,13 +16,13 @@
   - Planning logic can drift from actual behavior.
   - Team pays maintenance cost for logic that may not govern production flow.
 
-## 2) Runtime worker/session manager infrastructure appears underused
+## 2) Runtime worker/session manager migration is now active but still in cleanup phase
 
-- `orchestrator-runtime/src/worker_manager.rs` appears to be underexploited by app flow.
-- Main app flow appears to use backend integration directly from app dispatch/UI flow.
-- Impact:
-  - Two conceptual execution models (direct backend flow vs worker-manager lifecycle abstractions).
-  - Harder onboarding and ownership due to duplicate abstractions.
+- `orchestrator-runtime/src/worker_manager.rs` is now wired into app startup/runtime through the `WorkerManagerBackend` adapter.
+- UI terminal flow is fed through frontend-controller events and no longer directly subscribes to backend terminal streams.
+- Remaining work:
+  - remove stale fallback paths and tests that model deprecated UI-direct backend behavior,
+  - document the final ownership boundary between runtime coordinator, app frontend controller, and UI projection/render loop.
 
 ## 3) GitHub adapter capabilities exceed currently exposed app command surface
 

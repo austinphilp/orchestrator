@@ -19,7 +19,7 @@ fn sanitize_error_display_text(input: &str) -> String {
 }
 
 fn resolve_runtime_mapping_for_context(
-    store: &SqliteEventStore,
+    store: &AppEventStore,
     context: &SupervisorCommandContext,
 ) -> Result<RuntimeMappingRecord, CoreError> {
     resolve_runtime_mapping_for_context_with_command(
@@ -30,7 +30,7 @@ fn resolve_runtime_mapping_for_context(
 }
 
 fn resolve_runtime_mapping_for_context_with_command(
-    store: &SqliteEventStore,
+    store: &AppEventStore,
     context: &SupervisorCommandContext,
     command_id: &str,
 ) -> Result<RuntimeMappingRecord, CoreError> {
@@ -65,7 +65,7 @@ fn resolve_runtime_mapping_for_context_with_command(
 }
 
 fn resolve_pull_request_for_mapping_with_command(
-    store: &SqliteEventStore,
+    store: &AppEventStore,
     mapping: &RuntimeMappingRecord,
     command_id: &str,
 ) -> Result<PullRequestRef, CoreError> {
@@ -142,7 +142,7 @@ fn repository_ref_for_runtime_mapping(mapping: &RuntimeMappingRecord) -> Reposit
 }
 
 fn persist_pull_request_artifact_from_vcs_fallback(
-    store: &mut SqliteEventStore,
+    store: &mut AppEventStore,
     mapping: &RuntimeMappingRecord,
     command_id: &str,
     pr: &PullRequestRef,
@@ -183,7 +183,7 @@ fn persist_pull_request_artifact_from_vcs_fallback(
 }
 
 async fn resolve_pull_request_for_mapping_with_vcs_fallback<C>(
-    store: &mut SqliteEventStore,
+    store: &mut AppEventStore,
     mapping: &RuntimeMappingRecord,
     command_id: &str,
     code_host: &C,
@@ -262,7 +262,7 @@ where
 }
 
 fn latest_workflow_state_for_work_item(
-    store: &SqliteEventStore,
+    store: &AppEventStore,
     work_item_id: &WorkItemId,
 ) -> Result<WorkflowState, CoreError> {
     let mut current = WorkflowState::New;
@@ -279,7 +279,7 @@ fn latest_workflow_state_for_work_item(
 }
 
 fn append_workflow_transition_event_for_runtime(
-    store: &mut SqliteEventStore,
+    store: &mut AppEventStore,
     mapping: &RuntimeMappingRecord,
     from: &WorkflowState,
     to: &WorkflowState,
@@ -314,7 +314,7 @@ fn append_workflow_transition_event_for_runtime(
 }
 
 fn normalize_to_in_review_for_merge(
-    store: &mut SqliteEventStore,
+    store: &mut AppEventStore,
     runtime: &RuntimeMappingRecord,
     current: &mut WorkflowState,
     transitions: &mut Vec<String>,
@@ -621,7 +621,7 @@ where
 }
 
 fn rollback_merge_to_review_state(
-    store: &mut SqliteEventStore,
+    store: &mut AppEventStore,
     runtime: &RuntimeMappingRecord,
     current: &WorkflowState,
     prior_review_state: &WorkflowState,
@@ -663,16 +663,49 @@ fn append_supervisor_event(
     session_id: Option<WorkerSessionId>,
     payload: OrchestrationEventPayload,
 ) -> Result<(), CoreError> {
-    let mut store = open_event_store(event_store_path)?;
-    store.append(NewEventEnvelope {
-        event_id,
-        occurred_at,
-        work_item_id,
-        session_id,
-        payload,
-        schema_version: DOMAIN_EVENT_SCHEMA_VERSION,
-    })?;
-    Ok(())
+    let mut delay_ms = 25u64;
+    let mut last_error: Option<CoreError> = None;
+    for _ in 0..4 {
+        let mut store = match open_event_store(event_store_path) {
+            Ok(store) => store,
+            Err(error) => {
+                if is_sqlite_busy_error(&error) {
+                    last_error = Some(error);
+                    std::thread::sleep(Duration::from_millis(delay_ms));
+                    delay_ms = delay_ms.saturating_mul(2);
+                    continue;
+                }
+                return Err(error);
+            }
+        };
+
+        let append_result = store.append(NewEventEnvelope {
+            event_id: event_id.clone(),
+            occurred_at: occurred_at.clone(),
+            work_item_id: work_item_id.clone(),
+            session_id: session_id.clone(),
+            payload: payload.clone(),
+            schema_version: DOMAIN_EVENT_SCHEMA_VERSION,
+        });
+        match append_result {
+            Ok(_) => return Ok(()),
+            Err(error) if is_sqlite_busy_error(&error) => {
+                last_error = Some(error);
+                std::thread::sleep(Duration::from_millis(delay_ms));
+                delay_ms = delay_ms.saturating_mul(2);
+            }
+            Err(error) => return Err(error),
+        }
+    }
+
+    Err(last_error.unwrap_or_else(|| {
+        CoreError::Persistence("failed to append supervisor event after retry".to_owned())
+    }))
+}
+
+fn is_sqlite_busy_error(error: &CoreError) -> bool {
+    let rendered = error.to_string().to_ascii_lowercase();
+    rendered.contains("database is locked") || rendered.contains("database table is locked")
 }
 
 fn append_supervisor_event_best_effort(
@@ -707,6 +740,11 @@ struct SupervisorLifecycleRecordingStream {
     started_at: String,
     started_time: SystemTime,
     cancellation_requested_by_user: Arc<AtomicBool>,
+    chunk_flush_interval: Duration,
+    pending_chunk_count: u32,
+    pending_output_chars: u32,
+    pending_usage: Option<LlmTokenUsage>,
+    last_chunk_flush_time: SystemTime,
     chunk_count: u32,
     output_chars: u32,
     latest_usage: Option<LlmTokenUsage>,
@@ -735,6 +773,11 @@ impl SupervisorLifecycleRecordingStream {
             started_at,
             started_time,
             cancellation_requested_by_user,
+            chunk_flush_interval: supervisor_chunk_event_flush_interval(),
+            pending_chunk_count: 0,
+            pending_output_chars: 0,
+            pending_usage: None,
+            last_chunk_flush_time: SystemTime::now(),
             chunk_count: 0,
             output_chars: 0,
             latest_usage: None,
@@ -747,8 +790,31 @@ impl SupervisorLifecycleRecordingStream {
         let delta_chars = u32::try_from(chunk.delta.chars().count()).unwrap_or(u32::MAX);
         self.chunk_count = self.chunk_count.saturating_add(1);
         self.output_chars = self.output_chars.saturating_add(delta_chars);
+        self.pending_chunk_count = self.pending_chunk_count.saturating_add(1);
+        self.pending_output_chars = self.pending_output_chars.saturating_add(delta_chars);
         if let Some(usage) = chunk.usage.as_ref() {
             self.latest_usage = Some(usage.clone());
+            self.pending_usage = Some(usage.clone());
+        }
+
+        self.flush_pending_chunk_aggregate(None, false);
+    }
+
+    fn flush_pending_chunk_aggregate(
+        &mut self,
+        finish_reason: Option<LlmFinishReason>,
+        force: bool,
+    ) {
+        if self.pending_chunk_count == 0 {
+            return;
+        }
+        if !force {
+            let elapsed = SystemTime::now()
+                .duration_since(self.last_chunk_flush_time)
+                .unwrap_or_default();
+            if elapsed < self.chunk_flush_interval {
+                return;
+            }
         }
 
         let observed_at = now_timestamp();
@@ -763,12 +829,15 @@ impl SupervisorLifecycleRecordingStream {
                 stream_id: self.stream_id.clone(),
                 chunk_index: self.chunk_count,
                 observed_at,
-                delta_chars,
+                delta_chars: self.pending_output_chars,
                 cumulative_output_chars: self.output_chars,
-                usage: chunk.usage.clone(),
-                finish_reason: chunk.finish_reason.clone(),
+                usage: self.pending_usage.take(),
+                finish_reason,
             }),
         );
+        self.pending_chunk_count = 0;
+        self.pending_output_chars = 0;
+        self.last_chunk_flush_time = SystemTime::now();
     }
 
     fn finalize(
@@ -782,6 +851,7 @@ impl SupervisorLifecycleRecordingStream {
         }
 
         self.finished = true;
+        self.flush_pending_chunk_aggregate(Some(reason.clone()), true);
         let finished_at = now_timestamp();
         let duration_ms = SystemTime::now()
             .duration_since(self.started_time)
@@ -924,7 +994,7 @@ where
 {
     let context = merge_supervisor_query_context(fallback_context, args_context(&args));
     let scope = resolve_supervisor_query_scope(&context)?;
-    let store = open_event_store(event_store_path)?;
+    let store = open_owned_event_store(event_store_path)?;
     let query_engine = SupervisorQueryEngine::default();
     let context_pack =
         query_engine.build_context_pack_with_filters(&store, scope.clone(), &context)?;

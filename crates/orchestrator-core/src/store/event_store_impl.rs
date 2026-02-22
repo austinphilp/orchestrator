@@ -1,4 +1,7 @@
-impl EventStore for SqliteEventStore {
+impl<C> EventStore for SqliteEventStore<C>
+where
+    C: std::ops::Deref<Target = Connection> + std::ops::DerefMut,
+{
     fn append(&mut self, event: NewEventEnvelope) -> Result<StoredEventEnvelope, CoreError> {
         self.append_event(event, &[])
     }
@@ -88,4 +91,3 @@ impl EventStore for SqliteEventStore {
         }
     }
 }
-

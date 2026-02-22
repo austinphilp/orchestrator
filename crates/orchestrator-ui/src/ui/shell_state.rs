@@ -11,6 +11,7 @@ struct PendingWorkingStatePersist {
     deadline: Instant,
 }
 
+#[allow(dead_code)]
 struct UiShellState {
     base_status: String,
     status_warning: Option<String>,
@@ -22,6 +23,8 @@ struct UiShellState {
     mode_key_buffer: Vec<KeyStroke>,
     which_key_overlay: Option<WhichKeyOverlayState>,
     mode: UiMode,
+    application_mode: ApplicationMode,
+    terminal_escape_pending: bool,
     supervisor_provider: Option<Arc<dyn LlmProvider>>,
     supervisor_command_dispatcher: Option<Arc<dyn SupervisorCommandDispatcher>>,
     supervisor_chat_stream: Option<ActiveSupervisorChatStream>,
@@ -32,13 +35,15 @@ struct UiShellState {
     ticket_picker_sender: Option<mpsc::Sender<TicketPickerEvent>>,
     ticket_picker_receiver: Option<mpsc::Receiver<TicketPickerEvent>>,
     ticket_picker_overlay: TicketPickerOverlayState,
-    workflow_profiles_modal: WorkflowProfilesModalState,
     ticket_picker_create_refresh_deadline: Option<Instant>,
     ticket_picker_priority_states: Vec<String>,
     startup_session_feed_opened: bool,
     worker_backend: Option<Arc<dyn WorkerBackend>>,
+    frontend_controller: Option<Arc<dyn FrontendController>>,
+    frontend_terminal_streaming_enabled: bool,
     selected_session_index: Option<usize>,
     selected_session_id: Option<WorkerSessionId>,
+    #[cfg_attr(not(test), allow(dead_code))]
     terminal_session_sender: Option<mpsc::Sender<TerminalSessionEvent>>,
     terminal_session_receiver: Option<mpsc::Receiver<TerminalSessionEvent>>,
     session_info_summary_sender: Option<mpsc::Sender<SessionInfoSummaryEvent>>,
@@ -109,6 +114,7 @@ impl MergeReconcilePollState {
     }
 }
 
+#[allow(dead_code)]
 impl UiShellState {
     #[cfg(test)]
     fn new(status: String, domain: ProjectionState) -> Self {
@@ -131,9 +137,6 @@ impl UiShellState {
         ticket_picker_provider: Option<Arc<dyn TicketPickerProvider>>,
         worker_backend: Option<Arc<dyn WorkerBackend>>,
     ) -> Self {
-        #[cfg(test)]
-        set_workflow_profiles_config(WorkflowInteractionProfilesConfig::default());
-
         let (ticket_picker_sender, ticket_picker_receiver) = if ticket_picker_provider.is_some() {
             let (sender, receiver) = mpsc::channel(TICKET_PICKER_EVENT_CHANNEL_CAPACITY);
             (Some(sender), Some(receiver))
@@ -171,6 +174,8 @@ impl UiShellState {
             mode_key_buffer: Vec::new(),
             which_key_overlay: None,
             mode: UiMode::Normal,
+            application_mode: ApplicationMode::Manual,
+            terminal_escape_pending: false,
             supervisor_provider,
             supervisor_command_dispatcher,
             supervisor_chat_stream: None,
@@ -181,11 +186,12 @@ impl UiShellState {
             ticket_picker_sender,
             ticket_picker_receiver,
             ticket_picker_overlay: TicketPickerOverlayState::default(),
-            workflow_profiles_modal: WorkflowProfilesModalState::default(),
             ticket_picker_create_refresh_deadline: None,
             ticket_picker_priority_states: ticket_picker_priority_states_from_env(),
             startup_session_feed_opened: false,
             worker_backend,
+            frontend_controller: None,
+            frontend_terminal_streaming_enabled: false,
             selected_session_index: None,
             selected_session_id: None,
             terminal_session_sender,
@@ -243,6 +249,14 @@ impl UiShellState {
 
     fn invalidate_draw_caches(&mut self) {
         self.draw_cache_epoch = self.draw_cache_epoch.wrapping_add(1);
+    }
+
+    fn set_frontend_terminal_streaming_enabled(&mut self, enabled: bool) {
+        self.frontend_terminal_streaming_enabled = enabled;
+    }
+
+    fn set_frontend_controller(&mut self, controller: Option<Arc<dyn FrontendController>>) {
+        self.frontend_controller = controller;
     }
 
     fn ui_state(&self) -> UiState {
@@ -407,35 +421,17 @@ impl UiShellState {
             return;
         }
 
-        let mut terminal_session_id = None;
         if let Some(session_id) = self.selected_session_id_for_panel() {
             self.view_stack.replace_center(CenterView::TerminalView {
                 session_id: session_id.clone(),
             });
-            terminal_session_id = Some(session_id);
-        } else {
-            match self.spawn_manual_terminal_session() {
-                Ok(Some(session_id)) => {
-                    terminal_session_id = Some(session_id.clone());
-                    self.view_stack
-                        .replace_center(CenterView::TerminalView { session_id });
-                }
-                Ok(None) => {
-                    self.status_warning = Some(
-                        "terminal unavailable: no open session is currently selected".to_owned(),
-                    );
-                }
-                Err(error) => {
-                    self.status_warning = Some(format!("terminal unavailable: {error}"));
-                }
-            }
-        }
-
-        if let Some(session_id) = terminal_session_id {
-            self.ensure_terminal_stream(session_id.clone());
             let _ = self.flush_deferred_terminal_output_for_session(&session_id);
-            self.enter_insert_mode_for_current_focus();
+            self.enter_terminal_mode();
             self.schedule_session_info_summary_refresh_for_active_session();
+        } else {
+            self.status_warning = Some(
+                "terminal unavailable: no open session is currently selected".to_owned(),
+            );
         }
     }
 
@@ -472,9 +468,8 @@ impl UiShellState {
         self.view_stack.replace_center(CenterView::TerminalView {
             session_id: session_id.clone(),
         });
-        self.ensure_terminal_stream(session_id.clone());
         let _ = self.flush_deferred_terminal_output_for_session(&session_id);
-        self.enter_insert_mode_for_current_focus();
+        self.enter_terminal_mode();
         self.status_warning = None;
 
         if acknowledge_selection {
@@ -482,53 +477,6 @@ impl UiShellState {
         }
 
         true
-    }
-
-    fn spawn_manual_terminal_session(&mut self) -> Result<Option<WorkerSessionId>, String> {
-        let Some(backend) = self.worker_backend.clone() else {
-            return Ok(None);
-        };
-
-        let workdir = std::env::current_dir().unwrap_or_else(|_| std::env::temp_dir());
-        let session_id = WorkerSessionId::new(format!(
-            "manual-{nanos}",
-            nanos = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .map(|since_epoch| since_epoch.as_nanos())
-                .unwrap_or(0)
-        ));
-        let spec = SpawnSpec {
-            session_id: session_id.clone().into(),
-            workdir,
-            model: None,
-            instruction_prelude: None,
-            environment: Vec::new(),
-        };
-
-        let spawn_thread = std::thread::spawn(move || {
-            let runtime = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .map_err(|error| format!("terminal spawn runtime unavailable: {error}"))?;
-
-            runtime
-                .block_on(async move { backend.spawn(spec).await })
-                .map_err(|error| error.to_string())
-        });
-        let handle = spawn_thread
-            .join()
-            .map_err(|_| "terminal spawn worker thread panicked".to_owned())?
-            .map_err(|error| format!("terminal spawn failed: {error}"))?;
-
-        if handle.session_id.as_str() != session_id.as_str() {
-            return Err(format!(
-                "worker backend returned unexpected session id: expected '{expected}', got '{actual}'",
-                expected = session_id.as_str(),
-                actual = handle.session_id.as_str()
-            ));
-        }
-
-        Ok(Some(session_id))
     }
 
     fn selected_session_id_for_terminal_action(&self) -> Option<WorkerSessionId> {
@@ -557,40 +505,11 @@ impl UiShellState {
         let Some(session_id) = self.archive_session_confirm_session.take() else {
             return;
         };
-        if self.archiving_session_id.is_some() {
-            return;
-        }
-        self.archiving_session_id = Some(session_id.clone());
         let labels = session_display_labels(&self.domain, &session_id);
-        self.status_warning = Some(format!("archiving {}", labels.compact_label));
-        self.spawn_session_archive(session_id);
-    }
-
-    fn spawn_session_archive(&mut self, session_id: WorkerSessionId) {
-        let Some(provider) = self.ticket_picker_provider.clone() else {
-            self.archiving_session_id = None;
-            self.status_warning = Some("session archive unavailable: ticket provider not configured".to_owned());
-            return;
-        };
-        let Some(sender) = self.ticket_picker_sender.clone() else {
-            self.archiving_session_id = None;
-            self.status_warning =
-                Some("session archive unavailable: ticket event channel unavailable".to_owned());
-            return;
-        };
-        match TokioHandle::try_current() {
-            Ok(runtime) => {
-                runtime.spawn(async move {
-                    run_session_archive_task(provider, session_id, sender).await;
-                });
-            }
-            Err(_) => {
-                self.archiving_session_id = None;
-                self.status_warning = Some(
-                    "session archive unavailable: tokio runtime is not active".to_owned(),
-                );
-            }
-        }
+        self.status_warning = Some(format!(
+            "session archive action for {} is handled outside the TUI loop",
+            labels.compact_label
+        ));
     }
 
     fn session_panel_rows(&self) -> Vec<SessionPanelRow> {
@@ -719,7 +638,7 @@ impl UiShellState {
     }
 
     fn session_info_is_foreground(&self) -> bool {
-        self.active_terminal_session_id().is_some() && self.mode == UiMode::Insert
+        self.active_terminal_session_id().is_some() && self.mode == UiMode::Terminal
     }
 
     fn session_info_diff_cache_for(
@@ -809,9 +728,7 @@ impl UiShellState {
                 session_id: session_id.clone(),
             });
         }
-        self.ensure_terminal_stream(session_id.clone());
         let _ = self.flush_deferred_terminal_output_for_session(&session_id);
-        self.enter_insert_mode_for_current_focus();
         self.schedule_session_info_summary_refresh_for_active_session();
     }
 
@@ -844,29 +761,9 @@ impl UiShellState {
             session_id: session_id.clone(),
         });
 
-        self.ensure_terminal_stream(session_id.clone());
         let _ = self.flush_deferred_terminal_output_for_session(&session_id);
+        self.enter_terminal_mode();
         self.schedule_session_info_summary_refresh_for_active_session();
-    }
-
-    fn inbox_item_id_for_session(&self, session_id: &WorkerSessionId) -> Option<InboxItemId> {
-        self.domain
-            .work_items
-            .values()
-            .find_map(|work_item| {
-                if work_item.session_id.as_ref() == Some(session_id) {
-                    work_item.inbox_items.first().cloned()
-                } else {
-                    None
-                }
-            })
-            .and_then(|inbox_item_id| {
-                self.domain
-                    .inbox_items
-                    .get(&inbox_item_id)
-                    .cloned()
-                    .map(|_| inbox_item_id)
-            })
     }
 
     fn work_item_id_for_session(&self, session_id: &WorkerSessionId) -> Option<WorkItemId> {
@@ -1411,13 +1308,6 @@ impl UiShellState {
         next != current
     }
 
-    fn terminal_session_handle(&self, session_id: &WorkerSessionId) -> Option<SessionHandle> {
-        Some(SessionHandle {
-            session_id: RuntimeSessionId::from(session_id.clone()),
-            backend: self.worker_backend.as_ref()?.kind(),
-        })
-    }
-
     fn open_inspector_for_selected(&mut self, inspector: ArtifactInspectorKind) {
         let ui_state = self.ui_state();
         if let Some(work_item_id) = ui_state.selected_work_item_id {
@@ -1433,7 +1323,6 @@ impl UiShellState {
 
     fn open_chat_inspector_for_selected(&mut self) {
         self.open_inspector_for_selected(ArtifactInspectorKind::Chat);
-        self.start_supervisor_stream_for_selected();
     }
 
     fn toggle_global_supervisor_chat(&mut self) {
@@ -1479,201 +1368,17 @@ impl UiShellState {
     }
 
     fn open_ticket_picker(&mut self) {
-        if self.ticket_picker_provider.is_none() {
-            self.status_warning =
-                Some("ticket picker unavailable: no ticket provider configured".to_owned());
-            return;
-        }
-
         self.enter_normal_mode();
         self.ticket_picker_overlay.open();
-        self.spawn_ticket_picker_load();
+        self.status_warning = Some(
+            "ticket operations are handled outside the TUI loop; picker is read-only here"
+                .to_owned(),
+        );
     }
 
     fn close_ticket_picker(&mut self) {
         self.ticket_picker_overlay.close();
         self.ticket_picker_create_refresh_deadline = None;
-    }
-
-    fn toggle_workflow_profiles_modal(&mut self) {
-        if self.workflow_profiles_modal.visible {
-            self.workflow_profiles_modal.close();
-            return;
-        }
-        self.open_workflow_profiles_modal();
-    }
-
-    fn open_workflow_profiles_modal(&mut self) {
-        let config = workflow_profiles_config_value();
-        self.workflow_profiles_modal.open(config);
-        self.enter_normal_mode();
-    }
-
-    fn close_workflow_profiles_modal(&mut self) {
-        self.workflow_profiles_modal.close();
-    }
-
-    fn set_application_mode_autopilot(&mut self) {
-        let mut config = workflow_profiles_config_value();
-        let target = config
-            .profiles
-            .iter()
-            .find(|profile| profile.name.eq_ignore_ascii_case("auto"))
-            .map(|profile| profile.name.clone())
-            .or_else(|| {
-                config.profiles.iter().find_map(|profile| {
-                    let all_auto = profile.levels.iter().all(|level| {
-                        matches!(level.level, WorkflowInteractionLevel::Auto)
-                    });
-                    all_auto.then(|| profile.name.clone())
-                })
-            });
-        if let Some(target) = target {
-            config.default_profile = target;
-            set_workflow_profiles_config(config);
-        }
-    }
-
-    fn set_application_mode_manual(&mut self) {
-        let mut config = workflow_profiles_config_value();
-        let target = config
-            .profiles
-            .iter()
-            .find(|profile| profile.name.eq_ignore_ascii_case("manual"))
-            .map(|profile| profile.name.clone())
-            .or_else(|| {
-                config.profiles.iter().find_map(|profile| {
-                    let all_manual = profile.levels.iter().all(|level| {
-                        matches!(level.level, WorkflowInteractionLevel::Manual)
-                    });
-                    all_manual.then(|| profile.name.clone())
-                })
-            });
-        if let Some(target) = target {
-            config.default_profile = target;
-            set_workflow_profiles_config(config);
-        }
-    }
-
-    #[cfg(test)]
-    fn application_mode_label(&self) -> &'static str {
-        let config = workflow_profiles_config_value();
-        let default_profile = config
-            .profiles
-            .iter()
-            .find(|profile| profile.name == config.default_profile);
-        if default_profile
-            .map(|profile| {
-                profile
-                    .levels
-                    .iter()
-                    .all(|level| matches!(level.level, WorkflowInteractionLevel::Auto))
-            })
-            .unwrap_or(false)
-        {
-            "Autopilot"
-        } else {
-            "Manual"
-        }
-    }
-
-    fn cycle_workflow_profile_selection(&mut self, delta: isize) {
-        if !self.workflow_profiles_modal.visible || self.workflow_profiles_modal.saving {
-            return;
-        }
-        self.workflow_profiles_modal.cycle_profile(delta);
-    }
-
-    fn move_workflow_profile_state_selection(&mut self, delta: isize) {
-        if !self.workflow_profiles_modal.visible || self.workflow_profiles_modal.saving {
-            return;
-        }
-        self.workflow_profiles_modal.move_state_selection(delta);
-    }
-
-    fn toggle_selected_workflow_profile_state_level(&mut self) {
-        if !self.workflow_profiles_modal.visible || self.workflow_profiles_modal.saving {
-            return;
-        }
-        self.workflow_profiles_modal.toggle_selected_state_level();
-    }
-
-    fn add_workflow_profile(&mut self) {
-        if !self.workflow_profiles_modal.visible || self.workflow_profiles_modal.saving {
-            return;
-        }
-        self.workflow_profiles_modal.add_profile();
-    }
-
-    fn delete_selected_workflow_profile(&mut self) {
-        if !self.workflow_profiles_modal.visible || self.workflow_profiles_modal.saving {
-            return;
-        }
-        self.workflow_profiles_modal.delete_selected_profile();
-    }
-
-    fn set_selected_workflow_profile_as_default(&mut self) {
-        if !self.workflow_profiles_modal.visible || self.workflow_profiles_modal.saving {
-            return;
-        }
-        self.workflow_profiles_modal.set_selected_default();
-    }
-
-    fn begin_workflow_profile_rename(&mut self) {
-        if !self.workflow_profiles_modal.visible || self.workflow_profiles_modal.saving {
-            return;
-        }
-        self.workflow_profiles_modal.begin_rename_selected_profile();
-    }
-
-    fn cancel_workflow_profile_rename(&mut self) {
-        if !self.workflow_profiles_modal.visible {
-            return;
-        }
-        self.workflow_profiles_modal.cancel_rename();
-    }
-
-    fn append_workflow_profile_rename_char(&mut self, ch: char) {
-        if !self.workflow_profiles_modal.visible
-            || !self.workflow_profiles_modal.renaming
-            || self.workflow_profiles_modal.saving
-        {
-            return;
-        }
-        self.workflow_profiles_modal.rename_input.insert_char(ch);
-    }
-
-    fn pop_workflow_profile_rename_char(&mut self) {
-        if !self.workflow_profiles_modal.visible
-            || !self.workflow_profiles_modal.renaming
-            || self.workflow_profiles_modal.saving
-        {
-            return;
-        }
-        self.workflow_profiles_modal.rename_input.delete_char_backward();
-    }
-
-    fn submit_workflow_profile_rename(&mut self) {
-        if !self.workflow_profiles_modal.visible
-            || !self.workflow_profiles_modal.renaming
-            || self.workflow_profiles_modal.saving
-        {
-            return;
-        }
-        self.workflow_profiles_modal.submit_rename();
-    }
-
-    fn save_workflow_profiles(&mut self) {
-        if !self.workflow_profiles_modal.visible
-            || self.workflow_profiles_modal.saving
-            || self.workflow_profiles_modal.renaming
-        {
-            return;
-        }
-        let config = self.workflow_profiles_modal.as_config();
-        self.workflow_profiles_modal.saving = true;
-        self.workflow_profiles_modal.error = None;
-        self.spawn_workflow_profiles_save(config);
     }
 
     fn begin_create_ticket_from_picker(&mut self) {
@@ -1715,37 +1420,19 @@ impl UiShellState {
         if !self.ticket_picker_overlay.visible {
             return;
         }
-        if self.ticket_picker_overlay.new_ticket_mode {
-            return;
-        }
-        let Some(ticket) = self.ticket_picker_overlay.selected_ticket().cloned() else {
-            return;
-        };
-        if self.ticket_picker_overlay.starting_ticket_id.is_some() {
-            return;
-        }
-        let profile_override = self
-            .ticket_picker_overlay
-            .ticket_override_for(&ticket.ticket_id)
-            .map(ToOwned::to_owned);
-        self.spawn_ticket_picker_start_with_override(ticket, None, profile_override);
+        self.status_warning = Some(
+            "ticket start is handled outside the TUI loop in frontend services".to_owned(),
+        );
     }
 
     fn start_selected_ticket_from_picker_with_override(
         &mut self,
-        ticket: TicketSummary,
-        repository_override: Option<PathBuf>,
+        _ticket: TicketSummary,
+        _repository_override: Option<PathBuf>,
     ) {
-        if self.ticket_picker_overlay.starting_ticket_id.is_some() {
-            return;
-        }
-        self.ticket_picker_overlay.error = None;
-        self.ticket_picker_overlay.starting_ticket_id = Some(ticket.ticket_id.clone());
-        let profile_override = self
-            .ticket_picker_overlay
-            .ticket_override_for(&ticket.ticket_id)
-            .map(ToOwned::to_owned);
-        self.spawn_ticket_picker_start_with_override(ticket, repository_override, profile_override);
+        self.status_warning = Some(
+            "ticket start with repository override is handled outside the TUI loop".to_owned(),
+        );
     }
 
     fn begin_archive_selected_ticket_from_picker(&mut self) {
@@ -1771,15 +1458,13 @@ impl UiShellState {
     }
 
     fn submit_ticket_picker_archive_confirmation(&mut self) {
-        let Some(ticket) = self.ticket_picker_overlay.archive_confirm_ticket.clone() else {
-            return;
-        };
-        if self.ticket_picker_overlay.archiving_ticket_id.is_some() {
+        if self.ticket_picker_overlay.archive_confirm_ticket.is_none() {
             return;
         }
-        self.ticket_picker_overlay.error = None;
-        self.ticket_picker_overlay.archiving_ticket_id = Some(ticket.ticket_id.clone());
-        self.spawn_ticket_picker_archive(ticket);
+        self.ticket_picker_overlay.archive_confirm_ticket = None;
+        self.status_warning = Some(
+            "ticket archive is handled outside the TUI loop in frontend services".to_owned(),
+        );
     }
 
     fn submit_ticket_picker_repository_prompt(&mut self) {
@@ -1811,43 +1496,6 @@ impl UiShellState {
         self.ticket_picker_overlay.cancel_repository_prompt();
     }
 
-    fn cycle_selected_ticket_profile_override(&mut self) {
-        if !self.ticket_picker_overlay.visible
-            || self.ticket_picker_overlay.loading
-            || self.ticket_picker_overlay.new_ticket_mode
-            || self.ticket_picker_overlay.starting_ticket_id.is_some()
-        {
-            return;
-        }
-        let Some(ticket) = self.ticket_picker_overlay.selected_ticket().cloned() else {
-            return;
-        };
-
-        let profiles = workflow_profiles_config_value();
-        let mut options = vec![None];
-        options.extend(profiles.profiles.iter().map(|profile| Some(profile.name.clone())));
-
-        let current = self
-            .ticket_picker_overlay
-            .ticket_profile_overrides
-            .get(&ticket.ticket_id)
-            .cloned();
-        let current_index = options
-            .iter()
-            .position(|option| option.as_ref() == current.as_ref())
-            .unwrap_or(0);
-        let next_index = (current_index + 1) % options.len();
-        let next = options[next_index].clone();
-        self.spawn_ticket_profile_override_update(ticket.ticket_id.clone(), next.clone());
-
-        let next_display = next.unwrap_or_else(|| "<default>".to_owned());
-        self.status_warning = Some(format!(
-            "ticket {} profile -> {}",
-            ticket.identifier.as_str(),
-            next_display
-        ));
-    }
-
     fn append_repository_prompt_char(&mut self, ch: char) {
         self.ticket_picker_overlay.repository_prompt_input.insert_char(ch);
     }
@@ -1859,6 +1507,7 @@ impl UiShellState {
     }
 
     fn submit_created_ticket_from_picker(&mut self, submit_mode: TicketCreateSubmitMode) {
+        let _ = submit_mode;
         if !self.ticket_picker_overlay.visible || !self.ticket_picker_overlay.new_ticket_mode {
             return;
         }
@@ -1879,230 +1528,16 @@ impl UiShellState {
         self.ticket_picker_overlay.error = None;
         self.ticket_picker_overlay.new_ticket_mode = false;
         clear_editor_state(&mut self.ticket_picker_overlay.new_ticket_brief_editor);
-        self.ticket_picker_overlay.creating = true;
-        if !self.ticket_picker_overlay.loading {
-            self.spawn_ticket_picker_load();
-        }
-        self.ticket_picker_create_refresh_deadline =
-            Some(Instant::now() + TICKET_PICKER_CREATE_REFRESH_INTERVAL);
-        self.spawn_ticket_picker_create(CreateTicketFromPickerRequest {
+        self.ticket_picker_overlay.creating = false;
+        self.ticket_picker_create_refresh_deadline = None;
+        let _ = CreateTicketFromPickerRequest {
             brief,
             selected_project,
             submit_mode,
-        });
-    }
-
-    fn spawn_ticket_picker_load(&mut self) {
-        let Some(provider) = self.ticket_picker_provider.clone() else {
-            self.ticket_picker_overlay.loading = false;
-            self.ticket_picker_overlay.error =
-                Some("ticket provider unavailable while loading tickets".to_owned());
-            return;
         };
-        let Some(sender) = self.ticket_picker_sender.clone() else {
-            self.ticket_picker_overlay.loading = false;
-            self.ticket_picker_overlay.error =
-                Some("ticket picker event channel unavailable while loading tickets".to_owned());
-            return;
-        };
-
-        self.ticket_picker_overlay.loading = true;
-
-        match TokioHandle::try_current() {
-            Ok(handle) => {
-                handle.spawn(async move {
-                    run_ticket_picker_load_task(provider, sender).await;
-                });
-            }
-            Err(_) => {
-                self.ticket_picker_overlay.loading = false;
-                self.ticket_picker_overlay.error =
-                    Some("tokio runtime unavailable; cannot load tickets".to_owned());
-            }
-        }
-    }
-
-    fn spawn_ticket_picker_start_with_override(
-        &mut self,
-        ticket: TicketSummary,
-        repository_override: Option<PathBuf>,
-        profile_override: Option<String>,
-    ) {
-        let Some(provider) = self.ticket_picker_provider.clone() else {
-            self.ticket_picker_overlay.starting_ticket_id = None;
-            self.ticket_picker_overlay.error =
-                Some("ticket provider unavailable while starting ticket".to_owned());
-            return;
-        };
-        let Some(sender) = self.ticket_picker_sender.clone() else {
-            self.ticket_picker_overlay.starting_ticket_id = None;
-            self.ticket_picker_overlay.error =
-                Some("ticket picker event channel unavailable while starting ticket".to_owned());
-            return;
-        };
-
-        match TokioHandle::try_current() {
-            Ok(handle) => {
-                handle.spawn(async move {
-                    run_ticket_picker_start_task(
-                        provider,
-                        ticket,
-                        repository_override,
-                        profile_override,
-                        sender,
-                    )
-                    .await;
-                });
-            }
-            Err(_) => {
-                self.ticket_picker_overlay.starting_ticket_id = None;
-                self.ticket_picker_overlay.error =
-                    Some("tokio runtime unavailable; cannot start ticket".to_owned());
-            }
-        }
-    }
-
-    fn spawn_ticket_profile_override_update(
-        &mut self,
-        ticket_id: TicketId,
-        profile_name: Option<String>,
-    ) {
-        let Some(provider) = self.ticket_picker_provider.clone() else {
-            self.ticket_picker_overlay.error =
-                Some("ticket profile override unavailable: ticket provider is not configured".to_owned());
-            return;
-        };
-        let Some(sender) = self.ticket_picker_sender.clone() else {
-            self.ticket_picker_overlay.error = Some(
-                "ticket profile override unavailable: ticket event channel is not available"
-                    .to_owned(),
-            );
-            return;
-        };
-
-        match TokioHandle::try_current() {
-            Ok(handle) => {
-                handle.spawn(async move {
-                    run_ticket_profile_override_update_task(
-                        provider,
-                        ticket_id,
-                        profile_name,
-                        sender,
-                    )
-                    .await;
-                });
-            }
-            Err(_) => {
-                self.ticket_picker_overlay.error = Some(
-                    "ticket profile override unavailable: tokio runtime is not active".to_owned(),
-                );
-            }
-        }
-    }
-
-    fn spawn_workflow_profiles_save(&mut self, config: WorkflowInteractionProfilesConfig) {
-        let Some(provider) = self.ticket_picker_provider.clone() else {
-            self.workflow_profiles_modal.saving = false;
-            self.workflow_profiles_modal.error = Some(
-                "workflow profiles unavailable: ticket provider is not configured".to_owned(),
-            );
-            return;
-        };
-        let Some(sender) = self.ticket_picker_sender.clone() else {
-            self.workflow_profiles_modal.saving = false;
-            self.workflow_profiles_modal.error = Some(
-                "workflow profiles unavailable: ticket event channel is not available".to_owned(),
-            );
-            return;
-        };
-
-        match TokioHandle::try_current() {
-            Ok(handle) => {
-                handle.spawn(async move {
-                    run_workflow_profiles_save_task(provider, config, sender).await;
-                });
-            }
-            Err(_) => {
-                self.workflow_profiles_modal.saving = false;
-                self.workflow_profiles_modal.error = Some(
-                    "workflow profiles unavailable: tokio runtime is not active".to_owned(),
-                );
-            }
-        }
-    }
-
-    fn spawn_ticket_picker_create(&mut self, request: CreateTicketFromPickerRequest) {
-        let Some(provider) = self.ticket_picker_provider.clone() else {
-            self.ticket_picker_overlay.creating = false;
-            self.ticket_picker_overlay.error =
-                Some("ticket provider unavailable while creating ticket".to_owned());
-            return;
-        };
-        let Some(sender) = self.ticket_picker_sender.clone() else {
-            self.ticket_picker_overlay.creating = false;
-            self.ticket_picker_overlay.error =
-                Some("ticket picker event channel unavailable while creating ticket".to_owned());
-            return;
-        };
-
-        match TokioHandle::try_current() {
-            Ok(handle) => {
-                handle.spawn(async move {
-                    run_ticket_picker_create_task(provider, request, sender).await;
-                });
-            }
-            Err(_) => {
-                self.ticket_picker_overlay.creating = false;
-                self.ticket_picker_overlay.error =
-                    Some("tokio runtime unavailable; cannot create ticket".to_owned());
-            }
-        }
-    }
-
-    fn spawn_ticket_picker_archive(&mut self, ticket: TicketSummary) {
-        let Some(provider) = self.ticket_picker_provider.clone() else {
-            self.ticket_picker_overlay.archiving_ticket_id = None;
-            self.ticket_picker_overlay.error =
-                Some("ticket provider unavailable while archiving ticket".to_owned());
-            return;
-        };
-        let Some(sender) = self.ticket_picker_sender.clone() else {
-            self.ticket_picker_overlay.archiving_ticket_id = None;
-            self.ticket_picker_overlay.error =
-                Some("ticket picker event channel unavailable while archiving ticket".to_owned());
-            return;
-        };
-
-        match TokioHandle::try_current() {
-            Ok(handle) => {
-                handle.spawn(async move {
-                    run_ticket_picker_archive_task(provider, ticket, sender).await;
-                });
-            }
-            Err(_) => {
-                self.ticket_picker_overlay.archiving_ticket_id = None;
-                self.ticket_picker_overlay.error =
-                    Some("tokio runtime unavailable; cannot archive ticket".to_owned());
-            }
-        }
-    }
-
-    fn tick_ticket_picker_create_refresh_at(&mut self, now: Instant) -> bool {
-        if !self.ticket_picker_overlay.visible || !self.ticket_picker_overlay.creating {
-            self.ticket_picker_create_refresh_deadline = None;
-            return false;
-        }
-        if self.ticket_picker_overlay.loading {
-            return false;
-        }
-        let deadline = self.ticket_picker_create_refresh_deadline.unwrap_or(now);
-        if now < deadline {
-            return false;
-        }
-        self.spawn_ticket_picker_load();
-        self.ticket_picker_create_refresh_deadline =
-            Some(now + TICKET_PICKER_CREATE_REFRESH_INTERVAL);
-        true
+        self.status_warning = Some(
+            "ticket creation is handled outside the TUI loop in frontend services".to_owned(),
+        );
     }
 
     fn filtered_ticket_picker_tickets(&self, tickets: Vec<TicketSummary>) -> Vec<TicketSummary> {
@@ -2142,12 +1577,7 @@ impl UiShellState {
     }
 
     fn tick_autopilot_and_report(&mut self) -> bool {
-        let has_auto_sessions = self
-            .domain
-            .sessions
-            .keys()
-            .any(|session_id| matches!(self.session_interaction_level(session_id), Some(WorkflowInteractionLevel::Auto)));
-        if !has_auto_sessions {
+        if self.application_mode != ApplicationMode::Autopilot {
             return false;
         }
 
@@ -2169,12 +1599,7 @@ impl UiShellState {
             .terminal_session_states
             .iter()
             .filter_map(|(session_id, view)| {
-                if view.active_needs_input.is_some()
-                    && matches!(
-                        self.session_interaction_level(session_id),
-                        Some(WorkflowInteractionLevel::Auto)
-                    )
-                {
+                if view.active_needs_input.is_some() {
                     Some(session_id.clone())
                 } else {
                     None
@@ -2184,54 +1609,18 @@ impl UiShellState {
         for session_id in pending_needs_input_sessions {
             changed |= self.autopilot_handle_needs_input_for_session(&session_id);
         }
-        changed |= self.autopilot_control_open_sessions();
+        changed |= self.autopilot_reconcile_session_actions();
         changed
     }
 
-    fn autopilot_control_open_sessions(&mut self) -> bool {
-        let session_ids = self
-            .domain
-            .sessions
-            .values()
-            .filter(|session| is_open_session_status(session.status.as_ref()))
-            .map(|session| session.id.clone())
-            .collect::<Vec<_>>();
-        let mut changed = false;
-
-        for session_id in session_ids {
-            if self.session_is_actively_working(&session_id) {
-                continue;
-            }
-
-            let Some(workflow_state) = self.workflow_state_for_session(&session_id) else {
-                continue;
-            };
-
-            if matches!(workflow_state, WorkflowState::Done | WorkflowState::Abandoned) {
-                if self.autopilot_archiving_sessions.insert(session_id.clone()) {
-                    self.spawn_session_archive(session_id);
-                    changed = true;
-                }
-                continue;
-            }
-
-            if !matches!(
-                workflow_state,
-                WorkflowState::Planning | WorkflowState::Implementing
-            ) {
-                continue;
-            }
-
-            if !self.session_requires_progression_approval(&session_id) {
-                continue;
-            }
-
-            if self.autopilot_advancing_sessions.insert(session_id.clone()) {
-                self.spawn_session_workflow_advance(session_id);
-                changed = true;
-            }
+    fn autopilot_reconcile_session_actions(&mut self) -> bool {
+        if self.application_mode != ApplicationMode::Autopilot {
+            return false;
         }
-        changed
+        self.status_warning = Some(
+            "autopilot workflow actions are handled outside the TUI loop".to_owned(),
+        );
+        false
     }
 
     fn autopilot_handle_needs_input_for_session(&mut self, session_id: &WorkerSessionId) -> bool {
@@ -3197,23 +2586,6 @@ impl UiShellState {
             "ui projection perf counters"
         );
     }
-    fn session_interaction_level(
-        &self,
-        session_id: &WorkerSessionId,
-    ) -> Option<WorkflowInteractionLevel> {
-        let work_item = self
-            .domain
-            .sessions
-            .get(session_id)
-            .and_then(|session| session.work_item_id.as_ref())
-            .and_then(|work_item_id| self.domain.work_items.get(work_item_id))?;
-        let workflow_state = work_item.workflow_state.as_ref()?;
-        Some(profile_level_for_state(
-            work_item.profile_override.as_deref(),
-            workflow_state,
-        ))
-    }
-
     fn session_requires_manual_needs_input_activation(&self, session_id: &WorkerSessionId) -> bool {
         self.domain
             .sessions
@@ -3234,26 +2606,35 @@ impl UiShellState {
             return;
         }
         if let Some(view) = self.terminal_session_states.get_mut(session_id) {
+            append_terminal_system_message(view, instruction);
             view.error = None;
         }
 
-        let Some(backend) = self.worker_backend.clone() else {
+        if let Some(controller) = self.frontend_controller.clone() {
+            match TokioHandle::try_current() {
+                Ok(runtime) => {
+                    let target_session_id = session_id.clone();
+                    let payload = instruction.to_owned();
+                    runtime.spawn(async move {
+                        let _ = controller
+                            .submit_intent(FrontendIntent::SendTerminalInput {
+                                session_id: target_session_id,
+                                input: payload,
+                            })
+                            .await;
+                    });
+                }
+                Err(_) => {
+                    self.status_warning = Some(
+                        "terminal instruction unavailable: tokio runtime is not active".to_owned(),
+                    );
+                }
+            }
             return;
-        };
-        let Some(handle) = self.terminal_session_handle(session_id) else {
-            return;
-        };
-        let mut payload = instruction.to_owned();
-        if !payload.ends_with('\n') {
-            payload.push('\n');
         }
-        let bytes = payload.into_bytes();
 
-        if let Ok(runtime) = TokioHandle::try_current() {
-            runtime.spawn(async move {
-                let _ = backend.send_input(&handle, bytes.as_slice()).await;
-            });
-        }
+        self.status_warning =
+            Some("terminal instruction unavailable: frontend controller is not configured".to_owned());
     }
 
     fn clear_merge_status_warning_for_session(&mut self, session_id: &WorkerSessionId) {
@@ -3296,141 +2677,20 @@ impl UiShellState {
         }
     }
 
-    fn ensure_terminal_stream(&mut self, session_id: WorkerSessionId) {
-        let _ = self.ensure_terminal_stream_and_report(session_id);
-    }
-
     fn ensure_terminal_stream_and_report(&mut self, session_id: WorkerSessionId) -> bool {
-        if self.terminal_session_streamed.contains(&session_id) {
-            return false;
-        }
-        let Some(backend) = self.worker_backend.clone() else {
-            self.terminal_session_streamed.remove(&session_id);
-            return false;
-        };
-        let Some(sender) = self.terminal_session_sender.clone() else {
-            self.terminal_session_streamed.remove(&session_id);
-            self.status_warning = Some("terminal stream channel unavailable".to_owned());
-            return true;
-        };
-        let Some(handle) = self.terminal_session_handle(&session_id) else {
-            self.terminal_session_streamed.remove(&session_id);
-            self.status_warning =
-                Some("terminal stream unavailable: cannot build session handle".to_owned());
-            return true;
-        };
-        self.terminal_session_streamed.insert(session_id.clone());
-
-        match TokioHandle::try_current() {
-            Ok(runtime) => {
-                let stream_session_id = session_id;
-                runtime.spawn(async move {
-                    let mut stream = match backend.subscribe(&handle).await {
-                        Ok(stream) => stream,
-                        Err(error) => {
-                            let _ = sender
-                                .send(TerminalSessionEvent::StreamFailed {
-                                    session_id: stream_session_id,
-                                    error,
-                                })
-                                .await;
-                            return;
-                        }
-                    };
-
-                    loop {
-                        match stream.next_event().await {
-                            Ok(Some(BackendEvent::Output(output))) => {
-                                let _ = sender
-                                    .send(TerminalSessionEvent::Output {
-                                        session_id: stream_session_id.clone(),
-                                        output,
-                                    })
-                                    .await;
-                            }
-                            Ok(Some(BackendEvent::TurnState(turn_state))) => {
-                                let _ = sender
-                                    .send(TerminalSessionEvent::TurnState {
-                                        session_id: stream_session_id.clone(),
-                                        turn_state,
-                                    })
-                                    .await;
-                            }
-                            Ok(Some(BackendEvent::NeedsInput(needs_input))) => {
-                                let _ = sender
-                                    .send(TerminalSessionEvent::NeedsInput {
-                                        session_id: stream_session_id.clone(),
-                                        needs_input,
-                                    })
-                                    .await;
-                            }
-                            Ok(Some(_)) => {}
-                            Ok(None) => {
-                                let _ = sender
-                                    .send(TerminalSessionEvent::StreamEnded {
-                                        session_id: stream_session_id,
-                                    })
-                                    .await;
-                                return;
-                            }
-                            Err(error) => {
-                                let _ = sender
-                                    .send(TerminalSessionEvent::StreamFailed {
-                                        session_id: stream_session_id,
-                                        error,
-                                    })
-                                    .await;
-                                return;
-                            }
-                        }
-                    }
-                });
-                true
-            }
-            Err(_) => {
-                self.terminal_session_streamed.remove(&session_id);
-                self.status_warning =
-                    Some("terminal stream unavailable: tokio runtime unavailable".to_owned());
-                true
-            }
-        }
+        let _ = session_id;
+        false
     }
 
     fn recover_terminal_session_on_not_found(&mut self, session_id: &WorkerSessionId) {
         if self.terminal_session_event_is_stale(session_id) {
             return;
         }
-
-        match self.spawn_manual_terminal_session() {
-            Ok(Some(new_session_id)) => {
-                let started_session = new_session_id.clone();
-                let focus_session = self
-                    .inbox_item_id_for_session(session_id)
-                    .or_else(|| self.ui_state().selected_inbox_item_id.clone());
-
-                if let Some(inbox_item_id) = focus_session {
-                    self.selected_inbox_item_id = Some(inbox_item_id);
-                }
-                self.view_stack.replace_center(CenterView::TerminalView {
-                    session_id: new_session_id,
-                });
-                self.ensure_terminal_stream(started_session);
-                self.enter_insert_mode_for_current_focus();
-                let labels = session_display_labels(&self.domain, session_id);
-                self.status_warning = Some(format!(
-                    "terminal {} was not found; opened a fresh terminal",
-                    labels.compact_label
-                ));
-            }
-            Ok(None) => {
-                self.status_warning = Some(
-                    "terminal session unavailable: cannot spawn replacement terminal".to_owned(),
-                );
-            }
-            Err(error) => {
-                self.status_warning = Some(format!("terminal replacement failed: {error}"));
-            }
-        }
+        let labels = session_display_labels(&self.domain, session_id);
+        self.status_warning = Some(format!(
+            "terminal {} was not found; session recovery is managed outside the UI loop",
+            labels.compact_label
+        ));
     }
 
     fn terminal_session_event_is_stale(&self, session_id: &WorkerSessionId) -> bool {
@@ -3474,14 +2734,9 @@ impl UiShellState {
 
     fn apply_ticket_picker_event(&mut self, event: TicketPickerEvent) {
         match event {
-            TicketPickerEvent::TicketsLoaded {
-                tickets,
-                projects,
-                profile_overrides,
-            } => {
+            TicketPickerEvent::TicketsLoaded { tickets, projects } => {
                 self.ticket_picker_overlay.loading = false;
                 self.ticket_picker_overlay.error = None;
-                self.ticket_picker_overlay.ticket_profile_overrides = profile_overrides;
                 let tickets = self.filtered_ticket_picker_tickets(tickets);
                 self.ticket_picker_overlay
                     .apply_tickets(tickets, projects, &self.ticket_picker_priority_states);
@@ -3547,7 +2802,6 @@ impl UiShellState {
                 started_session_id,
                 projection,
                 tickets,
-                profile_overrides,
                 warning,
             } => {
                 self.ticket_picker_overlay.starting_ticket_id = None;
@@ -3562,9 +2816,6 @@ impl UiShellState {
                     let projects = self.ticket_picker_overlay.project_names();
                     self.ticket_picker_overlay
                         .apply_tickets(tickets, projects, &self.ticket_picker_priority_states);
-                }
-                if let Some(profile_overrides) = profile_overrides {
-                    self.ticket_picker_overlay.ticket_profile_overrides = profile_overrides;
                 }
                 self.focus_and_stream_session(started_session_id);
                 if let Some(message) = warning {
@@ -3588,44 +2839,6 @@ impl UiShellState {
                     repository_path_hint,
                 );
                 self.ticket_picker_overlay.error = Some(message);
-            }
-            TicketPickerEvent::TicketProfileOverrideUpdated {
-                ticket_id,
-                profile_name,
-            } => {
-                if let Some(profile_name) = profile_name {
-                    self.ticket_picker_overlay
-                        .ticket_profile_overrides
-                        .insert(ticket_id, profile_name);
-                } else {
-                    self.ticket_picker_overlay
-                        .ticket_profile_overrides
-                        .remove(&ticket_id);
-                }
-            }
-            TicketPickerEvent::TicketProfileOverrideUpdateFailed { ticket_id, message } => {
-                self.status_warning = Some(format!(
-                    "ticket profile override warning for {}: {}",
-                    ticket_id.as_str(),
-                    compact_focus_card_text(message.as_str())
-                ));
-            }
-            TicketPickerEvent::WorkflowProfilesSaved { config } => {
-                self.workflow_profiles_modal.saving = false;
-                self.workflow_profiles_modal.open(config.clone());
-                set_workflow_profiles_config(config.clone());
-                self.status_warning = Some(format!(
-                    "workflow profiles saved (default: {})",
-                    config.default_profile
-                ));
-            }
-            TicketPickerEvent::WorkflowProfilesSaveFailed { message } => {
-                self.workflow_profiles_modal.saving = false;
-                self.workflow_profiles_modal.error = Some(message.clone());
-                self.status_warning = Some(format!(
-                    "workflow profiles save warning: {}",
-                    compact_focus_card_text(message.as_str())
-                ));
             }
             TicketPickerEvent::TicketStartFailed { message } => {
                 self.ticket_picker_overlay.starting_ticket_id = None;
@@ -3877,32 +3090,16 @@ impl UiShellState {
             );
             return;
         }
-
-        let started = if let Some(dispatcher) = self.supervisor_command_dispatcher.clone() {
-            self.start_supervisor_stream_with_dispatcher_for_global_query(dispatcher, query.clone())
-        } else if let Some(provider) = self.supervisor_provider.clone() {
-            let request = build_global_supervisor_chat_request(query.as_str());
-            self.start_supervisor_stream_with_provider(
-                SupervisorStreamTarget::GlobalChatPanel,
-                provider,
-                request,
-            )
-        } else {
-            let message =
-                "supervisor stream unavailable: no LLM provider or command dispatcher configured";
-            self.status_warning = Some(message.to_owned());
-            self.set_supervisor_terminal_state(
-                SupervisorStreamTarget::GlobalChatPanel,
-                SupervisorResponseState::BackendUnavailable,
-                message,
-            );
-            false
-        };
-
-        if started {
-            self.global_supervisor_chat_input.clear();
-            self.global_supervisor_chat_last_query = Some(query);
-        }
+        self.global_supervisor_chat_input.clear();
+        self.global_supervisor_chat_last_query = Some(query);
+        self.status_warning = Some(
+            "supervisor queries are handled outside the TUI loop via frontend services".to_owned(),
+        );
+        self.set_supervisor_terminal_state(
+            SupervisorStreamTarget::GlobalChatPanel,
+            SupervisorResponseState::NoContext,
+            "query submission moved to frontend services",
+        );
     }
 
     fn apply_global_chat_insert_key(&mut self, key: KeyEvent) -> bool {
@@ -3930,10 +3127,13 @@ impl UiShellState {
     }
 
     fn apply_terminal_compose_key(&mut self, key: KeyEvent) -> bool {
-        if self.mode != UiMode::Insert || !self.is_terminal_view_active() {
+        if self.mode != UiMode::Terminal || !self.is_terminal_view_active() {
             return false;
         }
         if self.terminal_session_has_any_needs_input() {
+            return false;
+        }
+        if is_ctrl_char(key, '\\') || is_ctrl_char(key, 'n') {
             return false;
         }
 
@@ -4610,12 +3810,48 @@ impl UiShellState {
         }
     }
 
+    fn application_mode_label(&self) -> &'static str {
+        self.application_mode.label()
+    }
+
+    fn submit_frontend_command_intent(&mut self, command: FrontendCommandIntent) {
+        let Some(controller) = self.frontend_controller.clone() else {
+            return;
+        };
+        match TokioHandle::try_current() {
+            Ok(handle) => {
+                handle.spawn(async move {
+                    let _ = controller.submit_intent(FrontendIntent::Command(command)).await;
+                });
+            }
+            Err(_) => {
+                self.status_warning = Some(
+                    "frontend intent unavailable: tokio runtime is not active".to_owned(),
+                );
+            }
+        }
+    }
+
+    fn set_application_mode_autopilot(&mut self) {
+        self.application_mode = ApplicationMode::Autopilot;
+        self.status_warning = Some("application mode: autopilot".to_owned());
+        self.submit_frontend_command_intent(FrontendCommandIntent::SetApplicationModeAutopilot);
+    }
+
+    fn set_application_mode_manual(&mut self) {
+        self.application_mode = ApplicationMode::Manual;
+        self.status_warning = Some("application mode: manual".to_owned());
+        self.submit_frontend_command_intent(FrontendCommandIntent::SetApplicationModeManual);
+    }
+
     fn enter_normal_mode(&mut self) {
         self.apply_ui_mode(UiMode::Normal);
     }
 
     fn enter_insert_mode(&mut self) {
-        self.apply_ui_mode(UiMode::Insert);
+        if !self.is_terminal_view_active() {
+            self.apply_ui_mode(UiMode::Insert);
+        }
     }
 
     fn enter_insert_mode_for_current_focus(&mut self) {
@@ -4623,10 +3859,9 @@ impl UiShellState {
             if self.terminal_session_has_any_needs_input() && !self.terminal_session_has_active_needs_input()
             {
                 let _ = self.activate_terminal_needs_input(true);
+            } else {
+                self.enter_terminal_mode();
             }
-            self.snap_active_terminal_output_to_bottom();
-            self.apply_ui_mode(UiMode::Insert);
-            self.schedule_session_info_summary_refresh_for_active_session();
             return;
         }
 
@@ -4643,19 +3878,28 @@ impl UiShellState {
         self.enter_insert_mode();
     }
 
+    fn enter_terminal_mode(&mut self) {
+        if self.is_terminal_view_active() {
+            self.snap_active_terminal_output_to_bottom();
+            self.apply_ui_mode(UiMode::Terminal);
+            self.schedule_session_info_summary_refresh_for_active_session();
+        }
+    }
+
     fn apply_ui_mode(&mut self, mode: UiMode) {
         self.mode = mode;
         self.mode_key_buffer.clear();
         self.which_key_overlay = None;
+        self.terminal_escape_pending = false;
         self.terminal_compose_editor.mode = match mode {
             UiMode::Normal => EditorMode::Normal,
-            UiMode::Insert => EditorMode::Insert,
+            UiMode::Insert | UiMode::Terminal => EditorMode::Insert,
         };
     }
 
     fn open_terminal_and_enter_mode(&mut self) {
         self.open_terminal_for_selected();
-        self.enter_insert_mode_for_current_focus();
+        self.enter_terminal_mode();
     }
 
     fn needs_input_prompt_from_event(
@@ -4888,14 +4132,6 @@ impl UiShellState {
         &mut self,
         session_id: &WorkerSessionId,
     ) -> bool {
-        let Some(backend) = self.worker_backend.clone() else {
-            self.set_needs_input_error_for_session(
-                session_id,
-                "input response unavailable: no worker backend configured",
-            );
-            return false;
-        };
-
         let (prompt_id, answers) = {
             let Some(active_prompt) = self
                 .terminal_session_states
@@ -4916,38 +4152,43 @@ impl UiShellState {
             (prompt_id, answers)
         };
 
-        let Some(handle) = self.terminal_session_handle(&session_id) else {
-            self.set_needs_input_error_for_session(
-                session_id,
-                "input response unavailable: cannot resolve backend session handle",
-            );
-            return false;
-        };
-
-        match TokioHandle::try_current() {
-            Ok(runtime) => {
-                runtime.spawn(async move {
-                    let _ = backend
-                        .respond_to_needs_input(&handle, prompt_id.as_str(), answers.as_slice())
-                        .await;
-                });
-                if let Some(view) = self.terminal_session_states.get_mut(&session_id) {
-                    view.complete_active_needs_input_prompt();
+        if let Some(controller) = self.frontend_controller.clone() {
+            match TokioHandle::try_current() {
+                Ok(runtime) => {
+                    let target_session_id = session_id.clone();
+                    runtime.spawn(async move {
+                        let _ = controller
+                            .submit_intent(FrontendIntent::RespondToNeedsInput {
+                                session_id: target_session_id,
+                                prompt_id,
+                                answers,
+                            })
+                            .await;
+                    });
+                    if let Some(view) = self.terminal_session_states.get_mut(&session_id) {
+                        view.complete_active_needs_input_prompt();
+                    }
+                    if let Some(work_item_id) = self.work_item_id_for_session(&session_id) {
+                        self.acknowledge_needs_decision_for_work_item(&work_item_id);
+                    }
+                    let _ = self.mark_reconcile_dirty_for_session(&session_id);
+                    return true;
                 }
-                if let Some(work_item_id) = self.work_item_id_for_session(&session_id) {
-                    self.acknowledge_needs_decision_for_work_item(&work_item_id);
+                Err(_) => {
+                    self.set_needs_input_error_for_session(
+                        session_id,
+                        "input response unavailable: tokio runtime unavailable",
+                    );
+                    return false;
                 }
-                let _ = self.mark_reconcile_dirty_for_session(&session_id);
-                true
-            }
-            Err(_) => {
-                self.set_needs_input_error_for_session(
-                    session_id,
-                    "input response unavailable: tokio runtime unavailable",
-                );
-                false
             }
         }
+
+        self.set_needs_input_error_for_session(
+            session_id,
+            "input response unavailable: frontend controller is not configured",
+        );
+        false
     }
 
     fn recommended_option_index(options: &[BackendNeedsInputOption]) -> Option<usize> {
@@ -5036,7 +4277,11 @@ impl UiShellState {
             selected_hunk_index: 0,
             focus: DiffPaneFocus::Files,
         });
-        self.spawn_session_diff_load(session_id);
+        let labels = session_display_labels(&self.domain, &session_id);
+        self.status_warning = Some(format!(
+            "worktree diff fetch for {} is handled outside the TUI loop",
+            labels.compact_label
+        ));
     }
 
     fn scroll_worktree_diff_modal(&mut self, delta: isize) {
@@ -5285,100 +4530,220 @@ impl UiShellState {
     }
 
     fn drain_async_events_and_report(&mut self) -> bool {
+        false
+    }
+
+    fn poll_frontend_events_and_report(
+        &mut self,
+        receiver: Option<&mut mpsc::Receiver<FrontendEvent>>,
+    ) -> bool {
+        let Some(receiver) = receiver else {
+            return false;
+        };
+
         let mut changed = false;
-        changed |= self.tick_supervisor_stream_and_report();
-        changed |= self.poll_ticket_picker_events();
-        changed |= self.poll_terminal_session_events();
-        changed |= self.poll_merge_queue_events();
-        changed |= self.poll_session_info_summary_events();
+        let mut had_terminal_events = false;
+        loop {
+            match receiver.try_recv() {
+                Ok(FrontendEvent::SnapshotUpdated(snapshot)) => {
+                    changed |= self.apply_frontend_snapshot(snapshot);
+                }
+                Ok(FrontendEvent::Notification(notification)) => {
+                    changed |= self.apply_frontend_notification(notification);
+                }
+                Ok(FrontendEvent::TerminalSession(event)) => {
+                    had_terminal_events = true;
+                    changed |= self.apply_frontend_terminal_session_event(event);
+                }
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => {
+                    changed |= self.apply_frontend_notification(FrontendNotification {
+                        level: FrontendNotificationLevel::Warning,
+                        message: "frontend event stream disconnected".to_owned(),
+                        work_item_id: None,
+                        session_id: None,
+                    });
+                    break;
+                }
+            }
+        }
+        if had_terminal_events {
+            self.recompute_background_terminal_flush_deadline();
+        }
         changed
+    }
+
+    fn apply_frontend_snapshot(&mut self, snapshot: FrontendSnapshot) -> bool {
+        let mut changed = false;
+        if self.base_status != snapshot.status {
+            self.base_status = snapshot.status;
+            changed = true;
+        }
+        if self.domain != snapshot.projection {
+            self.replace_domain_projection(snapshot.projection, "frontend snapshot update");
+            changed = true;
+        }
+        let target_mode = match snapshot.application_mode {
+            FrontendApplicationMode::Manual => ApplicationMode::Manual,
+            FrontendApplicationMode::Autopilot => ApplicationMode::Autopilot,
+        };
+        if self.application_mode != target_mode {
+            self.application_mode = target_mode;
+            changed = true;
+        }
+        if changed {
+            self.sync_selected_session_panel_state();
+        }
+        changed
+    }
+
+    fn apply_frontend_notification(&mut self, notification: FrontendNotification) -> bool {
+        let prefix = match notification.level {
+            FrontendNotificationLevel::Info => "info",
+            FrontendNotificationLevel::Warning => "warning",
+            FrontendNotificationLevel::Error => "error",
+        };
+        let message = sanitize_terminal_display_text(notification.message.as_str());
+        let warning = format!("{prefix}: {message}");
+        if self.status_warning.as_deref() == Some(warning.as_str()) {
+            return false;
+        }
+        self.status_warning = Some(warning);
+        true
+    }
+
+    fn apply_frontend_terminal_session_event(&mut self, event: FrontendTerminalEvent) -> bool {
+        match event {
+            FrontendTerminalEvent::Output { session_id, output } => {
+                let is_active_session = self.active_terminal_session_id() == Some(&session_id);
+                let view = self.terminal_session_states.entry(session_id).or_default();
+                if is_active_session {
+                    if !view.deferred_output.is_empty() {
+                        let deferred = std::mem::take(&mut view.deferred_output);
+                        append_terminal_assistant_output(view, deferred);
+                        view.last_background_flush_at = Some(Instant::now());
+                    }
+                    append_terminal_assistant_output(view, output.bytes);
+                } else {
+                    view.deferred_output.extend_from_slice(output.bytes.as_slice());
+                    if view.deferred_output.len() >= BACKGROUND_SESSION_DEFERRED_OUTPUT_MAX_BYTES {
+                        let deferred = std::mem::take(&mut view.deferred_output);
+                        append_terminal_assistant_output(view, deferred);
+                        view.last_background_flush_at = Some(Instant::now());
+                    } else if view.last_background_flush_at.is_none() {
+                        view.last_background_flush_at = Some(Instant::now());
+                    }
+                }
+                view.error = None;
+                true
+            }
+            FrontendTerminalEvent::TurnState {
+                session_id,
+                turn_state,
+            } => {
+                let view = self
+                    .terminal_session_states
+                    .entry(session_id.clone())
+                    .or_default();
+                let previous_turn_active = view.turn_active;
+                view.turn_active = turn_state.active;
+                let _ = previous_turn_active;
+                true
+            }
+            FrontendTerminalEvent::NeedsInput {
+                session_id,
+                needs_input,
+            } => {
+                let prompt = self.needs_input_prompt_from_event(&session_id, needs_input);
+                let view = self
+                    .terminal_session_states
+                    .entry(session_id.clone())
+                    .or_default();
+                view.enqueue_needs_input_prompt(prompt);
+                true
+            }
+            FrontendTerminalEvent::StreamFailed {
+                session_id,
+                message,
+                is_session_not_found,
+            } => {
+                self.terminal_session_streamed.remove(&session_id);
+                let view = self
+                    .terminal_session_states
+                    .entry(session_id.clone())
+                    .or_default();
+                view.error = Some(message.clone());
+                view.deferred_output.clear();
+                view.last_background_flush_at = None;
+                view.entries.clear();
+                view.transcript_truncated = false;
+                view.transcript_truncated_line_count = 0;
+                view.output_fragment.clear();
+                view.render_cache.invalidate_all();
+                view.output_rendered_line_count = 0;
+                view.output_scroll_line = 0;
+                view.output_follow_tail = true;
+                view.turn_active = false;
+                let changed = true;
+                if is_session_not_found {
+                    self.recover_terminal_session_on_not_found(&session_id);
+                }
+                changed
+            }
+            FrontendTerminalEvent::StreamEnded { session_id } => {
+                self.terminal_session_streamed.remove(&session_id);
+                let view = self
+                    .terminal_session_states
+                    .entry(session_id.clone())
+                    .or_default();
+                if !view.deferred_output.is_empty() {
+                    let deferred = std::mem::take(&mut view.deferred_output);
+                    append_terminal_assistant_output(view, deferred);
+                }
+                view.last_background_flush_at = None;
+                flush_terminal_output_fragment(view);
+                view.turn_active = false;
+                true
+            }
+        }
     }
 
     fn run_due_periodic_tasks_and_report(&mut self, now: Instant) -> bool {
-        let mut changed = false;
-        changed |= self.flush_due_session_working_state_persists();
-        changed |= self.tick_ticket_picker_create_refresh_at(now);
-        changed |= self.flush_background_terminal_output_and_report_at(now);
-        changed |= self.enqueue_progression_approval_reconcile_polls_at(now);
-        changed |= self.tick_session_info_summary_refresh_at(now);
-        changed |= self.enqueue_merge_reconcile_polls_at(now);
-        changed |= self.run_sparse_reconcile_fallbacks();
-        changed |= self.dispatch_merge_queue_requests_at(now);
-        changed |= self.tick_autopilot_and_report();
-        changed
+        self.flush_background_terminal_output_and_report_at(now)
     }
 
     fn maintain_active_terminal_view_and_report(&mut self) -> bool {
-        let mut changed = self.ensure_session_info_diff_loaded_for_active_session();
+        let mut changed = false;
         if let Some(session_id) = self.active_terminal_session_id().cloned() {
             changed |= self.flush_deferred_terminal_output_for_session(&session_id);
-            changed |= self.ensure_terminal_stream_and_report(session_id);
         }
         changed
     }
 
     fn has_pending_async_activity(&self) -> bool {
-        let supervisor_busy = self.supervisor_chat_stream.as_ref().is_some_and(|stream| {
-            !stream.pending_delta.is_empty()
-                || matches!(
-                    stream.lifecycle,
-                    SupervisorStreamLifecycle::Connecting
-                        | SupervisorStreamLifecycle::Streaming
-                        | SupervisorStreamLifecycle::Cancelling
-                )
-        });
-        let ticket_picker_busy = self.ticket_picker_overlay.loading
-            || self.ticket_picker_overlay.creating
-            || self.ticket_picker_overlay.starting_ticket_id.is_some()
-            || self.ticket_picker_overlay.archiving_ticket_id.is_some();
         let terminal_busy = !self.terminal_session_streamed.is_empty()
             || self
                 .terminal_session_states
                 .values()
                 .any(|view| view.turn_active || !view.deferred_output.is_empty());
-        let merge_busy = !self.merge_queue.is_empty()
-            || !self.merge_finalizing_sessions.is_empty();
-        let summary_busy = self
-            .session_info_summary_cache
-            .values()
-            .any(|cache| cache.loading);
-        supervisor_busy || ticket_picker_busy || terminal_busy || merge_busy || summary_busy
+        terminal_busy
     }
 
     fn next_wake_deadline(
         &self,
-        now: Instant,
+        _now: Instant,
         animation_state: AnimationState,
         last_animation_frame: Instant,
-        full_redraw_deadline: Instant,
     ) -> Option<Instant> {
         let animation_deadline = match animation_state {
             AnimationState::ActiveTurn => Some(last_animation_frame + Duration::from_millis(200)),
             AnimationState::ResolvedOnly => Some(last_animation_frame + Duration::from_millis(1_000)),
             AnimationState::None => None,
         };
-        let ticket_refresh_deadline = self
-            .ticket_picker_create_refresh_deadline
-            .filter(|_| self.ticket_picker_overlay.visible && self.ticket_picker_overlay.creating)
-            .filter(|_| !self.ticket_picker_overlay.loading);
-        let summary_deadline = self.session_info_summary_deadline;
         let background_flush_deadline = self.background_terminal_flush_deadline;
-        let merge_dispatch_deadline = if self.merge_queue.is_empty() {
-            None
-        } else {
-            Some(
-                self.merge_last_dispatched_at
-                    .map(|previous| previous + MERGE_REQUEST_RATE_LIMIT)
-                    .unwrap_or(now),
-            )
-        };
         [
             animation_deadline,
-            ticket_refresh_deadline,
-            summary_deadline,
             background_flush_deadline,
-            merge_dispatch_deadline,
-            Some(full_redraw_deadline),
         ]
         .into_iter()
         .flatten()
@@ -5597,6 +4962,12 @@ impl UiShellState {
         }
     }
 
+    fn begin_terminal_escape_chord(&mut self) {
+        if self.mode == UiMode::Terminal {
+            self.terminal_escape_pending = true;
+        }
+    }
+
     fn submit_terminal_compose_input(&mut self) {
         if !self.is_terminal_view_active() {
             return;
@@ -5614,26 +4985,10 @@ impl UiShellState {
                 Some("terminal input unavailable: no active terminal session selected".to_owned());
             return;
         };
-        let Some(backend) = self.worker_backend.clone() else {
-            self.status_warning =
-                Some("terminal input unavailable: no worker backend configured".to_owned());
-            return;
-        };
-        let Some(handle) = self.terminal_session_handle(&session_id) else {
-            self.status_warning = Some(
-                "terminal input unavailable: cannot resolve backend session handle".to_owned(),
-            );
-            return;
-        };
-
         let user_message = editor_state_text(&self.terminal_compose_editor);
-        let mut payload = user_message.clone();
-        if !payload.ends_with('\n') {
-            payload.push('\n');
-        }
-        let bytes = payload.into_bytes();
+        let backend_kind = self.worker_backend.as_ref().map(|backend| backend.kind());
 
-        if backend.kind() != BackendKind::Codex {
+        if backend_kind != Some(BackendKind::Codex) {
             let view = self
                 .terminal_session_states
                 .entry(session_id.clone())
@@ -5642,19 +4997,32 @@ impl UiShellState {
             view.error = None;
         }
 
-        match TokioHandle::try_current() {
-            Ok(runtime) => {
-                runtime.spawn(async move {
-                    let _ = backend.send_input(&handle, bytes.as_slice()).await;
-                });
-                clear_editor_state(&mut self.terminal_compose_editor);
-                self.enter_normal_mode();
+        if let Some(controller) = self.frontend_controller.clone() {
+            match TokioHandle::try_current() {
+                Ok(runtime) => {
+                    let target_session_id = session_id.clone();
+                    let payload = user_message.clone();
+                    runtime.spawn(async move {
+                        let _ = controller
+                            .submit_intent(FrontendIntent::SendTerminalInput {
+                                session_id: target_session_id,
+                                input: payload,
+                            })
+                            .await;
+                    });
+                    clear_editor_state(&mut self.terminal_compose_editor);
+                    self.enter_normal_mode();
+                }
+                Err(_) => {
+                    self.status_warning =
+                        Some("terminal input unavailable: tokio runtime unavailable".to_owned());
+                }
             }
-            Err(_) => {
-                self.status_warning =
-                    Some("terminal input unavailable: tokio runtime unavailable".to_owned());
-            }
+            return;
         }
+
+        self.status_warning =
+            Some("terminal input unavailable: frontend controller is not configured".to_owned());
     }
 
     fn advance_terminal_workflow_stage(&mut self) {
@@ -5706,11 +5074,9 @@ impl UiShellState {
 
         let labels = session_display_labels(&self.domain, &session_id);
         self.status_warning = Some(format!(
-            "advancing workflow for {} from {:?}",
-            labels.compact_label,
-            current_state
+            "workflow advance for {} from {:?} is handled outside the TUI loop",
+            labels.compact_label, current_state
         ));
-        self.spawn_session_workflow_advance(session_id);
     }
 
     fn is_terminal_view_active(&self) -> bool {
@@ -5728,14 +5094,9 @@ impl UiShellState {
         let Some(session_id) = self.review_merge_confirm_session.take() else {
             return;
         };
-        let now = Instant::now();
-        self.merge_pending_sessions.insert(session_id.clone());
-        self.merge_poll_states
-            .insert(session_id.clone(), MergeReconcilePollState::new(now));
-        let _ = self.enqueue_merge_queue_request(session_id.clone(), MergeQueueCommandKind::Merge);
         let labels = session_display_labels(&self.domain, &session_id);
         self.status_warning = Some(format!(
-            "merge queued for review {}",
+            "review merge for {} is handled outside the TUI loop",
             labels.compact_label
         ));
     }

@@ -8,15 +8,16 @@ Ticket: AP-260 ([Linear](https://linear.app/austinphilp/issue/AP-260/perfinvesti
 
 ## Current architecture (as implemented)
 
-1. UI-level per-session subscriptions are opened in `UiShellState::ensure_terminal_stream_and_report`.
+1. Runtime/app path is coordinator-backed through `WorkerManager` via `WorkerManagerBackend`.
+   - File: `crates/orchestrator-app/src/lib/runtime_stream_coordinator.rs`
+   - Behavior: session lifecycle and subscriptions route through `WorkerManager` fanout while retaining the existing `WorkerBackend` contract.
+2. UI consumes frontend controller event streams and no longer subscribes to backend terminal streams directly.
+   - File: `crates/orchestrator-ui/src/ui/runtime.rs`
    - File: `crates/orchestrator-ui/src/ui/shell_state.rs`
-   - Behavior: once a session stream is opened, it remains subscribed until stream end/failure/archive.
-2. Background output is deferred then periodically flushed by UI refresh interval.
+   - Behavior: terminal output/turn-state/needs-input/failure/end events arrive through `FrontendTerminalEvent` feed.
+3. Background output is deferred then periodically flushed by UI refresh interval.
    - File: `crates/orchestrator-ui/src/ui/shell_state.rs`
    - Related config: `ui.background_session_refresh_secs` (2-15s clamp, default 15s).
-3. `WorkerManager` already supports centralized stream multiplexing (`subscribe_all` and per-session fanout), but app/UI runtime path does not currently use it.
-   - File: `crates/orchestrator-runtime/src/worker_manager.rs`
-   - App path currently wires UI directly to backend (`with_worker_backend(...)`) in `crates/orchestrator-app/src/main.rs`.
 4. Backend details:
    - OpenCode: session relay task per spawned session; backend `subscribe` is broadcast receiver attach only.
      - File: `crates/backend-opencode/src/lib.rs`
@@ -76,30 +77,38 @@ Rationale:
 
 ### Phase 1: Introduce coordinator plumbing
 
+Status: Completed (2026-02-22)
+
 1. Wire app runtime to instantiate/use `WorkerManager` (or equivalent coordinator abstraction) as source of truth for stream delivery.
 2. Preserve current `WorkerBackend` contract; no new backend API required in this phase.
 3. Add targeted tests for global/per-session fanout behavior at runtime boundary.
 
 ### Phase 2: Move UI to coordinator feed
 
-1. Replace direct `worker_backend.subscribe(...)` calls in `UiShellState` with coordinator subscriptions.
+Status: Completed (2026-02-22)
+
+1. Remove direct `worker_backend.subscribe(...)` terminal stream usage in `UiShellState`; consume coordinator-fed frontend events.
 2. Keep existing terminal UX semantics:
    - offscreen needs-input does not auto-switch view,
    - deferred offscreen output flush behavior,
    - stream failure/end handling.
-3. Add bounded output buffering policy and explicit overflow markers.
+3. Keep bounded output buffering policy for offscreen sessions.
 
 ### Phase 3: Perf hardening and optional hybrid prep
+
+Status: Completed (2026-02-22)
 
 1. Add lightweight internal metrics for session/event pressure (queue depth, dropped-output markers, fanout lag).
 2. Validate thresholds under 1/5/20 session synthetic scenarios.
 3. Re-evaluate Hybrid (C) only if coordinator path still exceeds target budget.
 
+Reference: `docs/perf/ap-272-stream-pressure-thresholds.md`.
+
 ## Acceptance criteria mapping (AP-260)
 
 1. Decision matrix with CPU/memory/latency tradeoffs: **covered** in table above.
 2. Recommended architecture and migration plan documented: **covered** in recommendation and migration sections.
-3. Follow-up implementation tickets proposed: **completed (`AP-270` to `AP-273`) and linked from AP-260**.
+3. Follow-up implementation tickets: **resolved (`AP-270`, `AP-271`, `AP-272`, `AP-273` closed as deferred hybrid, `AP-276`)**.
 
 ## Non-goals for AP-260
 

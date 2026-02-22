@@ -9,8 +9,8 @@ use tokio::task::JoinHandle;
 
 use crate::{
     BackendCapabilities, BackendCrashedEvent, BackendDoneEvent, BackendEvent, BackendKind,
-    RuntimeError, RuntimeResult, RuntimeSessionId, SessionHandle, SpawnSpec, WorkerBackend,
-    WorkerEventStream,
+    BackendOutputEvent, BackendOutputStream, RuntimeError, RuntimeResult, RuntimeSessionId,
+    SessionHandle, SpawnSpec, WorkerBackend, WorkerEventStream,
 };
 
 const DEFAULT_SESSION_EVENT_BUFFER: usize = 256;
@@ -84,8 +84,11 @@ pub struct WorkerManagerPerfTotals {
     pub events_forwarded_global_total: u64,
     pub event_clone_ops_total: u64,
     pub event_dispatch_nanos_total: u64,
+    pub queue_pressure_dropped_events_total: u64,
+    pub output_truncation_markers_total: u64,
     pub done_events_total: u64,
     pub crashed_events_total: u64,
+    pub events_received_rate_per_sec_x1000: u64,
     pub session_receiver_count_last: u64,
     pub global_receiver_count_last: u64,
     pub subscribe_session_calls_total: u64,
@@ -93,6 +96,8 @@ pub struct WorkerManagerPerfTotals {
     pub subscribe_session_failures_total: u64,
     pub subscriber_lagged_errors_session_total: u64,
     pub subscriber_lagged_errors_global_total: u64,
+    pub subscriber_lagged_events_session_total: u64,
+    pub subscriber_lagged_events_global_total: u64,
     pub subscriber_closed_session_total: u64,
     pub subscriber_closed_global_total: u64,
 }
@@ -111,8 +116,12 @@ pub struct WorkerManagerPerfSessionSnapshot {
     pub events_forwarded_global_total: u64,
     pub event_clone_ops_total: u64,
     pub event_dispatch_nanos_total: u64,
+    pub queue_pressure_dropped_events_total: u64,
+    pub output_truncation_markers_total: u64,
     pub done_events_total: u64,
     pub crashed_events_total: u64,
+    pub events_received_rate_per_sec_x1000: u64,
+    pub subscriber_lagged_events_session_total: u64,
     pub session_receiver_count_last: u64,
     pub global_receiver_count_last: u64,
 }
@@ -139,14 +148,22 @@ struct SessionPerfCounters {
     events_forwarded_global_total: AtomicU64,
     event_clone_ops_total: AtomicU64,
     event_dispatch_nanos_total: AtomicU64,
+    queue_pressure_dropped_events_total: AtomicU64,
+    output_truncation_markers_total: AtomicU64,
     done_events_total: AtomicU64,
     crashed_events_total: AtomicU64,
+    subscriber_lagged_events_session_total: AtomicU64,
     session_receiver_count_last: AtomicU64,
     global_receiver_count_last: AtomicU64,
 }
 
 impl SessionPerfCounters {
-    fn snapshot(&self, session_id: RuntimeSessionId) -> WorkerManagerPerfSessionSnapshot {
+    fn snapshot(
+        &self,
+        session_id: RuntimeSessionId,
+        captured_at_monotonic_nanos: u64,
+    ) -> WorkerManagerPerfSessionSnapshot {
+        let events_received_total = self.events_received_total.load(Ordering::Relaxed);
         WorkerManagerPerfSessionSnapshot {
             session_id,
             checkpoint_ticks_total: self.checkpoint_ticks_total.load(Ordering::Relaxed),
@@ -163,7 +180,7 @@ impl SessionPerfCounters {
                 .checkpoint_loop_read_lock_wait_nanos_total
                 .load(Ordering::Relaxed),
             checkpoint_send_nanos_total: self.checkpoint_send_nanos_total.load(Ordering::Relaxed),
-            events_received_total: self.events_received_total.load(Ordering::Relaxed),
+            events_received_total,
             events_forwarded_session_total: self
                 .events_forwarded_session_total
                 .load(Ordering::Relaxed),
@@ -172,8 +189,21 @@ impl SessionPerfCounters {
                 .load(Ordering::Relaxed),
             event_clone_ops_total: self.event_clone_ops_total.load(Ordering::Relaxed),
             event_dispatch_nanos_total: self.event_dispatch_nanos_total.load(Ordering::Relaxed),
+            queue_pressure_dropped_events_total: self
+                .queue_pressure_dropped_events_total
+                .load(Ordering::Relaxed),
+            output_truncation_markers_total: self
+                .output_truncation_markers_total
+                .load(Ordering::Relaxed),
             done_events_total: self.done_events_total.load(Ordering::Relaxed),
             crashed_events_total: self.crashed_events_total.load(Ordering::Relaxed),
+            events_received_rate_per_sec_x1000: rate_per_sec_x1000(
+                events_received_total,
+                captured_at_monotonic_nanos,
+            ),
+            subscriber_lagged_events_session_total: self
+                .subscriber_lagged_events_session_total
+                .load(Ordering::Relaxed),
             session_receiver_count_last: self.session_receiver_count_last.load(Ordering::Relaxed),
             global_receiver_count_last: self.global_receiver_count_last.load(Ordering::Relaxed),
         }
@@ -190,6 +220,8 @@ struct WorkerManagerPerfCounters {
     subscribe_session_failures_total: AtomicU64,
     subscriber_lagged_errors_session_total: AtomicU64,
     subscriber_lagged_errors_global_total: AtomicU64,
+    subscriber_lagged_events_session_total: AtomicU64,
+    subscriber_lagged_events_global_total: AtomicU64,
     subscriber_closed_session_total: AtomicU64,
     subscriber_closed_global_total: AtomicU64,
 }
@@ -205,6 +237,8 @@ impl WorkerManagerPerfCounters {
             subscribe_session_failures_total: AtomicU64::new(0),
             subscriber_lagged_errors_session_total: AtomicU64::new(0),
             subscriber_lagged_errors_global_total: AtomicU64::new(0),
+            subscriber_lagged_events_session_total: AtomicU64::new(0),
+            subscriber_lagged_events_global_total: AtomicU64::new(0),
             subscriber_closed_session_total: AtomicU64::new(0),
             subscriber_closed_global_total: AtomicU64::new(0),
         }
@@ -227,6 +261,8 @@ impl WorkerManagerPerfCounters {
     }
 
     fn capture_totals(&self) -> WorkerManagerPerfTotals {
+        let events_received_total = self.totals.events_received_total.load(Ordering::Relaxed);
+        let elapsed_nanos = saturating_nanos_u64(self.started_at.elapsed());
         WorkerManagerPerfTotals {
             checkpoint_ticks_total: self.totals.checkpoint_ticks_total.load(Ordering::Relaxed),
             checkpoint_skips_focused_total: self
@@ -249,7 +285,7 @@ impl WorkerManagerPerfCounters {
                 .totals
                 .checkpoint_send_nanos_total
                 .load(Ordering::Relaxed),
-            events_received_total: self.totals.events_received_total.load(Ordering::Relaxed),
+            events_received_total,
             events_forwarded_session_total: self
                 .totals
                 .events_forwarded_session_total
@@ -263,8 +299,20 @@ impl WorkerManagerPerfCounters {
                 .totals
                 .event_dispatch_nanos_total
                 .load(Ordering::Relaxed),
+            queue_pressure_dropped_events_total: self
+                .totals
+                .queue_pressure_dropped_events_total
+                .load(Ordering::Relaxed),
+            output_truncation_markers_total: self
+                .totals
+                .output_truncation_markers_total
+                .load(Ordering::Relaxed),
             done_events_total: self.totals.done_events_total.load(Ordering::Relaxed),
             crashed_events_total: self.totals.crashed_events_total.load(Ordering::Relaxed),
+            events_received_rate_per_sec_x1000: rate_per_sec_x1000(
+                events_received_total,
+                elapsed_nanos,
+            ),
             session_receiver_count_last: self
                 .totals
                 .session_receiver_count_last
@@ -286,6 +334,12 @@ impl WorkerManagerPerfCounters {
             subscriber_lagged_errors_global_total: self
                 .subscriber_lagged_errors_global_total
                 .load(Ordering::Relaxed),
+            subscriber_lagged_events_session_total: self
+                .subscriber_lagged_events_session_total
+                .load(Ordering::Relaxed),
+            subscriber_lagged_events_global_total: self
+                .subscriber_lagged_events_global_total
+                .load(Ordering::Relaxed),
             subscriber_closed_session_total: self
                 .subscriber_closed_session_total
                 .load(Ordering::Relaxed),
@@ -299,6 +353,7 @@ impl WorkerManagerPerfCounters {
 pub struct SessionEventSubscription {
     receiver: broadcast::Receiver<BackendEvent>,
     perf: Arc<WorkerManagerPerfCounters>,
+    session_perf: Arc<SessionPerfCounters>,
 }
 
 pub struct WorkerManagerEventSubscription {
@@ -356,11 +411,16 @@ impl WorkerManager {
     }
 
     pub async fn perf_snapshot(&self) -> WorkerManagerPerfSnapshot {
+        let captured_at_monotonic_nanos = saturating_nanos_u64(self.perf.started_at.elapsed());
         let sessions = self.sessions.read().await;
         let mut session_snapshots = sessions
             .iter()
             .filter_map(|(session_id, entry)| match entry {
-                SessionEntry::Managed(session) => Some(session.perf.snapshot(session_id.clone())),
+                SessionEntry::Managed(session) => Some(
+                    session
+                        .perf
+                        .snapshot(session_id.clone(), captured_at_monotonic_nanos),
+                ),
                 SessionEntry::Starting => None,
             })
             .collect::<Vec<_>>();
@@ -369,7 +429,7 @@ impl WorkerManager {
 
         WorkerManagerPerfSnapshot {
             metrics_enabled: self.perf.enabled,
-            captured_at_monotonic_nanos: saturating_nanos_u64(self.perf.started_at.elapsed()),
+            captured_at_monotonic_nanos,
             session_count: sessions.len(),
             totals: self.perf.capture_totals(),
             sessions: session_snapshots,
@@ -562,6 +622,7 @@ impl WorkerManager {
                 Ok(SessionEventSubscription {
                     receiver: event_tx.subscribe(),
                     perf: Arc::clone(&self.perf),
+                    session_perf: Arc::clone(&session.perf),
                 })
             }
             None => {
@@ -706,52 +767,13 @@ impl WorkerManager {
                             BackendEvent::Crashed(_) => Some(ManagedSessionStatus::Crashed),
                             _ => None,
                         };
-
-                        let session_receivers = event_tx.receiver_count() as u64;
-                        let global_receivers = global_event_tx.receiver_count() as u64;
-                        session_perf
-                            .session_receiver_count_last
-                            .store(session_receivers, Ordering::Relaxed);
-                        session_perf
-                            .global_receiver_count_last
-                            .store(global_receivers, Ordering::Relaxed);
-                        manager_perf
-                            .totals
-                            .session_receiver_count_last
-                            .store(session_receivers, Ordering::Relaxed);
-                        manager_perf
-                            .totals
-                            .global_receiver_count_last
-                            .store(global_receivers, Ordering::Relaxed);
-
-                        WorkerManagerPerfCounters::maybe_inc(
-                            &session_perf.event_clone_ops_total,
-                            manager_perf.enabled,
-                        );
-                        WorkerManagerPerfCounters::maybe_inc(
-                            &manager_perf.totals.event_clone_ops_total,
-                            manager_perf.enabled,
-                        );
-                        let _ = event_tx.send(event.clone());
-                        WorkerManagerPerfCounters::maybe_inc(
-                            &session_perf.events_forwarded_session_total,
-                            manager_perf.enabled,
-                        );
-                        WorkerManagerPerfCounters::maybe_inc(
-                            &manager_perf.totals.events_forwarded_session_total,
-                            manager_perf.enabled,
-                        );
-                        let _ = global_event_tx.send(WorkerManagerEvent {
-                            session_id: session_id.clone(),
+                        Self::fanout_event(
+                            &session_id,
                             event,
-                        });
-                        WorkerManagerPerfCounters::maybe_inc(
-                            &session_perf.events_forwarded_global_total,
-                            manager_perf.enabled,
-                        );
-                        WorkerManagerPerfCounters::maybe_inc(
-                            &manager_perf.totals.events_forwarded_global_total,
-                            manager_perf.enabled,
+                            &event_tx,
+                            &global_event_tx,
+                            &manager_perf,
+                            &session_perf,
                         );
 
                         let dispatch_nanos = saturating_nanos_u64(dispatch_started.elapsed());
@@ -796,11 +818,26 @@ impl WorkerManager {
                     }
                     Ok(None) => {
                         let done_event = BackendEvent::Done(BackendDoneEvent { summary: None });
-                        let _ = event_tx.send(done_event.clone());
-                        let _ = global_event_tx.send(WorkerManagerEvent {
-                            session_id: session_id.clone(),
-                            event: done_event,
-                        });
+                        let dispatch_started = std::time::Instant::now();
+                        Self::fanout_event(
+                            &session_id,
+                            done_event,
+                            &event_tx,
+                            &global_event_tx,
+                            &manager_perf,
+                            &session_perf,
+                        );
+                        let dispatch_nanos = saturating_nanos_u64(dispatch_started.elapsed());
+                        WorkerManagerPerfCounters::maybe_add(
+                            &session_perf.event_dispatch_nanos_total,
+                            manager_perf.enabled,
+                            dispatch_nanos,
+                        );
+                        WorkerManagerPerfCounters::maybe_add(
+                            &manager_perf.totals.event_dispatch_nanos_total,
+                            manager_perf.enabled,
+                            dispatch_nanos,
+                        );
                         WorkerManagerPerfCounters::maybe_inc(
                             &session_perf.done_events_total,
                             manager_perf.enabled,
@@ -821,11 +858,26 @@ impl WorkerManager {
                         let crashed_event = BackendEvent::Crashed(BackendCrashedEvent {
                             reason: format!("worker output stream failed: {error}"),
                         });
-                        let _ = event_tx.send(crashed_event.clone());
-                        let _ = global_event_tx.send(WorkerManagerEvent {
-                            session_id: session_id.clone(),
-                            event: crashed_event,
-                        });
+                        let dispatch_started = std::time::Instant::now();
+                        Self::fanout_event(
+                            &session_id,
+                            crashed_event,
+                            &event_tx,
+                            &global_event_tx,
+                            &manager_perf,
+                            &session_perf,
+                        );
+                        let dispatch_nanos = saturating_nanos_u64(dispatch_started.elapsed());
+                        WorkerManagerPerfCounters::maybe_add(
+                            &session_perf.event_dispatch_nanos_total,
+                            manager_perf.enabled,
+                            dispatch_nanos,
+                        );
+                        WorkerManagerPerfCounters::maybe_add(
+                            &manager_perf.totals.event_dispatch_nanos_total,
+                            manager_perf.enabled,
+                            dispatch_nanos,
+                        );
                         WorkerManagerPerfCounters::maybe_inc(
                             &session_perf.crashed_events_total,
                             manager_perf.enabled,
@@ -845,6 +897,92 @@ impl WorkerManager {
                 }
             }
         })
+    }
+
+    fn fanout_event(
+        session_id: &RuntimeSessionId,
+        event: BackendEvent,
+        event_tx: &broadcast::Sender<BackendEvent>,
+        global_event_tx: &broadcast::Sender<WorkerManagerEvent>,
+        manager_perf: &WorkerManagerPerfCounters,
+        session_perf: &SessionPerfCounters,
+    ) {
+        let session_receivers = event_tx.receiver_count() as u64;
+        let global_receivers = global_event_tx.receiver_count() as u64;
+        session_perf
+            .session_receiver_count_last
+            .store(session_receivers, Ordering::Relaxed);
+        session_perf
+            .global_receiver_count_last
+            .store(global_receivers, Ordering::Relaxed);
+        manager_perf
+            .totals
+            .session_receiver_count_last
+            .store(session_receivers, Ordering::Relaxed);
+        manager_perf
+            .totals
+            .global_receiver_count_last
+            .store(global_receivers, Ordering::Relaxed);
+
+        match (session_receivers > 0, global_receivers > 0) {
+            (true, true) => {
+                WorkerManagerPerfCounters::maybe_inc(
+                    &session_perf.event_clone_ops_total,
+                    manager_perf.enabled,
+                );
+                WorkerManagerPerfCounters::maybe_inc(
+                    &manager_perf.totals.event_clone_ops_total,
+                    manager_perf.enabled,
+                );
+                let _ = event_tx.send(event.clone());
+                WorkerManagerPerfCounters::maybe_inc(
+                    &session_perf.events_forwarded_session_total,
+                    manager_perf.enabled,
+                );
+                WorkerManagerPerfCounters::maybe_inc(
+                    &manager_perf.totals.events_forwarded_session_total,
+                    manager_perf.enabled,
+                );
+                let _ = global_event_tx.send(WorkerManagerEvent {
+                    session_id: session_id.clone(),
+                    event,
+                });
+                WorkerManagerPerfCounters::maybe_inc(
+                    &session_perf.events_forwarded_global_total,
+                    manager_perf.enabled,
+                );
+                WorkerManagerPerfCounters::maybe_inc(
+                    &manager_perf.totals.events_forwarded_global_total,
+                    manager_perf.enabled,
+                );
+            }
+            (true, false) => {
+                let _ = event_tx.send(event);
+                WorkerManagerPerfCounters::maybe_inc(
+                    &session_perf.events_forwarded_session_total,
+                    manager_perf.enabled,
+                );
+                WorkerManagerPerfCounters::maybe_inc(
+                    &manager_perf.totals.events_forwarded_session_total,
+                    manager_perf.enabled,
+                );
+            }
+            (false, true) => {
+                let _ = global_event_tx.send(WorkerManagerEvent {
+                    session_id: session_id.clone(),
+                    event,
+                });
+                WorkerManagerPerfCounters::maybe_inc(
+                    &session_perf.events_forwarded_global_total,
+                    manager_perf.enabled,
+                );
+                WorkerManagerPerfCounters::maybe_inc(
+                    &manager_perf.totals.events_forwarded_global_total,
+                    manager_perf.enabled,
+                );
+            }
+            (false, false) => {}
+        }
     }
 
     fn checkpoint_prompt_bytes(&self) -> Option<Vec<u8>> {
@@ -1057,23 +1195,54 @@ impl WorkerManager {
 
 impl SessionEventSubscription {
     pub async fn next_event(&mut self) -> RuntimeResult<Option<BackendEvent>> {
-        match self.receiver.recv().await {
-            Ok(event) => Ok(Some(event)),
-            Err(broadcast::error::RecvError::Closed) => {
-                WorkerManagerPerfCounters::maybe_inc(
-                    &self.perf.subscriber_closed_session_total,
-                    self.perf.enabled,
-                );
-                Ok(None)
-            }
-            Err(broadcast::error::RecvError::Lagged(skipped)) => {
-                WorkerManagerPerfCounters::maybe_inc(
-                    &self.perf.subscriber_lagged_errors_session_total,
-                    self.perf.enabled,
-                );
-                Err(RuntimeError::Process(format!(
-                    "worker session subscriber lagged; dropped {skipped} events"
-                )))
+        loop {
+            match self.receiver.recv().await {
+                Ok(event) => return Ok(Some(event)),
+                Err(broadcast::error::RecvError::Closed) => {
+                    WorkerManagerPerfCounters::maybe_inc(
+                        &self.perf.subscriber_closed_session_total,
+                        self.perf.enabled,
+                    );
+                    return Ok(None);
+                }
+                Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                    WorkerManagerPerfCounters::maybe_inc(
+                        &self.perf.subscriber_lagged_errors_session_total,
+                        self.perf.enabled,
+                    );
+                    WorkerManagerPerfCounters::maybe_add(
+                        &self.perf.subscriber_lagged_events_session_total,
+                        self.perf.enabled,
+                        skipped,
+                    );
+                    WorkerManagerPerfCounters::maybe_add(
+                        &self.session_perf.subscriber_lagged_events_session_total,
+                        self.perf.enabled,
+                        skipped,
+                    );
+                    WorkerManagerPerfCounters::maybe_add(
+                        &self.session_perf.queue_pressure_dropped_events_total,
+                        self.perf.enabled,
+                        skipped,
+                    );
+                    WorkerManagerPerfCounters::maybe_add(
+                        &self.perf.totals.queue_pressure_dropped_events_total,
+                        self.perf.enabled,
+                        skipped,
+                    );
+                    WorkerManagerPerfCounters::maybe_inc(
+                        &self.session_perf.output_truncation_markers_total,
+                        self.perf.enabled,
+                    );
+                    WorkerManagerPerfCounters::maybe_inc(
+                        &self.perf.totals.output_truncation_markers_total,
+                        self.perf.enabled,
+                    );
+                    return Ok(Some(BackendEvent::Output(BackendOutputEvent {
+                        stream: BackendOutputStream::Stderr,
+                        bytes: truncation_marker_bytes(skipped),
+                    })));
+                }
             }
         }
     }
@@ -1081,23 +1250,33 @@ impl SessionEventSubscription {
 
 impl WorkerManagerEventSubscription {
     pub async fn next_event(&mut self) -> RuntimeResult<Option<WorkerManagerEvent>> {
-        match self.receiver.recv().await {
-            Ok(event) => Ok(Some(event)),
-            Err(broadcast::error::RecvError::Closed) => {
-                WorkerManagerPerfCounters::maybe_inc(
-                    &self.perf.subscriber_closed_global_total,
-                    self.perf.enabled,
-                );
-                Ok(None)
-            }
-            Err(broadcast::error::RecvError::Lagged(skipped)) => {
-                WorkerManagerPerfCounters::maybe_inc(
-                    &self.perf.subscriber_lagged_errors_global_total,
-                    self.perf.enabled,
-                );
-                Err(RuntimeError::Process(format!(
-                    "worker manager subscriber lagged; dropped {skipped} events"
-                )))
+        loop {
+            match self.receiver.recv().await {
+                Ok(event) => return Ok(Some(event)),
+                Err(broadcast::error::RecvError::Closed) => {
+                    WorkerManagerPerfCounters::maybe_inc(
+                        &self.perf.subscriber_closed_global_total,
+                        self.perf.enabled,
+                    );
+                    return Ok(None);
+                }
+                Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                    WorkerManagerPerfCounters::maybe_inc(
+                        &self.perf.subscriber_lagged_errors_global_total,
+                        self.perf.enabled,
+                    );
+                    WorkerManagerPerfCounters::maybe_add(
+                        &self.perf.subscriber_lagged_events_global_total,
+                        self.perf.enabled,
+                        skipped,
+                    );
+                    WorkerManagerPerfCounters::maybe_add(
+                        &self.perf.totals.queue_pressure_dropped_events_total,
+                        self.perf.enabled,
+                        skipped,
+                    );
+                    continue;
+                }
             }
         }
     }
@@ -1109,6 +1288,23 @@ fn saturating_nanos_u64(duration: Duration) -> u64 {
         .min(u128::from(u64::MAX))
         .try_into()
         .unwrap_or(u64::MAX)
+}
+
+fn rate_per_sec_x1000(count: u64, elapsed_nanos: u64) -> u64 {
+    if elapsed_nanos == 0 || count == 0 {
+        return 0;
+    }
+    let scaled =
+        u128::from(count).saturating_mul(1_000_000_000_000_u128) / u128::from(elapsed_nanos);
+    scaled
+        .min(u128::from(u64::MAX))
+        .try_into()
+        .unwrap_or(u64::MAX)
+}
+
+fn truncation_marker_bytes(skipped: u64) -> Vec<u8> {
+    format!("[orchestrator] output truncated: dropped {skipped} events due stream pressure\n")
+        .into_bytes()
 }
 
 #[cfg(test)]
@@ -1447,11 +1643,17 @@ mod tests {
             "events_received_total": snapshot.totals.events_received_total,
             "events_forwarded_session_total": snapshot.totals.events_forwarded_session_total,
             "events_forwarded_global_total": snapshot.totals.events_forwarded_global_total,
+            "event_clone_ops_total": snapshot.totals.event_clone_ops_total,
             "event_dispatch_nanos_total": snapshot.totals.event_dispatch_nanos_total,
+            "queue_pressure_dropped_events_total": snapshot.totals.queue_pressure_dropped_events_total,
+            "output_truncation_markers_total": snapshot.totals.output_truncation_markers_total,
+            "events_received_rate_per_sec_x1000": snapshot.totals.events_received_rate_per_sec_x1000,
             "subscribe_session_calls_total": snapshot.totals.subscribe_session_calls_total,
             "subscribe_global_calls_total": snapshot.totals.subscribe_global_calls_total,
             "subscriber_lagged_errors_session_total": snapshot.totals.subscriber_lagged_errors_session_total,
             "subscriber_lagged_errors_global_total": snapshot.totals.subscriber_lagged_errors_global_total,
+            "subscriber_lagged_events_session_total": snapshot.totals.subscriber_lagged_events_session_total,
+            "subscriber_lagged_events_global_total": snapshot.totals.subscriber_lagged_events_global_total,
             "checkpoint_ticks_per_session": if session_count > 0 {
                 snapshot.totals.checkpoint_ticks_total / session_count as u64
             } else {
@@ -1778,6 +1980,188 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn worker_manager_session_lag_emits_truncation_marker_and_updates_pressure_metrics() {
+        let backend = Arc::new(MockBackend::default());
+        let manager = make_manager(
+            Arc::clone(&backend),
+            WorkerManagerConfig {
+                checkpoint_prompt_interval: None,
+                session_event_buffer: 1,
+                ..WorkerManagerConfig::default()
+            },
+        );
+        let spec = spawn_spec("wm-lagged-session-marker");
+        let session_id = spec.session_id.clone();
+        manager.spawn(spec).await.expect("spawn session");
+
+        let mut session_sub = manager
+            .subscribe(&session_id)
+            .await
+            .expect("subscribe session");
+        backend.emit_event(
+            &session_id,
+            BackendEvent::Output(BackendOutputEvent {
+                stream: BackendOutputStream::Stdout,
+                bytes: b"one".to_vec(),
+            }),
+        );
+        backend.emit_event(
+            &session_id,
+            BackendEvent::Output(BackendOutputEvent {
+                stream: BackendOutputStream::Stdout,
+                bytes: b"two".to_vec(),
+            }),
+        );
+        backend.emit_event(
+            &session_id,
+            BackendEvent::Output(BackendOutputEvent {
+                stream: BackendOutputStream::Stdout,
+                bytes: b"three".to_vec(),
+            }),
+        );
+
+        let marker_event = next_session_event(&mut session_sub).await;
+        match marker_event {
+            BackendEvent::Output(output) => {
+                assert_eq!(output.stream, BackendOutputStream::Stderr);
+                let marker_text = String::from_utf8_lossy(&output.bytes);
+                assert!(marker_text.contains("output truncated"));
+            }
+            other => panic!("expected truncation marker output event, got {other:?}"),
+        }
+
+        let snapshot = manager.perf_snapshot().await;
+        assert!(snapshot.totals.queue_pressure_dropped_events_total >= 1);
+        assert!(snapshot.totals.output_truncation_markers_total >= 1);
+        assert!(snapshot.totals.subscriber_lagged_events_session_total >= 1);
+        let session_metrics = snapshot
+            .sessions
+            .iter()
+            .find(|session| session.session_id == session_id)
+            .expect("session metrics present");
+        assert!(session_metrics.queue_pressure_dropped_events_total >= 1);
+        assert!(session_metrics.output_truncation_markers_total >= 1);
+        assert!(session_metrics.subscriber_lagged_events_session_total >= 1);
+
+        let _ = manager.kill(&session_id).await;
+    }
+
+    #[tokio::test]
+    async fn worker_manager_global_subscription_lag_continues_and_updates_metrics() {
+        let backend = Arc::new(MockBackend::default());
+        let manager = make_manager(
+            Arc::clone(&backend),
+            WorkerManagerConfig {
+                checkpoint_prompt_interval: None,
+                global_event_buffer: 1,
+                ..WorkerManagerConfig::default()
+            },
+        );
+        let spec = spawn_spec("wm-lagged-global-stream");
+        let session_id = spec.session_id.clone();
+        manager.spawn(spec).await.expect("spawn session");
+
+        let mut global = manager.subscribe_all();
+        for idx in 0..4 {
+            backend.emit_event(
+                &session_id,
+                BackendEvent::Output(BackendOutputEvent {
+                    stream: BackendOutputStream::Stdout,
+                    bytes: format!("event-{idx}").into_bytes(),
+                }),
+            );
+        }
+
+        let event = next_global_event(&mut global).await;
+        assert_eq!(event.session_id, session_id);
+        assert!(matches!(event.event, BackendEvent::Output(_)));
+
+        let snapshot = manager.perf_snapshot().await;
+        assert!(snapshot.totals.subscriber_lagged_errors_global_total >= 1);
+        assert!(snapshot.totals.subscriber_lagged_events_global_total >= 1);
+        assert!(snapshot.totals.queue_pressure_dropped_events_total >= 1);
+
+        let _ = manager.kill(&session_id).await;
+    }
+
+    #[tokio::test]
+    async fn worker_manager_skips_clone_work_when_only_global_subscribers_exist() {
+        let backend = Arc::new(MockBackend::default());
+        let manager = make_manager(
+            Arc::clone(&backend),
+            WorkerManagerConfig {
+                checkpoint_prompt_interval: None,
+                ..WorkerManagerConfig::default()
+            },
+        );
+        let spec = spawn_spec("wm-fanout-global-only");
+        let session_id = spec.session_id.clone();
+        manager.spawn(spec).await.expect("spawn session");
+
+        let mut global = manager.subscribe_all();
+        backend.emit_event(
+            &session_id,
+            BackendEvent::Output(BackendOutputEvent {
+                stream: BackendOutputStream::Stdout,
+                bytes: b"global-only".to_vec(),
+            }),
+        );
+        let event = next_global_event(&mut global).await;
+        assert_eq!(event.session_id, session_id);
+
+        let snapshot = manager.perf_snapshot().await;
+        assert_eq!(snapshot.totals.event_clone_ops_total, 0);
+        assert_eq!(snapshot.totals.events_forwarded_session_total, 0);
+        assert!(snapshot.totals.events_forwarded_global_total >= 1);
+        let session_metrics = snapshot
+            .sessions
+            .iter()
+            .find(|session| session.session_id == session_id)
+            .expect("session metrics present");
+        assert_eq!(session_metrics.event_clone_ops_total, 0);
+
+        let _ = manager.kill(&session_id).await;
+    }
+
+    #[tokio::test]
+    async fn worker_manager_clones_once_when_both_session_and_global_subscribers_exist() {
+        let backend = Arc::new(MockBackend::default());
+        let manager = make_manager(
+            Arc::clone(&backend),
+            WorkerManagerConfig {
+                checkpoint_prompt_interval: None,
+                ..WorkerManagerConfig::default()
+            },
+        );
+        let spec = spawn_spec("wm-fanout-both");
+        let session_id = spec.session_id.clone();
+        manager.spawn(spec).await.expect("spawn session");
+
+        let mut global = manager.subscribe_all();
+        let mut session_sub = manager
+            .subscribe(&session_id)
+            .await
+            .expect("subscribe session");
+        backend.emit_event(
+            &session_id,
+            BackendEvent::Output(BackendOutputEvent {
+                stream: BackendOutputStream::Stdout,
+                bytes: b"both".to_vec(),
+            }),
+        );
+
+        let _ = next_session_event(&mut session_sub).await;
+        let _ = next_global_event(&mut global).await;
+
+        let snapshot = manager.perf_snapshot().await;
+        assert!(snapshot.totals.event_clone_ops_total >= 1);
+        assert!(snapshot.totals.events_forwarded_session_total >= 1);
+        assert!(snapshot.totals.events_forwarded_global_total >= 1);
+
+        let _ = manager.kill(&session_id).await;
+    }
+
+    #[tokio::test]
     async fn worker_manager_spawn_mismatched_handle_cleans_up_spawned_session() {
         let backend = Arc::new(MockBackend::default());
         let manager = make_manager(Arc::clone(&backend), WorkerManagerConfig::default());
@@ -1901,10 +2285,84 @@ mod tests {
         assert!(snapshot.metrics_enabled);
         assert!(snapshot.totals.events_received_total >= 1);
         assert!(snapshot.totals.events_forwarded_global_total >= 1);
+        assert!(snapshot.totals.events_received_rate_per_sec_x1000 > 0);
         assert!(snapshot.totals.checkpoint_ticks_total >= 1);
         assert_eq!(snapshot.sessions.len(), 1);
 
         let _ = manager.kill(&session_id).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "perf investigation scenario"]
+    async fn perf_stream_pressure_1_5_20_sessions() {
+        let session_counts = [1_usize, 5, 20];
+        let events_per_session = 80_usize;
+        for session_count in session_counts {
+            let backend = Arc::new(MockBackend::default());
+            let manager = make_manager(
+                Arc::clone(&backend),
+                WorkerManagerConfig {
+                    checkpoint_prompt_interval: None,
+                    session_event_buffer: 8,
+                    global_event_buffer: 32,
+                    ..WorkerManagerConfig::default()
+                },
+            );
+            let mut session_ids = Vec::with_capacity(session_count);
+            for index in 0..session_count {
+                let session_id =
+                    RuntimeSessionId::new(format!("wm-perf-pressure-{session_count}-{index}"));
+                manager
+                    .spawn(spawn_spec(session_id.as_str()))
+                    .await
+                    .expect("spawn session");
+                session_ids.push(session_id);
+            }
+
+            let mut global = manager.subscribe_all();
+            let mut per_session = Vec::with_capacity(session_ids.len());
+            for session_id in &session_ids {
+                per_session.push(manager.subscribe(session_id).await.expect("subscribe"));
+            }
+
+            let started = std::time::Instant::now();
+            for _ in 0..events_per_session {
+                for session_id in &session_ids {
+                    backend.emit_event(
+                        session_id,
+                        BackendEvent::Output(BackendOutputEvent {
+                            stream: BackendOutputStream::Stdout,
+                            bytes: b"pressure".to_vec(),
+                        }),
+                    );
+                }
+            }
+
+            sleep(Duration::from_millis(60)).await;
+            let mut marker_events = 0_u64;
+            for subscription in &mut per_session {
+                if let Ok(Some(BackendEvent::Output(output))) = subscription.next_event().await {
+                    if String::from_utf8_lossy(&output.bytes).contains("output truncated") {
+                        marker_events += 1;
+                    }
+                }
+            }
+            let _ = next_global_event(&mut global).await;
+            sleep(Duration::from_millis(40)).await;
+
+            let elapsed = started.elapsed();
+            let snapshot = manager.perf_snapshot().await;
+            print_perf_metrics_line("stream_pressure", session_count, elapsed, &snapshot);
+            assert!(
+                snapshot.totals.events_received_total
+                    >= (session_count * events_per_session) as u64
+            );
+            assert!(snapshot.totals.events_received_rate_per_sec_x1000 > 0);
+            assert!(snapshot.totals.queue_pressure_dropped_events_total >= marker_events);
+            assert!(snapshot.totals.output_truncation_markers_total >= marker_events);
+
+            kill_all_sessions(&manager, &session_ids).await;
+        }
     }
 
     #[tokio::test]
@@ -1984,8 +2442,9 @@ mod tests {
             let snapshot = manager.perf_snapshot().await;
             print_perf_metrics_line("fanout_overhead", session_count, elapsed, &snapshot);
             assert!(snapshot.totals.events_received_total > 0);
-            assert!(snapshot.totals.events_forwarded_session_total > 0);
+            assert_eq!(snapshot.totals.events_forwarded_session_total, 0);
             assert!(snapshot.totals.events_forwarded_global_total > 0);
+            assert_eq!(snapshot.totals.event_clone_ops_total, 0);
 
             kill_all_sessions(&manager, &session_ids).await;
         }

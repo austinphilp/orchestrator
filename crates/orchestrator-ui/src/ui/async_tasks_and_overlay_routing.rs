@@ -70,6 +70,7 @@ async fn run_session_merge_finalize_task(
     }
 }
 
+#[allow(dead_code)]
 async fn run_session_archive_task(
     provider: Arc<dyn TicketPickerProvider>,
     session_id: WorkerSessionId,
@@ -227,6 +228,7 @@ async fn relay_supervisor_stream(
     }
 }
 
+#[allow(dead_code)]
 async fn run_ticket_picker_load_task(
     provider: Arc<dyn TicketPickerProvider>,
     sender: mpsc::Sender<TicketPickerEvent>,
@@ -354,6 +356,7 @@ async fn run_session_diff_load_task(
     }
 }
 
+#[allow(dead_code)]
 async fn run_session_info_summary_task(
     provider: Arc<dyn LlmProvider>,
     context: SessionInfoContext,
@@ -402,6 +405,7 @@ async fn run_session_info_summary_task(
         .await;
 }
 
+#[allow(dead_code)]
 async fn run_ticket_picker_start_task(
     provider: Arc<dyn TicketPickerProvider>,
     ticket: TicketSummary,
@@ -491,6 +495,7 @@ async fn run_ticket_picker_start_task(
         .await;
 }
 
+#[allow(dead_code)]
 async fn run_ticket_picker_create_task(
     provider: Arc<dyn TicketPickerProvider>,
     request: CreateTicketFromPickerRequest,
@@ -539,6 +544,7 @@ async fn run_ticket_picker_create_task(
         .await;
 }
 
+#[allow(dead_code)]
 async fn run_ticket_picker_archive_task(
     provider: Arc<dyn TicketPickerProvider>,
     ticket: TicketSummary,

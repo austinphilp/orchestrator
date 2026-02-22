@@ -1,12 +1,14 @@
 use anyhow::Result;
 use backend_codex::{CodexBackend, CodexBackendConfig};
 use backend_opencode::{OpenCodeBackend, OpenCodeBackendConfig};
-use integration_git::{GitCliVcsProvider, ProcessCommandRunner as GitProcessCommandRunner};
 use integration_linear::{
     LinearConfig, LinearRuntimeSettings, LinearTicketingProvider, WorkflowStateMapSetting,
 };
 use integration_shortcut::{ShortcutConfig, ShortcutTicketingProvider};
-use orchestrator_app::{App, AppConfig, AppTicketPickerProvider};
+use orchestrator_app::{
+    set_database_runtime_config, App, AppConfig, AppFrontendController, FrontendController,
+    WorkerManagerBackend,
+};
 use orchestrator_core::{
     BackendKind, CoreError, EventPrunePolicy, OrchestrationEventPayload, SpawnSpec,
     SqliteEventStore, TicketProvider, TicketRecord, TicketingProvider, WorkItemId, WorkerBackend,
@@ -29,7 +31,10 @@ const STARTUP_RESUME_NUDGE: &str =
 #[tokio::main]
 async fn main() -> Result<()> {
     let mut config = AppConfig::from_env()?;
+    set_database_runtime_config(config.database.clone());
     init_file_logging(config.event_store_path.as_str())?;
+    log_event_store_path(config.event_store_path.as_str());
+    warn_if_legacy_event_store_exists(config.event_store_path.as_str());
     let cli = parse_cli_flags()?;
 
     config.ticketing_provider = resolve_provider_name(
@@ -70,18 +75,11 @@ async fn main() -> Result<()> {
     )?;
     let (ticketing, linear_ticketing) =
         build_ticketing_provider(&config, &config.ticketing_provider)?;
-    let worker_backend = build_harness_provider(&config, &config.harness_provider)?;
-    let vcs = Arc::new(GitCliVcsProvider::new(
-        GitProcessCommandRunner,
-        PathBuf::from(config.git.binary.as_str()),
-        config.git.allow_destructive_automation,
-        config.git.allow_force_push,
-        config.git.allow_delete_unmerged_branches,
-        config.runtime.allow_unsafe_command_paths,
-    )?);
-
+    let raw_worker_backend = build_harness_provider(&config, &config.harness_provider)?;
     ticketing.health_check().await?;
-    worker_backend.health_check().await?;
+    raw_worker_backend.health_check().await?;
+    let worker_backend: Arc<dyn WorkerBackend + Send + Sync> =
+        Arc::new(WorkerManagerBackend::new(raw_worker_backend));
 
     let app = Arc::new(App {
         config,
@@ -92,38 +90,78 @@ async fn main() -> Result<()> {
     if let Err(error) = run_event_prune_maintenance(&app.config) {
         tracing::warn!(error = %error, "event prune maintenance failed at startup");
     }
-    let ticket_picker_provider = Arc::new(AppTicketPickerProvider::new(
-        Arc::clone(&app),
-        ticketing,
-        vcs,
-        worker_backend.clone(),
-    ));
-
     let state = app.startup_state().await?;
     rehydrate_inflight_sessions(&app.config.event_store_path, worker_backend.as_ref()).await?;
-    let supervisor_dispatcher: Arc<dyn orchestrator_ui::SupervisorCommandDispatcher> = app.clone();
+    let frontend_controller = Arc::new(AppFrontendController::from_startup_state(
+        Arc::clone(&app),
+        Some(worker_backend.clone()),
+        &state,
+    ));
+    frontend_controller.start().await?;
     let mut ui = Ui::init()?
-        .with_supervisor_command_dispatcher(supervisor_dispatcher)
-        .with_ticket_picker_provider(ticket_picker_provider)
-        .with_worker_backend(worker_backend.clone());
+        .with_frontend_controller(frontend_controller.clone());
     app.start_linear_polling(linear_ticketing.as_deref())
         .await?;
-    match ui.run(&state.status, &state.projection) {
-        Ok(()) => {
-            app.stop_linear_polling(linear_ticketing.as_deref()).await?;
+    let frontend_snapshot = frontend_controller.snapshot().await?;
+    let ui_result = ui.run(&frontend_snapshot.status, &frontend_snapshot.projection);
+    let linear_stop_result = app.stop_linear_polling(linear_ticketing.as_deref()).await;
+    let frontend_stop_result = frontend_controller.stop().await;
+
+    if let Err(linear_stop_error) = linear_stop_result {
+        tracing::warn!(
+            error = %linear_stop_error,
+            "failed to stop linear polling during UI shutdown"
+        );
+        if let Err(frontend_stop_error) = frontend_stop_result {
+            tracing::warn!(
+                error = %frontend_stop_error,
+                "failed to stop frontend controller during UI shutdown"
+            );
+            return Err(anyhow::anyhow!(
+                "shutdown failed: linear polling stop failed: {linear_stop_error}; frontend controller stop failed: {frontend_stop_error}"
+            ));
         }
-        Err(ui_error) => {
-            if let Err(stop_error) = app.stop_linear_polling(linear_ticketing.as_deref()).await {
-                tracing::warn!(error = %stop_error, "failed to stop linear polling during UI shutdown");
-                return Err(anyhow::anyhow!(
-                    "UI shutdown failed: {ui_error}; additionally, linear polling stop failed: {stop_error}"
-                ));
-            }
-            return Err(ui_error.into());
-        }
+        return Err(linear_stop_error.into());
+    }
+    if let Err(frontend_stop_error) = frontend_stop_result {
+        tracing::warn!(
+            error = %frontend_stop_error,
+            "failed to stop frontend controller during UI shutdown"
+        );
+        return Err(frontend_stop_error.into());
+    }
+
+    if let Err(ui_error) = ui_result {
+        return Err(ui_error.into());
     }
 
     Ok(())
+}
+
+fn log_event_store_path(event_store_path: &str) {
+    tracing::info!(
+        event_store_path = event_store_path,
+        "orchestrator event store path configured"
+    );
+}
+
+fn warn_if_legacy_event_store_exists(event_store_path: &str) {
+    let active = Path::new(event_store_path);
+    let Ok(current_dir) = std::env::current_dir() else {
+        return;
+    };
+    let legacy = current_dir.join("orchestrator-events.db");
+    if !legacy.exists() {
+        return;
+    }
+    if legacy == active {
+        return;
+    }
+    tracing::warn!(
+        active_event_store_path = event_store_path,
+        legacy_event_store_path = %legacy.display(),
+        "legacy repo-root event store exists and differs from active path"
+    );
 }
 
 fn init_file_logging(event_store_path: &str) -> Result<(), CoreError> {

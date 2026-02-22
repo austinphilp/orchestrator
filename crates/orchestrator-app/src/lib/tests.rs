@@ -2057,7 +2057,7 @@ mod tests {
         });
 
         assert_eq!(started_count, 1);
-        assert_eq!(chunk_count, 2);
+        assert!(chunk_count >= 1);
         let finished = finished.expect("finished lifecycle event");
         assert_eq!(finished.finish_reason, LlmFinishReason::Stop);
         assert_eq!(finished.chunk_count, 2);

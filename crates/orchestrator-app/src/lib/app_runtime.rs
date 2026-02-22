@@ -1,5 +1,3 @@
-const NEW_TO_PLANNING_TRANSITION_INSTRUCTION: &str = "Workflow transition approved: New -> Planning. Begin planning mode for this ticket. Write the full detailed implementation plan to IMPLEMENTATION_PLAN.md in the worktree root, and in chat provide only a concise 2-4 paragraph summary with no code fences or excessive formatting.";
-
 pub struct App<S: Supervisor, G: GithubClient> {
     pub config: AppConfig,
     pub ticketing: Arc<dyn TicketingProvider + Send + Sync>,
@@ -9,7 +7,7 @@ pub struct App<S: Supervisor, G: GithubClient> {
 
 impl<S: Supervisor, G: GithubClient> App<S, G> {
     fn latest_workflow_state_for_work_item(
-        store: &SqliteEventStore,
+        store: &AppEventStore,
         work_item_id: &WorkItemId,
     ) -> Result<WorkflowState, CoreError> {
         let mut current = WorkflowState::New;
@@ -41,7 +39,7 @@ impl<S: Supervisor, G: GithubClient> App<S, G> {
                 WorkflowState::Planning,
                 WorkflowTransitionReason::TicketAccepted,
                 WorkflowGuardContext::default(),
-                Some(NEW_TO_PLANNING_TRANSITION_INSTRUCTION),
+                Some("Workflow transition approved: New -> Planning. Begin planning mode for this ticket and produce a concrete implementation plan before coding."),
             )),
             WorkflowState::Planning => Ok((
                 WorkflowState::Implementing,
@@ -238,15 +236,11 @@ impl<S: Supervisor, G: GithubClient> App<S, G> {
         &self,
         selected_ticket: &TicketSummary,
         repository_override: Option<PathBuf>,
-        profile_override: Option<String>,
         vcs: &dyn VcsProvider,
         worker_backend: &dyn WorkerBackend,
     ) -> Result<SelectedTicketFlowResult, CoreError> {
-        let mut store = open_event_store(&self.config.event_store_path)?;
-        let flow_config = SelectedTicketFlowConfig::from_workspace_and_worktrees_root(
-            &self.config.workspace,
-            &self.config.worktrees_root,
-        );
+        let mut store = open_owned_event_store(&self.config.event_store_path)?;
+        let flow_config = SelectedTicketFlowConfig::from_workspace_root(&self.config.workspace);
         let selected_ticket_description = self
             .ticketing
             .get_ticket(GetTicketRequest {
@@ -256,35 +250,7 @@ impl<S: Supervisor, G: GithubClient> App<S, G> {
             .ok()
             .and_then(|details| details.description);
 
-        let profiles_config = Self::workflow_profiles_from_disk().unwrap_or_else(|_| {
-            WorkflowInteractionProfilesConfig {
-                default_profile: self.config.ui.default_workflow_profile.clone(),
-                profiles: self.config.ui.workflow_interaction_profiles.clone(),
-            }
-        });
-        let normalized_override = profile_override
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .filter(|value| {
-                profiles_config
-                    .profiles
-                    .iter()
-                    .any(|profile| profile.name == *value)
-            })
-            .map(ToOwned::to_owned);
-        if profile_override.is_some() {
-            match normalized_override.as_deref() {
-                Some(name) => {
-                    store.upsert_ticket_profile_override(&selected_ticket.ticket_id, name)?;
-                }
-                None => {
-                    store.delete_ticket_profile_override(&selected_ticket.ticket_id)?;
-                }
-            }
-        }
-
-        let result = orchestrator_core::start_or_resume_selected_ticket(
+        orchestrator_core::start_or_resume_selected_ticket(
             &mut store,
             selected_ticket,
             selected_ticket_description.as_deref(),
@@ -293,81 +259,7 @@ impl<S: Supervisor, G: GithubClient> App<S, G> {
             vcs,
             worker_backend,
         )
-        .await?;
-
-        let stored_override = store.find_ticket_profile_override(&selected_ticket.ticket_id)?;
-        let valid_override = stored_override.as_deref().and_then(|name| {
-            profiles_config
-                .profiles
-                .iter()
-                .any(|profile| profile.name == name)
-                .then(|| name.to_owned())
-        });
-        if stored_override.is_some() && valid_override.is_none() {
-            store.delete_ticket_profile_override(&selected_ticket.ticket_id)?;
-        }
-        self.append_work_item_profile_override_event(
-            &mut store,
-            &result.mapping.work_item_id,
-            &result.mapping.session.session_id,
-            valid_override.as_deref(),
-        )?;
-
-        Ok(result)
-    }
-
-    pub fn save_workflow_interaction_profiles(
-        &self,
-        profiles_config: WorkflowInteractionProfilesConfig,
-    ) -> Result<WorkflowInteractionProfilesConfig, CoreError> {
-        let config_path = config_path_from_env()?;
-        let mut config = load_or_create_config(&config_path)?;
-        config.ui.workflow_interaction_profiles = profiles_config.profiles;
-        config.ui.default_workflow_profile = profiles_config.default_profile;
-        let _ = normalize_config(&mut config);
-        persist_config(&config_path, &config)?;
-        Ok(WorkflowInteractionProfilesConfig {
-            default_profile: config.ui.default_workflow_profile,
-            profiles: config.ui.workflow_interaction_profiles,
-        })
-    }
-
-    pub fn set_ticket_profile_override(
-        &self,
-        ticket_id: &TicketId,
-        profile_name: Option<&str>,
-    ) -> Result<(), CoreError> {
-        let profiles_config = Self::workflow_profiles_from_disk().unwrap_or_else(|_| {
-            WorkflowInteractionProfilesConfig {
-                default_profile: self.config.ui.default_workflow_profile.clone(),
-                profiles: self.config.ui.workflow_interaction_profiles.clone(),
-            }
-        });
-        let store = open_event_store(&self.config.event_store_path)?;
-        let normalized_profile = profile_name
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .filter(|value| {
-                profiles_config
-                    .profiles
-                    .iter()
-                    .any(|profile| profile.name == *value)
-            });
-        if let Some(profile_name) = normalized_profile {
-            store.upsert_ticket_profile_override(ticket_id, profile_name)?;
-        } else {
-            store.delete_ticket_profile_override(ticket_id)?;
-        }
-        Ok(())
-    }
-
-    pub fn list_ticket_profile_overrides(
-        &self,
-        ticket_ids: &[TicketId],
-    ) -> Result<std::collections::HashMap<TicketId, String>, CoreError> {
-        let store = open_event_store(&self.config.event_store_path)?;
-        let items = store.list_ticket_profile_overrides(ticket_ids)?;
-        Ok(items.into_iter().collect())
+        .await
     }
 
     pub fn mark_session_crashed(
@@ -440,73 +332,6 @@ impl<S: Supervisor, G: GithubClient> App<S, G> {
                 }
             }
         }
-        Ok(())
-    }
-
-    fn workflow_profiles_from_disk() -> Result<WorkflowInteractionProfilesConfig, CoreError> {
-        let config = AppConfig::from_env()?;
-        Ok(WorkflowInteractionProfilesConfig {
-            default_profile: config.ui.default_workflow_profile,
-            profiles: config.ui.workflow_interaction_profiles,
-        })
-    }
-
-    fn latest_profile_override_for_work_item(
-        store: &SqliteEventStore,
-        work_item_id: &WorkItemId,
-    ) -> Result<Option<String>, CoreError> {
-        let events = store.read_ordered()?;
-        for event in events.iter().rev() {
-            if event.work_item_id.as_ref() != Some(work_item_id) {
-                continue;
-            }
-            match &event.payload {
-                OrchestrationEventPayload::WorkItemProfileOverrideSet(payload) => {
-                    return Ok(Some(payload.profile_name.clone()));
-                }
-                OrchestrationEventPayload::WorkItemProfileOverrideCleared(_) => return Ok(None),
-                _ => {}
-            }
-        }
-        Ok(None)
-    }
-
-    fn append_work_item_profile_override_event(
-        &self,
-        store: &mut SqliteEventStore,
-        work_item_id: &WorkItemId,
-        session_id: &WorkerSessionId,
-        profile_override: Option<&str>,
-    ) -> Result<(), CoreError> {
-        let previous = Self::latest_profile_override_for_work_item(store, work_item_id)?;
-        let next = profile_override.map(str::trim).filter(|value| !value.is_empty());
-        if previous.as_deref() == next {
-            return Ok(());
-        }
-
-        let payload = if let Some(profile_name) = next {
-            OrchestrationEventPayload::WorkItemProfileOverrideSet(
-                orchestrator_core::WorkItemProfileOverrideSetPayload {
-                    work_item_id: work_item_id.clone(),
-                    profile_name: profile_name.to_owned(),
-                },
-            )
-        } else {
-            OrchestrationEventPayload::WorkItemProfileOverrideCleared(
-                orchestrator_core::WorkItemProfileOverrideClearedPayload {
-                    work_item_id: work_item_id.clone(),
-                },
-            )
-        };
-
-        let _ = store.append(NewEventEnvelope {
-            event_id: format!("evt-work-item-profile-override-{}", now_nanos()),
-            occurred_at: now_timestamp(),
-            work_item_id: Some(work_item_id.clone()),
-            session_id: Some(session_id.clone()),
-            payload,
-            schema_version: DOMAIN_EVENT_SCHEMA_VERSION,
-        })?;
         Ok(())
     }
 
@@ -814,13 +639,6 @@ impl<S: Supervisor, G: GithubClient> App<S, G> {
         store.delete_harness_session_binding(
             &mapping.session.session_id,
             &mapping.session.backend_kind,
-        )?;
-        store.delete_ticket_profile_override(&mapping.ticket.ticket_id)?;
-        self.append_work_item_profile_override_event(
-            &mut store,
-            &mapping.work_item_id,
-            &mapping.session.session_id,
-            None,
         )?;
         let event = store.append(NewEventEnvelope {
             event_id: format!("evt-session-completed-{}", now_nanos()),

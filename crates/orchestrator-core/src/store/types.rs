@@ -1,3 +1,4 @@
+use std::ops::{Deref, DerefMut};
 use std::path::Path;
 
 use orchestrator_runtime::BackendKind;
@@ -115,6 +116,31 @@ pub trait EventStore {
     ) -> Result<Vec<StoredEventEnvelope>, CoreError>;
 }
 
-pub struct SqliteEventStore {
-    conn: Connection,
+pub struct OwnedConnection(Connection);
+
+impl OwnedConnection {
+    pub fn new(conn: Connection) -> Self {
+        Self(conn)
+    }
+}
+
+impl Deref for OwnedConnection {
+    type Target = Connection;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl DerefMut for OwnedConnection {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
+pub struct SqliteEventStore<C = OwnedConnection>
+where
+    C: Deref<Target = Connection> + DerefMut,
+{
+    conn: C,
 }

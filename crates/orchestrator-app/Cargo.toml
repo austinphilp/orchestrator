@@ -22,6 +22,8 @@ tokio.workspace = true
 toml.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+r2d2.workspace = true
+r2d2_sqlite.workspace = true
 
 [dev-dependencies]
 orchestrator-core = { path = "../orchestrator-core", features = ["test-support"] }

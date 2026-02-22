@@ -15,19 +15,21 @@ use edtui::{EditorEventHandler, EditorMode, EditorState, EditorTheme, EditorView
 use orchestrator_core::{
     apply_event, attention_inbox_snapshot, command_ids, ArtifactKind, ArtifactProjection,
     AttentionBatchKind, AttentionEngineConfig, AttentionInboxSnapshot, AttentionPriorityBand,
-    Command, CommandRegistry, CoreError, InboxItemId, InboxItemKind, LlmChatRequest,
-    LlmFinishReason, LlmMessage, LlmProvider, LlmRateLimitState, LlmResponseStream, LlmRole,
-    LlmTokenUsage, OrchestrationEventPayload, ProjectId,
-    ProjectionState, SelectedTicketFlowResult, SessionProjection, SupervisorQueryArgs,
-    StoredEventEnvelope, SupervisorQueryContextArgs, TicketId, TicketSummary,
-    UntypedCommandInvocation, WorkItemId, WorkerSessionId, WorkerSessionStatus,
-    WorkflowInteractionLevel, WorkflowInteractionProfile, WorkflowInteractionProfilesConfig,
-    WorkflowInteractionStateLevel, WorkflowState,
+    Command, CommandRegistry, CoreError, FrontendApplicationMode, FrontendCommandIntent,
+    FrontendController, FrontendEvent, FrontendIntent, FrontendNotification,
+    FrontendNotificationLevel, FrontendSnapshot,
+    FrontendTerminalEvent,
+    InboxItemId, InboxItemKind,
+    LlmChatRequest, LlmFinishReason, LlmMessage, LlmProvider, LlmRateLimitState, LlmResponseStream,
+    LlmRole, LlmTokenUsage, OrchestrationEventPayload, ProjectId, ProjectionState,
+    SelectedTicketFlowResult, SessionProjection, StoredEventEnvelope, SupervisorQueryArgs,
+    SupervisorQueryContextArgs, TicketId, TicketSummary, UntypedCommandInvocation, WorkItemId,
+    WorkerSessionId, WorkerSessionStatus, WorkflowState,
 };
 use orchestrator_runtime::{
-    BackendEvent, BackendKind, BackendNeedsInputAnswer, BackendNeedsInputEvent,
-    BackendNeedsInputOption, BackendNeedsInputQuestion, BackendOutputEvent, BackendTurnStateEvent,
-    RuntimeError, RuntimeResult, RuntimeSessionId, SessionHandle, SpawnSpec, WorkerBackend,
+    BackendKind, BackendNeedsInputAnswer, BackendNeedsInputEvent, BackendNeedsInputOption,
+    BackendNeedsInputQuestion, BackendOutputEvent, BackendTurnStateEvent, RuntimeError,
+    RuntimeResult, WorkerBackend,
 };
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Layout, Rect};
@@ -70,10 +72,9 @@ const MAX_MERGE_POLL_MAX_BACKOFF_SECS: u64 = 900;
 const DEFAULT_MERGE_POLL_BACKOFF_MULTIPLIER: u64 = 2;
 const MIN_MERGE_POLL_BACKOFF_MULTIPLIER: u64 = 1;
 const MAX_MERGE_POLL_BACKOFF_MULTIPLIER: u64 = 8;
-const DEFAULT_FULL_REDRAW_INTERVAL_SECS: u64 = 300;
-const MIN_FULL_REDRAW_INTERVAL_SECS: u64 = 60;
-const MAX_FULL_REDRAW_INTERVAL_SECS: u64 = 1800;
+#[allow(dead_code)]
 const MERGE_REQUEST_RATE_LIMIT: Duration = Duration::from_secs(1);
+#[allow(dead_code)]
 const TICKET_PICKER_CREATE_REFRESH_INTERVAL: Duration = Duration::from_secs(1);
 const BACKGROUND_SESSION_DEFERRED_OUTPUT_MAX_BYTES: usize = 64 * 1024;
 const RESOLVED_ANIMATION_REFRESH_INTERVAL: Duration = Duration::from_secs(1);
@@ -91,8 +92,6 @@ struct UiRuntimeConfig {
     merge_poll_base_interval_secs: u64,
     merge_poll_max_backoff_secs: u64,
     merge_poll_backoff_multiplier: u64,
-    workflow_profiles: WorkflowInteractionProfilesConfig,
-    full_redraw_interval_secs: u64,
 }
 
 impl Default for UiRuntimeConfig {
@@ -110,8 +109,6 @@ impl Default for UiRuntimeConfig {
             merge_poll_base_interval_secs: DEFAULT_MERGE_POLL_BASE_INTERVAL_SECS,
             merge_poll_max_backoff_secs: DEFAULT_MERGE_POLL_MAX_BACKOFF_SECS,
             merge_poll_backoff_multiplier: DEFAULT_MERGE_POLL_BACKOFF_MULTIPLIER,
-            workflow_profiles: WorkflowInteractionProfilesConfig::default(),
-            full_redraw_interval_secs: DEFAULT_FULL_REDRAW_INTERVAL_SECS,
         }
     }
 }
@@ -132,8 +129,6 @@ pub fn set_ui_runtime_config(
     merge_poll_base_interval_secs: u64,
     merge_poll_max_backoff_secs: u64,
     merge_poll_backoff_multiplier: u64,
-    workflow_profiles: WorkflowInteractionProfilesConfig,
-    full_redraw_interval_secs: u64,
 ) {
     let mut parsed_states = ticket_picker_priority_states
         .into_iter()
@@ -185,28 +180,10 @@ pub fn set_ui_runtime_config(
             MIN_MERGE_POLL_BACKOFF_MULTIPLIER,
             MAX_MERGE_POLL_BACKOFF_MULTIPLIER,
         ),
-        workflow_profiles,
-        full_redraw_interval_secs: full_redraw_interval_secs.clamp(
-            MIN_FULL_REDRAW_INTERVAL_SECS,
-            MAX_FULL_REDRAW_INTERVAL_SECS,
-        ),
     };
 
     if let Ok(mut guard) = ui_runtime_config_store().write() {
         *guard = config;
-    }
-}
-
-fn workflow_profiles_config_value() -> WorkflowInteractionProfilesConfig {
-    ui_runtime_config_store()
-        .read()
-        .map(|guard| guard.workflow_profiles.clone())
-        .unwrap_or_else(|_| WorkflowInteractionProfilesConfig::default())
-}
-
-fn set_workflow_profiles_config(config: WorkflowInteractionProfilesConfig) {
-    if let Ok(mut guard) = ui_runtime_config_store().write() {
-        guard.workflow_profiles = config;
     }
 }
 
@@ -300,18 +277,6 @@ fn merge_poll_backoff_multiplier_config_value() -> u64 {
         )
 }
 
-fn full_redraw_interval_config_value() -> Duration {
-    let secs = ui_runtime_config_store()
-        .read()
-        .map(|guard| guard.full_redraw_interval_secs)
-        .unwrap_or(DEFAULT_FULL_REDRAW_INTERVAL_SECS)
-        .clamp(
-            MIN_FULL_REDRAW_INTERVAL_SECS,
-            MAX_FULL_REDRAW_INTERVAL_SECS,
-        );
-    Duration::from_secs(secs)
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TicketCreateSubmitMode {
     CreateOnly,
@@ -346,7 +311,6 @@ pub trait TicketPickerProvider: Send + Sync {
         &self,
         ticket: TicketSummary,
         repository_override: Option<PathBuf>,
-        profile_override: Option<String>,
     ) -> Result<SelectedTicketFlowResult, CoreError>;
     async fn create_ticket_from_brief(
         &self,
@@ -433,30 +397,6 @@ pub trait TicketPickerProvider: Send + Sync {
         Err(CoreError::DependencyUnavailable(
             "PR merge queueing is not supported by this ticket provider".to_owned(),
         ))
-    }
-    async fn save_workflow_interaction_profiles(
-        &self,
-        _config: WorkflowInteractionProfilesConfig,
-    ) -> Result<WorkflowInteractionProfilesConfig, CoreError> {
-        Err(CoreError::DependencyUnavailable(
-            "saving workflow interaction profiles is not supported by this ticket provider"
-                .to_owned(),
-        ))
-    }
-    async fn set_ticket_profile_override(
-        &self,
-        _ticket_id: TicketId,
-        _profile_name: Option<String>,
-    ) -> Result<(), CoreError> {
-        Err(CoreError::DependencyUnavailable(
-            "setting ticket profile override is not supported by this ticket provider".to_owned(),
-        ))
-    }
-    async fn list_ticket_profile_overrides(
-        &self,
-        _ticket_ids: Vec<TicketId>,
-    ) -> Result<HashMap<TicketId, String>, CoreError> {
-        Ok(HashMap::new())
     }
 }
 
@@ -604,6 +544,7 @@ pub enum UiMode {
     #[default]
     Normal,
     Insert,
+    Terminal,
 }
 
 impl UiMode {
@@ -611,31 +552,25 @@ impl UiMode {
         match self {
             Self::Normal => "Normal",
             Self::Insert => "Insert",
+            Self::Terminal => "Terminal",
         }
     }
 }
 
-fn profile_level_for_state(
-    profile_name: Option<&str>,
-    state: &WorkflowState,
-) -> WorkflowInteractionLevel {
-    let config = workflow_profiles_config_value();
-    let requested = profile_name
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(ToOwned::to_owned)
-        .or_else(|| {
-            let default = config.default_profile.trim();
-            (!default.is_empty()).then(|| default.to_owned())
-        });
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum ApplicationMode {
+    #[default]
+    Manual,
+    Autopilot,
+}
 
-    let selected = requested
-        .as_deref()
-        .and_then(|name| config.profiles.iter().find(|profile| profile.name == name))
-        .or_else(|| config.profiles.first());
-    selected
-        .map(|profile| profile.level_for_state(state))
-        .unwrap_or(WorkflowInteractionLevel::Manual)
+impl ApplicationMode {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Manual => "Manual",
+            Self::Autopilot => "Autopilot",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -999,6 +934,7 @@ pub struct CiCheckStatus {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(dead_code)]
 enum SessionInfoSummaryEvent {
     Completed {
         session_id: WorkerSessionId,
@@ -1013,18 +949,21 @@ enum SessionInfoSummaryEvent {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(dead_code)]
 struct SessionInfoContext {
     session_id: WorkerSessionId,
     context_fingerprint: String,
     prompt: String,
 }
 
+#[allow(dead_code)]
 fn clamp_summary_text(input: &str, max_chars: usize) -> String {
     let compact = compact_focus_card_text(input);
     let clamped = compact.chars().take(max_chars).collect::<String>();
     clamped.trim().to_owned()
 }
 
+#[allow(dead_code)]
 fn summarize_text_output_request(prompt: &str) -> LlmChatRequest {
     LlmChatRequest {
         model: supervisor_model_from_env(),
@@ -1051,6 +990,7 @@ fn summarize_text_output_request(prompt: &str) -> LlmChatRequest {
     }
 }
 
+#[allow(dead_code)]
 fn session_info_summary_prompt(
     domain: &ProjectionState,
     session_id: &WorkerSessionId,
@@ -1745,6 +1685,7 @@ impl NeedsInputComposerState {
 }
 
 #[derive(Debug)]
+#[allow(dead_code)]
 enum TerminalSessionEvent {
     Output {
         session_id: WorkerSessionId,
@@ -1791,6 +1732,7 @@ enum SupervisorStreamEvent {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(dead_code)]
 enum SupervisorStreamTarget {
     Inspector { work_item_id: WorkItemId },
     GlobalChatPanel,

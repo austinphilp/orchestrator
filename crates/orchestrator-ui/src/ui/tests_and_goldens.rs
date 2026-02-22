@@ -7,7 +7,9 @@ mod tests {
     use super::*;
     use async_trait::async_trait;
     use orchestrator_core::{
-        ArtifactId, ArtifactKind, ArtifactProjection, CoreError, InboxItemProjection,
+        ArtifactId, ArtifactKind, ArtifactProjection, CoreError, FrontendApplicationMode,
+        FrontendCommandIntent, FrontendController, FrontendEvent, FrontendEventStream,
+        FrontendEventSubscription, FrontendIntent, FrontendSnapshot, InboxItemProjection,
         InboxItemCreatedPayload, LlmProviderKind, LlmResponseStream, LlmResponseSubscription,
         LlmStreamChunk, OrchestrationEventPayload, OrchestrationEventType, SessionBlockedPayload,
         SessionCheckpointPayload,
@@ -20,7 +22,7 @@ mod tests {
         BackendCapabilities, BackendEvent, BackendKind, BackendNeedsInputEvent,
         BackendNeedsInputOption, BackendNeedsInputQuestion, BackendOutputEvent,
         BackendOutputStream, BackendTurnStateEvent, RuntimeResult, RuntimeSessionId,
-        SessionHandle, SessionLifecycle, WorkerEventStream,
+        SessionHandle, SessionLifecycle, SpawnSpec, WorkerEventStream,
     };
     use std::collections::VecDeque;
     use std::sync::{Arc, Mutex};
@@ -164,6 +166,53 @@ mod tests {
         }
     }
 
+    #[derive(Default)]
+    struct EmptyFrontendSubscription;
+
+    #[async_trait]
+    impl FrontendEventSubscription for EmptyFrontendSubscription {
+        async fn next_event(&mut self) -> Result<Option<FrontendEvent>, CoreError> {
+            Ok(None)
+        }
+    }
+
+    #[derive(Default)]
+    struct RecordingFrontendController {
+        intents: Arc<Mutex<Vec<FrontendIntent>>>,
+    }
+
+    impl RecordingFrontendController {
+        fn intents(&self) -> Vec<FrontendIntent> {
+            self.intents
+                .lock()
+                .expect("frontend intents lock")
+                .clone()
+        }
+    }
+
+    #[async_trait]
+    impl FrontendController for RecordingFrontendController {
+        async fn snapshot(&self) -> Result<FrontendSnapshot, CoreError> {
+            Ok(FrontendSnapshot {
+                status: "ready".to_owned(),
+                projection: ProjectionState::default(),
+                application_mode: FrontendApplicationMode::Manual,
+            })
+        }
+
+        async fn submit_intent(&self, intent: FrontendIntent) -> Result<(), CoreError> {
+            self.intents
+                .lock()
+                .expect("frontend intents lock")
+                .push(intent);
+            Ok(())
+        }
+
+        async fn subscribe(&self) -> Result<FrontendEventStream, CoreError> {
+            Ok(Box::new(EmptyFrontendSubscription))
+        }
+    }
+
     #[derive(Debug)]
     struct TestTicketPickerProvider {
         tickets: Vec<TicketSummary>,
@@ -180,8 +229,7 @@ mod tests {
             &self,
             _ticket: TicketSummary,
             _repository_override: Option<PathBuf>,
-                _profile_override: Option<String>,
-            ) -> Result<SelectedTicketFlowResult, CoreError> {
+        ) -> Result<SelectedTicketFlowResult, CoreError> {
             Err(CoreError::DependencyUnavailable(
                 "not used in this test provider".to_owned(),
             ))
@@ -274,8 +322,7 @@ mod tests {
             &self,
             _ticket: TicketSummary,
             _repository_override: Option<PathBuf>,
-                _profile_override: Option<String>,
-            ) -> Result<SelectedTicketFlowResult, CoreError> {
+        ) -> Result<SelectedTicketFlowResult, CoreError> {
             Err(CoreError::DependencyUnavailable(
                 "not used in recording test provider".to_owned(),
             ))
@@ -370,8 +417,7 @@ mod tests {
             &self,
             _ticket: TicketSummary,
             _repository_override: Option<PathBuf>,
-                _profile_override: Option<String>,
-            ) -> Result<SelectedTicketFlowResult, CoreError> {
+        ) -> Result<SelectedTicketFlowResult, CoreError> {
             Err(CoreError::DependencyUnavailable(
                 "not used in recording working-state provider".to_owned(),
             ))
@@ -435,8 +481,7 @@ mod tests {
             &self,
             _ticket: TicketSummary,
             _repository_override: Option<PathBuf>,
-                _profile_override: Option<String>,
-            ) -> Result<SelectedTicketFlowResult, CoreError> {
+        ) -> Result<SelectedTicketFlowResult, CoreError> {
             Err(CoreError::DependencyUnavailable(
                 "not used in autopilot recording provider".to_owned(),
             ))
@@ -540,12 +585,6 @@ mod tests {
                 OrchestrationEventType::TicketDetailsSynced
             }
             OrchestrationEventPayload::WorkItemCreated(_) => OrchestrationEventType::WorkItemCreated,
-            OrchestrationEventPayload::WorkItemProfileOverrideSet(_) => {
-                OrchestrationEventType::WorkItemProfileOverrideSet
-            }
-            OrchestrationEventPayload::WorkItemProfileOverrideCleared(_) => {
-                OrchestrationEventType::WorkItemProfileOverrideCleared
-            }
             OrchestrationEventPayload::WorktreeCreated(_) => OrchestrationEventType::WorktreeCreated,
             OrchestrationEventPayload::SessionSpawned(_) => OrchestrationEventType::SessionSpawned,
             OrchestrationEventPayload::SessionCheckpoint(_) => {
@@ -719,7 +758,6 @@ mod tests {
                 worktree_id: None,
                 inbox_items: vec![inbox_item_id.clone()],
                 artifacts: vec![],
-            profile_override: None,
             },
         );
 
@@ -765,7 +803,6 @@ mod tests {
                 worktree_id: None,
                 inbox_items: vec![],
                 artifacts: vec![],
-            profile_override: None,
             },
         );
         projection.sessions.insert(
@@ -832,7 +869,6 @@ mod tests {
                     worktree_id: None,
                     inbox_items: Vec::new(),
                     artifacts: Vec::new(),
-                profile_override: None,
                 },
             );
             projection.sessions.insert(
@@ -902,7 +938,6 @@ mod tests {
                     worktree_id: None,
                     inbox_items: vec![inbox_item_id.clone()],
                     artifacts: vec![],
-                profile_override: None,
                 },
             );
 
@@ -942,7 +977,6 @@ mod tests {
                     ticket_id: None,
                     project_id: None,
                     workflow_state: Some(WorkflowState::Implementing),
-                    profile_override: None,
                     session_id: session_id.clone(),
                     worktree_id: None,
                     inbox_items: vec![inbox_item_id.clone()],
@@ -997,7 +1031,6 @@ mod tests {
                     ticket_id: None,
                     project_id: None,
                     workflow_state: Some(WorkflowState::Implementing),
-                    profile_override: None,
                     session_id: session_id.clone(),
                     worktree_id: None,
                     inbox_items: vec![inbox_item_id.clone()],
@@ -1070,7 +1103,6 @@ mod tests {
                     ticket_id: None,
                     project_id: None,
                     workflow_state: Some(WorkflowState::Implementing),
-                    profile_override: None,
                     session_id: session_id.clone(),
                     worktree_id: None,
                     inbox_items: vec![inbox_item_id.clone()],
@@ -1162,7 +1194,6 @@ mod tests {
                     pr_artifact_id.clone(),
                     chat_artifact_id.clone(),
                 ],
-            profile_override: None,
             },
         );
         projection.sessions.insert(
@@ -1338,7 +1369,6 @@ mod tests {
                 worktree_id: None,
                 inbox_items: vec![inbox_item_id.clone()],
                 artifacts: vec![pr_artifact_id.clone(), log_artifact_id.clone()],
-            profile_override: None,
             },
         );
         projection.sessions.insert(
@@ -1432,7 +1462,6 @@ mod tests {
                 worktree_id: None,
                 inbox_items: vec![inbox_item_id.clone()],
                 artifacts: vec![],
-            profile_override: None,
             },
         );
         projection.sessions.insert(
@@ -1531,7 +1560,6 @@ mod tests {
                 worktree_id: None,
                 inbox_items: vec![inbox_item_id.clone()],
                 artifacts: artifact_ids,
-            profile_override: None,
             },
         );
         projection.inbox_items.insert(
@@ -1595,7 +1623,6 @@ mod tests {
                 worktree_id: None,
                 inbox_items: vec![],
                 artifacts: vec![],
-            profile_override: None,
             },
         );
         projection.work_items.insert(
@@ -1609,7 +1636,6 @@ mod tests {
                 worktree_id: None,
                 inbox_items: vec![],
                 artifacts: vec![],
-            profile_override: None,
             },
         );
 
@@ -1713,7 +1739,6 @@ mod tests {
                 worktree_id: None,
                 inbox_items: vec![],
                 artifacts: vec![],
-            profile_override: None,
             },
         );
         projection.sessions.insert(
@@ -1793,7 +1818,6 @@ mod tests {
                 worktree_id: None,
                 inbox_items: vec![],
                 artifacts: vec![],
-            profile_override: None,
             },
         );
         projection.sessions.insert(
@@ -1852,7 +1876,6 @@ mod tests {
                 worktree_id: None,
                 inbox_items: vec![],
                 artifacts: vec![],
-            profile_override: None,
             },
         );
         projection.work_items.insert(
@@ -1866,7 +1889,6 @@ mod tests {
                 worktree_id: None,
                 inbox_items: vec![],
                 artifacts: vec![],
-            profile_override: None,
             },
         );
         projection.work_items.insert(
@@ -1880,7 +1902,6 @@ mod tests {
                 worktree_id: None,
                 inbox_items: vec![],
                 artifacts: vec![],
-            profile_override: None,
             },
         );
         projection.work_items.insert(
@@ -1894,7 +1915,6 @@ mod tests {
                 worktree_id: None,
                 inbox_items: vec![],
                 artifacts: vec![],
-            profile_override: None,
             },
         );
 
@@ -2007,7 +2027,6 @@ mod tests {
                 worktree_id: None,
                 inbox_items: vec![],
                 artifacts: vec![],
-            profile_override: None,
             },
         );
         projection.sessions.insert(
@@ -2062,7 +2081,6 @@ mod tests {
                 worktree_id: None,
                 inbox_items: vec![],
                 artifacts: vec![],
-            profile_override: None,
             },
         );
         projection.sessions.insert(
@@ -2129,7 +2147,6 @@ mod tests {
                 worktree_id: None,
                 inbox_items: vec![],
                 artifacts: vec![],
-            profile_override: None,
             },
         );
         projection.sessions.insert(
@@ -2165,61 +2182,6 @@ mod tests {
             .find(|entry| entry.contains("Running session without active turn"))
             .expect("idle running row");
         assert!(line.contains("• [idle]"));
-    }
-
-    #[test]
-    fn session_panel_planning_prompt_wait_renders_idle_even_with_active_turn() {
-        let backend = Arc::new(ManualTerminalBackend::default());
-        let mut projection = sample_projection(true);
-        projection
-            .work_items
-            .get_mut(&WorkItemId::new("wi-1"))
-            .expect("work item")
-            .workflow_state = Some(WorkflowState::Planning);
-        let mut shell_state = UiShellState::new_with_integrations(
-            "ready".to_owned(),
-            projection,
-            None,
-            None,
-            None,
-            Some(backend),
-        );
-        shell_state.open_terminal_and_enter_mode();
-
-        let sender = shell_state
-            .terminal_session_sender
-            .clone()
-            .expect("terminal sender");
-        sender
-            .try_send(TerminalSessionEvent::NeedsInput {
-                session_id: WorkerSessionId::new("sess-1"),
-                needs_input: BackendNeedsInputEvent {
-                    prompt_id: "prompt-planning-row-idle".to_owned(),
-                    question: "Provide next step".to_owned(),
-                    options: vec!["Continue".to_owned()],
-                    default_option: Some("Continue".to_owned()),
-                    questions: Vec::new(),
-                },
-            })
-            .expect("queue needs-input event");
-        shell_state.poll_terminal_session_events();
-        shell_state
-            .terminal_session_states
-            .get_mut(&WorkerSessionId::new("sess-1"))
-            .expect("terminal state")
-            .turn_active = true;
-
-        let rendered = render_sessions_panel(
-            &shell_state.domain,
-            &shell_state.terminal_session_states,
-            Some(&WorkerSessionId::new("sess-1")),
-        );
-        let line = rendered
-            .lines()
-            .find(|entry| entry.contains("session sess-1"))
-            .expect("planning session row");
-        assert!(line.contains("[idle]"));
-        assert!(!line.contains("[active]"));
     }
 
     #[test]
@@ -2406,7 +2368,6 @@ mod tests {
                 worktree_id: None,
                 inbox_items: vec![],
                 artifacts: vec![],
-            profile_override: None,
             },
         );
         projection.work_items.insert(
@@ -2420,7 +2381,6 @@ mod tests {
                 worktree_id: None,
                 inbox_items: vec![],
                 artifacts: vec![],
-            profile_override: None,
             },
         );
 
@@ -2594,14 +2554,14 @@ mod tests {
             with_session.view_stack.active_center(),
             Some(CenterView::TerminalView { .. })
         ));
-        assert_eq!(with_session.mode, UiMode::Insert);
+        assert_eq!(with_session.mode, UiMode::Terminal);
 
         with_session.open_terminal_for_selected();
         assert_eq!(with_session.view_stack.center_views().len(), 1);
     }
 
     #[test]
-    fn open_terminal_without_session_opens_manual_terminal_when_backend_available() {
+    fn open_terminal_without_session_shows_warning_when_no_open_session_selected() {
         let backend = Arc::new(ManualTerminalBackend::default());
         let mut without_session = UiShellState::new_with_integrations(
             "ready".to_owned(),
@@ -2613,32 +2573,60 @@ mod tests {
         );
 
         without_session.open_terminal_for_selected();
-        assert_eq!(without_session.view_stack.center_views().len(), 1);
-        assert!(matches!(
-            without_session.view_stack.active_center(),
-            Some(CenterView::TerminalView { .. })
-        ));
-        assert_eq!(without_session.mode, UiMode::Insert);
-        assert_eq!(backend.spawned_session_ids().len(), 1);
+        assert!(without_session.view_stack.center_views().is_empty());
+        assert_eq!(without_session.mode, UiMode::Normal);
+        assert_eq!(backend.spawned_session_ids().len(), 0);
+        assert!(
+            without_session
+                .status_warning
+                .as_deref()
+                .unwrap_or_default()
+                .contains("no open session is currently selected")
+        );
+    }
+
+    #[test]
+    fn open_terminal_without_session_does_not_spawn_manual_terminal_in_frontend_controller_mode() {
+        let backend = Arc::new(ManualTerminalBackend::default());
+        let mut without_session = UiShellState::new_with_integrations(
+            "ready".to_owned(),
+            sample_projection(false),
+            None,
+            None,
+            None,
+            Some(backend.clone()),
+        );
+        without_session.set_frontend_terminal_streaming_enabled(true);
+
+        without_session.open_terminal_for_selected();
+
+        assert!(without_session.view_stack.center_views().is_empty());
+        assert_eq!(without_session.mode, UiMode::Normal);
+        assert_eq!(backend.spawned_session_ids().len(), 0);
+        assert!(
+            without_session
+                .status_warning
+                .as_deref()
+                .unwrap_or_default()
+                .contains("no open session is currently selected")
+        );
     }
 
     #[tokio::test]
-    async fn ticket_started_auto_focuses_and_streams_started_session() {
-        let backend = Arc::new(ManualTerminalBackend::default());
+    async fn ticket_started_auto_focuses_started_session() {
         let mut shell_state = UiShellState::new_with_integrations(
             "ready".to_owned(),
             ProjectionState::default(),
             None,
             None,
             None,
-            Some(backend.clone()),
+            None,
         );
 
         shell_state.apply_ticket_picker_event(TicketPickerEvent::TicketStarted {
             started_session_id: WorkerSessionId::new("sess-1"),
             projection: Some(sample_projection(true)),
             tickets: None,
-            profile_overrides: None,
             warning: None,
         });
 
@@ -2650,14 +2638,98 @@ mod tests {
             shell_state.selected_session_id_for_panel().as_ref().map(|id| id.as_str()),
             Some("sess-1")
         );
+    }
+
+    #[tokio::test]
+    async fn frontend_controller_mode_skips_ui_terminal_stream_subscriptions() {
+        let backend = Arc::new(ManualTerminalBackend::default());
+        let mut shell_state = UiShellState::new_with_integrations(
+            "ready".to_owned(),
+            sample_projection(true),
+            None,
+            None,
+            None,
+            Some(backend.clone()),
+        );
+        shell_state.set_frontend_terminal_streaming_enabled(true);
+
+        shell_state.open_terminal_for_selected();
         tokio::task::yield_now().await;
+
+        assert!(matches!(
+            shell_state.view_stack.active_center(),
+            Some(CenterView::TerminalView { session_id }) if session_id.as_str() == "sess-1"
+        ));
+        assert_eq!(backend.subscribed_session_ids().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn terminal_compose_input_uses_frontend_controller_intent_when_configured() {
+        let controller = Arc::new(RecordingFrontendController::default());
+        let mut shell_state = UiShellState::new("ready".to_owned(), sample_projection(true));
+        shell_state.set_frontend_controller(Some(controller.clone()));
+        shell_state.open_terminal_and_enter_mode();
+        set_editor_state_text(&mut shell_state.terminal_compose_editor, "status update");
+
+        shell_state.submit_terminal_compose_input();
+        tokio::task::yield_now().await;
+
+        assert!(editor_state_text(&shell_state.terminal_compose_editor).is_empty());
+        assert_eq!(shell_state.mode, UiMode::Normal);
         assert_eq!(
-            backend
-                .subscribed_session_ids()
-                .iter()
-                .map(|id| id.as_str())
-                .collect::<Vec<_>>(),
-            vec!["sess-1"]
+            controller.intents(),
+            vec![FrontendIntent::SendTerminalInput {
+                session_id: WorkerSessionId::new("sess-1"),
+                input: "status update".to_owned(),
+            }]
+        );
+    }
+
+    #[tokio::test]
+    async fn needs_input_response_uses_frontend_controller_intent_when_configured() {
+        let backend = Arc::new(ManualTerminalBackend::default());
+        let controller = Arc::new(RecordingFrontendController::default());
+        let mut shell_state = UiShellState::new_with_integrations(
+            "ready".to_owned(),
+            sample_projection(true),
+            None,
+            None,
+            None,
+            Some(backend),
+        );
+        shell_state.set_frontend_controller(Some(controller.clone()));
+        shell_state.open_terminal_and_enter_mode();
+
+        let sender = shell_state
+            .terminal_session_sender
+            .clone()
+            .expect("terminal sender");
+        sender
+            .try_send(TerminalSessionEvent::NeedsInput {
+                session_id: WorkerSessionId::new("sess-1"),
+                needs_input: BackendNeedsInputEvent {
+                    prompt_id: "prompt-controller".to_owned(),
+                    question: "Select one".to_owned(),
+                    options: vec!["A".to_owned(), "B".to_owned()],
+                    default_option: Some("A".to_owned()),
+                    questions: Vec::new(),
+                },
+            })
+            .expect("queue needs-input event");
+        shell_state.poll_terminal_session_events();
+        let _ = route_needs_input_modal_key(&mut shell_state, key(KeyCode::Enter));
+        tokio::task::yield_now().await;
+
+        assert_eq!(
+            controller.intents(),
+            vec![FrontendIntent::RespondToNeedsInput {
+                session_id: WorkerSessionId::new("sess-1"),
+                prompt_id: "prompt-controller".to_owned(),
+                answers: vec![BackendNeedsInputAnswer {
+                    question_id: "prompt-controller".to_owned(),
+                    answers: vec!["A".to_owned()],
+                }],
+            }]
         );
     }
 
@@ -2706,12 +2778,13 @@ mod tests {
         assert_eq!(prompt.prompt_id.as_str(), "prompt-plan-gate");
         assert!(prompt.interaction_active);
         assert!(shell_state.terminal_session_has_active_needs_input());
-        assert!(shell_state.mode == UiMode::Insert);
+        assert!(shell_state.mode == UiMode::Terminal);
     }
 
     #[tokio::test]
     async fn submit_needs_input_auto_acknowledges_needs_decision_inbox_items() {
         let backend = Arc::new(ManualTerminalBackend::default());
+        let controller = Arc::new(RecordingFrontendController::default());
         let mut projection = sample_projection(true);
         projection.inbox_items.insert(
             InboxItemId::new("inbox-1"),
@@ -2731,6 +2804,7 @@ mod tests {
             None,
             Some(backend),
         );
+        shell_state.set_frontend_controller(Some(controller.clone()));
         shell_state.open_terminal_and_enter_mode();
 
         let sender = shell_state
@@ -2752,6 +2826,7 @@ mod tests {
         shell_state.poll_terminal_session_events();
 
         let _ = route_needs_input_modal_key(&mut shell_state, key(KeyCode::Enter));
+        tokio::task::yield_now().await;
 
         assert!(
             shell_state
@@ -2761,11 +2836,23 @@ mod tests {
                 .map(|item| item.resolved)
                 .unwrap_or(false)
         );
+        assert_eq!(
+            controller.intents(),
+            vec![FrontendIntent::RespondToNeedsInput {
+                session_id: WorkerSessionId::new("sess-1"),
+                prompt_id: "prompt-needs-decision".to_owned(),
+                answers: vec![BackendNeedsInputAnswer {
+                    question_id: "prompt-needs-decision".to_owned(),
+                    answers: vec!["A".to_owned()],
+                }],
+            }]
+        );
     }
 
     #[tokio::test]
     async fn autopilot_auto_submits_recommended_planning_option() {
         let backend = Arc::new(ManualTerminalBackend::default());
+        let controller = Arc::new(RecordingFrontendController::default());
         let mut projection = sample_projection(true);
         projection
             .work_items
@@ -2780,6 +2867,7 @@ mod tests {
             None,
             Some(backend),
         );
+        shell_state.set_frontend_controller(Some(controller.clone()));
         shell_state.open_terminal_and_enter_mode();
 
         let sender = shell_state
@@ -2826,6 +2914,20 @@ mod tests {
             .and_then(|view| view.active_needs_input.as_ref())
             .is_some();
         assert!(!prompt_active);
+        assert_eq!(
+            controller.intents(),
+            vec![
+                FrontendIntent::Command(FrontendCommandIntent::SetApplicationModeAutopilot),
+                FrontendIntent::RespondToNeedsInput {
+                    session_id: WorkerSessionId::new("sess-1"),
+                    prompt_id: "prompt-planning-autopilot".to_owned(),
+                    answers: vec![BackendNeedsInputAnswer {
+                        question_id: "mode".to_owned(),
+                        answers: vec!["Autopilot (Recommended)".to_owned()],
+                    }],
+                },
+            ]
+        );
     }
 
     #[test]
@@ -3119,7 +3221,6 @@ mod tests {
                 worktree_id: None,
                 inbox_items: vec![InboxItemId::new("inbox-1")],
                 artifacts: vec![],
-            profile_override: None,
             },
         );
         projection.sessions.insert(
@@ -3153,7 +3254,6 @@ mod tests {
                 worktree_id: None,
                 inbox_items: vec![InboxItemId::new("inbox-2")],
                 artifacts: vec![],
-            profile_override: None,
             },
         );
         projection.sessions.insert(
@@ -3195,12 +3295,9 @@ mod tests {
         );
         shell_state.set_application_mode_autopilot();
 
-        assert!(shell_state.tick_autopilot_and_report());
-        tokio::task::yield_now().await;
-        let advanced = provider.advanced_sessions();
-        let archived = provider.archived_sessions();
-        assert!(advanced.iter().any(|session_id| session_id.as_str() == "sess-1"));
-        assert!(archived.iter().any(|session_id| session_id.as_str() == "sess-2"));
+        assert!(!shell_state.run_due_periodic_tasks_and_report(Instant::now()));
+        assert!(provider.advanced_sessions().is_empty());
+        assert!(provider.archived_sessions().is_empty());
     }
 
     #[test]
@@ -3729,7 +3826,6 @@ mod tests {
                 worktree_id: None,
                 inbox_items: vec![],
                 artifacts: vec![],
-            profile_override: None,
             },
         );
         projection.sessions.insert(
@@ -3752,7 +3848,6 @@ mod tests {
                 worktree_id: None,
                 inbox_items: vec![],
                 artifacts: vec![],
-            profile_override: None,
             },
         );
         projection.sessions.insert(
@@ -3928,7 +4023,7 @@ mod tests {
     }
 
     #[test]
-    fn planning_unstructured_prompt_suppresses_working_indicator_when_turn_active() {
+    fn planning_unstructured_prompt_keeps_working_indicator_when_turn_active() {
         let backend = Arc::new(ManualTerminalBackend::default());
         let mut projection = sample_projection(true);
         projection
@@ -3975,7 +4070,7 @@ mod tests {
                 &shell_state.terminal_session_states,
                 &WorkerSessionId::new("sess-1"),
             ),
-            TerminalActivityIndicator::None
+            TerminalActivityIndicator::Working
         );
     }
 
@@ -4131,7 +4226,7 @@ mod tests {
             Some(backend),
         );
         shell_state.open_terminal_and_enter_mode();
-        assert_eq!(shell_state.mode, UiMode::Insert);
+        assert_eq!(shell_state.mode, UiMode::Terminal);
 
         let sender = shell_state
             .terminal_session_sender
@@ -4680,7 +4775,6 @@ mod tests {
                 worktree_id: None,
                 inbox_items: Vec::new(),
                 artifacts: Vec::new(),
-            profile_override: None,
             },
         );
         projection.sessions.insert(
@@ -4746,7 +4840,6 @@ mod tests {
                 worktree_id: None,
                 inbox_items: Vec::new(),
                 artifacts: Vec::new(),
-            profile_override: None,
             },
         );
         projection.sessions.insert(
@@ -4810,85 +4903,6 @@ mod tests {
     }
 
     #[test]
-    fn terminal_instruction_does_not_optimistically_append_system_message() {
-        let backend = Arc::new(ManualTerminalBackend::default());
-        let mut shell_state = UiShellState::new_with_integrations(
-            "ready".to_owned(),
-            sample_projection(true),
-            None,
-            None,
-            None,
-            Some(backend),
-        );
-        shell_state.open_terminal_and_enter_mode();
-        let session_id = shell_state
-            .selected_session_id_for_terminal_action()
-            .expect("selected session");
-
-        shell_state.send_terminal_instruction_to_session(
-            &session_id,
-            "workflow transition approved",
-        );
-
-        let has_system_line = shell_state
-            .terminal_session_states
-            .get(&session_id)
-            .map(|view| {
-                render_terminal_transcript_entries(view)
-                    .into_iter()
-                    .any(|line| line.text == "> system: workflow transition approved")
-            })
-            .unwrap_or(false);
-        assert!(!has_system_line);
-    }
-
-    #[test]
-    fn terminal_instruction_system_message_renders_once_when_backend_echoes() {
-        let backend = Arc::new(ManualTerminalBackend::default());
-        let mut shell_state = UiShellState::new_with_integrations(
-            "ready".to_owned(),
-            sample_projection(true),
-            None,
-            None,
-            None,
-            Some(backend),
-        );
-        shell_state.open_terminal_and_enter_mode();
-        let session_id = shell_state
-            .selected_session_id_for_terminal_action()
-            .expect("selected session");
-
-        shell_state.send_terminal_instruction_to_session(
-            &session_id,
-            "workflow transition approved",
-        );
-        let sender = shell_state
-            .terminal_session_sender
-            .clone()
-            .expect("terminal sender");
-        sender
-            .try_send(TerminalSessionEvent::Output {
-                session_id: session_id.clone(),
-                output: BackendOutputEvent {
-                    stream: BackendOutputStream::Stdout,
-                    bytes: b"you: system: workflow transition approved\n".to_vec(),
-                },
-            })
-            .expect("queue output event");
-        shell_state.poll_terminal_session_events();
-
-        let view = shell_state
-            .terminal_session_states
-            .get(&session_id)
-            .expect("terminal view state");
-        let system_lines = render_terminal_transcript_entries(view)
-            .into_iter()
-            .filter(|line| line.text == "> system: workflow transition approved")
-            .count();
-        assert_eq!(system_lines, 1);
-    }
-
-    #[test]
     fn background_output_flushes_when_refresh_interval_elapses() {
         let backend = Arc::new(ManualTerminalBackend::default());
         let mut projection = sample_projection(true);
@@ -4904,7 +4918,6 @@ mod tests {
                 worktree_id: None,
                 inbox_items: Vec::new(),
                 artifacts: Vec::new(),
-            profile_override: None,
             },
         );
         projection.sessions.insert(
@@ -4965,7 +4978,7 @@ mod tests {
     fn backspace_does_not_minimize_terminal_view_in_normal_mode() {
         let mut shell_state = UiShellState::new("ready".to_owned(), sample_projection(true));
         shell_state.open_terminal_and_enter_mode();
-        assert_eq!(shell_state.mode, UiMode::Insert);
+        assert_eq!(shell_state.mode, UiMode::Terminal);
         assert!(matches!(
             shell_state.view_stack.active_center(),
             Some(CenterView::TerminalView { session_id }) if session_id.as_str() == "sess-1"
@@ -5311,7 +5324,7 @@ mod tests {
     }
 
     #[test]
-    fn entering_insert_mode_reschedules_session_info_summary_refresh() {
+    fn entering_terminal_mode_reschedules_session_info_summary_refresh() {
         let mut shell_state = UiShellState::new("ready".to_owned(), sample_projection(true));
         shell_state.open_terminal_and_enter_mode();
         shell_state.enter_normal_mode();
@@ -5322,7 +5335,7 @@ mod tests {
             .expect("background deadline");
         assert!(background_deadline >= Instant::now() + Duration::from_secs(14));
 
-        shell_state.enter_insert_mode_for_current_focus();
+        shell_state.enter_terminal_mode();
         let foreground_deadline = shell_state
             .session_info_summary_deadline
             .expect("foreground deadline");
@@ -5551,23 +5564,6 @@ mod tests {
 
         shell_state.poll_merge_queue_events();
         tokio::time::sleep(Duration::from_millis(20)).await;
-        shell_state.view_stack.replace_center(CenterView::TerminalView {
-            session_id: session_id.clone(),
-        });
-        let sender = shell_state
-            .terminal_session_sender
-            .clone()
-            .expect("terminal sender");
-        sender
-            .try_send(TerminalSessionEvent::Output {
-                session_id: session_id.clone(),
-                output: BackendOutputEvent {
-                    stream: BackendOutputStream::Stdout,
-                    bytes: b"you: system: CI pipeline failure detected while this ticket is in review (Tests / tests). Investigate failing GitHub Actions checks, implement a fix, push updates, and report what changed. Use CI as the source of truth instead of running the full local build/test suite.\n".to_vec(),
-                },
-            })
-            .expect("send terminal output");
-        shell_state.poll_terminal_session_events();
 
         let rendered = render_terminal_transcript_entries(
             shell_state
@@ -5923,23 +5919,13 @@ mod tests {
         handle_key_press(&mut shell_state, key(KeyCode::Enter));
         assert_eq!(shell_state.mode, UiMode::Insert);
 
-        tokio::time::timeout(Duration::from_secs(1), async {
-            loop {
-                shell_state.tick_supervisor_stream();
-                let rendered = shell_state.ui_state().center_pane.lines.join("\n");
-                if rendered.contains("No blockers right now.") {
-                    break;
-                }
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("global chat stream should render response");
-
         let rendered = shell_state.ui_state().center_pane.lines.join("\n");
         assert!(rendered.contains("Last query: what needs me next?"));
-        assert!(rendered.contains("Live supervisor stream:"));
-        assert!(rendered.contains("Token usage: input=21 output=8 total=29"));
+        assert!(rendered.contains("query submission moved to frontend services"));
+        assert!(shell_state
+            .status_warning
+            .as_deref()
+            .is_some_and(|warning| warning.contains("handled outside the TUI loop")));
     }
 
     #[tokio::test]
@@ -5971,45 +5957,14 @@ mod tests {
         );
 
         shell_state.open_chat_inspector_for_selected();
-
-        tokio::time::timeout(Duration::from_secs(1), async {
-            loop {
-                shell_state.tick_supervisor_stream();
-                let rendered = shell_state.ui_state().center_pane.lines.join("\n");
-                if rendered.contains("No blockers detected.") {
-                    break;
-                }
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("selected chat stream should render dispatcher response");
-
-        let requests = dispatcher.requests();
-        assert_eq!(requests.len(), 1);
-        let (invocation, context) = &requests[0];
-        let command = CommandRegistry::default()
-            .parse_invocation(invocation)
-            .expect("dispatcher invocation should parse");
+        assert!(dispatcher.requests().is_empty());
         assert!(matches!(
-            command,
-            Command::SupervisorQuery(SupervisorQueryArgs::Freeform { query, .. })
-                if query == "What is the current status of this ticket?"
+            shell_state.view_stack.active_center(),
+            Some(CenterView::InspectorView {
+                inspector: ArtifactInspectorKind::Chat,
+                ..
+            })
         ));
-        assert_eq!(
-            context.selected_work_item_id.as_deref(),
-            Some("wi-inspector")
-        );
-        assert_eq!(
-            context.selected_session_id.as_deref(),
-            Some("sess-inspector")
-        );
-        assert_eq!(context.scope.as_deref(), Some("session:sess-inspector"));
-
-        let rendered = shell_state.ui_state().center_pane.lines.join("\n");
-        assert!(rendered.contains("Live supervisor stream:"));
-        assert!(rendered.contains("Current activity: running focused tests."));
-        assert!(rendered.contains("No blockers detected."));
     }
 
     #[tokio::test]
@@ -6050,37 +6005,12 @@ mod tests {
         }
         handle_key_press(&mut shell_state, key(KeyCode::Enter));
 
-        tokio::time::timeout(Duration::from_secs(1), async {
-            loop {
-                shell_state.tick_supervisor_stream();
-                let rendered = shell_state.ui_state().center_pane.lines.join("\n");
-                if rendered.contains("two approvals need review.") {
-                    break;
-                }
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("global chat stream should render dispatcher response");
-
         let requests = dispatcher.requests();
-        assert_eq!(requests.len(), 1);
-        let (invocation, context) = &requests[0];
-        let command = CommandRegistry::default()
-            .parse_invocation(invocation)
-            .expect("dispatcher invocation should parse");
-        assert!(matches!(
-            command,
-            Command::SupervisorQuery(SupervisorQueryArgs::Freeform { query, .. })
-                if query == "what needs me next globally?"
-        ));
-        assert_eq!(context.scope.as_deref(), Some("global"));
-        assert!(context.selected_work_item_id.is_none());
-        assert!(context.selected_session_id.is_none());
+        assert!(requests.is_empty());
 
         let rendered = shell_state.ui_state().center_pane.lines.join("\n");
         assert!(rendered.contains("Last query: what needs me next globally?"));
-        assert!(rendered.contains("Global status: two approvals need review."));
+        assert!(rendered.contains("query submission moved to frontend services"));
 
         handle_key_press(&mut shell_state, key(KeyCode::Esc));
         if shell_state.is_global_supervisor_chat_active() {
@@ -6126,23 +6056,26 @@ mod tests {
         }
         handle_key_press(&mut shell_state, key(KeyCode::Enter));
 
-        assert_eq!(shell_state.global_supervisor_chat_input.text(), "what changed?");
-        assert_eq!(shell_state.global_supervisor_chat_last_query, None);
+        assert_eq!(shell_state.global_supervisor_chat_input.text(), "");
+        assert_eq!(
+            shell_state.global_supervisor_chat_last_query.as_deref(),
+            Some("what changed?")
+        );
         let stream = shell_state
             .supervisor_chat_stream
             .as_ref()
             .expect("failed query should surface terminal state");
         assert_eq!(
             stream.response_state,
-            SupervisorResponseState::BackendUnavailable
+            SupervisorResponseState::NoContext
         );
         let rendered = shell_state.ui_state().center_pane.lines.join("\n");
-        assert!(rendered.contains("Supervisor state: backend-unavailable"));
-        assert!(rendered.contains("Retry guidance:"));
+        assert!(rendered.contains("Supervisor state: no-context"));
+        assert!(rendered.contains("query submission moved to frontend services"));
         assert!(shell_state
             .status_warning
             .as_deref()
-            .is_some_and(|warning| warning.contains("supervisor stream unavailable")));
+            .is_some_and(|warning| warning.contains("handled outside the TUI loop")));
     }
 
     #[tokio::test]
@@ -6399,7 +6332,6 @@ mod tests {
                 worktree_id: None,
                 inbox_items: vec![inbox_item_a.clone()],
                 artifacts: vec![],
-            profile_override: None,
             },
         );
         projection.work_items.insert(
@@ -6413,7 +6345,6 @@ mod tests {
                 worktree_id: None,
                 inbox_items: vec![inbox_item_b.clone()],
                 artifacts: vec![],
-            profile_override: None,
             },
         );
         projection.inbox_items.insert(
@@ -6551,7 +6482,6 @@ mod tests {
                 worktree_id: None,
                 inbox_items: vec![inbox_item_id.clone()],
                 artifacts: vec![],
-            profile_override: None,
             },
         );
         projection.inbox_items.insert(
@@ -6640,7 +6570,6 @@ mod tests {
                 worktree_id: None,
                 inbox_items: vec![],
                 artifacts: vec![],
-            profile_override: None,
             },
         );
         projection.sessions.insert(
@@ -6720,7 +6649,7 @@ mod tests {
             shell_state.view_stack.active_center(),
             Some(CenterView::TerminalView { session_id }) if session_id.as_str() == "sess-decision"
         ));
-        assert_eq!(shell_state.mode, UiMode::Insert);
+        assert_eq!(shell_state.mode, UiMode::Terminal);
     }
 
     #[test]
@@ -6786,7 +6715,7 @@ mod tests {
             shell_state.view_stack.active_center(),
             Some(CenterView::TerminalView { session_id }) if session_id.as_str() == "sess-1"
         ));
-        assert_eq!(shell_state.mode, UiMode::Insert);
+        assert_eq!(shell_state.mode, UiMode::Terminal);
         assert!(
             shell_state
                 .domain
@@ -7054,6 +6983,25 @@ mod tests {
         assert_eq!(shell_state.application_mode_label(), "Manual");
     }
 
+    #[tokio::test]
+    async fn app_mode_changes_submit_frontend_controller_intents() {
+        let controller = Arc::new(RecordingFrontendController::default());
+        let mut shell_state = UiShellState::new("ready".to_owned(), triage_projection());
+        shell_state.set_frontend_controller(Some(controller.clone()));
+
+        shell_state.set_application_mode_autopilot();
+        shell_state.set_application_mode_manual();
+        tokio::task::yield_now().await;
+
+        assert_eq!(
+            controller.intents(),
+            vec![
+                FrontendIntent::Command(FrontendCommandIntent::SetApplicationModeAutopilot),
+                FrontendIntent::Command(FrontendCommandIntent::SetApplicationModeManual),
+            ]
+        );
+    }
+
     #[test]
     fn which_key_overlay_clears_on_completion_invalid_and_cancel() {
         let mut shell_state = UiShellState::new("ready".to_owned(), triage_projection());
@@ -7295,38 +7243,14 @@ mod tests {
 
         clear_editor_state(&mut shell_state.ticket_picker_overlay.new_ticket_brief_editor);
         route_ticket_picker_key(&mut shell_state, key(KeyCode::Enter));
+        route_ticket_picker_key(&mut shell_state, key(KeyCode::Esc));
+        route_ticket_picker_key(&mut shell_state, key(KeyCode::Enter));
         assert!(shell_state
             .ticket_picker_overlay
             .error
             .as_deref()
             .unwrap_or_default()
             .contains("enter a brief description"));
-    }
-
-    #[test]
-    fn ticket_picker_new_ticket_mode_enter_submits_create_only_from_insert_mode() {
-        let mut shell_state = UiShellState::new("ready".to_owned(), triage_projection());
-        shell_state.ticket_picker_overlay.open();
-        shell_state.ticket_picker_overlay.begin_new_ticket_mode();
-        assert_eq!(
-            shell_state.ticket_picker_overlay.new_ticket_brief_editor.mode,
-            EditorMode::Insert
-        );
-
-        route_ticket_picker_key(&mut shell_state, key(KeyCode::Char('a')));
-        route_ticket_picker_key(&mut shell_state, key(KeyCode::Enter));
-
-        assert!(
-            editor_state_text(&shell_state.ticket_picker_overlay.new_ticket_brief_editor)
-                .is_empty()
-        );
-        assert!(!shell_state.ticket_picker_overlay.new_ticket_mode);
-        assert!(shell_state
-            .ticket_picker_overlay
-            .error
-            .as_deref()
-            .unwrap_or_default()
-            .contains("ticket provider unavailable"));
     }
 
     #[test]
@@ -7340,6 +7264,7 @@ mod tests {
         );
 
         route_ticket_picker_key(&mut shell_state, key(KeyCode::Char('a')));
+        route_ticket_picker_key(&mut shell_state, key(KeyCode::Esc));
         route_ticket_picker_key(&mut shell_state, shift_key(KeyCode::Enter));
 
         assert!(
@@ -7347,12 +7272,11 @@ mod tests {
                 .is_empty()
         );
         assert!(!shell_state.ticket_picker_overlay.new_ticket_mode);
+        assert!(shell_state.ticket_picker_overlay.error.is_none());
         assert!(shell_state
-            .ticket_picker_overlay
-            .error
+            .status_warning
             .as_deref()
-            .unwrap_or_default()
-            .contains("ticket provider unavailable"));
+            .is_some_and(|warning| warning.contains("handled outside the TUI loop")));
     }
 
     #[test]
@@ -7516,12 +7440,11 @@ mod tests {
             warning: None,
         });
 
+        assert!(shell_state.ticket_picker_overlay.error.is_none());
         assert!(shell_state
-            .ticket_picker_overlay
-            .error
+            .status_warning
             .as_deref()
-            .unwrap_or_default()
-            .contains("ticket provider unavailable while starting ticket"));
+            .is_some_and(|warning| warning.contains("handled outside the TUI loop")));
     }
 
     #[test]
@@ -7597,7 +7520,6 @@ mod tests {
                     worktree_id: None,
                     inbox_items: Vec::new(),
                     artifacts: Vec::new(),
-                profile_override: None,
                 },
             );
             projection.sessions.insert(
@@ -7678,7 +7600,6 @@ mod tests {
                 },
             ],
             projects: Vec::new(),
-            profile_overrides: HashMap::new(),
         });
 
         let identifiers = shell_state
@@ -7759,7 +7680,6 @@ mod tests {
                 &self,
                 _ticket: TicketSummary,
                 _repository_override: Option<PathBuf>,
-                _profile_override: Option<String>,
             ) -> Result<SelectedTicketFlowResult, CoreError> {
                 Err(CoreError::DependencyUnavailable("not used".to_owned()))
             }
@@ -7844,7 +7764,6 @@ mod tests {
                 &self,
                 _ticket: TicketSummary,
                 _repository_override: Option<PathBuf>,
-                _profile_override: Option<String>,
             ) -> Result<SelectedTicketFlowResult, CoreError> {
                 Err(CoreError::DependencyUnavailable("not used".to_owned()))
             }
@@ -7908,7 +7827,6 @@ mod tests {
                 worktree_id: None,
                 inbox_items: vec![resolved_approval.clone()],
                 artifacts: vec![],
-            profile_override: None,
             },
         );
         projection.work_items.insert(
@@ -7922,7 +7840,6 @@ mod tests {
                 worktree_id: None,
                 inbox_items: vec![unresolved_approval.clone()],
                 artifacts: vec![],
-            profile_override: None,
             },
         );
         projection.inbox_items.insert(
@@ -8050,6 +7967,7 @@ mod tests {
             UiCommand::OpenTestInspectorForSelected,
             UiCommand::OpenPrInspectorForSelected,
             UiCommand::OpenChatInspectorForSelected,
+            UiCommand::StartTerminalEscapeChord,
             UiCommand::QuitShell,
             UiCommand::FocusNextInbox,
             UiCommand::FocusPreviousInbox,
@@ -8105,15 +8023,19 @@ mod tests {
     }
 
     #[test]
-    fn insert_mode_is_entered_while_terminal_view_is_active() {
+    fn insert_mode_is_not_entered_while_terminal_view_is_active() {
         let mut shell_state = UiShellState::new("ready".to_owned(), sample_projection(true));
-        shell_state.open_terminal_for_selected();
-        shell_state.enter_normal_mode();
+        handle_key_press(&mut shell_state, key(KeyCode::Char('I')));
+        assert_eq!(shell_state.mode, UiMode::Terminal);
+        assert!(shell_state.is_terminal_view_active());
+
+        handle_key_press(&mut shell_state, key(KeyCode::Esc));
         assert_eq!(shell_state.mode, UiMode::Normal);
+        assert_eq!(shell_state.terminal_compose_editor.mode, EditorMode::Normal);
+        assert!(shell_state.is_terminal_view_active());
 
         shell_state.enter_insert_mode();
-        assert_eq!(shell_state.mode, UiMode::Insert);
-        assert!(shell_state.is_terminal_view_active());
+        assert_eq!(shell_state.mode, UiMode::Normal);
     }
 
     #[test]
@@ -8128,10 +8050,10 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_backslash_is_ignored_in_insert_mode() {
+    fn terminal_mode_supports_escape_chord_with_compose_buffer() {
         let mut shell_state = UiShellState::new("ready".to_owned(), sample_projection(true));
-        shell_state.open_terminal_and_enter_mode();
-        assert_eq!(shell_state.mode, UiMode::Insert);
+        handle_key_press(&mut shell_state, key(KeyCode::Char('I')));
+        assert_eq!(shell_state.mode, UiMode::Terminal);
         assert!(shell_state.is_terminal_view_active());
         assert_eq!(shell_state.terminal_compose_editor.mode, EditorMode::Insert);
 
@@ -8139,17 +8061,22 @@ mod tests {
         assert!(matches!(routed, RoutedInput::Ignore));
         assert_eq!(editor_state_text(&shell_state.terminal_compose_editor), "j");
 
-        let routed = route_key_press(&mut shell_state, ctrl_key(KeyCode::Char('\\')));
-        assert!(matches!(routed, RoutedInput::Ignore));
-        assert_eq!(shell_state.mode, UiMode::Insert);
-        assert_eq!(editor_state_text(&shell_state.terminal_compose_editor), "j");
+        let start_chord = handle_key_press(&mut shell_state, ctrl_key(KeyCode::Char('\\')));
+        assert!(!start_chord);
+        assert!(shell_state.terminal_escape_pending);
+        assert_eq!(shell_state.mode, UiMode::Terminal);
+
+        let finish_chord = handle_key_press(&mut shell_state, ctrl_key(KeyCode::Char('n')));
+        assert!(!finish_chord);
+        assert_eq!(shell_state.mode, UiMode::Normal);
+        assert!(!shell_state.terminal_escape_pending);
     }
 
     #[test]
     fn terminal_compose_restores_insert_mode_after_focus_returns() {
         let mut shell_state = UiShellState::new("ready".to_owned(), sample_projection(true));
-        shell_state.open_terminal_and_enter_mode();
-        assert_eq!(shell_state.mode, UiMode::Insert);
+        handle_key_press(&mut shell_state, key(KeyCode::Char('I')));
+        assert_eq!(shell_state.mode, UiMode::Terminal);
         assert_eq!(shell_state.terminal_compose_editor.mode, EditorMode::Insert);
 
         handle_key_press(&mut shell_state, key(KeyCode::Char('a')));
@@ -8158,23 +8085,37 @@ mod tests {
         assert_eq!(shell_state.terminal_compose_editor.mode, EditorMode::Normal);
 
         handle_key_press(&mut shell_state, key(KeyCode::Char('i')));
-        assert_eq!(shell_state.mode, UiMode::Insert);
+        assert_eq!(shell_state.mode, UiMode::Terminal);
         assert_eq!(shell_state.terminal_compose_editor.mode, EditorMode::Insert);
         handle_key_press(&mut shell_state, key(KeyCode::Char('b')));
         assert_eq!(editor_state_text(&shell_state.terminal_compose_editor), "ab");
     }
 
     #[test]
-    fn insert_mode_without_terminal_view_ignores_navigation() {
+    fn terminal_mode_without_terminal_view_recovers_to_normal() {
         let mut shell_state = UiShellState::new("ready".to_owned(), triage_projection());
-        shell_state.mode = UiMode::Insert;
+        shell_state.mode = UiMode::Terminal;
         assert!(!shell_state.is_terminal_view_active());
-        let before_index = shell_state.ui_state().selected_inbox_index;
 
         let should_quit = handle_key_press(&mut shell_state, key(KeyCode::Char('j')));
         assert!(!should_quit);
-        assert_eq!(shell_state.mode, UiMode::Insert);
-        assert_eq!(shell_state.ui_state().selected_inbox_index, before_index);
+        assert_eq!(shell_state.mode, UiMode::Normal);
+
+        handle_key_press(&mut shell_state, key(KeyCode::Char('j')));
+        assert_eq!(shell_state.mode, UiMode::Normal);
+    }
+
+    #[test]
+    fn terminal_escape_prefix_replays_when_chord_not_completed() {
+        let mut shell_state = UiShellState::new("ready".to_owned(), sample_projection(true));
+        handle_key_press(&mut shell_state, key(KeyCode::Char('I')));
+        assert_eq!(shell_state.mode, UiMode::Terminal);
+
+        handle_key_press(&mut shell_state, ctrl_key(KeyCode::Char('\\')));
+        let routed = route_key_press(&mut shell_state, key(KeyCode::Char('x')));
+        assert!(matches!(routed, RoutedInput::Ignore));
+        assert!(!shell_state.terminal_escape_pending);
+        assert!(editor_state_text(&shell_state.terminal_compose_editor).is_empty());
     }
 
     #[test]
@@ -8253,8 +8194,8 @@ mod tests {
     #[test]
     fn terminal_compose_supports_multiline_input() {
         let mut shell_state = UiShellState::new("ready".to_owned(), sample_projection(true));
-        shell_state.open_terminal_and_enter_mode();
-        assert_eq!(shell_state.mode, UiMode::Insert);
+        handle_key_press(&mut shell_state, key(KeyCode::Char('I')));
+        assert_eq!(shell_state.mode, UiMode::Terminal);
         assert_eq!(shell_state.terminal_compose_editor.mode, EditorMode::Insert);
 
         handle_key_press(&mut shell_state, key(KeyCode::Char('h')));
@@ -8268,6 +8209,7 @@ mod tests {
     #[tokio::test]
     async fn terminal_submit_enter_success_returns_to_normal_mode() {
         let backend = Arc::new(ManualTerminalBackend::default());
+        let controller = Arc::new(RecordingFrontendController::default());
         let mut shell_state = UiShellState::new_with_integrations(
             "ready".to_owned(),
             sample_projection(true),
@@ -8276,22 +8218,32 @@ mod tests {
             None,
             Some(backend),
         );
+        shell_state.set_frontend_controller(Some(controller.clone()));
         shell_state.open_terminal_and_enter_mode();
-        assert_eq!(shell_state.mode, UiMode::Insert);
+        assert_eq!(shell_state.mode, UiMode::Terminal);
         assert_eq!(shell_state.terminal_compose_editor.mode, EditorMode::Insert);
 
         handle_key_press(&mut shell_state, key(KeyCode::Char('h')));
         handle_key_press(&mut shell_state, key(KeyCode::Char('i')));
         assert_eq!(editor_state_text(&shell_state.terminal_compose_editor), "hi");
         handle_key_press(&mut shell_state, key(KeyCode::Enter));
+        tokio::task::yield_now().await;
 
         assert_eq!(editor_state_text(&shell_state.terminal_compose_editor), "");
         assert_eq!(shell_state.mode, UiMode::Normal);
+        assert_eq!(
+            controller.intents(),
+            vec![FrontendIntent::SendTerminalInput {
+                session_id: WorkerSessionId::new("sess-1"),
+                input: "hi".to_owned(),
+            }]
+        );
     }
 
     #[tokio::test]
     async fn terminal_submit_ctrl_enter_success_returns_to_normal_mode() {
         let backend = Arc::new(ManualTerminalBackend::default());
+        let controller = Arc::new(RecordingFrontendController::default());
         let mut shell_state = UiShellState::new_with_integrations(
             "ready".to_owned(),
             sample_projection(true),
@@ -8300,8 +8252,9 @@ mod tests {
             None,
             Some(backend),
         );
+        shell_state.set_frontend_controller(Some(controller.clone()));
         shell_state.open_terminal_and_enter_mode();
-        assert_eq!(shell_state.mode, UiMode::Insert);
+        assert_eq!(shell_state.mode, UiMode::Terminal);
         assert_eq!(shell_state.terminal_compose_editor.mode, EditorMode::Insert);
 
         handle_key_press(&mut shell_state, key(KeyCode::Char('o')));
@@ -8309,13 +8262,21 @@ mod tests {
         assert_eq!(editor_state_text(&shell_state.terminal_compose_editor), "ok");
 
         handle_key_press(&mut shell_state, ctrl_key(KeyCode::Enter));
+        tokio::task::yield_now().await;
 
         assert_eq!(editor_state_text(&shell_state.terminal_compose_editor), "");
         assert_eq!(shell_state.mode, UiMode::Normal);
+        assert_eq!(
+            controller.intents(),
+            vec![FrontendIntent::SendTerminalInput {
+                session_id: WorkerSessionId::new("sess-1"),
+                input: "ok".to_owned(),
+            }]
+        );
     }
 
     #[test]
-    fn terminal_submit_failure_keeps_insert_mode() {
+    fn terminal_submit_failure_keeps_terminal_mode() {
         let backend = Arc::new(ManualTerminalBackend::default());
         let mut shell_state = UiShellState::new_with_integrations(
             "ready".to_owned(),
@@ -8326,11 +8287,11 @@ mod tests {
             Some(backend),
         );
         shell_state.open_terminal_and_enter_mode();
-        assert_eq!(shell_state.mode, UiMode::Insert);
+        assert_eq!(shell_state.mode, UiMode::Terminal);
 
         handle_key_press(&mut shell_state, key(KeyCode::Enter));
 
-        assert_eq!(shell_state.mode, UiMode::Insert);
+        assert_eq!(shell_state.mode, UiMode::Terminal);
         assert!(shell_state
             .status_warning
             .as_deref()
@@ -8338,10 +8299,10 @@ mod tests {
     }
 
     #[test]
-    fn entering_insert_mode_snaps_stream_view_to_bottom() {
+    fn entering_terminal_mode_snaps_stream_view_to_bottom() {
         let mut shell_state = UiShellState::new("ready".to_owned(), sample_projection(true));
-        shell_state.open_terminal_and_enter_mode();
-        assert_eq!(shell_state.mode, UiMode::Insert);
+        handle_key_press(&mut shell_state, key(KeyCode::Char('I')));
+        assert_eq!(shell_state.mode, UiMode::Terminal);
         let session_id = shell_state
             .active_terminal_session_id()
             .expect("active terminal session")
@@ -8371,8 +8332,8 @@ mod tests {
         handle_key_press(&mut shell_state, key(KeyCode::Esc));
         assert_eq!(shell_state.mode, UiMode::Normal);
 
-        handle_key_press(&mut shell_state, key(KeyCode::Char('i')));
-        assert_eq!(shell_state.mode, UiMode::Insert);
+        handle_key_press(&mut shell_state, key(KeyCode::Char('I')));
+        assert_eq!(shell_state.mode, UiMode::Terminal);
 
         let view = shell_state
             .terminal_session_states
@@ -8389,8 +8350,8 @@ mod tests {
     #[test]
     fn terminal_stream_normal_mode_scrolls_with_shift_jk() {
         let mut shell_state = UiShellState::new("ready".to_owned(), sample_projection(true));
-        shell_state.open_terminal_and_enter_mode();
-        assert_eq!(shell_state.mode, UiMode::Insert);
+        handle_key_press(&mut shell_state, key(KeyCode::Char('I')));
+        assert_eq!(shell_state.mode, UiMode::Terminal);
         let session_id = shell_state
             .active_terminal_session_id()
             .expect("active terminal session")
@@ -8438,8 +8399,8 @@ mod tests {
     #[test]
     fn terminal_stream_scroll_uses_rendered_line_count_without_initial_jump() {
         let mut shell_state = UiShellState::new("ready".to_owned(), sample_projection(true));
-        shell_state.open_terminal_and_enter_mode();
-        assert_eq!(shell_state.mode, UiMode::Insert);
+        handle_key_press(&mut shell_state, key(KeyCode::Char('I')));
+        assert_eq!(shell_state.mode, UiMode::Terminal);
         let session_id = shell_state
             .active_terminal_session_id()
             .expect("active terminal session")
@@ -8662,6 +8623,10 @@ mod tests {
             Some(UiCommand::EnterInsertMode)
         );
         assert_eq!(
+            routed_command(route_key_press(&mut shell_state, key(KeyCode::Char('I')))),
+            Some(UiCommand::OpenTerminalForSelected)
+        );
+        assert_eq!(
             routed_command(route_key_press(&mut shell_state, key(KeyCode::Char('q')))),
             Some(UiCommand::QuitShell)
         );
@@ -8700,7 +8665,7 @@ mod tests {
         let help = mode_help(UiMode::Normal);
         assert!(help.contains("Navigate: j/k sessions"));
         assert!(help.contains("Shift+J/K output"));
-        assert!(help.contains("Views: i"));
+        assert!(help.contains("Views: i/I"));
         assert!(!help.contains("i: "));
         assert!(!help.contains("I: "));
 
@@ -8713,60 +8678,16 @@ mod tests {
     fn bottom_bar_styles_are_mode_specific_and_readable() {
         let normal = bottom_bar_style(UiMode::Normal);
         let insert = bottom_bar_style(UiMode::Insert);
+        let terminal = bottom_bar_style(UiMode::Terminal);
 
         assert_ne!(normal, insert);
+        assert_ne!(insert, terminal);
+        assert_ne!(normal, terminal);
 
-        for style in [normal, insert] {
+        for style in [normal, insert, terminal] {
             assert!(style.fg.is_some(), "foreground color should be set");
             assert!(style.bg.is_some(), "background color should be set");
             assert_ne!(style.fg, style.bg, "foreground and background must differ");
         }
-    }
-
-    #[test]
-    fn full_redraw_interval_config_clamps_to_supported_bounds() {
-        set_ui_runtime_config(
-            "nord".to_owned(),
-            Vec::new(),
-            "model".to_owned(),
-            100,
-            15,
-            15,
-            15,
-            120,
-            2,
-            0,
-        );
-        assert_eq!(full_redraw_interval_config_value(), Duration::from_secs(60));
-
-        set_ui_runtime_config(
-            "nord".to_owned(),
-            Vec::new(),
-            "model".to_owned(),
-            100,
-            15,
-            15,
-            15,
-            120,
-            2,
-            9_999,
-        );
-        assert_eq!(full_redraw_interval_config_value(), Duration::from_secs(1_800));
-    }
-
-    #[test]
-    fn next_wake_deadline_includes_full_redraw_deadline() {
-        let shell_state = UiShellState::new("ready".to_owned(), triage_projection());
-        let now = Instant::now();
-        let full_redraw_deadline = now + Duration::from_secs(5);
-
-        let wake = shell_state.next_wake_deadline(
-            now,
-            AnimationState::None,
-            now,
-            full_redraw_deadline,
-        );
-
-        assert_eq!(wake, Some(full_redraw_deadline));
     }
 }

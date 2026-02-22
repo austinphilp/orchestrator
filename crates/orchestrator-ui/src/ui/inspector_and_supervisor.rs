@@ -439,6 +439,7 @@ fn latest_supervisor_query_metrics_line(
     None
 }
 
+#[allow(dead_code)]
 fn build_supervisor_chat_request(
     selected_row: &UiInboxRow,
     domain: &ProjectionState,
@@ -503,6 +504,7 @@ fn build_supervisor_chat_request(
     }
 }
 
+#[allow(dead_code)]
 fn build_global_supervisor_chat_request(query: &str) -> LlmChatRequest {
     LlmChatRequest {
         model: supervisor_model_from_env(),

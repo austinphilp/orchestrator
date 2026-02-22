@@ -4,11 +4,10 @@ use orchestrator_core::{
     GetTicketRequest, GithubClient, InboxItemCreatedPayload, InboxItemId, InboxItemResolvedPayload,
     LlmProvider, NewEventEnvelope, OrchestrationEventPayload, ProjectionState, RuntimeSessionId,
     SelectedTicketFlowConfig, SelectedTicketFlowResult, SessionCompletedPayload,
-    SessionCrashedPayload, SessionHandle, SqliteEventStore, Supervisor, TicketId, TicketSummary,
+    SessionCrashedPayload, SessionHandle, SqliteEventStore, Supervisor, TicketSummary,
     StoredEventEnvelope, TicketingProvider, UntypedCommandInvocation, VcsProvider, WorkItemId,
     WorkerBackend, WorkerSessionId, WorkerSessionStatus, WorkflowGuardContext, WorkflowState,
-    WorkflowInteractionProfile, WorkflowInteractionProfilesConfig, WorkflowTransitionPayload,
-    WorkflowTransitionReason, DOMAIN_EVENT_SCHEMA_VERSION,
+    WorkflowTransitionPayload, WorkflowTransitionReason, DOMAIN_EVENT_SCHEMA_VERSION,
     SessionRuntimeProjection,
 };
 use orchestrator_ui::{
@@ -16,12 +15,14 @@ use orchestrator_ui::{
     SessionMergeFinalizeOutcome, SessionWorkflowAdvanceOutcome, SupervisorCommandContext,
     SupervisorCommandDispatcher,
 };
+use r2d2::{Pool, PooledConnection};
+use r2d2_sqlite::SqliteConnectionManager;
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::process::Command;
-use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 #[path = "../command_dispatch.rs"]
 mod command_dispatch;
 #[path = "../ticket_picker.rs"]
@@ -31,8 +32,6 @@ pub use ticket_picker::AppTicketPickerProvider;
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AppConfig {
     pub workspace: String,
-    #[serde(default)]
-    pub worktrees_root: String,
     #[serde(default = "default_event_store_path")]
     pub event_store_path: String,
     #[serde(default = "default_ticketing_provider")]
@@ -51,6 +50,8 @@ pub struct AppConfig {
     pub github: GithubConfigToml,
     #[serde(default)]
     pub runtime: RuntimeConfigToml,
+    #[serde(default)]
+    pub database: DatabaseConfigToml,
     #[serde(default)]
     pub ui: UiConfigToml,
 }
@@ -81,11 +82,13 @@ const DEFAULT_CODEX_BINARY: &str = "codex";
 const DEFAULT_EVENT_RETENTION_DAYS: u64 = 14;
 const DEFAULT_EVENT_PRUNE_ENABLED: bool = true;
 const DEFAULT_PR_PIPELINE_POLL_INTERVAL_SECS: u64 = 15;
+const DEFAULT_DATABASE_MAX_CONNECTIONS: u32 = 8;
+const DEFAULT_DATABASE_BUSY_TIMEOUT_MS: u64 = 5000;
+const DEFAULT_DATABASE_WAL_ENABLED: bool = true;
+const DEFAULT_DATABASE_SYNCHRONOUS: &str = "NORMAL";
+const DEFAULT_DATABASE_CHUNK_EVENT_FLUSH_MS: u64 = 250;
 const DEFAULT_UI_THEME: &str = "nord";
 const DEFAULT_UI_TRANSCRIPT_LINE_LIMIT: usize = 100;
-const DEFAULT_UI_FULL_REDRAW_INTERVAL_SECS: u64 = 300;
-const MIN_UI_FULL_REDRAW_INTERVAL_SECS: u64 = 60;
-const MAX_UI_FULL_REDRAW_INTERVAL_SECS: u64 = 1800;
 const DEFAULT_TICKET_PICKER_PRIORITY_STATES: &[&str] =
     &["In Progress", "Final Approval", "Todo", "Backlog"];
 
@@ -101,18 +104,6 @@ fn default_event_store_path() -> String {
         .join("orchestrator-events.db")
         .to_string_lossy()
         .to_string()
-}
-
-fn legacy_workspace_worktrees_root(workspace: &str) -> PathBuf {
-    PathBuf::from(workspace)
-        .join(".orchestrator")
-        .join("worktrees")
-}
-
-fn legacy_workspace_nested_worktrees_root(workspace: &str) -> PathBuf {
-    PathBuf::from(workspace)
-        .join(".orchestrator")
-        .join("workspace")
 }
 fn default_ticketing_provider() -> String {
     DEFAULT_TICKETING_PROVIDER.to_owned()
@@ -308,6 +299,32 @@ impl Default for RuntimeConfigToml {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DatabaseConfigToml {
+    #[serde(default = "default_database_max_connections")]
+    pub max_connections: u32,
+    #[serde(default = "default_database_busy_timeout_ms")]
+    pub busy_timeout_ms: u64,
+    #[serde(default = "default_database_wal_enabled")]
+    pub wal_enabled: bool,
+    #[serde(default = "default_database_synchronous")]
+    pub synchronous: String,
+    #[serde(default = "default_database_chunk_event_flush_ms")]
+    pub chunk_event_flush_ms: u64,
+}
+
+impl Default for DatabaseConfigToml {
+    fn default() -> Self {
+        Self {
+            max_connections: default_database_max_connections(),
+            busy_timeout_ms: default_database_busy_timeout_ms(),
+            wal_enabled: default_database_wal_enabled(),
+            synchronous: default_database_synchronous(),
+            chunk_event_flush_ms: default_database_chunk_event_flush_ms(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct UiConfigToml {
     #[serde(default = "default_ui_theme")]
     pub theme: String,
@@ -325,12 +342,6 @@ pub struct UiConfigToml {
     pub merge_poll_max_backoff_secs: u64,
     #[serde(default = "default_ui_merge_poll_backoff_multiplier")]
     pub merge_poll_backoff_multiplier: u64,
-    #[serde(default = "default_workflow_interaction_profiles")]
-    pub workflow_interaction_profiles: Vec<WorkflowInteractionProfile>,
-    #[serde(default = "default_workflow_profile_name")]
-    pub default_workflow_profile: String,
-    #[serde(default = "default_ui_full_redraw_interval_secs")]
-    pub full_redraw_interval_secs: u64,
 }
 
 impl Default for UiConfigToml {
@@ -344,9 +355,6 @@ impl Default for UiConfigToml {
             merge_poll_base_interval_secs: default_ui_merge_poll_base_interval_secs(),
             merge_poll_max_backoff_secs: default_ui_merge_poll_max_backoff_secs(),
             merge_poll_backoff_multiplier: default_ui_merge_poll_backoff_multiplier(),
-            workflow_interaction_profiles: default_workflow_interaction_profiles(),
-            default_workflow_profile: default_workflow_profile_name(),
-            full_redraw_interval_secs: default_ui_full_redraw_interval_secs(),
         }
     }
 }
@@ -439,6 +447,26 @@ fn default_pr_pipeline_poll_interval_secs() -> u64 {
     DEFAULT_PR_PIPELINE_POLL_INTERVAL_SECS
 }
 
+fn default_database_max_connections() -> u32 {
+    DEFAULT_DATABASE_MAX_CONNECTIONS
+}
+
+fn default_database_busy_timeout_ms() -> u64 {
+    DEFAULT_DATABASE_BUSY_TIMEOUT_MS
+}
+
+fn default_database_wal_enabled() -> bool {
+    DEFAULT_DATABASE_WAL_ENABLED
+}
+
+fn default_database_synchronous() -> String {
+    DEFAULT_DATABASE_SYNCHRONOUS.to_owned()
+}
+
+fn default_database_chunk_event_flush_ms() -> u64 {
+    DEFAULT_DATABASE_CHUNK_EVENT_FLUSH_MS
+}
+
 fn default_ui_theme() -> String {
     DEFAULT_UI_THEME.to_owned()
 }
@@ -467,18 +495,6 @@ fn default_ui_merge_poll_backoff_multiplier() -> u64 {
     2
 }
 
-fn default_workflow_interaction_profiles() -> Vec<WorkflowInteractionProfile> {
-    WorkflowInteractionProfilesConfig::default().profiles
-}
-
-fn default_workflow_profile_name() -> String {
-    WorkflowInteractionProfilesConfig::default().default_profile
-}
-
-fn default_ui_full_redraw_interval_secs() -> u64 {
-    DEFAULT_UI_FULL_REDRAW_INTERVAL_SECS
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct StartupState {
     pub status: String,
@@ -487,10 +503,8 @@ pub struct StartupState {
 
 impl Default for AppConfig {
     fn default() -> Self {
-        let workspace = default_workspace_path();
         Self {
-            workspace: workspace.clone(),
-            worktrees_root: workspace,
+            workspace: default_workspace_path(),
             event_store_path: default_event_store_path(),
             ticketing_provider: default_ticketing_provider(),
             harness_provider: default_harness_provider(),
@@ -500,6 +514,7 @@ impl Default for AppConfig {
             git: GitConfigToml::default(),
             github: GithubConfigToml::default(),
             runtime: RuntimeConfigToml::default(),
+            database: DatabaseConfigToml::default(),
             ui: UiConfigToml::default(),
         }
     }
@@ -508,7 +523,9 @@ impl Default for AppConfig {
 impl AppConfig {
     pub fn from_env() -> Result<Self, CoreError> {
         let path = config_path_from_env()?;
-        load_or_create_config(&path)
+        let config = load_or_create_config(&path)?;
+        set_database_runtime_config(config.database.clone());
+        Ok(config)
     }
 }
 
@@ -671,8 +688,7 @@ fn load_or_create_config(path: &std::path::Path) -> Result<AppConfig, CoreError>
         ))
     })?;
 
-    let mut changed = normalize_config(&mut config);
-    changed |= migrate_legacy_directory_layout(&mut config)?;
+    let changed = normalize_config(&mut config);
 
     if changed {
         persist_config(path, &config)?;
@@ -687,9 +703,6 @@ fn normalize_config(config: &mut AppConfig) -> bool {
     if config.workspace.trim() == LEGACY_DEFAULT_WORKSPACE_PATH || config.workspace.trim().is_empty()
     {
         config.workspace = default_workspace_path();
-        changed = true;
-    }
-    if normalize_non_empty_string(&mut config.worktrees_root, config.workspace.clone()) {
         changed = true;
     }
     if config.event_store_path.trim() == LEGACY_DEFAULT_EVENT_STORE_PATH
@@ -788,6 +801,38 @@ fn normalize_config(config: &mut AppConfig) -> bool {
         config.runtime.pr_pipeline_poll_interval_secs = normalized_pr_pipeline_poll_interval_secs;
         changed = true;
     }
+    let normalized_max_connections = if config.database.max_connections == 0 {
+        default_database_max_connections()
+    } else {
+        config.database.max_connections.clamp(1, 64)
+    };
+    if normalized_max_connections != config.database.max_connections {
+        config.database.max_connections = normalized_max_connections;
+        changed = true;
+    }
+    let normalized_busy_timeout_ms = if config.database.busy_timeout_ms == 0 {
+        default_database_busy_timeout_ms()
+    } else {
+        config.database.busy_timeout_ms.clamp(100, 60_000)
+    };
+    if normalized_busy_timeout_ms != config.database.busy_timeout_ms {
+        config.database.busy_timeout_ms = normalized_busy_timeout_ms;
+        changed = true;
+    }
+    let normalized_chunk_event_flush_ms = if config.database.chunk_event_flush_ms == 0 {
+        default_database_chunk_event_flush_ms()
+    } else {
+        config.database.chunk_event_flush_ms.clamp(50, 5_000)
+    };
+    if normalized_chunk_event_flush_ms != config.database.chunk_event_flush_ms {
+        config.database.chunk_event_flush_ms = normalized_chunk_event_flush_ms;
+        changed = true;
+    }
+    let normalized_synchronous = normalize_database_synchronous(config.database.synchronous.as_str());
+    if normalized_synchronous != config.database.synchronous {
+        config.database.synchronous = normalized_synchronous;
+        changed = true;
+    }
 
     changed |= normalize_non_empty_string(&mut config.ui.theme, default_ui_theme());
     changed |= normalize_string_vec(&mut config.ui.ticket_picker_priority_states);
@@ -832,81 +877,6 @@ fn normalize_config(config: &mut AppConfig) -> bool {
         config.ui.merge_poll_backoff_multiplier = normalized_merge_poll_backoff_multiplier;
         changed = true;
     }
-    let normalized_full_redraw_interval_secs = config.ui.full_redraw_interval_secs.clamp(
-        MIN_UI_FULL_REDRAW_INTERVAL_SECS,
-        MAX_UI_FULL_REDRAW_INTERVAL_SECS,
-    );
-    if normalized_full_redraw_interval_secs != config.ui.full_redraw_interval_secs {
-        config.ui.full_redraw_interval_secs = normalized_full_redraw_interval_secs;
-        changed = true;
-    }
-
-    changed |= normalize_workflow_profiles(&mut config.ui);
-
-    changed
-}
-
-fn normalize_workflow_profiles(ui: &mut UiConfigToml) -> bool {
-    let mut changed = false;
-    let mut dedup = std::collections::HashSet::new();
-    let mut normalized_profiles = Vec::new();
-
-    for mut profile in std::mem::take(&mut ui.workflow_interaction_profiles) {
-        let trimmed_name = profile.name.trim().to_owned();
-        if trimmed_name.is_empty() {
-            changed = true;
-            continue;
-        }
-        if !dedup.insert(trimmed_name.to_ascii_lowercase()) {
-            changed = true;
-            continue;
-        }
-        if profile.name != trimmed_name {
-            profile.name = trimmed_name;
-            changed = true;
-        }
-
-        let mut level_by_state = std::collections::HashMap::new();
-        for entry in profile.levels {
-            level_by_state.insert(entry.state, entry.level);
-        }
-        let mut rebuilt_levels = Vec::new();
-        for state in orchestrator_core::all_workflow_states() {
-            let level = level_by_state
-                .remove(&state)
-                .unwrap_or(orchestrator_core::WorkflowInteractionLevel::Manual);
-            rebuilt_levels.push(orchestrator_core::WorkflowInteractionStateLevel { state, level });
-        }
-        profile.levels = rebuilt_levels;
-        normalized_profiles.push(profile);
-    }
-
-    if normalized_profiles.is_empty() {
-        let defaults = WorkflowInteractionProfilesConfig::default();
-        normalized_profiles = defaults.profiles;
-        ui.default_workflow_profile = defaults.default_profile;
-        changed = true;
-    }
-
-    let default_profile = ui.default_workflow_profile.trim().to_owned();
-    let default_exists = normalized_profiles
-        .iter()
-        .any(|profile| profile.name == default_profile);
-    if default_profile.is_empty() || !default_exists {
-        let fallback = normalized_profiles[0].name.clone();
-        if ui.default_workflow_profile != fallback {
-            ui.default_workflow_profile = fallback;
-            changed = true;
-        }
-    } else if ui.default_workflow_profile != default_profile {
-        ui.default_workflow_profile = default_profile;
-        changed = true;
-    }
-
-    if ui.workflow_interaction_profiles != normalized_profiles {
-        ui.workflow_interaction_profiles = normalized_profiles;
-        changed = true;
-    }
 
     changed
 }
@@ -942,280 +912,12 @@ fn normalize_string_vec(values: &mut Vec<String>) -> bool {
     false
 }
 
-fn migrate_legacy_directory_layout(config: &mut AppConfig) -> Result<bool, CoreError> {
-    let mut changed = false;
-    changed |= migrate_legacy_event_store_path(config)?;
-    changed |= migrate_legacy_worktrees(config)?;
-    changed |= migrate_runtime_mapping_workdirs(config)?;
-    Ok(changed)
-}
-
-fn migrate_legacy_event_store_path(config: &mut AppConfig) -> Result<bool, CoreError> {
-    let legacy_parent = PathBuf::from(&config.workspace).join(".orchestrator");
-    let event_store_path = PathBuf::from(&config.event_store_path);
-    if !event_store_path.starts_with(&legacy_parent) {
-        return Ok(false);
+fn normalize_database_synchronous(value: &str) -> String {
+    let candidate = value.trim().to_ascii_uppercase();
+    match candidate.as_str() {
+        "OFF" | "NORMAL" | "FULL" | "EXTRA" => candidate,
+        _ => default_database_synchronous(),
     }
-
-    let destination = PathBuf::from(default_event_store_path());
-    if event_store_path == destination {
-        return Ok(false);
-    }
-
-    let sidecar_suffixes = ["-wal", "-shm"];
-    let source_sidecars = sidecar_suffixes
-        .iter()
-        .map(|suffix| PathBuf::from(format!("{}{}", event_store_path.to_string_lossy(), suffix)))
-        .collect::<Vec<_>>();
-    let destination_sidecars = sidecar_suffixes
-        .iter()
-        .map(|suffix| PathBuf::from(format!("{}{}", destination.to_string_lossy(), suffix)))
-        .collect::<Vec<_>>();
-    let source_log = event_store_path
-        .parent()
-        .unwrap_or_else(|| std::path::Path::new("."))
-        .join("orchestrator.log");
-    let destination_log = destination
-        .parent()
-        .unwrap_or_else(|| std::path::Path::new("."))
-        .join("orchestrator.log");
-
-    if event_store_path.exists() && destination.exists() {
-        return Err(CoreError::Configuration(format!(
-            "Cannot migrate legacy event store '{}' to '{}' because destination already exists.",
-            event_store_path.display(),
-            destination.display()
-        )));
-    }
-    for (source, target) in source_sidecars.iter().zip(destination_sidecars.iter()) {
-        if source.exists() && target.exists() {
-            return Err(CoreError::Configuration(format!(
-                "Cannot migrate legacy event store sidecar '{}' to '{}' because destination already exists.",
-                source.display(),
-                target.display()
-            )));
-        }
-    }
-    if source_log.exists() && destination_log.exists() {
-        return Err(CoreError::Configuration(format!(
-            "Cannot migrate legacy log file '{}' to '{}' because destination already exists.",
-            source_log.display(),
-            destination_log.display()
-        )));
-    }
-
-    if let Some(parent) = destination.parent() {
-        if !parent.as_os_str().is_empty() {
-            std::fs::create_dir_all(parent).map_err(|err| {
-                CoreError::Configuration(format!(
-                    "Failed to create destination directory '{}' for legacy event-store migration: {err}",
-                    parent.display()
-                ))
-            })?;
-        }
-    }
-
-    if event_store_path.exists() {
-        std::fs::rename(&event_store_path, &destination).map_err(|err| {
-            CoreError::Configuration(format!(
-                "Failed to migrate legacy event store '{}' to '{}': {err}",
-                event_store_path.display(),
-                destination.display()
-            ))
-        })?;
-    }
-    for (source, target) in source_sidecars.iter().zip(destination_sidecars.iter()) {
-        if source.exists() {
-            std::fs::rename(source, target).map_err(|err| {
-                CoreError::Configuration(format!(
-                    "Failed to migrate legacy event store sidecar '{}' to '{}': {err}",
-                    source.display(),
-                    target.display()
-                ))
-            })?;
-        }
-    }
-    if source_log.exists() {
-        std::fs::rename(&source_log, &destination_log).map_err(|err| {
-            CoreError::Configuration(format!(
-                "Failed to migrate legacy log file '{}' to '{}': {err}",
-                source_log.display(),
-                destination_log.display()
-            ))
-        })?;
-    }
-
-    config.event_store_path = destination.to_string_lossy().to_string();
-    Ok(true)
-}
-
-fn migrate_legacy_worktrees(config: &AppConfig) -> Result<bool, CoreError> {
-    let destination_root = PathBuf::from(&config.worktrees_root);
-    let legacy_roots = vec![
-        legacy_workspace_worktrees_root(&config.workspace),
-        legacy_workspace_nested_worktrees_root(&config.workspace),
-    ];
-
-    let mut planned_moves: Vec<(PathBuf, PathBuf)> = Vec::new();
-    let mut seen_destinations: HashSet<PathBuf> = HashSet::new();
-    let mut collisions: Vec<(PathBuf, PathBuf)> = Vec::new();
-
-    for source_root in &legacy_roots {
-        if *source_root == destination_root || !source_root.is_dir() {
-            continue;
-        }
-        let entries = std::fs::read_dir(source_root).map_err(|err| {
-            CoreError::Configuration(format!(
-                "Failed to inspect legacy worktrees directory '{}': {err}",
-                source_root.display()
-            ))
-        })?;
-
-        for entry in entries {
-            let entry = entry.map_err(|err| {
-                CoreError::Configuration(format!(
-                    "Failed to read entry in legacy worktrees directory '{}': {err}",
-                    source_root.display()
-                ))
-            })?;
-            let source_path = entry.path();
-            let file_type = entry.file_type().map_err(|err| {
-                CoreError::Configuration(format!(
-                    "Failed to inspect legacy worktree entry '{}': {err}",
-                    source_path.display()
-                ))
-            })?;
-            if !file_type.is_dir() {
-                continue;
-            }
-            let destination = destination_root.join(entry.file_name());
-            if destination.exists() || !seen_destinations.insert(destination.clone()) {
-                collisions.push((source_path, destination));
-                continue;
-            }
-            planned_moves.push((source_path, destination));
-        }
-    }
-
-    if !collisions.is_empty() {
-        let details = collisions
-            .iter()
-            .map(|(src, dst)| format!("{} -> {}", src.display(), dst.display()))
-            .collect::<Vec<_>>()
-            .join(", ");
-        return Err(CoreError::Configuration(format!(
-            "Legacy worktree migration blocked by destination collisions: {details}"
-        )));
-    }
-
-    if planned_moves.is_empty() {
-        return Ok(false);
-    }
-
-    if !destination_root.exists() {
-        std::fs::create_dir_all(&destination_root).map_err(|err| {
-            CoreError::Configuration(format!(
-                "Failed to create configured worktrees_root '{}' for migration: {err}",
-                destination_root.display()
-            ))
-        })?;
-    }
-
-    for (source, destination) in planned_moves {
-        std::fs::rename(&source, &destination).map_err(|err| {
-            CoreError::Configuration(format!(
-                "Failed to migrate legacy worktree '{}' to '{}': {err}",
-                source.display(),
-                destination.display()
-            ))
-        })?;
-    }
-
-    prune_empty_legacy_worktree_dirs(&config.workspace)?;
-    Ok(true)
-}
-
-fn prune_empty_legacy_worktree_dirs(workspace: &str) -> Result<(), CoreError> {
-    let candidates = vec![
-        legacy_workspace_nested_worktrees_root(workspace),
-        legacy_workspace_worktrees_root(workspace),
-        PathBuf::from(workspace).join(".orchestrator"),
-    ];
-    for candidate in candidates {
-        if !candidate.is_dir() {
-            continue;
-        }
-        let mut entries = std::fs::read_dir(&candidate).map_err(|err| {
-            CoreError::Configuration(format!(
-                "Failed to inspect legacy migration cleanup directory '{}': {err}",
-                candidate.display()
-            ))
-        })?;
-        if entries.next().is_none() {
-            std::fs::remove_dir(&candidate).map_err(|err| {
-                CoreError::Configuration(format!(
-                    "Failed to remove empty legacy migration directory '{}': {err}",
-                    candidate.display()
-                ))
-            })?;
-        }
-    }
-    Ok(())
-}
-
-fn migrate_runtime_mapping_workdirs(config: &AppConfig) -> Result<bool, CoreError> {
-    let event_store_path = PathBuf::from(&config.event_store_path);
-    if !event_store_path.exists() {
-        return Ok(false);
-    }
-
-    let legacy_roots = vec![
-        legacy_workspace_worktrees_root(&config.workspace),
-        legacy_workspace_nested_worktrees_root(&config.workspace),
-    ];
-    let destination_root = PathBuf::from(&config.worktrees_root);
-    let mut store = open_event_store(&config.event_store_path)?;
-    let mappings = store.list_runtime_mappings()?;
-    let mut changed = false;
-
-    for mapping in mappings {
-        let migrated = rewrite_legacy_worktree_path(
-            &mapping.worktree.path,
-            legacy_roots.as_slice(),
-            &destination_root,
-        )
-        .or_else(|| {
-            rewrite_legacy_worktree_path(
-                &mapping.session.workdir,
-                legacy_roots.as_slice(),
-                &destination_root,
-            )
-        });
-        let Some(next_path) = migrated else {
-            continue;
-        };
-        if mapping.worktree.path == next_path && mapping.session.workdir == next_path {
-            continue;
-        }
-        store.migrate_runtime_mapping_path(&mapping.work_item_id, &next_path)?;
-        changed = true;
-    }
-
-    Ok(changed)
-}
-
-fn rewrite_legacy_worktree_path(
-    raw_path: &str,
-    legacy_roots: &[PathBuf],
-    destination_root: &std::path::Path,
-) -> Option<String> {
-    let raw = PathBuf::from(raw_path);
-    for legacy_root in legacy_roots {
-        if let Ok(suffix) = raw.strip_prefix(legacy_root) {
-            return Some(destination_root.join(suffix).to_string_lossy().to_string());
-        }
-    }
-    None
 }
 
 fn ensure_event_store_parent_dir(path: &str) -> Result<(), CoreError> {
@@ -1237,7 +939,121 @@ fn ensure_event_store_parent_dir(path: &str) -> Result<(), CoreError> {
     Ok(())
 }
 
-fn open_event_store(path: &str) -> Result<SqliteEventStore, CoreError> {
+pub(crate) type AppEventStore = SqliteEventStore<PooledConnection<SqliteConnectionManager>>;
+
+fn event_store_pools() -> &'static Mutex<HashMap<String, Pool<SqliteConnectionManager>>> {
+    static POOLS: OnceLock<Mutex<HashMap<String, Pool<SqliteConnectionManager>>>> = OnceLock::new();
+    POOLS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn database_runtime_config_cell() -> &'static Mutex<DatabaseConfigToml> {
+    static CONFIG: OnceLock<Mutex<DatabaseConfigToml>> = OnceLock::new();
+    CONFIG.get_or_init(|| Mutex::new(DatabaseConfigToml::default()))
+}
+
+pub fn set_database_runtime_config(config: DatabaseConfigToml) {
+    let mut normalized = config;
+    normalized.max_connections = if normalized.max_connections == 0 {
+        default_database_max_connections()
+    } else {
+        normalized.max_connections.clamp(1, 64)
+    };
+    normalized.busy_timeout_ms = if normalized.busy_timeout_ms == 0 {
+        default_database_busy_timeout_ms()
+    } else {
+        normalized.busy_timeout_ms.clamp(100, 60_000)
+    };
+    normalized.chunk_event_flush_ms = if normalized.chunk_event_flush_ms == 0 {
+        default_database_chunk_event_flush_ms()
+    } else {
+        normalized.chunk_event_flush_ms.clamp(50, 5_000)
+    };
+    normalized.synchronous = normalize_database_synchronous(normalized.synchronous.as_str());
+
+    {
+        let mut guard = database_runtime_config_cell()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *guard = normalized;
+    }
+
+    let mut pools = event_store_pools()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    pools.clear();
+}
+
+fn database_runtime_config() -> DatabaseConfigToml {
+    database_runtime_config_cell()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clone()
+}
+
+fn build_event_store_pool(
+    path: &str,
+    config: &DatabaseConfigToml,
+) -> Result<Pool<SqliteConnectionManager>, CoreError> {
+    let manager = SqliteConnectionManager::file(path);
+    let pool = Pool::builder()
+        .max_size(config.max_connections)
+        .build(manager)
+        .map_err(|err| CoreError::Persistence(format!("failed to build sqlite pool: {err}")))?;
+
+    {
+        let mut conn = pool
+            .get()
+            .map_err(|err| CoreError::Persistence(format!("failed to acquire sqlite connection: {err}")))?;
+        apply_sqlite_runtime_pragmas(&mut conn, config)?;
+        let _ = SqliteEventStore::from_connection(conn)?;
+    }
+
+    Ok(pool)
+}
+
+fn apply_sqlite_runtime_pragmas(
+    conn: &mut PooledConnection<SqliteConnectionManager>,
+    config: &DatabaseConfigToml,
+) -> Result<(), CoreError> {
+    let journal_mode = if config.wal_enabled { "WAL" } else { "DELETE" };
+    conn.execute_batch(
+        format!(
+            "PRAGMA journal_mode = {journal_mode}; PRAGMA synchronous = {}; PRAGMA busy_timeout = {}; PRAGMA foreign_keys = ON;",
+            config.synchronous, config.busy_timeout_ms
+        )
+        .as_str(),
+    )
+    .map_err(|err| CoreError::Persistence(err.to_string()))
+}
+
+pub(crate) fn supervisor_chunk_event_flush_interval() -> Duration {
+    let config = database_runtime_config();
+    Duration::from_millis(config.chunk_event_flush_ms)
+}
+
+fn open_event_store(path: &str) -> Result<AppEventStore, CoreError> {
+    ensure_event_store_parent_dir(path)?;
+    let config = database_runtime_config();
+    let pool = {
+        let mut pools = event_store_pools()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(existing) = pools.get(path) {
+            existing.clone()
+        } else {
+            let created = build_event_store_pool(path, &config)?;
+            pools.insert(path.to_owned(), created.clone());
+            created
+        }
+    };
+    let mut conn = pool
+        .get()
+        .map_err(|err| CoreError::Persistence(format!("failed to acquire sqlite connection: {err}")))?;
+    apply_sqlite_runtime_pragmas(&mut conn, &config)?;
+    Ok(SqliteEventStore::from_initialized_connection(conn))
+}
+
+fn open_owned_event_store(path: &str) -> Result<SqliteEventStore, CoreError> {
     ensure_event_store_parent_dir(path)?;
     SqliteEventStore::open(path)
 }

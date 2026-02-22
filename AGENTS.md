@@ -18,7 +18,7 @@
 ### Config TOML ownership
 
 - Runtime settings previously controlled by `ORCHESTRATOR_*` non-secret env vars now live in `config.toml` under `ORCHESTRATOR_CONFIG`.
-- This includes provider selection, supervisor model/base URL, Linear/Shortcut runtime options, git/github binary+safety controls, harness backend settings, and UI theme/ticket-priority ordering.
+- This includes provider selection, supervisor model/base URL, Linear/Shortcut runtime options, git/github binary+safety controls, harness backend settings, SQLite pool/locking settings, and UI theme/ticket-priority ordering.
 
 ## Development Policy
 

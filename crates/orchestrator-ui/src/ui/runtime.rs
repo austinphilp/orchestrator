@@ -1,9 +1,6 @@
 pub struct Ui {
     terminal: Terminal<CrosstermBackend<Stdout>>,
-    supervisor_provider: Option<Arc<dyn LlmProvider>>,
-    supervisor_command_dispatcher: Option<Arc<dyn SupervisorCommandDispatcher>>,
-    ticket_picker_provider: Option<Arc<dyn TicketPickerProvider>>,
-    worker_backend: Option<Arc<dyn WorkerBackend>>,
+    frontend_controller: Option<Arc<dyn FrontendController>>,
     keyboard_enhancement_enabled: bool,
 }
 
@@ -26,34 +23,16 @@ impl Ui {
         let terminal = Terminal::new(backend)?;
         Ok(Self {
             terminal,
-            supervisor_provider: None,
-            supervisor_command_dispatcher: None,
-            ticket_picker_provider: None,
-            worker_backend: None,
+            frontend_controller: None,
             keyboard_enhancement_enabled,
         })
     }
 
-    pub fn with_supervisor_provider(mut self, provider: Arc<dyn LlmProvider>) -> Self {
-        self.supervisor_provider = Some(provider);
-        self
-    }
-
-    pub fn with_supervisor_command_dispatcher(
+    pub fn with_frontend_controller(
         mut self,
-        dispatcher: Arc<dyn SupervisorCommandDispatcher>,
+        controller: Arc<dyn FrontendController>,
     ) -> Self {
-        self.supervisor_command_dispatcher = Some(dispatcher);
-        self
-    }
-
-    pub fn with_ticket_picker_provider(mut self, provider: Arc<dyn TicketPickerProvider>) -> Self {
-        self.ticket_picker_provider = Some(provider);
-        self
-    }
-
-    pub fn with_worker_backend(mut self, backend: Arc<dyn WorkerBackend>) -> Self {
-        self.worker_backend = Some(backend);
+        self.frontend_controller = Some(controller);
         self
     }
 
@@ -61,18 +40,25 @@ impl Ui {
         let mut shell_state = UiShellState::new_with_integrations(
             status.to_owned(),
             projection.clone(),
-            self.supervisor_provider.clone(),
-            self.supervisor_command_dispatcher.clone(),
-            self.ticket_picker_provider.clone(),
-            self.worker_backend.clone(),
+            None,
+            None,
+            None,
+            None,
         );
+        shell_state.set_frontend_controller(self.frontend_controller.clone());
+        shell_state.set_frontend_terminal_streaming_enabled(self.frontend_controller.is_some());
         let mut force_draw = true;
         let mut last_animation_frame = Instant::now();
         let mut last_full_redraw_at = Instant::now();
         let mut cached_ui_state: Option<UiState> = None;
+        let mut frontend_event_receiver =
+            spawn_frontend_event_bridge(self.frontend_controller.clone());
         loop {
             let now = Instant::now();
             let mut changed = false;
+            changed |= shell_state.poll_frontend_events_and_report(
+                frontend_event_receiver.as_mut(),
+            );
             changed |= shell_state.drain_async_events_and_report();
             changed |= shell_state.run_due_periodic_tasks_and_report(now);
             changed |= shell_state.maintain_active_terminal_view_and_report();
@@ -428,12 +414,14 @@ impl Ui {
             }
 
             force_draw = false;
+            const BUSY_EVENT_SCAN_INTERVAL: Duration = Duration::from_millis(50);
+            const IDLE_EVENT_SCAN_INTERVAL: Duration = Duration::from_millis(100);
             let event_scan_interval = if matches!(animation_state, AnimationState::ActiveTurn)
                 || shell_state.has_pending_async_activity()
             {
-                Duration::from_millis(50)
+                BUSY_EVENT_SCAN_INTERVAL
             } else {
-                Duration::from_secs(1)
+                IDLE_EVENT_SCAN_INTERVAL
             };
             let full_redraw_deadline = last_full_redraw_at + full_redraw_interval;
             let wake_deadline =
@@ -449,18 +437,98 @@ impl Ui {
                 None => event_scan_interval,
             };
             if event::poll(poll_timeout)? {
-                if let Event::Key(key) = event::read()? {
-                    shell_state.invalidate_draw_caches();
-                    if key.kind == KeyEventKind::Press && handle_key_press(&mut shell_state, key) {
-                        break;
+                match event::read()? {
+                    Event::Key(key) => {
+                        shell_state.invalidate_draw_caches();
+                        if key.kind == KeyEventKind::Press && handle_key_press(&mut shell_state, key)
+                        {
+                            break;
+                        }
+                        force_draw = true;
+                        cached_ui_state = None;
                     }
-                    force_draw = true;
-                    cached_ui_state = None;
+                    _ => {
+                        force_draw = true;
+                        cached_ui_state = None;
+                    }
                 }
             }
         }
 
         Ok(())
+    }
+}
+
+fn spawn_frontend_event_bridge(
+    controller: Option<Arc<dyn FrontendController>>,
+) -> Option<mpsc::Receiver<FrontendEvent>> {
+    let controller = controller?;
+    let (sender, receiver) = mpsc::channel(128);
+    match TokioHandle::try_current() {
+        Ok(runtime) => {
+            runtime.spawn(async move {
+                match controller.snapshot().await {
+                    Ok(snapshot) => {
+                        let _ = sender.send(FrontendEvent::SnapshotUpdated(snapshot)).await;
+                    }
+                    Err(error) => {
+                        let _ = sender
+                            .send(FrontendEvent::Notification(FrontendNotification {
+                                level: FrontendNotificationLevel::Warning,
+                                message: sanitize_terminal_display_text(
+                                    format!("frontend snapshot unavailable: {error}").as_str(),
+                                ),
+                                work_item_id: None,
+                                session_id: None,
+                            }))
+                            .await;
+                    }
+                }
+
+                let mut stream = match controller.subscribe().await {
+                    Ok(stream) => stream,
+                    Err(error) => {
+                        let _ = sender
+                            .send(FrontendEvent::Notification(FrontendNotification {
+                                level: FrontendNotificationLevel::Warning,
+                                message: sanitize_terminal_display_text(
+                                    format!("frontend subscription unavailable: {error}").as_str(),
+                                ),
+                                work_item_id: None,
+                                session_id: None,
+                            }))
+                            .await;
+                        return;
+                    }
+                };
+
+                loop {
+                    match stream.next_event().await {
+                        Ok(Some(event)) => {
+                            if sender.send(event).await.is_err() {
+                                break;
+                            }
+                        }
+                        Ok(None) => break,
+                        Err(error) => {
+                            let _ = sender
+                                .send(FrontendEvent::Notification(FrontendNotification {
+                                    level: FrontendNotificationLevel::Warning,
+                                    message: sanitize_terminal_display_text(
+                                        format!("frontend subscription failed: {error}").as_str(),
+                                    ),
+                                    work_item_id: None,
+                                    session_id: None,
+                                }))
+                                .await;
+                            break;
+                        }
+                    }
+                }
+            });
+            Some(receiver)
+        }
+        Err(_) => None,
     }
 }
 
