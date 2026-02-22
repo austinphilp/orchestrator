@@ -4,12 +4,13 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use orchestrator_worker_eventbus::{
-    WorkerEventBus, WorkerEventBusPerfSnapshot, WorkerGlobalEventSubscription,
-    WorkerSessionEventSubscription,
+    WorkerEventBus, WorkerEventBusConfig, WorkerEventBusPerfSnapshot, WorkerEventEnvelope,
+    WorkerGlobalEventSubscription, WorkerSessionEventSubscription, DEFAULT_GLOBAL_BUFFER_CAPACITY,
+    DEFAULT_SESSION_BUFFER_CAPACITY,
 };
 use orchestrator_worker_lifecycle::{
-    WorkerLifecycle, WorkerLifecycleBackend, WorkerLifecycleSummary, WorkerSessionState,
-    WorkerSessionVisibility,
+    WorkerLifecycle, WorkerLifecycleBackend, WorkerLifecyclePerfSnapshot, WorkerLifecycleSummary,
+    WorkerSessionState, WorkerSessionVisibility,
 };
 use orchestrator_worker_protocol::backend::{WorkerBackendCapabilities, WorkerBackendKind};
 use orchestrator_worker_protocol::error::WorkerRuntimeResult;
@@ -26,11 +27,71 @@ use tokio::task::JoinHandle;
 const DEFAULT_CHECKPOINT_PROMPT_INTERVAL_SECS: u64 = 120;
 const DEFAULT_CHECKPOINT_PROMPT_MESSAGE: &str = "Emit a checkpoint now.";
 
+pub trait WorkerRuntimeBackend: WorkerLifecycleBackend {}
+
+impl<T> WorkerRuntimeBackend for T where T: WorkerLifecycleBackend + ?Sized {}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkerRuntimePerfSnapshot {
+    pub lifecycle: WorkerLifecyclePerfSnapshot,
     pub eventbus: WorkerEventBusPerfSnapshot,
     pub scheduler: WorkerSchedulerPerfSnapshot,
-    pub active_stream_ingestion_tasks: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkerRuntimeEventEnvelope {
+    pub session_id: WorkerSessionId,
+    pub sequence: u64,
+    pub received_at_monotonic_nanos: u64,
+    pub event: WorkerEvent,
+}
+
+impl From<WorkerEventEnvelope> for WorkerRuntimeEventEnvelope {
+    fn from(value: WorkerEventEnvelope) -> Self {
+        Self {
+            session_id: value.session_id,
+            sequence: value.sequence,
+            received_at_monotonic_nanos: value.received_at_monotonic_nanos,
+            event: value.event,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkerRuntimeConfig {
+    pub session_event_buffer: usize,
+    pub global_event_buffer: usize,
+    pub scheduler: WorkerRuntimeSchedulerConfig,
+}
+
+impl Default for WorkerRuntimeConfig {
+    fn default() -> Self {
+        Self {
+            session_event_buffer: DEFAULT_SESSION_BUFFER_CAPACITY,
+            global_event_buffer: DEFAULT_GLOBAL_BUFFER_CAPACITY,
+            scheduler: WorkerRuntimeSchedulerConfig::default(),
+        }
+    }
+}
+
+pub struct WorkerRuntimeSessionSubscription {
+    inner: WorkerSessionEventSubscription,
+}
+
+impl WorkerRuntimeSessionSubscription {
+    pub async fn next_event(&mut self) -> Option<WorkerRuntimeEventEnvelope> {
+        self.inner.next_event().await.map(Into::into)
+    }
+}
+
+pub struct WorkerRuntimeGlobalSubscription {
+    inner: WorkerGlobalEventSubscription,
+}
+
+impl WorkerRuntimeGlobalSubscription {
+    pub async fn next_event(&mut self) -> Option<WorkerRuntimeEventEnvelope> {
+        self.inner.next_event().await.map(Into::into)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -88,18 +149,25 @@ pub struct WorkerRuntime {
 }
 
 impl WorkerRuntime {
-    pub fn new(backend: Arc<dyn WorkerLifecycleBackend>) -> Self {
+    pub fn new(backend: Arc<dyn WorkerRuntimeBackend>) -> Self {
+        Self::with_config(backend, WorkerRuntimeConfig::default())
+    }
+
+    pub fn with_config(
+        backend: Arc<dyn WorkerRuntimeBackend>,
+        config: WorkerRuntimeConfig,
+    ) -> Self {
         Self::with_eventbus_and_scheduler_config(
             backend,
-            WorkerEventBus::default(),
-            WorkerRuntimeSchedulerConfig::default(),
+            WorkerEventBus::new(WorkerEventBusConfig {
+                session_buffer_capacity: config.session_event_buffer.max(1),
+                global_buffer_capacity: config.global_event_buffer.max(1),
+            }),
+            config.scheduler,
         )
     }
 
-    pub fn with_eventbus(
-        backend: Arc<dyn WorkerLifecycleBackend>,
-        eventbus: WorkerEventBus,
-    ) -> Self {
+    pub fn with_eventbus(backend: Arc<dyn WorkerRuntimeBackend>, eventbus: WorkerEventBus) -> Self {
         Self::with_eventbus_and_scheduler_config(
             backend,
             eventbus,
@@ -108,10 +176,11 @@ impl WorkerRuntime {
     }
 
     pub fn with_eventbus_and_scheduler_config(
-        backend: Arc<dyn WorkerLifecycleBackend>,
+        backend: Arc<dyn WorkerRuntimeBackend>,
         eventbus: WorkerEventBus,
         scheduler_config: WorkerRuntimeSchedulerConfig,
     ) -> Self {
+        let backend: Arc<dyn WorkerLifecycleBackend> = backend;
         let eventbus = Arc::new(eventbus);
         let lifecycle = WorkerLifecycle::new(backend, Arc::clone(&eventbus));
         let scheduler = WorkerScheduler::new(lifecycle.clone());
@@ -236,12 +305,17 @@ impl WorkerRuntime {
     pub async fn subscribe_session(
         &self,
         session_id: &WorkerSessionId,
-    ) -> WorkerRuntimeResult<WorkerSessionEventSubscription> {
-        self.lifecycle.subscribe_session(session_id).await
+    ) -> WorkerRuntimeResult<WorkerRuntimeSessionSubscription> {
+        let subscription = self.lifecycle.subscribe_session(session_id).await?;
+        Ok(WorkerRuntimeSessionSubscription {
+            inner: subscription,
+        })
     }
 
-    pub fn subscribe_all(&self) -> WorkerGlobalEventSubscription {
-        self.eventbus.subscribe_all()
+    pub fn subscribe_all(&self) -> WorkerRuntimeGlobalSubscription {
+        WorkerRuntimeGlobalSubscription {
+            inner: self.eventbus.subscribe_all(),
+        }
     }
 
     pub fn scheduler(&self) -> &WorkerScheduler {
@@ -255,14 +329,11 @@ impl WorkerRuntime {
     }
 
     pub async fn perf_snapshot(&self) -> WorkerRuntimePerfSnapshot {
+        let lifecycle = self.lifecycle.perf_snapshot().await;
         WorkerRuntimePerfSnapshot {
+            lifecycle,
             eventbus: self.eventbus.perf_snapshot(),
             scheduler: self.scheduler.perf_snapshot(),
-            active_stream_ingestion_tasks: self
-                .lifecycle
-                .task_snapshot()
-                .await
-                .active_stream_ingestion_tasks,
         }
     }
 }
@@ -561,6 +632,44 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn runtime_global_subscription_exposes_runtime_envelope_shape() {
+        let backend = Arc::new(MockBackend::default());
+        let runtime = WorkerRuntime::with_eventbus_and_scheduler_config(
+            backend.clone(),
+            WorkerEventBus::default(),
+            WorkerRuntimeSchedulerConfig {
+                checkpoint_prompt_interval: None,
+                checkpoint_prompt_message: "Emit a checkpoint now.".to_owned(),
+            },
+        );
+        let mut global_subscription = runtime.subscribe_all();
+        let handle = runtime
+            .spawn(spawn_request("runtime-global-envelope"))
+            .await
+            .expect("spawn session");
+
+        backend.emit_event(
+            &handle.session_id,
+            WorkerEvent::Output(WorkerOutputEvent {
+                stream: WorkerOutputStream::Stdout,
+                bytes: b"global-envelope".to_vec(),
+            }),
+        );
+
+        let envelope = timeout(Duration::from_secs(2), global_subscription.next_event())
+            .await
+            .expect("global subscription timeout")
+            .expect("global subscription event");
+        assert_eq!(envelope.session_id, handle.session_id);
+        assert_eq!(envelope.sequence, 1);
+        assert!(envelope.received_at_monotonic_nanos > 0);
+        match envelope.event {
+            WorkerEvent::Output(output) => assert_eq!(output.bytes, b"global-envelope"),
+            other => panic!("expected output event, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
     async fn runtime_focus_visibility_controls_follow_lifecycle_state() {
         let backend = Arc::new(MockBackend::default());
         let runtime = WorkerRuntime::new(backend.clone());
@@ -646,6 +755,10 @@ mod tests {
             .expect("spawn session");
         wait_for_sent_input_count(&backend, &handle.session_id, 1).await;
         let snapshot = runtime.perf_snapshot().await;
+        assert_eq!(snapshot.lifecycle.spawn_requests_total, 1);
+        assert_eq!(snapshot.lifecycle.spawn_success_total, 1);
+        assert_eq!(snapshot.lifecycle.running_sessions, 1);
+        assert_eq!(snapshot.lifecycle.active_stream_ingestion_tasks, 1);
         assert!(snapshot.scheduler.task_dispatches_total >= 1);
         assert!(snapshot.scheduler.checkpoint_send_attempts_total >= 1);
         assert_eq!(runtime.scheduler().task_count(), 1);
@@ -668,6 +781,14 @@ mod tests {
         })
         .await
         .expect("timed out waiting for scheduler task cancellation");
+
+        let terminal_snapshot = runtime.perf_snapshot().await;
+        assert_eq!(terminal_snapshot.lifecycle.done_sessions, 1);
+        assert_eq!(terminal_snapshot.lifecycle.active_stream_ingestion_tasks, 0);
+        assert_eq!(
+            terminal_snapshot.lifecycle.terminal_transitions_done_total,
+            1
+        );
     }
 
     #[tokio::test]

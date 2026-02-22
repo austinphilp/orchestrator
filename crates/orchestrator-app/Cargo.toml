@@ -17,8 +17,6 @@ orchestrator-github = { path = "../orchestrator-github" }
 orchestrator-supervisor = { path = "../orchestrator-supervisor" }
 orchestrator-ui = { path = "../orchestrator-ui" }
 orchestrator-worker-protocol = { path = "../orchestrator-worker-protocol" }
-orchestrator-worker-eventbus = { path = "../orchestrator-worker-eventbus" }
-orchestrator-worker-lifecycle = { path = "../orchestrator-worker-lifecycle" }
 orchestrator-worker-runtime = { path = "../orchestrator-worker-runtime" }
 serde.workspace = true
 serde_json.workspace = true

@@ -4,7 +4,10 @@ pub mod controller;
 pub mod registry;
 pub mod state;
 
-pub use controller::{WorkerLifecycle, WorkerLifecycleBackend, WorkerLifecycleTaskSnapshot};
+pub use controller::{
+    WorkerLifecycle, WorkerLifecycleBackend, WorkerLifecyclePerfSnapshot,
+    WorkerLifecycleTaskSnapshot,
+};
 pub use registry::{
     WorkerLifecycleRegistry, WorkerLifecycleSnapshot, WorkerLifecycleSummary,
     WorkerTerminalTransition,

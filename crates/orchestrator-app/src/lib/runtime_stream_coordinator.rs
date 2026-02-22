@@ -7,15 +7,14 @@ mod runtime_stream_coordinator {
         SessionLifecycle, SpawnSpec, WorkerBackend, WorkerEventStream, WorkerEventSubscription,
         WorkerManagerConfig,
     };
-    use orchestrator_worker_eventbus::{
-        WorkerEventBus, WorkerEventBusConfig, WorkerSessionEventSubscription,
-    };
-    use orchestrator_worker_lifecycle::WorkerLifecycleBackend;
     use orchestrator_worker_protocol::backend::{
         WorkerBackendInfo, WorkerSessionControl, WorkerSessionStreamSource,
     };
     use orchestrator_worker_protocol::event::WorkerNeedsInputAnswer as BackendNeedsInputAnswer;
-    use orchestrator_worker_runtime::{WorkerRuntime, WorkerRuntimeSchedulerConfig};
+    use orchestrator_worker_runtime::{
+        WorkerRuntime, WorkerRuntimeBackend, WorkerRuntimeConfig, WorkerRuntimeSchedulerConfig,
+        WorkerRuntimeSessionSubscription,
+    };
 
     #[derive(Clone)]
     pub struct WorkerManagerBackend {
@@ -32,18 +31,17 @@ mod runtime_stream_coordinator {
             backend: Arc<dyn WorkerBackend + Send + Sync>,
             config: WorkerManagerConfig,
         ) -> Self {
-            let runtime_backend: Arc<dyn WorkerLifecycleBackend> =
+            let runtime_backend: Arc<dyn WorkerRuntimeBackend> =
                 Arc::new(WorkerBackendProtocolAdapter::new(backend.clone()));
-            let eventbus = WorkerEventBus::new(WorkerEventBusConfig {
-                session_buffer_capacity: config.session_event_buffer.max(1),
-                global_buffer_capacity: config.global_event_buffer.max(1),
-            });
-            let runtime = Arc::new(WorkerRuntime::with_eventbus_and_scheduler_config(
+            let runtime = Arc::new(WorkerRuntime::with_config(
                 runtime_backend,
-                eventbus,
-                WorkerRuntimeSchedulerConfig {
-                    checkpoint_prompt_interval: config.checkpoint_prompt_interval,
-                    checkpoint_prompt_message: config.checkpoint_prompt_message,
+                WorkerRuntimeConfig {
+                    session_event_buffer: config.session_event_buffer,
+                    global_event_buffer: config.global_event_buffer,
+                    scheduler: WorkerRuntimeSchedulerConfig {
+                        checkpoint_prompt_interval: config.checkpoint_prompt_interval,
+                        checkpoint_prompt_message: config.checkpoint_prompt_message,
+                    },
                 },
             ));
             Self { runtime, backend }
@@ -138,13 +136,17 @@ mod runtime_stream_coordinator {
     }
 
     struct WorkerRuntimeSessionStream {
-        subscription: WorkerSessionEventSubscription,
+        subscription: WorkerRuntimeSessionSubscription,
     }
 
     #[async_trait]
     impl WorkerEventSubscription for WorkerRuntimeSessionStream {
         async fn next_event(&mut self) -> RuntimeResult<Option<BackendEvent>> {
-            Ok(self.subscription.next_event().await.map(|envelope| envelope.event))
+            Ok(self
+                .subscription
+                .next_event()
+                .await
+                .map(|envelope| envelope.event))
         }
     }
 
@@ -213,7 +215,9 @@ mod runtime_stream_coordinator {
         use std::time::Duration;
 
         use async_trait::async_trait;
-        use orchestrator_core::{BackendOutputEvent, BackendOutputStream, RuntimeError, RuntimeSessionId};
+        use orchestrator_core::{
+            BackendOutputEvent, BackendOutputStream, RuntimeError, RuntimeSessionId,
+        };
         use tokio::sync::mpsc;
         use tokio::time::timeout;
 
@@ -484,7 +488,10 @@ mod runtime_stream_coordinator {
                 .expect("respond needs input");
             coordinator.kill(&handle).await.expect("kill session");
 
-            assert_eq!(backend.sent_input(&handle.session_id), vec![b"resume".to_vec()]);
+            assert_eq!(
+                backend.sent_input(&handle.session_id),
+                vec![b"resume".to_vec()]
+            );
             assert_eq!(
                 backend.needs_input_responses(&handle.session_id),
                 vec![(

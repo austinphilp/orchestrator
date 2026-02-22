@@ -1457,8 +1457,6 @@ dependencies = [
  "orchestrator-github",
  "orchestrator-supervisor",
  "orchestrator-ui",
- "orchestrator-worker-eventbus",
- "orchestrator-worker-lifecycle",
  "orchestrator-worker-protocol",
  "orchestrator-worker-runtime",
  "r2d2",
