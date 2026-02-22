@@ -3,11 +3,12 @@ mod runtime_stream_coordinator {
 
     use async_trait::async_trait;
     use orchestrator_core::{
-        BackendCapabilities, BackendEvent, BackendKind, BackendNeedsInputAnswer,
-        ManagedSessionStatus, RuntimeError, RuntimeResult, RuntimeSessionId,
-        SessionEventSubscription, SessionHandle, SessionLifecycle, SpawnSpec, WorkerBackend,
-        WorkerEventStream, WorkerEventSubscription, WorkerManager, WorkerManagerConfig,
+        BackendCapabilities, BackendEvent, BackendKind, ManagedSessionStatus, RuntimeError,
+        RuntimeResult, RuntimeSessionId, SessionEventSubscription, SessionHandle,
+        SessionLifecycle, SpawnSpec, WorkerBackend, WorkerEventStream, WorkerEventSubscription,
+        WorkerManager, WorkerManagerConfig,
     };
+    use orchestrator_worker_protocol::WorkerNeedsInputAnswer as BackendNeedsInputAnswer;
 
     #[derive(Clone)]
     pub struct WorkerManagerBackend {

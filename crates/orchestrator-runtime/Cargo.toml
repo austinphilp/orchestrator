@@ -7,8 +7,8 @@ license.workspace = true
 
 [dependencies]
 async-trait.workspace = true
+orchestrator-worker-protocol = { path = "../orchestrator-worker-protocol" }
 serde.workspace = true
-thiserror.workspace = true
 tokio.workspace = true
 
 [dev-dependencies]

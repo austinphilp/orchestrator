@@ -18,11 +18,16 @@ mod tests {
         TicketProvider, UserRespondedPayload, WorkItemProjection, WorkflowTransitionPayload,
         WorkflowTransitionReason, WorkflowState,
     };
-    use orchestrator_runtime::{
-        BackendCapabilities, BackendEvent, BackendKind, BackendNeedsInputEvent,
-        BackendNeedsInputOption, BackendNeedsInputQuestion, BackendOutputEvent,
-        BackendOutputStream, BackendTurnStateEvent, RuntimeResult, RuntimeSessionId,
-        SessionHandle, SessionLifecycle, SpawnSpec, WorkerEventStream,
+    use orchestrator_runtime::{SessionLifecycle, WorkerEventStream};
+    use orchestrator_worker_protocol::{
+        WorkerBackendCapabilities as BackendCapabilities, WorkerBackendKind as BackendKind,
+        WorkerEvent as BackendEvent, WorkerNeedsInputEvent as BackendNeedsInputEvent,
+        WorkerNeedsInputOption as BackendNeedsInputOption,
+        WorkerNeedsInputQuestion as BackendNeedsInputQuestion,
+        WorkerOutputEvent as BackendOutputEvent, WorkerOutputStream as BackendOutputStream,
+        WorkerRuntimeResult as RuntimeResult, WorkerSessionHandle as SessionHandle,
+        WorkerSessionId as RuntimeSessionId, WorkerSpawnRequest as SpawnSpec,
+        WorkerTurnStateEvent as BackendTurnStateEvent,
     };
     use std::collections::VecDeque;
     use std::sync::{Arc, Mutex};

@@ -1,7 +1,7 @@
-//! Shared worker runtime protocol scaffold.
+//! Shared worker runtime protocol contracts.
 //!
-//! This crate is intentionally minimal in RRP26 A01 and only establishes
-//! crate/module boundaries for follow-on implementation phases.
+//! This crate owns canonical worker protocol IDs, events, runtime errors/results,
+//! session request/handle types, and backend trait contracts.
 
 pub mod backend;
 pub mod error;
@@ -9,14 +9,28 @@ pub mod event;
 pub mod ids;
 pub mod session;
 
+pub use backend::{
+    WorkerBackendCapabilities, WorkerBackendInfo, WorkerBackendKind, WorkerEventStream,
+    WorkerEventSubscription, WorkerSessionControl, WorkerSessionStreamSource,
+};
+pub use error::{WorkerRuntimeError, WorkerRuntimeResult};
+pub use event::{
+    WorkerArtifactEvent, WorkerArtifactKind, WorkerBlockedEvent, WorkerCheckpointEvent,
+    WorkerCrashedEvent, WorkerDoneEvent, WorkerEvent, WorkerNeedsInputAnswer,
+    WorkerNeedsInputEvent, WorkerNeedsInputOption, WorkerNeedsInputQuestion, WorkerOutputEvent,
+    WorkerOutputStream, WorkerTurnStateEvent,
+};
+pub use ids::{WorkerArtifactId, WorkerSessionId};
+pub use session::{WorkerSessionHandle, WorkerSpawnRequest};
+
 #[cfg(test)]
 mod tests {
     use async_trait::async_trait;
 
-    use crate::backend::{WorkerBackendKind, WorkerEventStream, WorkerEventSubscription};
-    use crate::error::WorkerRuntimeResult;
-    use crate::event::WorkerEvent;
-    use crate::ids::WorkerSessionId;
+    use crate::{
+        WorkerBackendKind, WorkerEvent, WorkerEventStream, WorkerEventSubscription,
+        WorkerRuntimeError, WorkerRuntimeResult, WorkerSessionId,
+    };
 
     struct EmptyWorkerEventSubscription;
 
@@ -52,5 +66,17 @@ mod tests {
     #[test]
     fn worker_event_stream_alias_accepts_trait_objects() {
         let _stream: WorkerEventStream = Box::new(EmptyWorkerEventSubscription);
+    }
+
+    #[test]
+    fn runtime_error_display_format_matches_legacy_runtime_wording() {
+        assert_eq!(
+            WorkerRuntimeError::Configuration("bad config".to_owned()).to_string(),
+            "runtime configuration error: bad config"
+        );
+        assert_eq!(
+            WorkerRuntimeError::Protocol("bad payload".to_owned()).to_string(),
+            "runtime protocol error: bad payload"
+        );
     }
 }

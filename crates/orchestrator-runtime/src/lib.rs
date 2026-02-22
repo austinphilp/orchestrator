@@ -4,227 +4,38 @@
 //! must land in the `orchestrator-worker-*` crates instead.
 
 use async_trait::async_trait;
-use serde::{Deserialize, Serialize};
-use thiserror::Error;
 
 mod worker_manager;
-use std::path::PathBuf;
 pub use worker_manager::{
     ManagedSessionStatus, ManagedSessionSummary, SessionEventSubscription, SessionVisibility,
     WorkerManager, WorkerManagerConfig, WorkerManagerEvent, WorkerManagerEventSubscription,
     WorkerManagerPerfSessionSnapshot, WorkerManagerPerfSnapshot, WorkerManagerPerfTotals,
 };
 
-macro_rules! runtime_string_id {
-    ($name:ident) => {
-        #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-        pub struct $name(String);
-
-        impl $name {
-            pub fn new(value: impl Into<String>) -> Self {
-                Self(value.into())
-            }
-
-            pub fn as_str(&self) -> &str {
-                &self.0
-            }
-        }
-
-        impl From<String> for $name {
-            fn from(value: String) -> Self {
-                Self(value)
-            }
-        }
-
-        impl From<&str> for $name {
-            fn from(value: &str) -> Self {
-                Self(value.to_owned())
-            }
-        }
-    };
-}
-
-#[derive(Debug, Error)]
-pub enum RuntimeError {
-    #[error("runtime configuration error: {0}")]
-    Configuration(String),
-    #[error("runtime dependency unavailable: {0}")]
-    DependencyUnavailable(String),
-    #[error("runtime session not found: {0}")]
-    SessionNotFound(String),
-    #[error("runtime process error: {0}")]
-    Process(String),
-    #[error("runtime protocol error: {0}")]
-    Protocol(String),
-    #[error("runtime internal error: {0}")]
-    Internal(String),
-}
-
-pub type RuntimeResult<T> = Result<T, RuntimeError>;
-
-runtime_string_id!(RuntimeSessionId);
-runtime_string_id!(RuntimeArtifactId);
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum BackendKind {
-    OpenCode,
-    Codex,
-    ClaudeCode,
-    Other(String),
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
-pub struct BackendCapabilities {
-    pub structured_events: bool,
-    pub session_export: bool,
-    pub diff_provider: bool,
-    pub supports_background: bool,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SpawnSpec {
-    pub session_id: RuntimeSessionId,
-    pub workdir: PathBuf,
-    pub model: Option<String>,
-    pub instruction_prelude: Option<String>,
-    pub environment: Vec<(String, String)>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SessionHandle {
-    pub session_id: RuntimeSessionId,
-    pub backend: BackendKind,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum BackendOutputStream {
-    Stdout,
-    Stderr,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct BackendOutputEvent {
-    pub stream: BackendOutputStream,
-    pub bytes: Vec<u8>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct BackendCheckpointEvent {
-    pub summary: String,
-    pub detail: Option<String>,
-    pub file_refs: Vec<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct BackendNeedsInputOption {
-    pub label: String,
-    pub description: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct BackendNeedsInputQuestion {
-    pub id: String,
-    pub header: String,
-    pub question: String,
-    pub is_other: bool,
-    pub is_secret: bool,
-    pub options: Option<Vec<BackendNeedsInputOption>>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct BackendNeedsInputEvent {
-    pub prompt_id: String,
-    pub question: String,
-    pub options: Vec<String>,
-    pub default_option: Option<String>,
-    #[serde(default)]
-    pub questions: Vec<BackendNeedsInputQuestion>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct BackendNeedsInputAnswer {
-    pub question_id: String,
-    pub answers: Vec<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct BackendBlockedEvent {
-    pub reason: String,
-    pub hint: Option<String>,
-    pub log_ref: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum BackendArtifactKind {
-    Diff,
-    PullRequest,
-    TestRun,
-    LogSnippet,
-    Link,
-    SessionExport,
-    Other(String),
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct BackendArtifactEvent {
-    pub kind: BackendArtifactKind,
-    pub artifact_id: Option<RuntimeArtifactId>,
-    pub label: Option<String>,
-    pub uri: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct BackendDoneEvent {
-    pub summary: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct BackendTurnStateEvent {
-    pub active: bool,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct BackendCrashedEvent {
-    pub reason: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum BackendEvent {
-    Output(BackendOutputEvent),
-    Checkpoint(BackendCheckpointEvent),
-    NeedsInput(BackendNeedsInputEvent),
-    Blocked(BackendBlockedEvent),
-    Artifact(BackendArtifactEvent),
-    TurnState(BackendTurnStateEvent),
-    Done(BackendDoneEvent),
-    Crashed(BackendCrashedEvent),
-}
-
-#[async_trait]
-pub trait WorkerEventSubscription: Send {
-    async fn next_event(&mut self) -> RuntimeResult<Option<BackendEvent>>;
-}
-
-pub type WorkerEventStream = Box<dyn WorkerEventSubscription>;
-
-#[async_trait]
-pub trait SessionLifecycle: Send + Sync {
-    async fn spawn(&self, spec: SpawnSpec) -> RuntimeResult<SessionHandle>;
-    async fn kill(&self, session: &SessionHandle) -> RuntimeResult<()>;
-    async fn send_input(&self, session: &SessionHandle, input: &[u8]) -> RuntimeResult<()>;
-    async fn respond_to_needs_input(
-        &self,
-        session: &SessionHandle,
-        prompt_id: &str,
-        answers: &[BackendNeedsInputAnswer],
-    ) -> RuntimeResult<()> {
-        let _ = (session, prompt_id, answers);
-        Err(RuntimeError::Protocol(
-            "needs-input responses are not supported by this backend".to_owned(),
-        ))
-    }
-    async fn resize(&self, session: &SessionHandle, cols: u16, rows: u16) -> RuntimeResult<()>;
-}
+pub use orchestrator_worker_protocol::backend::{
+    WorkerBackendCapabilities as BackendCapabilities, WorkerBackendInfo,
+    WorkerBackendKind as BackendKind, WorkerEventStream, WorkerEventSubscription,
+    WorkerSessionControl as SessionLifecycle, WorkerSessionStreamSource,
+};
+pub use orchestrator_worker_protocol::error::{
+    WorkerRuntimeError as RuntimeError, WorkerRuntimeResult as RuntimeResult,
+};
+pub use orchestrator_worker_protocol::event::{
+    WorkerArtifactEvent as BackendArtifactEvent, WorkerArtifactKind as BackendArtifactKind,
+    WorkerBlockedEvent as BackendBlockedEvent, WorkerCheckpointEvent as BackendCheckpointEvent,
+    WorkerCrashedEvent as BackendCrashedEvent, WorkerDoneEvent as BackendDoneEvent,
+    WorkerEvent as BackendEvent, WorkerNeedsInputAnswer as BackendNeedsInputAnswer,
+    WorkerNeedsInputEvent as BackendNeedsInputEvent,
+    WorkerNeedsInputOption as BackendNeedsInputOption,
+    WorkerNeedsInputQuestion as BackendNeedsInputQuestion, WorkerOutputEvent as BackendOutputEvent,
+    WorkerOutputStream as BackendOutputStream, WorkerTurnStateEvent as BackendTurnStateEvent,
+};
+pub use orchestrator_worker_protocol::ids::{
+    WorkerArtifactId as RuntimeArtifactId, WorkerSessionId as RuntimeSessionId,
+};
+pub use orchestrator_worker_protocol::session::{
+    WorkerSessionHandle as SessionHandle, WorkerSpawnRequest as SpawnSpec,
+};
 
 #[async_trait]
 pub trait WorkerBackend: SessionLifecycle + Send + Sync {
@@ -274,5 +85,39 @@ mod tests {
     #[test]
     fn worker_event_stream_alias_accepts_trait_objects() {
         let _stream: WorkerEventStream = Box::new(EmptyWorkerStream);
+    }
+
+    #[test]
+    fn runtime_aliases_round_trip_with_worker_protocol_json() {
+        let protocol_session = orchestrator_worker_protocol::WorkerSessionId::new("sess-interop");
+        let runtime_session: RuntimeSessionId = serde_json::from_str(
+            &serde_json::to_string(&protocol_session).expect("serialize protocol session id"),
+        )
+        .expect("deserialize runtime session id");
+        assert_eq!(runtime_session.as_str(), "sess-interop");
+
+        let protocol_event = orchestrator_worker_protocol::WorkerEvent::Done(
+            orchestrator_worker_protocol::WorkerDoneEvent {
+                summary: Some("finished".to_owned()),
+            },
+        );
+        let runtime_event: BackendEvent = serde_json::from_str(
+            &serde_json::to_string(&protocol_event).expect("serialize protocol event"),
+        )
+        .expect("deserialize runtime event");
+        assert_eq!(
+            runtime_event,
+            BackendEvent::Done(BackendDoneEvent {
+                summary: Some("finished".to_owned()),
+            })
+        );
+    }
+
+    #[test]
+    fn runtime_error_display_wording_is_stable() {
+        assert_eq!(
+            RuntimeError::Process("boom".to_owned()).to_string(),
+            "runtime process error: boom"
+        );
     }
 }

@@ -3924,7 +3924,7 @@ impl UiShellState {
                     event
                         .options
                         .into_iter()
-                        .map(|label| orchestrator_runtime::BackendNeedsInputOption {
+                        .map(|label| BackendNeedsInputOption {
                             label,
                             description: String::new(),
                         })

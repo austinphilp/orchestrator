@@ -1455,6 +1455,7 @@ dependencies = [
  "orchestrator-github",
  "orchestrator-supervisor",
  "orchestrator-ui",
+ "orchestrator-worker-protocol",
  "r2d2",
  "r2d2_sqlite",
  "serde",
@@ -1495,9 +1496,9 @@ name = "orchestrator-runtime"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "orchestrator-worker-protocol",
  "serde",
  "serde_json",
- "thiserror 2.0.18",
  "tokio",
 ]
 
@@ -1521,6 +1522,7 @@ dependencies = [
  "edtui",
  "orchestrator-core",
  "orchestrator-runtime",
+ "orchestrator-worker-protocol",
  "ratatui",
  "ratatui-interact",
  "ratskin",

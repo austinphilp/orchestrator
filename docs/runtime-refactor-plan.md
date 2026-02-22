@@ -5,6 +5,7 @@
 - Scope: planning/spec document
 - Decision: replace `crates/orchestrator-runtime` entirely (no compatibility shim)
 - Implementation update (RRP26 A01): scaffold crates added for `orchestrator-worker-protocol`, `orchestrator-worker-lifecycle`, `orchestrator-worker-eventbus`, `orchestrator-worker-scheduler`, and `orchestrator-worker-runtime`; protocol/event/error trait boundaries and minimal registry/scheduler/event envelope scaffolds are in place; `crates/orchestrator-runtime` is feature-frozen.
+- Implementation update (RRP26 A02): canonical worker protocol IDs/events/errors/session+backend trait contracts are owned by `orchestrator-worker-protocol`; `orchestrator-runtime` re-exports compatibility aliases for existing consumers while protocol imports are adopted downstream where feasible.
 
 ## Why This Refactor
 `orchestrator-runtime` currently combines too many concerns:

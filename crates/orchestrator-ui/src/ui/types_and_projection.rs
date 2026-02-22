@@ -26,10 +26,14 @@ use orchestrator_core::{
     SupervisorQueryContextArgs, TicketId, TicketSummary, UntypedCommandInvocation, WorkItemId,
     WorkerSessionId, WorkerSessionStatus, WorkflowState,
 };
-use orchestrator_runtime::{
-    BackendKind, BackendNeedsInputAnswer, BackendNeedsInputEvent, BackendNeedsInputOption,
-    BackendNeedsInputQuestion, BackendOutputEvent, BackendTurnStateEvent, RuntimeError,
-    RuntimeResult, WorkerBackend,
+use orchestrator_runtime::WorkerBackend;
+use orchestrator_worker_protocol::{
+    WorkerBackendKind as BackendKind, WorkerNeedsInputAnswer as BackendNeedsInputAnswer,
+    WorkerNeedsInputEvent as BackendNeedsInputEvent,
+    WorkerNeedsInputOption as BackendNeedsInputOption,
+    WorkerNeedsInputQuestion as BackendNeedsInputQuestion,
+    WorkerOutputEvent as BackendOutputEvent, WorkerRuntimeError as RuntimeError,
+    WorkerRuntimeResult as RuntimeResult, WorkerTurnStateEvent as BackendTurnStateEvent,
 };
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Layout, Rect};
