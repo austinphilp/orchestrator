@@ -3069,7 +3069,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn autopilot_tick_does_not_auto_advance_or_archive_sessions() {
+    async fn autopilot_tick_advances_idle_implementing_and_archives_done_sessions() {
         let provider = Arc::new(AutopilotRecordingProvider::default());
         let mut projection = ProjectionState::default();
 
@@ -3162,8 +3162,8 @@ mod tests {
         tokio::task::yield_now().await;
         let advanced = provider.advanced_sessions();
         let archived = provider.archived_sessions();
-        assert!(advanced.is_empty());
-        assert!(archived.is_empty());
+        assert!(advanced.iter().any(|session_id| session_id.as_str() == "sess-1"));
+        assert!(archived.iter().any(|session_id| session_id.as_str() == "sess-2"));
     }
 
     #[test]
