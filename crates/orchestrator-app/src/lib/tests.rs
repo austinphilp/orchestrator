@@ -1,21 +1,23 @@
 #[cfg(test)]
 mod tests {
     use super::*;
-    use orchestrator_ticketing as integration_linear;
+    use crate::events::{
+        ArtifactCreatedPayload, NewEventEnvelope, OrchestrationEventPayload, StoredEventEnvelope,
+    };
+    use crate::normalization::DOMAIN_EVENT_SCHEMA_VERSION;
     use orchestrator_core::test_support::{with_env_var, with_env_vars, TestDbPath};
     use orchestrator_core::{
-        command_ids, AddTicketCommentRequest, ArtifactCreatedPayload, ArtifactId, ArtifactKind,
-        ArtifactRecord, BackendCapabilities, BackendKind, CodeHostKind, Command, CommandRegistry,
+        command_ids, AddTicketCommentRequest, ArtifactId, ArtifactKind, ArtifactRecord,
+        BackendCapabilities, BackendKind, CodeHostKind, Command, CommandRegistry,
         CreateTicketRequest, GetTicketRequest, LlmChatRequest, LlmFinishReason, LlmProviderKind,
         LlmResponseStream, LlmResponseSubscription, LlmRole, LlmStreamChunk, LlmToolCall,
-        NewEventEnvelope, OrchestrationEventPayload, RuntimeMappingRecord, RuntimeResult,
-        SessionHandle, SessionRecord, SpawnSpec, SupervisorQueryArgs,
-        SupervisorQueryCancellationSource, SupervisorQueryContextArgs, TicketDetails, TicketId,
-        TicketProvider, TicketQuery, TicketRecord, TicketSummary, TicketingProvider,
-        UpdateTicketDescriptionRequest, UpdateTicketStateRequest, WorkItemId, WorkerSessionId,
-        WorkerSessionStatus, WorktreeId, WorktreeRecord, WorktreeStatus,
-        DOMAIN_EVENT_SCHEMA_VERSION,
+        RuntimeMappingRecord, RuntimeResult, SessionHandle, SessionRecord, SpawnSpec,
+        SupervisorQueryArgs, SupervisorQueryCancellationSource, SupervisorQueryContextArgs,
+        TicketDetails, TicketId, TicketProvider, TicketQuery, TicketRecord, TicketSummary,
+        TicketingProvider, UpdateTicketDescriptionRequest, UpdateTicketStateRequest, WorkItemId,
+        WorkerSessionId, WorkerSessionStatus, WorktreeId, WorktreeRecord, WorktreeStatus,
     };
+    use orchestrator_ticketing as integration_linear;
     use serde_json::json;
     use std::collections::{BTreeMap, VecDeque};
     use std::path::{Path, PathBuf};
@@ -429,7 +431,7 @@ mod tests {
             .expect("serialize freeform supervisor.query")
     }
 
-    fn read_events(path: &std::path::Path) -> Vec<orchestrator_core::StoredEventEnvelope> {
+    fn read_events(path: &std::path::Path) -> Vec<StoredEventEnvelope> {
         let store = SqliteEventStore::open(path).expect("open event store");
         store.read_ordered().expect("read ordered events")
     }
@@ -647,9 +649,8 @@ mod tests {
     fn new_to_planning_instruction_requires_plan_file_and_summary_only() {
         assert!(NEW_TO_PLANNING_TRANSITION_INSTRUCTION.contains("IMPLEMENTATION_PLAN.md"));
         assert!(NEW_TO_PLANNING_TRANSITION_INSTRUCTION.contains("concise 2-4 paragraph summary"));
-        assert!(
-            NEW_TO_PLANNING_TRANSITION_INSTRUCTION.contains("no code fences or excessive formatting")
-        );
+        assert!(NEW_TO_PLANNING_TRANSITION_INSTRUCTION
+            .contains("no code fences or excessive formatting"));
     }
 
     #[test]

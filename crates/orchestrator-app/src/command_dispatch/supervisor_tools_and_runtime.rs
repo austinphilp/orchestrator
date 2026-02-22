@@ -7,19 +7,14 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use orchestrator_core::{
     apply_workflow_transition, command_ids, resolve_supervisor_query_scope,
-    AddTicketCommentRequest, ArtifactCreatedPayload, ArtifactId, ArtifactKind, ArtifactRecord,
-    CodeHostProvider, Command, CommandRegistry, CoreError, EventStore, GetTicketRequest,
-    LlmChatRequest, LlmFinishReason, LlmMessage, LlmProvider, LlmResponseStream,
-    LlmResponseSubscription, LlmRole, LlmStreamChunk, LlmTokenUsage, LlmTool, LlmToolCall,
-    LlmToolCallOutput, LlmToolFunction, NewEventEnvelope, OrchestrationEventPayload,
-    PullRequestRef, RepositoryRef, RetrievalScope, RuntimeMappingRecord,
-    SupervisorQueryArgs, SupervisorQueryCancellationSource, SupervisorQueryCancelledPayload,
-    SupervisorQueryChunkPayload, SupervisorQueryContextArgs, SupervisorQueryFinishedPayload,
-    SupervisorQueryKind, SupervisorQueryStartedPayload, TicketAttachment, TicketId, TicketQuery,
-    TicketingProvider, UntypedCommandInvocation, UpdateTicketDescriptionRequest,
-    UpdateTicketStateRequest, UrlOpener, WorkItemId, WorkerSessionId, WorkflowGuardContext,
-    WorkflowState, WorkflowTransitionPayload, WorkflowTransitionReason,
-    DOMAIN_EVENT_SCHEMA_VERSION,
+    AddTicketCommentRequest, ArtifactId, ArtifactKind, ArtifactRecord, CodeHostProvider, Command,
+    CommandRegistry, CoreError, EventStore, GetTicketRequest, LlmChatRequest, LlmFinishReason,
+    LlmMessage, LlmProvider, LlmResponseStream, LlmResponseSubscription, LlmRole, LlmStreamChunk,
+    LlmTokenUsage, LlmTool, LlmToolCall, LlmToolCallOutput, LlmToolFunction, PullRequestRef,
+    RepositoryRef, RetrievalScope, RuntimeMappingRecord, SupervisorQueryArgs,
+    SupervisorQueryContextArgs, TicketAttachment, TicketId, TicketQuery, TicketingProvider,
+    UntypedCommandInvocation, UpdateTicketDescriptionRequest, UpdateTicketStateRequest, UrlOpener,
+    WorkItemId, WorkerSessionId, WorkflowGuardContext, WorkflowState, WorkflowTransitionReason,
 };
 use orchestrator_supervisor::{
     build_freeform_messages, build_template_messages_with_variables, SupervisorQueryEngine,
@@ -32,6 +27,13 @@ use serde_json::{json, Value};
 use tracing::warn;
 
 use crate::{
+    events::{
+        ArtifactCreatedPayload, NewEventEnvelope, OrchestrationEventPayload,
+        SupervisorQueryCancellationSource, SupervisorQueryCancelledPayload,
+        SupervisorQueryChunkPayload, SupervisorQueryFinishedPayload, SupervisorQueryKind,
+        SupervisorQueryStartedPayload, WorkflowTransitionPayload,
+    },
+    normalization::DOMAIN_EVENT_SCHEMA_VERSION,
     open_event_store, open_owned_event_store, supervisor_chunk_event_flush_interval,
     supervisor_model_from_env, AppEventStore,
 };

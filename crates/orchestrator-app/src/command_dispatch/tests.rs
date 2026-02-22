@@ -1,15 +1,18 @@
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::events::{
+        ArtifactCreatedPayload, NewEventEnvelope, OrchestrationEventPayload,
+        WorkflowTransitionPayload,
+    };
+    use crate::normalization::DOMAIN_EVENT_SCHEMA_VERSION;
     use orchestrator_core::test_support::TestDbPath;
     use orchestrator_core::{
-        ArtifactCreatedPayload, ArtifactId, ArtifactKind, ArtifactRecord, BackendKind,
-        CodeHostKind, NewEventEnvelope, OrchestrationEventPayload, PullRequestCiStatus,
+        ArtifactId, ArtifactKind, ArtifactRecord, BackendKind, CodeHostKind, PullRequestCiStatus,
         PullRequestMergeState, PullRequestRef, PullRequestSummary, RepositoryRef, ReviewerRequest,
         RuntimeMappingRecord, SessionRecord, SqliteEventStore, TicketId, TicketProvider,
-        TicketRecord, WorkItemId,
-        WorkerSessionId, WorkerSessionStatus, WorkflowState, WorkflowTransitionPayload, WorktreeId,
-        WorktreeRecord, DOMAIN_EVENT_SCHEMA_VERSION,
+        TicketRecord, WorkItemId, WorkerSessionId, WorkerSessionStatus, WorkflowState, WorktreeId,
+        WorktreeRecord,
     };
     use serde_json::json;
     use std::sync::Mutex;
@@ -753,7 +756,8 @@ mod tests {
         );
         assert_eq!(code_host.fallback_calls().len(), 1);
 
-        let persisted_store = open_event_store(temp_db.path().to_str().expect("path")).expect("reopen store");
+        let persisted_store =
+            open_event_store(temp_db.path().to_str().expect("path")).expect("reopen store");
         let runtime = resolve_runtime_mapping_for_context_with_command(
             &persisted_store,
             &SupervisorCommandContext {
@@ -814,7 +818,8 @@ mod tests {
             .contains(command_ids::WORKFLOW_RECONCILE_PR_MERGE));
         assert_eq!(code_host.fallback_calls().len(), 1);
 
-        let persisted_store = open_event_store(temp_db.path().to_str().expect("path")).expect("reopen store");
+        let persisted_store =
+            open_event_store(temp_db.path().to_str().expect("path")).expect("reopen store");
         let runtime = resolve_runtime_mapping_for_context_with_command(
             &persisted_store,
             &SupervisorCommandContext {
@@ -1010,7 +1015,8 @@ mod tests {
             serde_json::from_str(first_chunk.delta.as_str()).expect("parse reconcile response");
         assert_eq!(parsed["completed"], true);
 
-        let persisted_store = open_event_store(temp_db.path().to_str().expect("path")).expect("reopen store");
+        let persisted_store =
+            open_event_store(temp_db.path().to_str().expect("path")).expect("reopen store");
         let events = persisted_store.read_ordered().expect("read events");
         let latest_state = events
             .iter()
@@ -1235,7 +1241,8 @@ mod tests {
             .expect("error message")
             .contains("failed to mark draft PR #613 ready for review"));
 
-        let persisted_store = open_event_store(temp_db.path().to_str().expect("path")).expect("reopen store");
+        let persisted_store =
+            open_event_store(temp_db.path().to_str().expect("path")).expect("reopen store");
         let events = persisted_store.read_ordered().expect("read events");
         let transition_targets = events
             .iter()
@@ -1388,7 +1395,8 @@ mod tests {
             .expect("error message")
             .contains("merge blocked by required checks"));
 
-        let persisted_store = open_event_store(temp_db.path().to_str().expect("path")).expect("reopen store");
+        let persisted_store =
+            open_event_store(temp_db.path().to_str().expect("path")).expect("reopen store");
         let events = persisted_store.read_ordered().expect("read events");
         let transition_targets = events
             .iter()
@@ -1476,7 +1484,8 @@ mod tests {
             .iter()
             .any(|transition| transition == "PendingMerge->Done"));
 
-        let persisted_store = open_event_store(temp_db.path().to_str().expect("path")).expect("reopen store");
+        let persisted_store =
+            open_event_store(temp_db.path().to_str().expect("path")).expect("reopen store");
         let events = persisted_store.read_ordered().expect("read events");
         let latest_state = events
             .iter()
@@ -1548,7 +1557,8 @@ mod tests {
             serde_json::Value::String("forced_from_non_review_state".to_owned())
         );
 
-        let persisted_store = open_event_store(temp_db.path().to_str().expect("path")).expect("reopen store");
+        let persisted_store =
+            open_event_store(temp_db.path().to_str().expect("path")).expect("reopen store");
         let events = persisted_store.read_ordered().expect("read events");
         let latest_state = events
             .iter()

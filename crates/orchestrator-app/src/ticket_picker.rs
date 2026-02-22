@@ -6,9 +6,9 @@ use async_trait::async_trait;
 use orchestrator_core::{
     ArchiveTicketRequest, CodeHostProvider, Command, CommandRegistry, CoreError, CreateTicketRequest,
     GithubClient, LlmChatRequest, LlmMessage, LlmProvider, LlmRole, ProjectionState,
-    SelectedTicketFlowResult, StoredEventEnvelope, Supervisor, TicketId, TicketQuery, TicketSummary,
-    TicketingProvider, WorkerBackend, WorkerSessionId, WorkerSessionStatus,
-    WorkflowInteractionProfilesConfig, WorkflowState,
+    SelectedTicketFlowResult, Supervisor, TicketId, TicketQuery, TicketSummary, TicketingProvider,
+    WorkerBackend, WorkerSessionId, WorkerSessionStatus, WorkflowInteractionProfilesConfig,
+    WorkflowState,
 };
 use orchestrator_vcs::VcsProvider;
 use orchestrator_ui::{
@@ -21,6 +21,7 @@ use std::path::PathBuf;
 use tokio::sync::{mpsc, watch, Mutex};
 use tracing::warn;
 
+use crate::events::StoredEventEnvelope;
 use crate::App;
 
 pub struct AppTicketPickerProvider<S, G, V>

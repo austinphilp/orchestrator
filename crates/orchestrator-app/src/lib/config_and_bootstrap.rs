@@ -1,21 +1,22 @@
+use crate::events::{
+    InboxItemCreatedPayload, InboxItemResolvedPayload, NewEventEnvelope, OrchestrationEventPayload,
+    SessionCompletedPayload, SessionCrashedPayload, StoredEventEnvelope, WorkflowTransitionPayload,
+};
+use crate::normalization::DOMAIN_EVENT_SCHEMA_VERSION;
 use orchestrator_core::{
     apply_workflow_transition, rebuild_projection, CodeHostProvider, CoreError, EventStore,
-    GetTicketRequest, GithubClient, InboxItemCreatedPayload, InboxItemId, InboxItemResolvedPayload,
-    LlmProvider, NewEventEnvelope, OrchestrationEventPayload, ProjectionState, RuntimeSessionId,
-    SelectedTicketFlowConfig, SelectedTicketFlowResult, SessionCompletedPayload,
-    SessionCrashedPayload, SessionHandle, SqliteEventStore, Supervisor, TicketSummary,
-    StoredEventEnvelope, TicketingProvider, UntypedCommandInvocation, WorkItemId,
-    WorkerBackend, WorkerSessionId, WorkerSessionStatus, WorkflowGuardContext, WorkflowState,
-    WorkflowTransitionPayload, WorkflowTransitionReason, DOMAIN_EVENT_SCHEMA_VERSION,
-    SessionRuntimeProjection,
+    GetTicketRequest, GithubClient, InboxItemId, LlmProvider, ProjectionState, RuntimeSessionId,
+    SelectedTicketFlowConfig, SelectedTicketFlowResult, SessionHandle, SessionRuntimeProjection,
+    SqliteEventStore, Supervisor, TicketSummary, TicketingProvider, UntypedCommandInvocation,
+    WorkItemId, WorkerBackend, WorkerSessionId, WorkerSessionStatus, WorkflowGuardContext,
+    WorkflowState, WorkflowTransitionReason,
 };
-use orchestrator_vcs::VcsProvider;
 use orchestrator_ticketing::LinearTicketingProvider;
 use orchestrator_ui::{
-    InboxPublishRequest, InboxResolveRequest, SessionArchiveOutcome,
-    SessionMergeFinalizeOutcome, SessionWorkflowAdvanceOutcome, SupervisorCommandContext,
-    SupervisorCommandDispatcher,
+    InboxPublishRequest, InboxResolveRequest, SessionArchiveOutcome, SessionMergeFinalizeOutcome,
+    SessionWorkflowAdvanceOutcome, SupervisorCommandContext, SupervisorCommandDispatcher,
 };
+use orchestrator_vcs::VcsProvider;
 use r2d2::{Pool, PooledConnection};
 use r2d2_sqlite::SqliteConnectionManager;
 use serde::{Deserialize, Serialize};
@@ -716,7 +717,8 @@ fn load_or_create_config(path: &std::path::Path) -> Result<AppConfig, CoreError>
 fn normalize_config(config: &mut AppConfig) -> bool {
     let mut changed = false;
 
-    if config.workspace.trim() == LEGACY_DEFAULT_WORKSPACE_PATH || config.workspace.trim().is_empty()
+    if config.workspace.trim() == LEGACY_DEFAULT_WORKSPACE_PATH
+        || config.workspace.trim().is_empty()
     {
         config.workspace = default_workspace_path();
         changed = true;
@@ -730,7 +732,10 @@ fn normalize_config(config: &mut AppConfig) -> bool {
     changed |= normalize_provider_selection(
         &mut config.ticketing_provider,
         DEFAULT_TICKETING_PROVIDER,
-        &[("linear", "ticketing.linear"), ("shortcut", "ticketing.shortcut")],
+        &[
+            ("linear", "ticketing.linear"),
+            ("shortcut", "ticketing.shortcut"),
+        ],
     );
     changed |= normalize_provider_selection(
         &mut config.harness_provider,
@@ -751,10 +756,7 @@ fn normalize_config(config: &mut AppConfig) -> bool {
         ],
     );
 
-    changed |= normalize_non_empty_string(
-        &mut config.supervisor.model,
-        default_supervisor_model(),
-    );
+    changed |= normalize_non_empty_string(&mut config.supervisor.model, default_supervisor_model());
     changed |= normalize_non_empty_string(
         &mut config.supervisor.openrouter_base_url,
         default_openrouter_base_url(),
@@ -781,9 +783,10 @@ fn normalize_config(config: &mut AppConfig) -> bool {
                 changed = true;
             }
         }
-        config.linear.workflow_state_map.retain(|entry| {
-            !entry.workflow_state.is_empty() && !entry.linear_state.is_empty()
-        });
+        config
+            .linear
+            .workflow_state_map
+            .retain(|entry| !entry.workflow_state.is_empty() && !entry.linear_state.is_empty());
         if config.linear.workflow_state_map.is_empty() {
             config.linear.workflow_state_map = default_linear_workflow_state_map();
             changed = true;
@@ -804,7 +807,10 @@ fn normalize_config(config: &mut AppConfig) -> bool {
             default_harness_server_startup_timeout_secs();
         changed = true;
     }
-    changed |= normalize_non_empty_string(&mut config.runtime.opencode_binary, default_opencode_binary());
+    changed |= normalize_non_empty_string(
+        &mut config.runtime.opencode_binary,
+        default_opencode_binary(),
+    );
     changed |= normalize_non_empty_string(
         &mut config.runtime.opencode_server_base_url,
         default_opencode_server_base_url(),
@@ -847,7 +853,8 @@ fn normalize_config(config: &mut AppConfig) -> bool {
         config.database.chunk_event_flush_ms = normalized_chunk_event_flush_ms;
         changed = true;
     }
-    let normalized_synchronous = normalize_database_synchronous(config.database.synchronous.as_str());
+    let normalized_synchronous =
+        normalize_database_synchronous(config.database.synchronous.as_str());
     if normalized_synchronous != config.database.synchronous {
         config.database.synchronous = normalized_synchronous;
         changed = true;
@@ -864,10 +871,7 @@ fn normalize_config(config: &mut AppConfig) -> bool {
         config.ui.transcript_line_limit = normalized_transcript_line_limit;
         changed = true;
     }
-    let normalized_background_refresh_secs = config
-        .ui
-        .background_session_refresh_secs
-        .clamp(2, 15);
+    let normalized_background_refresh_secs = config.ui.background_session_refresh_secs.clamp(2, 15);
     if normalized_background_refresh_secs != config.ui.background_session_refresh_secs {
         config.ui.background_session_refresh_secs = normalized_background_refresh_secs;
         changed = true;
@@ -881,17 +885,20 @@ fn normalize_config(config: &mut AppConfig) -> bool {
             normalized_session_info_background_refresh_secs;
         changed = true;
     }
-    let normalized_merge_poll_base_interval_secs = config.ui.merge_poll_base_interval_secs.clamp(5, 300);
+    let normalized_merge_poll_base_interval_secs =
+        config.ui.merge_poll_base_interval_secs.clamp(5, 300);
     if normalized_merge_poll_base_interval_secs != config.ui.merge_poll_base_interval_secs {
         config.ui.merge_poll_base_interval_secs = normalized_merge_poll_base_interval_secs;
         changed = true;
     }
-    let normalized_merge_poll_max_backoff_secs = config.ui.merge_poll_max_backoff_secs.clamp(15, 900);
+    let normalized_merge_poll_max_backoff_secs =
+        config.ui.merge_poll_max_backoff_secs.clamp(15, 900);
     if normalized_merge_poll_max_backoff_secs != config.ui.merge_poll_max_backoff_secs {
         config.ui.merge_poll_max_backoff_secs = normalized_merge_poll_max_backoff_secs;
         changed = true;
     }
-    let normalized_merge_poll_backoff_multiplier = config.ui.merge_poll_backoff_multiplier.clamp(1, 8);
+    let normalized_merge_poll_backoff_multiplier =
+        config.ui.merge_poll_backoff_multiplier.clamp(1, 8);
     if normalized_merge_poll_backoff_multiplier != config.ui.merge_poll_backoff_multiplier {
         config.ui.merge_poll_backoff_multiplier = normalized_merge_poll_backoff_multiplier;
         changed = true;
@@ -1044,9 +1051,9 @@ fn build_event_store_pool(
         .map_err(|err| CoreError::Persistence(format!("failed to build sqlite pool: {err}")))?;
 
     {
-        let mut conn = pool
-            .get()
-            .map_err(|err| CoreError::Persistence(format!("failed to acquire sqlite connection: {err}")))?;
+        let mut conn = pool.get().map_err(|err| {
+            CoreError::Persistence(format!("failed to acquire sqlite connection: {err}"))
+        })?;
         apply_sqlite_runtime_pragmas(&mut conn, config)?;
         let _ = SqliteEventStore::from_connection(conn)?;
     }
@@ -1089,9 +1096,9 @@ fn open_event_store(path: &str) -> Result<AppEventStore, CoreError> {
             created
         }
     };
-    let mut conn = pool
-        .get()
-        .map_err(|err| CoreError::Persistence(format!("failed to acquire sqlite connection: {err}")))?;
+    let mut conn = pool.get().map_err(|err| {
+        CoreError::Persistence(format!("failed to acquire sqlite connection: {err}"))
+    })?;
     apply_sqlite_runtime_pragmas(&mut conn, &config)?;
     Ok(SqliteEventStore::from_initialized_connection(conn))
 }
