@@ -1,6 +1,7 @@
 //! Worker runtime composition layer for lifecycle, eventbus, and scheduler crates.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use orchestrator_worker_eventbus::{
     WorkerEventBus, WorkerEventBusPerfSnapshot, WorkerGlobalEventSubscription,
@@ -12,10 +13,14 @@ use orchestrator_worker_lifecycle::{
 };
 use orchestrator_worker_protocol::backend::{WorkerBackendCapabilities, WorkerBackendKind};
 use orchestrator_worker_protocol::error::WorkerRuntimeResult;
-use orchestrator_worker_protocol::event::WorkerNeedsInputAnswer;
+use orchestrator_worker_protocol::event::{WorkerEvent, WorkerNeedsInputAnswer};
 use orchestrator_worker_protocol::ids::WorkerSessionId;
 use orchestrator_worker_protocol::session::{WorkerSessionHandle, WorkerSpawnRequest};
-use orchestrator_worker_scheduler::WorkerScheduler;
+use orchestrator_worker_scheduler::{WorkerScheduler, WorkerSchedulerTask};
+use tokio::task::JoinHandle;
+
+const DEFAULT_CHECKPOINT_PROMPT_INTERVAL_SECS: u64 = 120;
+const DEFAULT_CHECKPOINT_PROMPT_MESSAGE: &str = "Emit a checkpoint now.";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkerRuntimePerfSnapshot {
@@ -23,35 +28,108 @@ pub struct WorkerRuntimePerfSnapshot {
     pub active_stream_ingestion_tasks: usize,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkerRuntimeSchedulerConfig {
+    pub checkpoint_prompt_interval: Option<Duration>,
+    pub checkpoint_prompt_message: String,
+}
+
+impl Default for WorkerRuntimeSchedulerConfig {
+    fn default() -> Self {
+        Self {
+            checkpoint_prompt_interval: Some(Duration::from_secs(
+                DEFAULT_CHECKPOINT_PROMPT_INTERVAL_SECS,
+            )),
+            checkpoint_prompt_message: DEFAULT_CHECKPOINT_PROMPT_MESSAGE.to_owned(),
+        }
+    }
+}
+
+impl WorkerRuntimeSchedulerConfig {
+    fn checkpoint_schedule(&self) -> Option<WorkerRuntimeCheckpointSchedule> {
+        let interval = self.checkpoint_prompt_interval?;
+        if interval.is_zero() {
+            return None;
+        }
+
+        let prompt = self.checkpoint_prompt_message.trim();
+        if prompt.is_empty() {
+            return None;
+        }
+        let mut prompt_bytes = prompt.as_bytes().to_vec();
+        if !prompt_bytes.ends_with(b"\n") {
+            prompt_bytes.push(b'\n');
+        }
+
+        Some(WorkerRuntimeCheckpointSchedule {
+            interval,
+            prompt: prompt_bytes,
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct WorkerRuntimeCheckpointSchedule {
+    interval: Duration,
+    prompt: Vec<u8>,
+}
+
 pub struct WorkerRuntime {
     lifecycle: WorkerLifecycle,
     eventbus: Arc<WorkerEventBus>,
     scheduler: WorkerScheduler,
+    checkpoint_schedule: Option<WorkerRuntimeCheckpointSchedule>,
+    terminal_scheduler_sync_task: JoinHandle<()>,
 }
 
 impl WorkerRuntime {
     pub fn new(backend: Arc<dyn WorkerLifecycleBackend>) -> Self {
-        Self::with_eventbus(backend, WorkerEventBus::default())
+        Self::with_eventbus_and_scheduler_config(
+            backend,
+            WorkerEventBus::default(),
+            WorkerRuntimeSchedulerConfig::default(),
+        )
     }
 
     pub fn with_eventbus(
         backend: Arc<dyn WorkerLifecycleBackend>,
         eventbus: WorkerEventBus,
     ) -> Self {
-        Self::with_components(backend, eventbus, WorkerScheduler::default())
+        Self::with_eventbus_and_scheduler_config(
+            backend,
+            eventbus,
+            WorkerRuntimeSchedulerConfig::default(),
+        )
     }
 
-    pub fn with_components(
+    pub fn with_eventbus_and_scheduler_config(
         backend: Arc<dyn WorkerLifecycleBackend>,
         eventbus: WorkerEventBus,
-        scheduler: WorkerScheduler,
+        scheduler_config: WorkerRuntimeSchedulerConfig,
     ) -> Self {
         let eventbus = Arc::new(eventbus);
         let lifecycle = WorkerLifecycle::new(backend, Arc::clone(&eventbus));
+        let scheduler = WorkerScheduler::new(lifecycle.clone());
+        let checkpoint_schedule = scheduler_config.checkpoint_schedule();
+        let mut terminal_events = eventbus.subscribe_all();
+        let scheduler_for_terminal = scheduler.clone();
+        let terminal_scheduler_sync_task = tokio::spawn(async move {
+            while let Some(envelope) = terminal_events.next_event().await {
+                if matches!(
+                    envelope.event,
+                    WorkerEvent::Done(_) | WorkerEvent::Crashed(_)
+                ) {
+                    scheduler_for_terminal.cancel_for_session(&envelope.session_id);
+                }
+            }
+        });
+
         Self {
             lifecycle,
             eventbus,
             scheduler,
+            checkpoint_schedule,
+            terminal_scheduler_sync_task,
         }
     }
 
@@ -71,11 +149,29 @@ impl WorkerRuntime {
         &self,
         spec: WorkerSpawnRequest,
     ) -> WorkerRuntimeResult<WorkerSessionHandle> {
-        self.lifecycle.spawn(spec).await
+        let handle = self.lifecycle.spawn(spec).await?;
+
+        if let Some(checkpoint_schedule) = &self.checkpoint_schedule {
+            if let Err(error) =
+                self.scheduler
+                    .register(WorkerSchedulerTask::checkpoint_for_session(
+                        handle.session_id.clone(),
+                        checkpoint_schedule.interval,
+                        checkpoint_schedule.prompt.clone(),
+                    ))
+            {
+                let _ = self.lifecycle.kill(&handle.session_id).await;
+                return Err(error);
+            }
+        }
+
+        Ok(handle)
     }
 
     pub async fn kill(&self, session_id: &WorkerSessionId) -> WorkerRuntimeResult<()> {
-        self.lifecycle.kill(session_id).await
+        let result = self.lifecycle.kill(session_id).await;
+        self.scheduler.cancel_for_session(session_id);
+        result
     }
 
     pub async fn send_input(
@@ -159,6 +255,13 @@ impl WorkerRuntime {
     }
 }
 
+impl Drop for WorkerRuntime {
+    fn drop(&mut self) {
+        self.terminal_scheduler_sync_task.abort();
+        self.scheduler.close();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
@@ -172,17 +275,16 @@ mod tests {
         WorkerBackendCapabilities, WorkerBackendInfo, WorkerBackendKind, WorkerEventStream,
         WorkerEventSubscription, WorkerSessionControl, WorkerSessionStreamSource,
     };
-    use orchestrator_worker_protocol::error::WorkerRuntimeResult;
+    use orchestrator_worker_protocol::error::{WorkerRuntimeError, WorkerRuntimeResult};
     use orchestrator_worker_protocol::event::{
         WorkerDoneEvent, WorkerEvent, WorkerNeedsInputAnswer, WorkerOutputEvent, WorkerOutputStream,
     };
     use orchestrator_worker_protocol::ids::WorkerSessionId;
     use orchestrator_worker_protocol::session::{WorkerSessionHandle, WorkerSpawnRequest};
-    use orchestrator_worker_scheduler::WorkerScheduler;
     use tokio::sync::mpsc;
     use tokio::time::{sleep, timeout, Duration};
 
-    use super::WorkerRuntime;
+    use super::{WorkerRuntime, WorkerRuntimeSchedulerConfig};
 
     type StreamMessage = WorkerRuntimeResult<Option<WorkerEvent>>;
 
@@ -199,6 +301,7 @@ mod tests {
     struct MockSession {
         event_tx: Option<mpsc::UnboundedSender<StreamMessage>>,
         event_rx: Option<mpsc::UnboundedReceiver<StreamMessage>>,
+        sent_input: Vec<Vec<u8>>,
     }
 
     struct MockEventStream {
@@ -220,6 +323,16 @@ mod tests {
             };
             sender.send(Ok(Some(event))).expect("emit event");
         }
+
+        fn sent_input(&self, session_id: &WorkerSessionId) -> Vec<Vec<u8>> {
+            let state = self.state.lock().expect("lock backend state");
+            state
+                .sessions
+                .get(session_id)
+                .expect("session exists")
+                .sent_input
+                .clone()
+        }
     }
 
     #[async_trait]
@@ -235,6 +348,7 @@ mod tests {
                 MockSession {
                     event_tx: Some(event_tx),
                     event_rx: Some(event_rx),
+                    sent_input: Vec::new(),
                 },
             );
             Ok(WorkerSessionHandle {
@@ -249,9 +363,16 @@ mod tests {
 
         async fn send_input(
             &self,
-            _session: &WorkerSessionHandle,
-            _input: &[u8],
+            session: &WorkerSessionHandle,
+            input: &[u8],
         ) -> WorkerRuntimeResult<()> {
+            let mut state = self.state.lock().expect("lock backend state");
+            let session = state.sessions.get_mut(&session.session_id).ok_or_else(|| {
+                orchestrator_worker_protocol::error::WorkerRuntimeError::SessionNotFound(
+                    session.session_id.as_str().to_owned(),
+                )
+            })?;
+            session.sent_input.push(input.to_vec());
             Ok(())
         }
 
@@ -352,13 +473,35 @@ mod tests {
         }
     }
 
+    async fn wait_for_sent_input_count(
+        backend: &MockBackend,
+        session_id: &WorkerSessionId,
+        expected: usize,
+    ) {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        loop {
+            let count = backend.sent_input(session_id).len();
+            if count >= expected {
+                return;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "timed out waiting for scheduled send_input count {expected}; observed {count}"
+            );
+            sleep(Duration::from_millis(10)).await;
+        }
+    }
+
     #[tokio::test]
     async fn runtime_wires_lifecycle_controls_and_eventbus_stream() {
         let backend = Arc::new(MockBackend::default());
-        let runtime = WorkerRuntime::with_components(
+        let runtime = WorkerRuntime::with_eventbus_and_scheduler_config(
             backend.clone(),
             WorkerEventBus::default(),
-            WorkerScheduler::default(),
+            WorkerRuntimeSchedulerConfig {
+                checkpoint_prompt_interval: None,
+                checkpoint_prompt_message: "Emit a checkpoint now.".to_owned(),
+            },
         );
 
         let handle = runtime
@@ -443,7 +586,14 @@ mod tests {
     #[tokio::test]
     async fn runtime_rejects_subscriptions_for_missing_or_closed_sessions() {
         let backend = Arc::new(MockBackend::default());
-        let runtime = WorkerRuntime::new(backend.clone());
+        let runtime = WorkerRuntime::with_eventbus_and_scheduler_config(
+            backend.clone(),
+            WorkerEventBus::default(),
+            WorkerRuntimeSchedulerConfig {
+                checkpoint_prompt_interval: None,
+                checkpoint_prompt_message: "Emit a checkpoint now.".to_owned(),
+            },
+        );
 
         let missing = WorkerSessionId::new("runtime-missing");
         assert!(matches!(
@@ -464,5 +614,70 @@ mod tests {
             runtime.subscribe_session(&handle.session_id).await,
             Err(orchestrator_worker_protocol::error::WorkerRuntimeError::Process(_))
         ));
+    }
+
+    #[tokio::test]
+    async fn runtime_scheduler_registers_checkpoint_task_and_cancels_on_done() {
+        let backend = Arc::new(MockBackend::default());
+        let runtime = WorkerRuntime::with_eventbus_and_scheduler_config(
+            backend.clone(),
+            WorkerEventBus::default(),
+            WorkerRuntimeSchedulerConfig {
+                checkpoint_prompt_interval: Some(Duration::from_millis(35)),
+                checkpoint_prompt_message: "Emit a checkpoint now.".to_owned(),
+            },
+        );
+
+        let handle = runtime
+            .spawn(spawn_request("runtime-scheduler-terminal"))
+            .await
+            .expect("spawn session");
+        wait_for_sent_input_count(&backend, &handle.session_id, 1).await;
+        assert_eq!(runtime.scheduler().task_count(), 1);
+
+        backend.emit_event(
+            &handle.session_id,
+            WorkerEvent::Done(WorkerDoneEvent {
+                summary: Some("done".to_owned()),
+            }),
+        );
+        wait_for_status(&runtime, &handle.session_id, WorkerSessionState::Done).await;
+
+        timeout(Duration::from_secs(2), async {
+            loop {
+                if runtime.scheduler().task_count() == 0 {
+                    return;
+                }
+                sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("timed out waiting for scheduler task cancellation");
+    }
+
+    #[tokio::test]
+    async fn runtime_spawn_rolls_back_when_scheduler_registration_fails() {
+        let backend = Arc::new(MockBackend::default());
+        let runtime = WorkerRuntime::with_eventbus_and_scheduler_config(
+            backend.clone(),
+            WorkerEventBus::default(),
+            WorkerRuntimeSchedulerConfig {
+                checkpoint_prompt_interval: Some(Duration::from_millis(35)),
+                checkpoint_prompt_message: "Emit a checkpoint now.".to_owned(),
+            },
+        );
+        runtime.scheduler().close();
+
+        let session_id = WorkerSessionId::new("runtime-scheduler-register-failure");
+        let spawn_error = runtime
+            .spawn(spawn_request(session_id.as_str()))
+            .await
+            .expect_err("spawn should fail when scheduler is closed");
+        assert!(matches!(
+            spawn_error,
+            WorkerRuntimeError::Process(message) if message.contains("scheduler is closed")
+        ));
+        wait_for_status(&runtime, &session_id, WorkerSessionState::Killed).await;
+        assert_eq!(runtime.scheduler().task_count(), 0);
     }
 }

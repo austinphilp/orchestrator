@@ -15,7 +15,7 @@ mod runtime_stream_coordinator {
         WorkerBackendInfo, WorkerSessionControl, WorkerSessionStreamSource,
     };
     use orchestrator_worker_protocol::event::WorkerNeedsInputAnswer as BackendNeedsInputAnswer;
-    use orchestrator_worker_runtime::WorkerRuntime;
+    use orchestrator_worker_runtime::{WorkerRuntime, WorkerRuntimeSchedulerConfig};
 
     #[derive(Clone)]
     pub struct WorkerManagerBackend {
@@ -25,10 +25,7 @@ mod runtime_stream_coordinator {
 
     impl WorkerManagerBackend {
         pub fn new(backend: Arc<dyn WorkerBackend + Send + Sync>) -> Self {
-            let mut config = WorkerManagerConfig::default();
-            // Keep existing app semantics stable; app/runtime can opt into periodic prompts later.
-            config.checkpoint_prompt_interval = None;
-            Self::with_config(backend, config)
+            Self::with_config(backend, WorkerManagerConfig::default())
         }
 
         pub fn with_config(
@@ -37,13 +34,18 @@ mod runtime_stream_coordinator {
         ) -> Self {
             let runtime_backend: Arc<dyn WorkerLifecycleBackend> =
                 Arc::new(WorkerBackendProtocolAdapter::new(backend.clone()));
-            // AP-313 only rewires stream ingestion + lifecycle controls.
-            // Checkpoint/perf scheduler semantics remain in AP-314/AP-315.
             let eventbus = WorkerEventBus::new(WorkerEventBusConfig {
                 session_buffer_capacity: config.session_event_buffer.max(1),
                 global_buffer_capacity: config.global_event_buffer.max(1),
             });
-            let runtime = Arc::new(WorkerRuntime::with_eventbus(runtime_backend, eventbus));
+            let runtime = Arc::new(WorkerRuntime::with_eventbus_and_scheduler_config(
+                runtime_backend,
+                eventbus,
+                WorkerRuntimeSchedulerConfig {
+                    checkpoint_prompt_interval: config.checkpoint_prompt_interval,
+                    checkpoint_prompt_message: config.checkpoint_prompt_message,
+                },
+            ));
             Self { runtime, backend }
         }
     }
