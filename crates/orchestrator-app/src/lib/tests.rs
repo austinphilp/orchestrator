@@ -1,22 +1,24 @@
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::commands::{
+        ids as command_ids, Command, CommandRegistry, SupervisorQueryArgs,
+        SupervisorQueryContextArgs, UntypedCommandInvocation,
+    };
     use crate::events::{
         ArtifactCreatedPayload, NewEventEnvelope, OrchestrationEventPayload, StoredEventEnvelope,
     };
     use crate::normalization::DOMAIN_EVENT_SCHEMA_VERSION;
     use orchestrator_domain::test_support::{with_env_var, with_env_vars, TestDbPath};
     use orchestrator_domain::{
-        command_ids, AddTicketCommentRequest, ArtifactId, ArtifactKind, ArtifactRecord,
-        BackendCapabilities, BackendKind, CodeHostKind, Command, CommandRegistry,
+        AddTicketCommentRequest, ArtifactId, ArtifactKind, ArtifactRecord, BackendCapabilities,
+        BackendKind, CodeHostKind,
         CreateTicketRequest, GetTicketRequest, LlmChatRequest, LlmFinishReason, LlmProviderKind,
         LlmResponseStream, LlmResponseSubscription, LlmRole, LlmStreamChunk, LlmToolCall,
         RuntimeMappingRecord, RuntimeResult, SessionHandle, SessionRecord, SpawnSpec,
-        SupervisorQueryArgs, SupervisorQueryCancellationSource, SupervisorQueryContextArgs,
-        TicketDetails, TicketId, TicketProvider, TicketQuery, TicketRecord, TicketSummary,
-        UntypedCommandInvocation, UpdateTicketDescriptionRequest, UpdateTicketStateRequest,
-        WorkItemId, WorkerSessionId, WorkerSessionStatus, WorktreeId, WorktreeRecord,
-        WorktreeStatus,
+        SupervisorQueryCancellationSource, TicketDetails, TicketId, TicketProvider, TicketQuery,
+        TicketRecord, TicketSummary, UpdateTicketDescriptionRequest, UpdateTicketStateRequest,
+        WorkItemId, WorkerSessionId, WorkerSessionStatus, WorktreeId, WorktreeRecord, WorktreeStatus,
     };
     use orchestrator_ticketing::{self as integration_linear, TicketingProvider};
     use serde_json::json;

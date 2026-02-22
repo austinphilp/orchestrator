@@ -1,3 +1,5 @@
+use orchestrator_domain::{BackendEvent, BackendNeedsInputAnswer, RuntimeError};
+
 pub struct AppFrontendController<S: Supervisor, G: GithubClient> {
     app: std::sync::Arc<App<S, G>>,
     worker_backend: Option<std::sync::Arc<dyn WorkerBackend + Send + Sync>>,
@@ -59,10 +61,7 @@ impl<S: Supervisor, G: GithubClient> AppFrontendController<S, G> {
         let snapshot = self.snapshot.clone();
         let event_tx = self.event_tx.clone();
         let poll_interval = std::time::Duration::from_secs(
-            app.config
-                .runtime
-                .pr_pipeline_poll_interval_secs
-                .max(1),
+            app.config.runtime.pr_pipeline_poll_interval_secs.max(1),
         );
 
         let task = tokio::spawn(async move {
@@ -177,7 +176,7 @@ impl<S: Supervisor, G: GithubClient> AppFrontendController<S, G> {
         &self,
         session_id: &WorkerSessionId,
         prompt_id: &str,
-        answers: &[orchestrator_domain::BackendNeedsInputAnswer],
+        answers: &[BackendNeedsInputAnswer],
     ) -> Result<(), CoreError> {
         let Some(worker_backend) = self.worker_backend.clone() else {
             return Err(CoreError::DependencyUnavailable(
@@ -236,10 +235,7 @@ fn ensure_terminal_streams(
                         FrontendTerminalEvent::StreamFailed {
                             session_id: stream_session_id,
                             message: error.to_string(),
-                            is_session_not_found: matches!(
-                                error,
-                                orchestrator_domain::RuntimeError::SessionNotFound(_)
-                            ),
+                            is_session_not_found: matches!(error, RuntimeError::SessionNotFound(_)),
                         },
                     ));
                     return;
@@ -251,7 +247,7 @@ fn ensure_terminal_streams(
                     _ = stream_shutdown_rx.changed() => return,
                     next = stream.next_event() => {
                         match next {
-                            Ok(Some(orchestrator_domain::BackendEvent::Output(output))) => {
+                            Ok(Some(BackendEvent::Output(output))) => {
                                 let _ = stream_event_tx.send(FrontendEvent::TerminalSession(
                                     FrontendTerminalEvent::Output {
                                         session_id: stream_session_id.clone(),
@@ -259,7 +255,7 @@ fn ensure_terminal_streams(
                                     }
                                 ));
                             }
-                            Ok(Some(orchestrator_domain::BackendEvent::TurnState(turn_state))) => {
+                            Ok(Some(BackendEvent::TurnState(turn_state))) => {
                                 let _ = stream_event_tx.send(FrontendEvent::TerminalSession(
                                     FrontendTerminalEvent::TurnState {
                                         session_id: stream_session_id.clone(),
@@ -267,7 +263,7 @@ fn ensure_terminal_streams(
                                     }
                                 ));
                             }
-                            Ok(Some(orchestrator_domain::BackendEvent::NeedsInput(needs_input))) => {
+                            Ok(Some(BackendEvent::NeedsInput(needs_input))) => {
                                 let _ = stream_event_tx.send(FrontendEvent::TerminalSession(
                                     FrontendTerminalEvent::NeedsInput {
                                         session_id: stream_session_id.clone(),
@@ -291,7 +287,7 @@ fn ensure_terminal_streams(
                                         message: error.to_string(),
                                         is_session_not_found: matches!(
                                             error,
-                                            orchestrator_domain::RuntimeError::SessionNotFound(_)
+                                            RuntimeError::SessionNotFound(_)
                                         ),
                                     },
                                 ));
@@ -326,17 +322,14 @@ fn apply_intent_to_snapshot(snapshot: &mut FrontendSnapshot, intent: &FrontendIn
             }
             _ => false,
         },
-        FrontendIntent::SendTerminalInput { .. }
-        | FrontendIntent::RespondToNeedsInput { .. } => false,
+        FrontendIntent::SendTerminalInput { .. } | FrontendIntent::RespondToNeedsInput { .. } => {
+            false
+        }
     }
 }
 
 struct FrontendBroadcastSubscription {
     receiver: tokio::sync::broadcast::Receiver<FrontendEvent>,
-}
-
-struct CoreFrontendSubscriptionAdapter {
-    inner: FrontendEventStream,
 }
 
 #[async_trait::async_trait]
@@ -349,13 +342,6 @@ impl FrontendEventSubscription for FrontendBroadcastSubscription {
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => return Ok(None),
             }
         }
-    }
-}
-
-#[async_trait::async_trait]
-impl orchestrator_domain::FrontendEventSubscription for CoreFrontendSubscriptionAdapter {
-    async fn next_event(&mut self) -> Result<Option<orchestrator_domain::FrontendEvent>, CoreError> {
-        Ok(self.inner.next_event().await?.map(Into::into))
     }
 }
 
@@ -374,7 +360,9 @@ where
             FrontendIntent::Command(_) => {
                 let mut guard = self.snapshot.write().await;
                 if apply_intent_to_snapshot(&mut guard, &intent) {
-                    let _ = self.event_tx.send(FrontendEvent::SnapshotUpdated(guard.clone()));
+                    let _ = self
+                        .event_tx
+                        .send(FrontendEvent::SnapshotUpdated(guard.clone()));
                 }
             }
             FrontendIntent::SendTerminalInput { session_id, input } => {
@@ -404,26 +392,6 @@ where
     }
 }
 
-#[async_trait::async_trait]
-impl<S, G> orchestrator_domain::FrontendController for AppFrontendController<S, G>
-where
-    S: Supervisor + Send + Sync + 'static,
-    G: GithubClient + Send + Sync + 'static,
-{
-    async fn snapshot(&self) -> Result<orchestrator_domain::FrontendSnapshot, CoreError> {
-        Ok(<Self as FrontendController>::snapshot(self).await?.into())
-    }
-
-    async fn submit_intent(&self, intent: orchestrator_domain::FrontendIntent) -> Result<(), CoreError> {
-        <Self as FrontendController>::submit_intent(self, intent.into()).await
-    }
-
-    async fn subscribe(&self) -> Result<orchestrator_domain::FrontendEventStream, CoreError> {
-        let stream = <Self as FrontendController>::subscribe(self).await?;
-        Ok(Box::new(CoreFrontendSubscriptionAdapter { inner: stream }))
-    }
-}
-
 #[cfg(test)]
 mod frontend_controller_tests {
     use super::*;
@@ -441,14 +409,20 @@ mod frontend_controller_tests {
             &FrontendIntent::Command(FrontendCommandIntent::SetApplicationModeAutopilot),
         );
         assert!(changed);
-        assert_eq!(snapshot.application_mode, FrontendApplicationMode::Autopilot);
+        assert_eq!(
+            snapshot.application_mode,
+            FrontendApplicationMode::Autopilot
+        );
 
         let changed = apply_intent_to_snapshot(
             &mut snapshot,
             &FrontendIntent::Command(FrontendCommandIntent::SetApplicationModeAutopilot),
         );
         assert!(!changed);
-        assert_eq!(snapshot.application_mode, FrontendApplicationMode::Autopilot);
+        assert_eq!(
+            snapshot.application_mode,
+            FrontendApplicationMode::Autopilot
+        );
 
         let changed = apply_intent_to_snapshot(
             &mut snapshot,
@@ -457,5 +431,4 @@ mod frontend_controller_tests {
         assert!(changed);
         assert_eq!(snapshot.application_mode, FrontendApplicationMode::Manual);
     }
-
 }

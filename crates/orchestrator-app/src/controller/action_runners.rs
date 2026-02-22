@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use crate::commands::UntypedCommandInvocation;
 use crate::controller::contracts::{
     InboxPublishRequest, InboxResolveRequest, MergeQueueEvent, SessionWorkflowAdvanceOutcome,
     SupervisorCommandContext, SupervisorCommandDispatcher, TicketPickerProvider,
@@ -7,7 +8,7 @@ use crate::controller::contracts::{
 use crate::events::StoredEventEnvelope;
 use orchestrator_domain::{
     CoreError, LlmChatRequest, LlmFinishReason, LlmProvider, LlmRateLimitState, LlmResponseStream,
-    LlmTokenUsage, UntypedCommandInvocation, WorkerSessionId,
+    LlmTokenUsage, WorkerSessionId,
 };
 use tokio::sync::mpsc;
 

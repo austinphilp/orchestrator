@@ -1,9 +1,10 @@
 use std::path::PathBuf;
 
+use crate::commands::{SupervisorQueryContextArgs, UntypedCommandInvocation};
 use async_trait::async_trait;
 use orchestrator_domain::{
-    CoreError, InboxItemId, InboxItemKind, LlmResponseStream, SelectedTicketFlowResult,
-    UntypedCommandInvocation, WorkItemId, WorkerSessionId, WorkflowState,
+    CoreError, InboxItemId, InboxItemKind, LlmResponseStream, SelectedTicketFlowResult, WorkItemId,
+    WorkerSessionId, WorkflowState,
 };
 use orchestrator_ticketing::TicketSummary;
 use tokio::sync::mpsc;
@@ -206,7 +207,7 @@ pub enum MergeQueueEvent {
     },
 }
 
-pub type SupervisorCommandContext = orchestrator_domain::SupervisorQueryContextArgs;
+pub type SupervisorCommandContext = SupervisorQueryContextArgs;
 
 #[async_trait]
 pub trait SupervisorCommandDispatcher: Send + Sync {
@@ -222,7 +223,6 @@ pub trait SupervisorCommandDispatcher: Send + Sync {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::any::TypeId;
 
     struct StubTicketPickerProvider;
 
@@ -254,14 +254,6 @@ mod tests {
         async fn reload_projection(&self) -> Result<ProjectionState, CoreError> {
             Ok(ProjectionState::default())
         }
-    }
-
-    #[test]
-    fn supervisor_command_context_alias_tracks_command_context_type() {
-        assert_eq!(
-            TypeId::of::<SupervisorCommandContext>(),
-            TypeId::of::<orchestrator_domain::SupervisorQueryContextArgs>()
-        );
     }
 
     #[tokio::test]

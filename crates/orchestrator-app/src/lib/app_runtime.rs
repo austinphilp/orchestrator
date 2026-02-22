@@ -960,7 +960,7 @@ where
 {
     async fn dispatch_supervisor_command(
         &self,
-        invocation: orchestrator_domain::UntypedCommandInvocation,
+        invocation: crate::commands::UntypedCommandInvocation,
         context: SupervisorCommandContext,
     ) -> Result<(String, orchestrator_supervisor::LlmResponseStream), CoreError> {
         let supervisor_config = self.supervisor_runtime_config();

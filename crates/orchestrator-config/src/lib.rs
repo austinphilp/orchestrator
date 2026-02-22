@@ -771,7 +771,7 @@ fn load_or_create_config(path: &Path) -> Result<OrchestratorConfig, ConfigError>
         ))
     })?;
 
-    let changed = normalize_config(&mut config);
+    let changed = normalize_config(&mut config)?;
     if changed {
         persist_config(path, &config)?;
     }
@@ -779,7 +779,7 @@ fn load_or_create_config(path: &Path) -> Result<OrchestratorConfig, ConfigError>
     Ok(config)
 }
 
-fn normalize_config(config: &mut OrchestratorConfig) -> bool {
+fn normalize_config(config: &mut OrchestratorConfig) -> Result<bool, ConfigError> {
     let mut changed = false;
 
     if config.workspace.trim() == LEGACY_DEFAULT_WORKSPACE_PATH
@@ -797,29 +797,27 @@ fn normalize_config(config: &mut OrchestratorConfig) -> bool {
     changed |= normalize_provider_selection(
         &mut config.ticketing_provider,
         DEFAULT_TICKETING_PROVIDER,
-        &[
-            ("linear", "ticketing.linear"),
-            ("shortcut", "ticketing.shortcut"),
-        ],
-    );
+        "ticketing_provider",
+        "ticketing",
+    )?;
     changed |= normalize_provider_selection(
         &mut config.harness_provider,
         DEFAULT_HARNESS_PROVIDER,
-        &[("opencode", "harness.opencode"), ("codex", "harness.codex")],
-    );
+        "harness_provider",
+        "harness",
+    )?;
     changed |= normalize_provider_selection(
         &mut config.vcs_provider,
         DEFAULT_VCS_PROVIDER,
-        &[("git", "vcs.git_cli"), ("git_cli", "vcs.git_cli")],
-    );
+        "vcs_provider",
+        "vcs",
+    )?;
     changed |= normalize_provider_selection(
         &mut config.vcs_repo_provider,
         DEFAULT_VCS_REPO_PROVIDER,
-        &[
-            ("github", "vcs_repos.github_gh_cli"),
-            ("github_gh_cli", "vcs_repos.github_gh_cli"),
-        ],
-    );
+        "vcs_repo_provider",
+        "vcs_repos",
+    )?;
 
     changed |= normalize_supervisor_model(&mut config.supervisor.model);
     changed |= normalize_non_empty_string(
@@ -895,7 +893,7 @@ fn normalize_config(config: &mut OrchestratorConfig) -> bool {
     changed |= normalize_database_config(&mut config.database);
     changed |= normalize_ui_config(&mut config.ui);
 
-    changed
+    Ok(changed)
 }
 
 pub fn normalize_supervisor_model(value: &mut String) -> bool {
@@ -1001,25 +999,42 @@ pub fn normalize_ui_config(config: &mut UiConfigToml) -> bool {
 fn normalize_provider_selection(
     value: &mut String,
     default: &str,
-    legacy_aliases: &[(&str, &str)],
-) -> bool {
+    field_name: &str,
+    provider_namespace: &str,
+) -> Result<bool, ConfigError> {
     let normalized = value.trim().to_ascii_lowercase();
     let canonical = if normalized.is_empty() {
         default.to_owned()
     } else {
-        legacy_aliases
-            .iter()
-            .find_map(|(legacy, namespaced)| (normalized == *legacy).then_some(*namespaced))
-            .unwrap_or(normalized.as_str())
-            .to_owned()
+        normalized
     };
+    let expected_prefix = format!("{provider_namespace}.");
+
+    if !canonical.starts_with(expected_prefix.as_str()) {
+        return Err(ConfigError::configuration(format!(
+            "Invalid `{field_name}` value '{canonical}' in ORCHESTRATOR_CONFIG: provider keys must be namespaced under `{expected_prefix}*` (for example `{default}`)."
+        )));
+    }
+    let suffix = canonical[expected_prefix.len()..].trim();
+    if suffix.is_empty()
+        || suffix.split('.').any(|segment| {
+            segment.is_empty()
+                || !segment.chars().all(|ch| {
+                    ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '_' || ch == '-'
+                })
+        })
+    {
+        return Err(ConfigError::configuration(format!(
+            "Invalid `{field_name}` value '{canonical}' in ORCHESTRATOR_CONFIG: expected format `{provider_namespace}.<provider_key>` where each key segment contains only lowercase letters, digits, `_`, or `-`."
+        )));
+    }
 
     if *value != canonical {
         *value = canonical;
-        return true;
+        return Ok(true);
     }
 
-    false
+    Ok(false)
 }
 
 fn normalize_non_empty_string(value: &mut String, default: String) -> bool {
@@ -1241,20 +1256,58 @@ mod tests {
     }
 
     #[test]
-    fn load_from_path_migrates_legacy_provider_aliases() {
-        let root = unique_temp_dir("legacy-aliases");
+    fn load_from_path_rejects_legacy_provider_aliases() {
+        let cases = [
+            ("ticketing_provider", "linear", "ticketing"),
+            ("harness_provider", "codex", "harness"),
+            ("vcs_provider", "git", "vcs"),
+            ("vcs_repo_provider", "github_gh_cli", "vcs_repos"),
+        ];
+
+        for (field, legacy_alias, namespace) in cases {
+            let root = unique_temp_dir(&format!("legacy-aliases-{field}"));
+            let path = root.join("config.toml");
+            let mut ticketing = "ticketing.linear";
+            let mut harness = "harness.codex";
+            let mut vcs = "vcs.git_cli";
+            let mut vcs_repos = "vcs_repos.github_gh_cli";
+            match field {
+                "ticketing_provider" => ticketing = legacy_alias,
+                "harness_provider" => harness = legacy_alias,
+                "vcs_provider" => vcs = legacy_alias,
+                "vcs_repo_provider" => vcs_repos = legacy_alias,
+                _ => unreachable!("unexpected provider field"),
+            }
+            write_config_file(
+                &path,
+                format!(
+                    "workspace = '/tmp/work'\nevent_store_path = '/tmp/events.db'\nticketing_provider='{ticketing}'\nharness_provider='{harness}'\nvcs_provider='{vcs}'\nvcs_repo_provider='{vcs_repos}'\n"
+                )
+                .as_str(),
+            );
+
+            let error = load_from_path(&path).expect_err("legacy aliases should be rejected");
+            let detail = error.to_string();
+            assert!(detail.contains(field));
+            assert!(detail.contains(format!("{namespace}.*").as_str()));
+
+            remove_temp_path(&root);
+        }
+    }
+
+    #[test]
+    fn load_from_path_rejects_malformed_namespaced_provider_key() {
+        let root = unique_temp_dir("malformed-provider-key");
         let path = root.join("config.toml");
         write_config_file(
             &path,
-            "workspace = '/tmp/work'\nevent_store_path = '/tmp/events.db'\nticketing_provider='linear'\nharness_provider='codex'\nvcs_provider='git'\nvcs_repo_provider='github_gh_cli'\n",
+            "workspace = '/tmp/work'\nevent_store_path = '/tmp/events.db'\nticketing_provider='ticketing.'\nharness_provider='harness.codex'\nvcs_provider='vcs.git_cli'\nvcs_repo_provider='vcs_repos.github_gh_cli'\n",
         );
 
-        let config = load_from_path(&path).expect("load config");
-
-        assert_eq!(config.ticketing_provider, "ticketing.linear");
-        assert_eq!(config.harness_provider, "harness.codex");
-        assert_eq!(config.vcs_provider, "vcs.git_cli");
-        assert_eq!(config.vcs_repo_provider, "vcs_repos.github_gh_cli");
+        let error = load_from_path(&path).expect_err("malformed provider key should be rejected");
+        let detail = error.to_string();
+        assert!(detail.contains("ticketing_provider"));
+        assert!(detail.contains("expected format `ticketing.<provider_key>`"));
 
         remove_temp_path(&root);
     }

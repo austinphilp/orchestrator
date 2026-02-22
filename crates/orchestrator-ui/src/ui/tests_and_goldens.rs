@@ -8840,8 +8840,7 @@ mod tests {
     }
 
     #[test]
-    fn ui_runtime_config_from_view_config_normalizes_invalid_inputs() {
-        let defaults = UiRuntimeConfig::default();
+    fn ui_runtime_config_from_view_config_uses_injected_values_without_mutation() {
         let config = UiRuntimeConfig::from_view_config(
             UiViewConfig {
                 theme: " ".to_owned(),
@@ -8856,18 +8855,15 @@ mod tests {
             " ".to_owned(),
         );
 
-        assert_eq!(config.theme, defaults.theme);
-        assert_eq!(
-            config.ticket_picker_priority_states,
-            defaults.ticket_picker_priority_states
-        );
-        assert_eq!(config.supervisor_model, defaults.supervisor_model);
-        assert_eq!(config.transcript_line_limit, 1);
-        assert_eq!(config.background_session_refresh_secs, 15);
-        assert_eq!(config.session_info_background_refresh_secs, 15);
-        assert_eq!(config.merge_poll_base_interval_secs, 5);
-        assert_eq!(config.merge_poll_max_backoff_secs, 900);
-        assert_eq!(config.merge_poll_backoff_multiplier, 1);
+        assert_eq!(config.theme, " ");
+        assert_eq!(config.ticket_picker_priority_states, vec![" "]);
+        assert_eq!(config.supervisor_model, " ");
+        assert_eq!(config.transcript_line_limit, 0);
+        assert_eq!(config.background_session_refresh_secs, 99);
+        assert_eq!(config.session_info_background_refresh_secs, 1);
+        assert_eq!(config.merge_poll_base_interval_secs, 1);
+        assert_eq!(config.merge_poll_max_backoff_secs, 9_999);
+        assert_eq!(config.merge_poll_backoff_multiplier, 0);
     }
 
     #[test]

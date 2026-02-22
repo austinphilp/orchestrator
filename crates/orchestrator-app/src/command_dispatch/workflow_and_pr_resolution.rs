@@ -1018,11 +1018,12 @@ where
     P: LlmProvider + Send + Sync + ?Sized,
 {
     let context = merge_supervisor_query_context(fallback_context, args_context(&args));
-    let scope = resolve_supervisor_query_scope(&SupervisorQueryContextArgs::from(context.clone()))?;
+    let scope = resolve_supervisor_query_scope(&context)?;
     let store = open_owned_event_store(event_store_path)?;
     let query_engine = SupervisorQueryEngine::default();
+    let domain_context = to_domain_supervisor_query_context(&context);
     let context_pack =
-        query_engine.build_context_pack_with_filters(&store, scope.clone(), &context)?;
+        query_engine.build_context_pack_with_filters(&store, scope.clone(), &domain_context)?;
     let messages = match &args {
         SupervisorQueryArgs::Template {
             template,
@@ -1173,6 +1174,16 @@ where
     Ok((stream_id, Box::new(stream)))
 }
 
+fn to_domain_supervisor_query_context(
+    context: &SupervisorCommandContext,
+) -> orchestrator_domain::SupervisorQueryContextArgs {
+    orchestrator_domain::SupervisorQueryContextArgs {
+        selected_work_item_id: context.selected_work_item_id.clone(),
+        selected_session_id: context.selected_session_id.clone(),
+        scope: context.scope.clone(),
+    }
+}
+
 async fn execute_github_open_review_tabs_with_opener(
     code_host: &impl CodeHostProvider,
     event_store_path: &str,
@@ -1231,14 +1242,13 @@ pub(crate) async fn dispatch_supervisor_runtime_command<P>(
     event_store_path: &str,
     supervisor_runtime_config: &SupervisorRuntimeConfig,
     database_runtime_config: &DatabaseRuntimeConfig,
-    invocation: orchestrator_domain::UntypedCommandInvocation,
+    invocation: crate::commands::UntypedCommandInvocation,
     context: SupervisorCommandContext,
 ) -> Result<(String, LlmResponseStream), CoreError>
 where
     P: LlmProvider + Send + Sync + ?Sized,
 {
-    let typed_invocation = crate::commands::UntypedCommandInvocation::from(invocation);
-    let command = CommandRegistry::default().parse_invocation(&typed_invocation)?;
+    let command = CommandRegistry::default().parse_invocation(&invocation)?;
     match command {
         Command::SupervisorQuery(args) => {
             execute_supervisor_query(

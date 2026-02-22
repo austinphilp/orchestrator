@@ -27,9 +27,7 @@ pub use orchestrator_app::frontend::ui_boundary::{
     ArtifactKind, ArtifactProjection, AttentionBatchKind, AttentionEngineConfig,
     AttentionInboxSnapshot, AttentionPriorityBand,
 };
-use orchestrator_config::{
-    normalize_supervisor_model, normalize_ui_config, SupervisorConfig, UiConfigToml, UiViewConfig,
-};
+use orchestrator_config::{SupervisorConfig, UiConfigToml, UiViewConfig};
 use crossterm::cursor::{SetCursorStyle, Show};
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use crossterm::terminal::{
@@ -105,41 +103,18 @@ impl Default for UiRuntimeConfig {
 }
 
 impl UiRuntimeConfig {
-    fn from_inputs(ui_config: UiConfigToml, supervisor_model: String) -> Self {
-        let mut normalized_ui = ui_config;
-        let mut normalized_supervisor_model = supervisor_model;
-        let _ = normalize_ui_config(&mut normalized_ui);
-        let _ = normalize_supervisor_model(&mut normalized_supervisor_model);
-
-        Self {
-            theme: normalized_ui.theme,
-            ticket_picker_priority_states: normalized_ui.ticket_picker_priority_states,
-            supervisor_model: normalized_supervisor_model,
-            transcript_line_limit: normalized_ui.transcript_line_limit,
-            background_session_refresh_secs: normalized_ui.background_session_refresh_secs,
-            session_info_background_refresh_secs: normalized_ui
-                .session_info_background_refresh_secs,
-            merge_poll_base_interval_secs: normalized_ui.merge_poll_base_interval_secs,
-            merge_poll_max_backoff_secs: normalized_ui.merge_poll_max_backoff_secs,
-            merge_poll_backoff_multiplier: normalized_ui.merge_poll_backoff_multiplier,
-        }
-    }
-
     fn from_view_config(ui_config: UiViewConfig, supervisor_model: String) -> Self {
-        Self::from_inputs(
-            UiConfigToml {
-                theme: ui_config.theme,
-                ticket_picker_priority_states: ui_config.ticket_picker_priority_states,
-                transcript_line_limit: ui_config.transcript_line_limit,
-                background_session_refresh_secs: ui_config.background_session_refresh_secs,
-                session_info_background_refresh_secs: ui_config
-                    .session_info_background_refresh_secs,
-                merge_poll_base_interval_secs: ui_config.merge_poll_base_interval_secs,
-                merge_poll_max_backoff_secs: ui_config.merge_poll_max_backoff_secs,
-                merge_poll_backoff_multiplier: ui_config.merge_poll_backoff_multiplier,
-            },
+        Self {
+            theme: ui_config.theme,
+            ticket_picker_priority_states: ui_config.ticket_picker_priority_states,
             supervisor_model,
-        )
+            transcript_line_limit: ui_config.transcript_line_limit,
+            background_session_refresh_secs: ui_config.background_session_refresh_secs,
+            session_info_background_refresh_secs: ui_config.session_info_background_refresh_secs,
+            merge_poll_base_interval_secs: ui_config.merge_poll_base_interval_secs,
+            merge_poll_max_backoff_secs: ui_config.merge_poll_max_backoff_secs,
+            merge_poll_backoff_multiplier: ui_config.merge_poll_backoff_multiplier,
+        }
     }
 
     fn background_session_refresh_interval(&self) -> Duration {

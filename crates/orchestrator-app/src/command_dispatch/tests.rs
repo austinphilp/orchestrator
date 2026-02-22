@@ -63,6 +63,24 @@ mod tests {
         assert_eq!(sanitized, "workflow merge failed\n\n");
     }
 
+    #[test]
+    fn supervisor_context_adapter_preserves_fields() {
+        let context = SupervisorCommandContext {
+            selected_work_item_id: Some("wi-77".to_owned()),
+            selected_session_id: Some("sess-77".to_owned()),
+            scope: Some("session:sess-77".to_owned()),
+        };
+
+        let domain_context = to_domain_supervisor_query_context(&context);
+
+        assert_eq!(
+            domain_context.selected_work_item_id,
+            context.selected_work_item_id
+        );
+        assert_eq!(domain_context.selected_session_id, context.selected_session_id);
+        assert_eq!(domain_context.scope, context.scope);
+    }
+
     struct MockUrlOpener {
         calls: Mutex<Vec<String>>,
     }

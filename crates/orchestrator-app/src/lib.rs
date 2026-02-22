@@ -43,7 +43,7 @@ mod module_tree_tests {
     }
 
     #[test]
-    fn root_exports_match_bootstrap_bridge() {
+    fn root_exports_match_bootstrap_boundary() {
         assert_eq!(
             TypeId::of::<crate::AppConfig>(),
             TypeId::of::<crate::bootstrap::AppConfig>()
