@@ -7,7 +7,7 @@
 
 ## Canonical environment variables
 
-- `ORCHESTRATOR_CONFIG` (orchestrator-app): optional path to TOML config.
+- `ORCHESTRATOR_CONFIG` (orchestrator-config, orchestrator-app): optional path to TOML config loaded by orchestrator-config and consumed by orchestrator-app.
 - `OPENROUTER_API_KEY` (orchestrator-supervisor): required API key for supervisor.
 - `LINEAR_API_KEY` (orchestrator-app, orchestrator-ticketing, scripts/ralph_loop.py, scripts/linear_graphql.py): required Linear API key.
 - `ORCHESTRATOR_LINEAR_API_URL` (scripts/linear_graphql.py): optional Linear GraphQL endpoint override for script usage.

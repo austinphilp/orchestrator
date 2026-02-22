@@ -532,7 +532,7 @@ mod tests {
                 ("APPDATA", None),
             ],
             || {
-                let config = AppConfig::from_env().expect("default config");
+                let config = load_app_config_from_env().expect("default config");
                 assert_eq!(config.workspace, expected_workspace.to_string_lossy());
                 assert_eq!(config.workspace, expected_workspace.to_string_lossy());
                 assert_eq!(
@@ -600,7 +600,7 @@ mod tests {
                 ("APPDATA", None),
             ],
             || {
-                let config = AppConfig::from_env().expect("bootstrap config");
+                let config = load_app_config_from_env().expect("bootstrap config");
                 assert_eq!(config.workspace, expected_workspace.to_string_lossy());
                 assert_eq!(config.workspace, expected_workspace.to_string_lossy());
                 assert_eq!(
@@ -666,7 +666,7 @@ mod tests {
             "ORCHESTRATOR_CONFIG",
             Some(config_path.to_str().unwrap()),
             || {
-                let config = AppConfig::from_env().expect("parse config");
+                let config = load_app_config_from_env().expect("parse config");
                 assert_eq!(config.workspace, "/tmp/work");
                 assert_eq!(config.workspace, "/tmp/work");
                 assert_eq!(config.event_store_path, "/tmp/events.db");
@@ -699,7 +699,7 @@ mod tests {
                 ("APPDATA", None),
             ],
             || {
-                let config = AppConfig::from_env().expect("parse config");
+                let config = load_app_config_from_env().expect("parse config");
                 assert_eq!(config.workspace, "/tmp/work");
                 assert_eq!(config.workspace, "/tmp/work");
                 assert_eq!(
@@ -733,7 +733,7 @@ mod tests {
                 ("APPDATA", None),
             ],
             || {
-                let config = AppConfig::from_env().expect("config should load");
+                let config = load_app_config_from_env().expect("config should load");
                 assert_eq!(config.workspace, expected_workspace.to_string_lossy());
                 assert!(Path::new(&config.workspace).is_absolute());
                 assert_eq!(
@@ -774,7 +774,7 @@ mod tests {
                 ("APPDATA", None),
             ],
             || {
-                let config = AppConfig::from_env().expect("config should load");
+                let config = load_app_config_from_env().expect("config should load");
                 assert_eq!(config.workspace, "./custom-workspace");
                 assert_eq!(config.event_store_path, "./custom-events.db");
             },
@@ -814,7 +814,7 @@ mod tests {
                 ("APPDATA", None),
             ],
             || {
-                AppConfig::from_env().expect("config should load");
+                load_app_config_from_env().expect("config should load");
                 let migrated = PathBuf::from(workspace.clone())
                     .join("ap-999-sample-ticket")
                     .join("marker.txt");
@@ -898,7 +898,7 @@ mod tests {
                 ("APPDATA", None),
             ],
             || {
-                AppConfig::from_env().expect("config should load and migrate mappings");
+                load_app_config_from_env().expect("config should load and migrate mappings");
             },
         );
 
@@ -932,7 +932,7 @@ mod tests {
             "ORCHESTRATOR_CONFIG",
             Some(config_path.to_str().unwrap()),
             || {
-                let err = AppConfig::from_env().expect_err("invalid toml should fail");
+                let err = load_app_config_from_env().expect_err("invalid toml should fail");
                 let message = err.to_string();
                 assert!(message.contains("Failed to parse ORCHESTRATOR_CONFIG"));
             },
@@ -954,7 +954,7 @@ mod tests {
             "ORCHESTRATOR_CONFIG",
             Some(config_path.to_str().unwrap()),
             || {
-                let config = AppConfig::from_env().expect("parse and normalize config");
+                let config = load_app_config_from_env().expect("parse and normalize config");
                 assert_eq!(config.ui.background_session_refresh_secs, 15);
                 assert_eq!(config.ui.session_info_background_refresh_secs, 15);
             },
@@ -969,7 +969,7 @@ mod tests {
             "ORCHESTRATOR_CONFIG",
             Some(config_path.to_str().unwrap()),
             || {
-                let config = AppConfig::from_env().expect("parse and normalize low config");
+                let config = load_app_config_from_env().expect("parse and normalize low config");
                 assert_eq!(config.ui.background_session_refresh_secs, 2);
                 assert_eq!(config.ui.session_info_background_refresh_secs, 30);
             },
@@ -991,7 +991,7 @@ mod tests {
             "ORCHESTRATOR_CONFIG",
             Some(config_path.to_str().unwrap()),
             || {
-                let config = AppConfig::from_env().expect("parse and normalize config");
+                let config = load_app_config_from_env().expect("parse and normalize config");
                 assert_eq!(config.ui.transcript_line_limit, 1);
             },
         );
@@ -1005,7 +1005,7 @@ mod tests {
             "ORCHESTRATOR_CONFIG",
             Some(config_path.to_str().unwrap()),
             || {
-                let config = AppConfig::from_env().expect("parse and preserve config");
+                let config = load_app_config_from_env().expect("parse and preserve config");
                 assert_eq!(config.ui.transcript_line_limit, 250);
             },
         );
@@ -1019,7 +1019,7 @@ mod tests {
             "ORCHESTRATOR_CONFIG",
             Some(config_path.to_str().unwrap()),
             || {
-                let config = AppConfig::from_env().expect("parse and normalize merge poll config");
+                let config = load_app_config_from_env().expect("parse and normalize merge poll config");
                 assert_eq!(config.ui.merge_poll_base_interval_secs, 5);
                 assert_eq!(config.ui.merge_poll_max_backoff_secs, 900);
                 assert_eq!(config.ui.merge_poll_backoff_multiplier, 1);

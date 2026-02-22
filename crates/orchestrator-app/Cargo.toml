@@ -16,6 +16,7 @@ orchestrator-vcs = { path = "../orchestrator-vcs" }
 orchestrator-vcs-repos = { path = "../orchestrator-vcs-repos" }
 orchestrator-worker-protocol = { path = "../orchestrator-worker-protocol" }
 orchestrator-worker-runtime = { path = "../orchestrator-worker-runtime" }
+orchestrator-config = { path = "../orchestrator-config" }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

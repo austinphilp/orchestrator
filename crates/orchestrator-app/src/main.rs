@@ -1,8 +1,8 @@
 use anyhow::Result;
 use orchestrator_app::events::OrchestrationEventPayload;
 use orchestrator_app::{
-    set_database_runtime_config, App, AppConfig, AppError, AppFrontendController,
-    FrontendController, WorkerManagerBackend,
+    load_app_config_from_env, App, AppConfig, AppError, AppFrontendController, FrontendController,
+    WorkerManagerBackend,
 };
 use orchestrator_core::{
     BackendKind, CoreError, EventPrunePolicy, SpawnSpec, SqliteEventStore, TicketProvider,
@@ -43,8 +43,7 @@ const STARTUP_RESUME_NUDGE: &str =
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let mut config = AppConfig::from_env()?;
-    set_database_runtime_config(config.database.clone());
+    let mut config = load_app_config_from_env()?;
     init_file_logging(config.event_store_path.as_str())?;
     log_event_store_path(config.event_store_path.as_str());
     warn_if_legacy_event_store_exists(config.event_store_path.as_str());
@@ -63,16 +62,9 @@ async fn main() -> Result<()> {
 
     orchestrator_app::set_supervisor_model_config(config.supervisor.model.clone());
     orchestrator_app::set_git_binary_config(config.git.binary.clone());
-    orchestrator_ui::set_ui_runtime_config(
-        config.ui.theme.clone(),
-        config.ui.ticket_picker_priority_states.clone(),
+    orchestrator_ui::set_ui_runtime_config_from_view(
+        config.ui_view(),
         config.supervisor.model.clone(),
-        config.ui.transcript_line_limit,
-        config.ui.background_session_refresh_secs,
-        config.ui.session_info_background_refresh_secs,
-        config.ui.merge_poll_base_interval_secs,
-        config.ui.merge_poll_max_backoff_secs,
-        config.ui.merge_poll_backoff_multiplier,
     );
 
     let openrouter_api_key = required_env(ENV_OPENROUTER_API_KEY)?;

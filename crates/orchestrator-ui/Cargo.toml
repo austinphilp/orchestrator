@@ -7,6 +7,7 @@ license.workspace = true
 [dependencies]
 orchestrator-core = { path = "../orchestrator-core" }
 orchestrator-worker-protocol = { path = "../orchestrator-worker-protocol" }
+orchestrator-config = { path = "../orchestrator-config" }
 crossterm.workspace = true
 ratatui.workspace = true
 ratskin.workspace = true

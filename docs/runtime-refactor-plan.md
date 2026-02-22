@@ -32,6 +32,7 @@
 - Implementation update (RRP26 C04): `orchestrator-app::commands` now owns command IDs/registry/parsing/invocation types (including uniqueness + roundtrip coverage), `orchestrator-app::frontend` now owns frontend event/intent/controller contracts with schema roundtrip tests, and app command/frontend runtime paths now import those app-domain modules directly with compatibility adapters at legacy boundaries.
 - Implementation update (RRP26 C05): `orchestrator-app::error` now owns app-level error conversion glue (provider factory + runtime adaptation at app integration edges), and startup composition paths now convert cross-crate provider factory errors through that boundary while legacy `orchestrator-core` conversion behavior remains available during migration.
 - Implementation update (RRP26 C06): provider/supervisor-facing workspace imports now resolve through `orchestrator-ticketing`/`orchestrator-vcs`/`orchestrator-vcs-repos`/`orchestrator-supervisor` interfaces, and direct `orchestrator-core` imports were removed from provider implementation crates in favor of those owners.
+- Implementation update (RRP26 D01): new crate `orchestrator-config` now owns canonical `OrchestratorConfig` schema + normalization/load behavior (`load_from_env`, `load_from_path`) with `ConfigError` and typed config slices (including `UiViewConfig`); `orchestrator-app` now loads through this crate and `orchestrator-ui` accepts `UiViewConfig`-based runtime config injection.
 
 ## Why This Refactor
 `orchestrator-runtime` currently combines too many concerns:

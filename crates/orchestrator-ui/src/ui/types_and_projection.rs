@@ -5,6 +5,7 @@ use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
+use orchestrator_config::UiViewConfig;
 use crossterm::cursor::{SetCursorStyle, Show};
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use crossterm::terminal::{
@@ -120,6 +121,20 @@ static UI_RUNTIME_CONFIG: OnceLock<std::sync::RwLock<UiRuntimeConfig>> = OnceLoc
 
 fn ui_runtime_config_store() -> &'static std::sync::RwLock<UiRuntimeConfig> {
     UI_RUNTIME_CONFIG.get_or_init(|| std::sync::RwLock::new(UiRuntimeConfig::default()))
+}
+
+pub fn set_ui_runtime_config_from_view(ui_config: UiViewConfig, supervisor_model: String) {
+    set_ui_runtime_config(
+        ui_config.theme,
+        ui_config.ticket_picker_priority_states,
+        supervisor_model,
+        ui_config.transcript_line_limit,
+        ui_config.background_session_refresh_secs,
+        ui_config.session_info_background_refresh_secs,
+        ui_config.merge_poll_base_interval_secs,
+        ui_config.merge_poll_max_backoff_secs,
+        ui_config.merge_poll_backoff_multiplier,
+    );
 }
 
 pub fn set_ui_runtime_config(
