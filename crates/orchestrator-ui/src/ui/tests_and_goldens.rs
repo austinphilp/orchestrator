@@ -2168,6 +2168,61 @@ mod tests {
     }
 
     #[test]
+    fn session_panel_planning_prompt_wait_renders_idle_even_with_active_turn() {
+        let backend = Arc::new(ManualTerminalBackend::default());
+        let mut projection = sample_projection(true);
+        projection
+            .work_items
+            .get_mut(&WorkItemId::new("wi-1"))
+            .expect("work item")
+            .workflow_state = Some(WorkflowState::Planning);
+        let mut shell_state = UiShellState::new_with_integrations(
+            "ready".to_owned(),
+            projection,
+            None,
+            None,
+            None,
+            Some(backend),
+        );
+        shell_state.open_terminal_and_enter_mode();
+
+        let sender = shell_state
+            .terminal_session_sender
+            .clone()
+            .expect("terminal sender");
+        sender
+            .try_send(TerminalSessionEvent::NeedsInput {
+                session_id: WorkerSessionId::new("sess-1"),
+                needs_input: BackendNeedsInputEvent {
+                    prompt_id: "prompt-planning-row-idle".to_owned(),
+                    question: "Provide next step".to_owned(),
+                    options: vec!["Continue".to_owned()],
+                    default_option: Some("Continue".to_owned()),
+                    questions: Vec::new(),
+                },
+            })
+            .expect("queue needs-input event");
+        shell_state.poll_terminal_session_events();
+        shell_state
+            .terminal_session_states
+            .get_mut(&WorkerSessionId::new("sess-1"))
+            .expect("terminal state")
+            .turn_active = true;
+
+        let rendered = render_sessions_panel(
+            &shell_state.domain,
+            &shell_state.terminal_session_states,
+            Some(&WorkerSessionId::new("sess-1")),
+        );
+        let line = rendered
+            .lines()
+            .find(|entry| entry.contains("session sess-1"))
+            .expect("planning session row");
+        assert!(line.contains("[idle]"));
+        assert!(!line.contains("[active]"));
+    }
+
+    #[test]
     fn session_panel_line_metrics_tracks_selected_row_line() {
         let rows = vec![
             SessionPanelRow {
@@ -3049,7 +3104,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn autopilot_tick_does_not_auto_advance_or_archive_sessions() {
+    async fn autopilot_tick_advances_idle_implementing_and_archives_done_sessions() {
         let provider = Arc::new(AutopilotRecordingProvider::default());
         let mut projection = ProjectionState::default();
 
@@ -3142,7 +3197,6 @@ mod tests {
 
         assert!(shell_state.tick_autopilot_and_report());
         tokio::task::yield_now().await;
-
         let advanced = provider.advanced_sessions();
         let archived = provider.archived_sessions();
         assert!(advanced.iter().any(|session_id| session_id.as_str() == "sess-1"));
@@ -3874,7 +3928,7 @@ mod tests {
     }
 
     #[test]
-    fn planning_unstructured_prompt_keeps_working_indicator_when_turn_active() {
+    fn planning_unstructured_prompt_suppresses_working_indicator_when_turn_active() {
         let backend = Arc::new(ManualTerminalBackend::default());
         let mut projection = sample_projection(true);
         projection
@@ -3921,7 +3975,7 @@ mod tests {
                 &shell_state.terminal_session_states,
                 &WorkerSessionId::new("sess-1"),
             ),
-            TerminalActivityIndicator::Working
+            TerminalActivityIndicator::None
         );
     }
 
