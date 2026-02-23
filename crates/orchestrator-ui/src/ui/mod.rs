@@ -4629,8 +4629,29 @@ impl UiShellState {
     }
 
     fn start_selected_ticket_from_picker(&mut self) {
-        if !self.ticket_picker_overlay.visible {
+        if !self.can_start_selected_ticket_from_picker(false) {
             return;
+        }
+        let Some(ticket) = self.ticket_picker_overlay.selected_ticket().cloned() else {
+            return;
+        };
+        self.start_selected_ticket_from_picker_with_override(ticket, None);
+    }
+
+    fn start_selected_ticket_from_picker_with_override(
+        &mut self,
+        ticket: TicketSummary,
+        repository_override: Option<PathBuf>,
+    ) {
+        if !self.can_start_selected_ticket_from_picker(repository_override.is_some()) {
+            return;
+        }
+        self.spawn_ticket_picker_start(ticket, repository_override);
+    }
+
+    fn can_start_selected_ticket_from_picker(&self, has_repository_override: bool) -> bool {
+        if !self.ticket_picker_overlay.visible {
+            return false;
         }
         if self.ticket_picker_overlay.loading
             || self.ticket_picker_overlay.new_ticket_mode
@@ -4638,24 +4659,14 @@ impl UiShellState {
             || self.ticket_picker_overlay.starting_ticket_id.is_some()
             || self.ticket_picker_overlay.archiving_ticket_id.is_some()
             || self.ticket_picker_overlay.archive_confirm_ticket.is_some()
-            || self.ticket_picker_overlay.has_repository_prompt()
         {
-            return;
+            return false;
         }
-        let Some(ticket) = self.ticket_picker_overlay.selected_ticket().cloned() else {
-            return;
-        };
-        self.spawn_ticket_picker_start(ticket, None);
-    }
+        if self.ticket_picker_overlay.has_repository_prompt() && !has_repository_override {
+            return false;
+        }
 
-    fn start_selected_ticket_from_picker_with_override(
-        &mut self,
-        _ticket: TicketSummary,
-        _repository_override: Option<PathBuf>,
-    ) {
-        self.status_warning = Some(
-            "ticket start with repository override is handled outside the TUI loop".to_owned(),
-        );
+        true
     }
 
     fn begin_archive_selected_ticket_from_picker(&mut self) {
@@ -4706,14 +4717,12 @@ impl UiShellState {
             .repository_prompt_input
             .text()
             .trim();
-        if repository_path.is_empty() {
-            self.ticket_picker_overlay.error = Some("repository path cannot be empty".to_owned());
-            return;
-        }
-        let Some(repository_path) = expand_tilde_path(repository_path) else {
-            self.ticket_picker_overlay.error =
-                Some("could not expand repository path: HOME is not set".to_owned());
-            return;
+        let repository_path = match normalize_repository_override_path(repository_path) {
+            Ok(path) => path,
+            Err(message) => {
+                self.ticket_picker_overlay.error = Some(message);
+                return;
+            }
         };
         self.start_selected_ticket_from_picker_with_override(ticket, Some(repository_path));
     }
@@ -8990,6 +8999,56 @@ fn expand_tilde_path(raw: &str) -> Option<PathBuf> {
     }
 
     Some(PathBuf::from(raw))
+}
+
+fn normalize_repository_override_path(raw: &str) -> Result<PathBuf, String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err("repository path cannot be empty".to_owned());
+    }
+
+    let Some(expanded) = expand_tilde_path(trimmed) else {
+        return Err("could not expand repository path: HOME is not set".to_owned());
+    };
+
+    let normalized = if expanded.is_absolute() {
+        expanded
+    } else {
+        let cwd = std::env::current_dir().map_err(|error| {
+            format!("could not resolve repository path from current directory: {error}")
+        })?;
+        cwd.join(expanded)
+    };
+
+    let metadata = match std::fs::metadata(&normalized) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            return Err(format!(
+                "repository path '{}' does not exist",
+                normalized.display()
+            ))
+        }
+        Err(error) => {
+            return Err(format!(
+                "could not read repository path '{}': {error}",
+                normalized.display()
+            ))
+        }
+    };
+
+    if !metadata.is_dir() {
+        return Err(format!(
+            "repository path '{}' is not a directory",
+            normalized.display()
+        ));
+    }
+
+    normalized.canonicalize().map_err(|error| {
+        format!(
+            "could not canonicalize repository path '{}': {error}",
+            normalized.display()
+        )
+    })
 }
 
 fn resolve_shell_home() -> Option<String> {

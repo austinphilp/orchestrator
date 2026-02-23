@@ -8142,6 +8142,242 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn ticket_picker_repository_prompt_submit_starts_with_normalized_override() {
+        #[derive(Default)]
+        struct OverrideRecordingStartProvider {
+            start_overrides: Arc<Mutex<Vec<Option<PathBuf>>>>,
+        }
+
+        impl OverrideRecordingStartProvider {
+            fn start_overrides(&self) -> Vec<Option<PathBuf>> {
+                self.start_overrides
+                    .lock()
+                    .expect("start overrides lock")
+                    .clone()
+            }
+        }
+
+        #[async_trait]
+        impl TicketPickerProvider for OverrideRecordingStartProvider {
+            async fn list_unfinished_tickets(&self) -> Result<Vec<TicketSummary>, CoreError> {
+                Ok(Vec::new())
+            }
+
+            async fn start_or_resume_ticket(
+                &self,
+                _ticket: TicketSummary,
+                repository_override: Option<PathBuf>,
+            ) -> Result<SelectedTicketFlowResult, CoreError> {
+                self.start_overrides
+                    .lock()
+                    .expect("start overrides lock")
+                    .push(repository_override);
+                Err(CoreError::DependencyUnavailable(
+                    "override capture start failure".to_owned(),
+                ))
+            }
+
+            async fn create_ticket_from_brief(
+                &self,
+                _request: CreateTicketFromPickerRequest,
+            ) -> Result<TicketSummary, CoreError> {
+                Err(CoreError::DependencyUnavailable("not used".to_owned()))
+            }
+
+            async fn reload_projection(&self) -> Result<ProjectionState, CoreError> {
+                Ok(ProjectionState::default())
+            }
+        }
+
+        let provider = Arc::new(OverrideRecordingStartProvider::default());
+        let mut shell_state = UiShellState::new_with_integrations(
+            "ready".to_owned(),
+            triage_projection(),
+            None,
+            None,
+            Some(provider.clone()),
+            None,
+        );
+        let ticket = sample_ticket_summary("issue-352", "AP-352", "Todo");
+        shell_state.open_ticket_picker();
+        shell_state.ticket_picker_overlay.loading = false;
+        shell_state.ticket_picker_overlay.start_repository_prompt(
+            ticket.clone(),
+            "Core".to_owned(),
+            None,
+        );
+        shell_state
+            .ticket_picker_overlay
+            .repository_prompt_input
+            .set_text(".".to_owned());
+
+        let _ = route_ticket_picker_key(&mut shell_state, key(KeyCode::Enter));
+
+        assert!(shell_state.ticket_picker_overlay.loading);
+        assert_eq!(
+            shell_state
+                .ticket_picker_overlay
+                .starting_ticket_id
+                .as_ref(),
+            Some(&ticket.ticket_id)
+        );
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if !provider.start_overrides().is_empty() {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("repository override start call should be recorded");
+
+        let expected_override = std::env::current_dir()
+            .expect("current dir for repository override test")
+            .canonicalize()
+            .expect("canonicalize current dir for repository override test");
+        let start_overrides = provider.start_overrides();
+        assert_eq!(start_overrides.len(), 1);
+        assert_eq!(
+            start_overrides[0].as_deref(),
+            Some(expected_override.as_path())
+        );
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                let _ = shell_state.tick_terminal_view_and_report();
+                if shell_state
+                    .ticket_picker_overlay
+                    .starting_ticket_id
+                    .is_none()
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("ticket start failure event should be received");
+
+        assert!(!shell_state.ticket_picker_overlay.loading);
+        assert!(!shell_state.ticket_picker_overlay.has_repository_prompt());
+        assert!(shell_state
+            .ticket_picker_overlay
+            .error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("override capture start failure"));
+    }
+
+    #[test]
+    fn ticket_picker_repository_prompt_submit_rejects_nonexistent_path() {
+        let mut shell_state = UiShellState::new("ready".to_owned(), triage_projection());
+        shell_state.ticket_picker_overlay.open();
+        shell_state.ticket_picker_overlay.loading = false;
+        let ticket = sample_ticket_summary("issue-352b", "AP-352B", "Todo");
+        shell_state
+            .ticket_picker_overlay
+            .start_repository_prompt(ticket, "Core".to_owned(), None);
+        let missing_path = std::env::temp_dir().join(format!(
+            "orchestrator-ui-missing-repo-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system clock before unix epoch")
+                .as_nanos()
+        ));
+        shell_state
+            .ticket_picker_overlay
+            .repository_prompt_input
+            .set_text(missing_path.to_string_lossy().to_string());
+
+        let _ = route_ticket_picker_key(&mut shell_state, key(KeyCode::Enter));
+
+        assert!(shell_state.ticket_picker_overlay.has_repository_prompt());
+        assert!(shell_state
+            .ticket_picker_overlay
+            .error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("does not exist"));
+        assert!(shell_state
+            .ticket_picker_overlay
+            .starting_ticket_id
+            .is_none());
+        assert!(!shell_state.ticket_picker_overlay.loading);
+    }
+
+    #[test]
+    fn ticket_picker_repository_prompt_submit_rejects_empty_path() {
+        let mut shell_state = UiShellState::new("ready".to_owned(), triage_projection());
+        shell_state.ticket_picker_overlay.open();
+        shell_state.ticket_picker_overlay.loading = false;
+        let ticket = sample_ticket_summary("issue-352c", "AP-352C", "Todo");
+        shell_state
+            .ticket_picker_overlay
+            .start_repository_prompt(ticket, "Core".to_owned(), None);
+        shell_state
+            .ticket_picker_overlay
+            .repository_prompt_input
+            .set_text("   ".to_owned());
+
+        let _ = route_ticket_picker_key(&mut shell_state, key(KeyCode::Enter));
+
+        assert!(shell_state.ticket_picker_overlay.has_repository_prompt());
+        assert!(shell_state
+            .ticket_picker_overlay
+            .error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("cannot be empty"));
+        assert!(shell_state
+            .ticket_picker_overlay
+            .starting_ticket_id
+            .is_none());
+        assert!(!shell_state.ticket_picker_overlay.loading);
+    }
+
+    #[test]
+    fn ticket_picker_repository_prompt_submit_rejects_file_path() {
+        let mut shell_state = UiShellState::new("ready".to_owned(), triage_projection());
+        shell_state.ticket_picker_overlay.open();
+        shell_state.ticket_picker_overlay.loading = false;
+        let ticket = sample_ticket_summary("issue-352d", "AP-352D", "Todo");
+        shell_state
+            .ticket_picker_overlay
+            .start_repository_prompt(ticket, "Core".to_owned(), None);
+        let file_path = std::env::temp_dir().join(format!(
+            "orchestrator-ui-file-repo-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system clock before unix epoch")
+                .as_nanos()
+        ));
+        std::fs::write(&file_path, b"not a repository directory")
+            .expect("write repository prompt file path fixture");
+        shell_state
+            .ticket_picker_overlay
+            .repository_prompt_input
+            .set_text(file_path.to_string_lossy().to_string());
+
+        let _ = route_ticket_picker_key(&mut shell_state, key(KeyCode::Enter));
+
+        assert!(shell_state.ticket_picker_overlay.has_repository_prompt());
+        assert!(shell_state
+            .ticket_picker_overlay
+            .error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("is not a directory"));
+        assert!(shell_state
+            .ticket_picker_overlay
+            .starting_ticket_id
+            .is_none());
+        assert!(!shell_state.ticket_picker_overlay.loading);
+        let _ = std::fs::remove_file(file_path);
+    }
+
+    #[tokio::test]
     async fn ticket_picker_ignores_stale_start_failure_from_older_request() {
         struct StaggeredStartProvider {
             start_calls: Arc<Mutex<usize>>,
@@ -8449,11 +8685,15 @@ mod tests {
             warning: None,
         });
 
-        assert!(shell_state.ticket_picker_overlay.error.is_none());
+        assert!(shell_state
+            .ticket_picker_overlay
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("ticket provider is not configured")));
         assert!(shell_state
             .status_warning
             .as_deref()
-            .is_some_and(|warning| warning.contains("handled outside the TUI loop")));
+            .is_some_and(|warning| warning.contains("ticket provider is not configured")));
     }
 
     #[test]
