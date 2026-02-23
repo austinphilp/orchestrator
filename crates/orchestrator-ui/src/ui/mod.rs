@@ -2971,12 +2971,14 @@ enum TicketPickerEvent {
         message: String,
     },
     TicketStarted {
+        request_id: u64,
         started_session_id: WorkerSessionId,
         projection: Option<ProjectionState>,
         tickets: Option<Vec<TicketSummary>>,
         warning: Option<String>,
     },
     TicketStartFailed {
+        request_id: u64,
         message: String,
     },
     TicketArchived {
@@ -3001,6 +3003,7 @@ enum TicketPickerEvent {
         warning: Option<String>,
     },
     TicketStartRequiresRepository {
+        request_id: u64,
         ticket: TicketSummary,
         project_id: String,
         repository_path_hint: Option<String>,
@@ -3146,6 +3149,8 @@ struct UiShellState {
     ticket_picker_overlay: TicketPickerOverlayState,
     ticket_picker_create_refresh_deadline: Option<Instant>,
     ticket_picker_priority_states: Vec<String>,
+    ticket_picker_start_request_seq: u64,
+    ticket_picker_active_start_request_id: Option<u64>,
     startup_session_feed_opened: bool,
     worker_backend: Option<Arc<dyn WorkerBackend>>,
     frontend_controller: Option<Arc<dyn FrontendController>>,
@@ -3318,6 +3323,8 @@ impl UiShellState {
             ticket_picker_overlay: TicketPickerOverlayState::default(),
             ticket_picker_create_refresh_deadline: None,
             ticket_picker_priority_states: runtime_config.ticket_picker_priority_states.clone(),
+            ticket_picker_start_request_seq: 0,
+            ticket_picker_active_start_request_id: None,
             startup_session_feed_opened: false,
             worker_backend,
             frontend_controller: None,
@@ -4625,8 +4632,20 @@ impl UiShellState {
         if !self.ticket_picker_overlay.visible {
             return;
         }
-        self.status_warning =
-            Some("ticket start is handled outside the TUI loop in frontend services".to_owned());
+        if self.ticket_picker_overlay.loading
+            || self.ticket_picker_overlay.new_ticket_mode
+            || self.ticket_picker_overlay.creating
+            || self.ticket_picker_overlay.starting_ticket_id.is_some()
+            || self.ticket_picker_overlay.archiving_ticket_id.is_some()
+            || self.ticket_picker_overlay.archive_confirm_ticket.is_some()
+            || self.ticket_picker_overlay.has_repository_prompt()
+        {
+            return;
+        }
+        let Some(ticket) = self.ticket_picker_overlay.selected_ticket().cloned() else {
+            return;
+        };
+        self.spawn_ticket_picker_start(ticket, None);
     }
 
     fn start_selected_ticket_from_picker_with_override(
@@ -4746,6 +4765,57 @@ impl UiShellState {
         };
         self.status_warning =
             Some("ticket creation is handled outside the TUI loop in frontend services".to_owned());
+    }
+
+    fn spawn_ticket_picker_start(
+        &mut self,
+        ticket: TicketSummary,
+        repository_override: Option<PathBuf>,
+    ) {
+        let ticket_identifier = ticket.identifier.clone();
+        let Some(provider) = self.ticket_picker_provider.clone() else {
+            let message = "ticket start unavailable: ticket provider is not configured".to_owned();
+            self.ticket_picker_overlay.error = Some(message.clone());
+            self.status_warning = Some(message);
+            return;
+        };
+        let Some(sender) = self.ticket_picker_sender.clone() else {
+            let message =
+                "ticket start unavailable: ticket picker event channel is not available".to_owned();
+            self.ticket_picker_overlay.error = Some(message.clone());
+            self.status_warning = Some(message);
+            return;
+        };
+
+        self.ticket_picker_overlay.loading = true;
+        self.ticket_picker_overlay.error = None;
+        self.ticket_picker_overlay.starting_ticket_id = Some(ticket.ticket_id.clone());
+        self.ticket_picker_start_request_seq = self.ticket_picker_start_request_seq.wrapping_add(1);
+        let request_id = self.ticket_picker_start_request_seq;
+        self.ticket_picker_active_start_request_id = Some(request_id);
+        match TokioHandle::try_current() {
+            Ok(handle) => {
+                self.status_warning = Some(format!("starting {}...", ticket_identifier));
+                handle.spawn(async move {
+                    run_ticket_picker_start_task(
+                        provider,
+                        ticket,
+                        repository_override,
+                        request_id,
+                        sender,
+                    )
+                    .await;
+                });
+            }
+            Err(_) => {
+                self.ticket_picker_overlay.loading = false;
+                self.ticket_picker_overlay.starting_ticket_id = None;
+                self.ticket_picker_active_start_request_id = None;
+                let message = "ticket start unavailable: tokio runtime is not active".to_owned();
+                self.ticket_picker_overlay.error = Some(message.clone());
+                self.status_warning = Some(message);
+            }
+        }
     }
 
     fn filtered_ticket_picker_tickets(&self, tickets: Vec<TicketSummary>) -> Vec<TicketSummary> {
@@ -6067,17 +6137,32 @@ impl UiShellState {
                 ));
             }
             TicketPickerEvent::TicketStarted {
+                request_id,
                 started_session_id,
                 projection,
                 tickets,
                 warning,
             } => {
+                if request_id < self.ticket_picker_start_request_seq {
+                    return;
+                }
+                if self
+                    .ticket_picker_active_start_request_id
+                    .is_some_and(|active_id| active_id != request_id)
+                {
+                    return;
+                }
+                self.ticket_picker_active_start_request_id = None;
+                self.ticket_picker_overlay.loading = false;
                 self.ticket_picker_overlay.starting_ticket_id = None;
                 self.ticket_picker_overlay.cancel_repository_prompt();
                 self.ticket_picker_overlay.error = None;
                 if let Some(projection) = projection {
                     // Full replacement remains only for ticket-start authoritative reloads.
                     self.replace_domain_projection(projection, "ticket-start");
+                }
+                if tickets.is_none() {
+                    self.refresh_ticket_picker_overlay_from_projection();
                 }
                 if let Some(tickets) = tickets {
                     let tickets = self.filtered_ticket_picker_tickets(tickets);
@@ -6098,11 +6183,23 @@ impl UiShellState {
                 self.schedule_session_info_summary_refresh_for_active_session();
             }
             TicketPickerEvent::TicketStartRequiresRepository {
+                request_id,
                 ticket,
                 project_id,
                 repository_path_hint,
                 message,
             } => {
+                if request_id < self.ticket_picker_start_request_seq {
+                    return;
+                }
+                if self
+                    .ticket_picker_active_start_request_id
+                    .is_some_and(|active_id| active_id != request_id)
+                {
+                    return;
+                }
+                self.ticket_picker_active_start_request_id = None;
+                self.ticket_picker_overlay.loading = false;
                 self.ticket_picker_overlay.starting_ticket_id = None;
                 self.ticket_picker_overlay.start_repository_prompt(
                     ticket,
@@ -6111,7 +6208,21 @@ impl UiShellState {
                 );
                 self.ticket_picker_overlay.error = Some(message);
             }
-            TicketPickerEvent::TicketStartFailed { message } => {
+            TicketPickerEvent::TicketStartFailed {
+                request_id,
+                message,
+            } => {
+                if request_id < self.ticket_picker_start_request_seq {
+                    return;
+                }
+                if self
+                    .ticket_picker_active_start_request_id
+                    .is_some_and(|active_id| active_id != request_id)
+                {
+                    return;
+                }
+                self.ticket_picker_active_start_request_id = None;
+                self.ticket_picker_overlay.loading = false;
                 self.ticket_picker_overlay.starting_ticket_id = None;
                 self.ticket_picker_overlay.cancel_repository_prompt();
                 self.ticket_picker_overlay.error = Some(message.clone());
@@ -8698,6 +8809,7 @@ async fn run_ticket_picker_start_task(
     provider: Arc<dyn TicketPickerProvider>,
     ticket: TicketSummary,
     repository_override: Option<PathBuf>,
+    request_id: u64,
     sender: mpsc::Sender<TicketPickerEvent>,
 ) {
     let started_ticket = ticket.clone();
@@ -8711,6 +8823,7 @@ async fn run_ticket_picker_start_task(
             CoreError::MissingProjectRepositoryMapping { project, .. } => {
                 let _ = sender
                     .send(TicketPickerEvent::TicketStartRequiresRepository {
+                        request_id,
                         ticket: started_ticket,
                         project_id: project.clone(),
                         repository_path_hint: None,
@@ -8726,6 +8839,7 @@ async fn run_ticket_picker_start_task(
             } => {
                 let _ = sender
                     .send(TicketPickerEvent::TicketStartRequiresRepository {
+                        request_id,
                         ticket: started_ticket,
                         project_id: project.clone(),
                         repository_path_hint: Some(repository_path.clone()),
@@ -8737,6 +8851,7 @@ async fn run_ticket_picker_start_task(
             error => {
                 let _ = sender
                     .send(TicketPickerEvent::TicketStartFailed {
+                        request_id,
                         message: error.to_string(),
                     })
                     .await;
@@ -8763,6 +8878,7 @@ async fn run_ticket_picker_start_task(
 
     let _ = sender
         .send(TicketPickerEvent::TicketStarted {
+            request_id,
             started_session_id: result.mapping.session.session_id,
             projection,
             tickets,
@@ -8902,7 +9018,11 @@ fn render_ticket_picker_overlay_text(overlay: &TicketPickerOverlayState) -> Stri
         ]
     };
 
-    if overlay.loading && !overlay.creating {
+    if overlay.loading
+        && !overlay.creating
+        && overlay.starting_ticket_id.is_none()
+        && overlay.archiving_ticket_id.is_none()
+    {
         lines.push("Loading unfinished tickets...".to_owned());
     }
     if let Some(starting_ticket_id) = overlay.starting_ticket_id.as_ref() {

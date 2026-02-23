@@ -2742,6 +2742,7 @@ mod tests {
         );
 
         shell_state.apply_ticket_picker_event(TicketPickerEvent::TicketStarted {
+            request_id: 1,
             started_session_id: WorkerSessionId::new("sess-1"),
             projection: Some(sample_projection(true)),
             tickets: None,
@@ -2759,6 +2760,94 @@ mod tests {
                 .map(|id| id.as_str()),
             Some("sess-1")
         );
+    }
+
+    #[test]
+    fn ticket_started_event_clears_starting_state_and_filters_started_ticket() {
+        let started_session_id = WorkerSessionId::new("sess-started");
+        let started_work_item_id = WorkItemId::new("wi-started");
+        let started_ticket_id =
+            TicketId::from_provider_uuid(TicketProvider::Linear, "issue-started");
+        let started_ticket = TicketSummary {
+            ticket_id: started_ticket_id.clone().into(),
+            identifier: "AP-353".to_owned(),
+            title: "Start selected flow".to_owned(),
+            project: Some("Core".to_owned()),
+            state: "Todo".to_owned(),
+            url: "https://example/start-selected".to_owned(),
+            assignee: None,
+            priority: None,
+            labels: Vec::new(),
+            updated_at: "2026-02-20T00:00:00Z".to_owned(),
+        };
+        let remaining_ticket = sample_ticket_summary("issue-354", "AP-354", "Todo");
+
+        let mut projection = ProjectionState::default();
+        projection.work_items.insert(
+            started_work_item_id.clone(),
+            WorkItemProjection {
+                profile_override: None,
+                id: started_work_item_id.clone(),
+                ticket_id: Some(started_ticket_id),
+                project_id: None,
+                workflow_state: Some(WorkflowState::Implementing),
+                session_id: Some(started_session_id.clone()),
+                worktree_id: None,
+                inbox_items: Vec::new(),
+                artifacts: Vec::new(),
+            },
+        );
+        projection.sessions.insert(
+            started_session_id.clone(),
+            SessionProjection {
+                id: started_session_id.clone(),
+                work_item_id: Some(started_work_item_id),
+                status: Some(WorkerSessionStatus::Running),
+                latest_checkpoint: None,
+            },
+        );
+
+        let mut shell_state = UiShellState::new("ready".to_owned(), ProjectionState::default());
+        shell_state.ticket_picker_overlay.open();
+        shell_state.ticket_picker_overlay.loading = true;
+        shell_state.ticket_picker_overlay.starting_ticket_id =
+            Some(started_ticket.ticket_id.clone());
+        shell_state.ticket_picker_overlay.apply_tickets(
+            vec![started_ticket.clone(), remaining_ticket.clone()],
+            Vec::new(),
+            &["Todo".to_owned()],
+        );
+        shell_state.ticket_picker_overlay.start_repository_prompt(
+            started_ticket.clone(),
+            "Core".to_owned(),
+            None,
+        );
+
+        shell_state.apply_ticket_picker_event(TicketPickerEvent::TicketStarted {
+            request_id: 1,
+            started_session_id: started_session_id.clone(),
+            projection: Some(projection),
+            tickets: Some(vec![started_ticket, remaining_ticket.clone()]),
+            warning: None,
+        });
+
+        assert!(!shell_state.ticket_picker_overlay.loading);
+        assert!(shell_state
+            .ticket_picker_overlay
+            .starting_ticket_id
+            .is_none());
+        assert!(!shell_state.ticket_picker_overlay.has_repository_prompt());
+        assert!(matches!(
+            shell_state.view_stack.active_center(),
+            Some(CenterView::TerminalView { session_id }) if session_id == &started_session_id
+        ));
+        let identifiers = shell_state
+            .ticket_picker_overlay
+            .tickets_snapshot()
+            .into_iter()
+            .map(|ticket| ticket.identifier)
+            .collect::<Vec<_>>();
+        assert_eq!(identifiers, vec![remaining_ticket.identifier]);
     }
 
     #[tokio::test]
@@ -7909,6 +7998,310 @@ mod tests {
             "draft"
         );
         assert!(shell_state.ticket_picker_overlay.new_ticket_mode);
+    }
+
+    #[tokio::test]
+    async fn ticket_picker_enter_start_selected_surfaces_start_failure() {
+        let provider = Arc::new(RecordingTicketPickerProvider::default());
+        let mut shell_state = UiShellState::new_with_integrations(
+            "ready".to_owned(),
+            triage_projection(),
+            None,
+            None,
+            Some(provider),
+            None,
+        );
+        let ticket = sample_ticket_summary("issue-351", "AP-351", "Todo");
+        shell_state.open_ticket_picker();
+        shell_state.ticket_picker_overlay.loading = false;
+        shell_state.ticket_picker_overlay.apply_tickets(
+            vec![ticket.clone()],
+            Vec::new(),
+            &["Todo".to_owned()],
+        );
+        shell_state.ticket_picker_overlay.move_selection(1);
+
+        let _ = handle_key_press(&mut shell_state, key(KeyCode::Enter));
+
+        assert_eq!(
+            shell_state
+                .ticket_picker_overlay
+                .starting_ticket_id
+                .as_ref(),
+            Some(&ticket.ticket_id)
+        );
+        assert!(shell_state.ticket_picker_overlay.loading);
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                let _ = shell_state.tick_terminal_view_and_report();
+                if shell_state
+                    .ticket_picker_overlay
+                    .starting_ticket_id
+                    .is_none()
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("ticket start failure event should be received");
+
+        assert!(!shell_state.ticket_picker_overlay.loading);
+        assert!(shell_state
+            .ticket_picker_overlay
+            .error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("not used in recording test provider"));
+        assert!(shell_state
+            .status_warning
+            .as_deref()
+            .is_some_and(|warning| warning.contains("ticket picker start warning")));
+    }
+
+    #[tokio::test]
+    async fn ticket_picker_enter_start_selected_shows_repository_prompt_when_mapping_missing() {
+        struct MissingMappingStartProvider;
+
+        #[async_trait]
+        impl TicketPickerProvider for MissingMappingStartProvider {
+            async fn list_unfinished_tickets(&self) -> Result<Vec<TicketSummary>, CoreError> {
+                Ok(Vec::new())
+            }
+
+            async fn start_or_resume_ticket(
+                &self,
+                _ticket: TicketSummary,
+                _repository_override: Option<PathBuf>,
+            ) -> Result<SelectedTicketFlowResult, CoreError> {
+                Err(CoreError::MissingProjectRepositoryMapping {
+                    provider: "Linear".to_owned(),
+                    project: "Core".to_owned(),
+                })
+            }
+
+            async fn create_ticket_from_brief(
+                &self,
+                _request: CreateTicketFromPickerRequest,
+            ) -> Result<TicketSummary, CoreError> {
+                Err(CoreError::DependencyUnavailable("not used".to_owned()))
+            }
+
+            async fn reload_projection(&self) -> Result<ProjectionState, CoreError> {
+                Ok(ProjectionState::default())
+            }
+        }
+
+        let provider = Arc::new(MissingMappingStartProvider);
+        let mut shell_state = UiShellState::new_with_integrations(
+            "ready".to_owned(),
+            triage_projection(),
+            None,
+            None,
+            Some(provider),
+            None,
+        );
+        let ticket = sample_ticket_summary("issue-352", "AP-352", "Todo");
+        shell_state.open_ticket_picker();
+        shell_state.ticket_picker_overlay.loading = false;
+        shell_state.ticket_picker_overlay.apply_tickets(
+            vec![ticket.clone()],
+            Vec::new(),
+            &["Todo".to_owned()],
+        );
+        shell_state.ticket_picker_overlay.move_selection(1);
+
+        let _ = handle_key_press(&mut shell_state, key(KeyCode::Enter));
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                let _ = shell_state.tick_terminal_view_and_report();
+                if shell_state.ticket_picker_overlay.has_repository_prompt() {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("ticket start repository prompt event should be received");
+
+        assert!(!shell_state.ticket_picker_overlay.loading);
+        assert!(shell_state
+            .ticket_picker_overlay
+            .starting_ticket_id
+            .is_none());
+        assert!(shell_state.ticket_picker_overlay.has_repository_prompt());
+        assert!(shell_state
+            .ticket_picker_overlay
+            .error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("no repository mapping exists"));
+    }
+
+    #[tokio::test]
+    async fn ticket_picker_ignores_stale_start_failure_from_older_request() {
+        struct StaggeredStartProvider {
+            start_calls: Arc<Mutex<usize>>,
+            first_call_released: Arc<Mutex<bool>>,
+            release_first_call: Arc<tokio::sync::Notify>,
+        }
+
+        impl StaggeredStartProvider {
+            fn new() -> Self {
+                Self {
+                    start_calls: Arc::new(Mutex::new(0)),
+                    first_call_released: Arc::new(Mutex::new(false)),
+                    release_first_call: Arc::new(tokio::sync::Notify::new()),
+                }
+            }
+
+            fn start_call_count(&self) -> usize {
+                *self.start_calls.lock().expect("start call count lock")
+            }
+
+            fn mark_first_call_released(&self) {
+                self.release_first_call.notify_waiters();
+            }
+
+            fn first_call_released(&self) -> bool {
+                *self
+                    .first_call_released
+                    .lock()
+                    .expect("first call released lock")
+            }
+        }
+
+        #[async_trait]
+        impl TicketPickerProvider for StaggeredStartProvider {
+            async fn list_unfinished_tickets(&self) -> Result<Vec<TicketSummary>, CoreError> {
+                Ok(Vec::new())
+            }
+
+            async fn start_or_resume_ticket(
+                &self,
+                _ticket: TicketSummary,
+                _repository_override: Option<PathBuf>,
+            ) -> Result<SelectedTicketFlowResult, CoreError> {
+                let call_number = {
+                    let mut guard = self.start_calls.lock().expect("start call count lock");
+                    *guard += 1;
+                    *guard
+                };
+                if call_number == 1 {
+                    self.release_first_call.notified().await;
+                    *self
+                        .first_call_released
+                        .lock()
+                        .expect("first call released lock") = true;
+                    Err(CoreError::DependencyUnavailable(
+                        "first start failure".to_owned(),
+                    ))
+                } else {
+                    Err(CoreError::DependencyUnavailable(
+                        "second start failure".to_owned(),
+                    ))
+                }
+            }
+
+            async fn create_ticket_from_brief(
+                &self,
+                _request: CreateTicketFromPickerRequest,
+            ) -> Result<TicketSummary, CoreError> {
+                Err(CoreError::DependencyUnavailable("not used".to_owned()))
+            }
+
+            async fn reload_projection(&self) -> Result<ProjectionState, CoreError> {
+                Ok(ProjectionState::default())
+            }
+        }
+
+        let provider = Arc::new(StaggeredStartProvider::new());
+        let mut shell_state = UiShellState::new_with_integrations(
+            "ready".to_owned(),
+            triage_projection(),
+            None,
+            None,
+            Some(provider.clone()),
+            None,
+        );
+        let first_ticket = sample_ticket_summary("issue-351-first", "AP-351", "Todo");
+        let second_ticket = sample_ticket_summary("issue-351-second", "AP-352", "Todo");
+        let tickets = vec![first_ticket.clone(), second_ticket.clone()];
+
+        shell_state.open_ticket_picker();
+        shell_state.ticket_picker_overlay.loading = false;
+        shell_state.ticket_picker_overlay.apply_tickets(
+            tickets.clone(),
+            Vec::new(),
+            &["Todo".to_owned()],
+        );
+        shell_state.ticket_picker_overlay.move_selection(1);
+
+        let _ = handle_key_press(&mut shell_state, key(KeyCode::Enter));
+        assert_eq!(
+            shell_state
+                .ticket_picker_overlay
+                .starting_ticket_id
+                .as_ref(),
+            Some(&first_ticket.ticket_id)
+        );
+
+        shell_state.close_ticket_picker();
+        shell_state.open_ticket_picker();
+        shell_state.ticket_picker_overlay.loading = false;
+        shell_state
+            .ticket_picker_overlay
+            .apply_tickets(tickets, Vec::new(), &["Todo".to_owned()]);
+        shell_state.ticket_picker_overlay.move_selection(2);
+
+        let _ = handle_key_press(&mut shell_state, key(KeyCode::Enter));
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                let _ = shell_state.tick_terminal_view_and_report();
+                if shell_state
+                    .ticket_picker_overlay
+                    .error
+                    .as_deref()
+                    .is_some_and(|message| message.contains("second start failure"))
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("newer start request failure event should be received");
+        assert_eq!(provider.start_call_count(), 2);
+
+        provider.mark_first_call_released();
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                let _ = shell_state.tick_terminal_view_and_report();
+                if provider.first_call_released() {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("first start request should be released");
+
+        for _ in 0..8 {
+            let _ = shell_state.tick_terminal_view_and_report();
+            tokio::task::yield_now().await;
+        }
+
+        let error = shell_state
+            .ticket_picker_overlay
+            .error
+            .clone()
+            .unwrap_or_default();
+        assert!(error.contains("second start failure"));
+        assert!(!error.contains("first start failure"));
     }
 
     #[test]
