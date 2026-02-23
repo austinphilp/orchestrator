@@ -473,6 +473,63 @@ mod tests {
         }
     }
 
+    #[derive(Default)]
+    struct FailingArchiveRecordingProvider {
+        attempted_archives: Arc<Mutex<Vec<WorkerSessionId>>>,
+    }
+
+    impl FailingArchiveRecordingProvider {
+        fn attempted_archives(&self) -> Vec<WorkerSessionId> {
+            self.attempted_archives
+                .lock()
+                .expect("attempted archives lock")
+                .clone()
+        }
+    }
+
+    #[async_trait]
+    impl TicketPickerProvider for FailingArchiveRecordingProvider {
+        async fn list_unfinished_tickets(&self) -> Result<Vec<TicketSummary>, CoreError> {
+            Ok(Vec::new())
+        }
+
+        async fn start_or_resume_ticket(
+            &self,
+            _ticket: TicketSummary,
+            _repository_override: Option<PathBuf>,
+        ) -> Result<SelectedTicketFlowResult, CoreError> {
+            Err(CoreError::DependencyUnavailable(
+                "not used in failing archive recording provider".to_owned(),
+            ))
+        }
+
+        async fn create_ticket_from_brief(
+            &self,
+            _request: CreateTicketFromPickerRequest,
+        ) -> Result<TicketSummary, CoreError> {
+            Err(CoreError::DependencyUnavailable(
+                "not used in failing archive recording provider".to_owned(),
+            ))
+        }
+
+        async fn archive_session(
+            &self,
+            session_id: WorkerSessionId,
+        ) -> Result<SessionArchiveOutcome, CoreError> {
+            self.attempted_archives
+                .lock()
+                .expect("attempted archives lock")
+                .push(session_id);
+            Err(CoreError::DependencyUnavailable(
+                "session archive failed in recording provider".to_owned(),
+            ))
+        }
+
+        async fn reload_projection(&self) -> Result<ProjectionState, CoreError> {
+            Ok(ProjectionState::default())
+        }
+    }
+
     #[async_trait]
     impl TicketPickerProvider for AutopilotRecordingProvider {
         async fn list_unfinished_tickets(&self) -> Result<Vec<TicketSummary>, CoreError> {
@@ -670,6 +727,20 @@ mod tests {
         })
         .await
         .expect("working-state persists should complete");
+    }
+
+    async fn wait_for_session_archive_completion(shell_state: &mut UiShellState) {
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                tokio::task::yield_now().await;
+                let _ = shell_state.tick_terminal_view_and_report();
+                if shell_state.archiving_session_id.is_none() {
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("session archive should complete");
     }
 
     #[derive(Default, Debug)]
@@ -8705,6 +8776,148 @@ mod tests {
         let routed = route_key_press(&mut shell_state, key(KeyCode::Esc));
         assert!(matches!(routed, RoutedInput::Ignore));
         assert!(shell_state.archive_session_confirm_session.is_none());
+    }
+
+    #[tokio::test]
+    async fn session_archive_confirm_enter_runs_archive_and_updates_ui_state() {
+        let provider = Arc::new(AutopilotRecordingProvider::default());
+        let mut shell_state = UiShellState::new_with_integrations(
+            "ready".to_owned(),
+            sample_projection(true),
+            None,
+            None,
+            Some(provider.clone()),
+            None,
+        );
+        let session_id = WorkerSessionId::new("sess-1");
+        let inbox_item_id = InboxItemId::new("inbox-1");
+
+        let should_quit = handle_key_press(&mut shell_state, key(KeyCode::Char('x')));
+        assert!(!should_quit);
+        assert_eq!(
+            shell_state.archive_session_confirm_session.as_ref(),
+            Some(&session_id)
+        );
+
+        let routed = route_key_press(&mut shell_state, key(KeyCode::Enter));
+        assert!(matches!(routed, RoutedInput::Ignore));
+        assert_eq!(shell_state.archiving_session_id.as_ref(), Some(&session_id));
+
+        wait_for_session_archive_completion(&mut shell_state).await;
+
+        assert_eq!(provider.archived_sessions(), vec![session_id.clone()]);
+        assert!(shell_state.archiving_session_id.is_none());
+        assert!(shell_state.archive_session_confirm_session.is_none());
+        assert!(shell_state.session_ids_for_navigation().is_empty());
+        assert_eq!(
+            shell_state
+                .domain
+                .sessions
+                .get(&session_id)
+                .and_then(|session| session.status.clone()),
+            Some(WorkerSessionStatus::Done)
+        );
+        assert!(
+            shell_state
+                .domain
+                .inbox_items
+                .get(&inbox_item_id)
+                .expect("inbox item")
+                .resolved
+        );
+        assert!(shell_state
+            .status_warning
+            .as_deref()
+            .expect("status warning")
+            .contains("archived"));
+    }
+
+    #[tokio::test]
+    async fn session_archive_confirm_enter_surfaces_failure_and_is_recoverable() {
+        let provider = Arc::new(FailingArchiveRecordingProvider::default());
+        let mut shell_state = UiShellState::new_with_integrations(
+            "ready".to_owned(),
+            sample_projection(true),
+            None,
+            None,
+            Some(provider.clone()),
+            None,
+        );
+        let session_id = WorkerSessionId::new("sess-1");
+
+        let should_quit = handle_key_press(&mut shell_state, key(KeyCode::Char('x')));
+        assert!(!should_quit);
+        assert_eq!(
+            shell_state.archive_session_confirm_session.as_ref(),
+            Some(&session_id)
+        );
+
+        let routed = route_key_press(&mut shell_state, key(KeyCode::Enter));
+        assert!(matches!(routed, RoutedInput::Ignore));
+        assert_eq!(shell_state.archiving_session_id.as_ref(), Some(&session_id));
+
+        wait_for_session_archive_completion(&mut shell_state).await;
+
+        assert_eq!(provider.attempted_archives(), vec![session_id]);
+        assert!(shell_state.archiving_session_id.is_none());
+        assert!(shell_state.archive_session_confirm_session.is_none());
+        let warning = shell_state
+            .status_warning
+            .as_deref()
+            .expect("status warning after archive failure");
+        assert!(warning.contains("session archive warning"));
+        assert!(warning.contains("session archive failed in recording provider"));
+
+        let should_quit = handle_key_press(&mut shell_state, key(KeyCode::Char('x')));
+        assert!(!should_quit);
+        assert!(shell_state.archive_session_confirm_session.is_some());
+    }
+
+    #[test]
+    fn session_archive_events_for_other_sessions_do_not_clear_active_archive_state() {
+        let mut shell_state = UiShellState::new("ready".to_owned(), sample_projection(true));
+        let active_session = WorkerSessionId::new("sess-1");
+        let other_session = WorkerSessionId::new("sess-2");
+        shell_state.archiving_session_id = Some(active_session.clone());
+        shell_state.archive_session_confirm_session = Some(active_session.clone());
+
+        shell_state.apply_ticket_picker_event(TicketPickerEvent::SessionArchived {
+            session_id: other_session.clone(),
+            warning: None,
+            event: stored_event_for_test(
+                "evt-test-session-archived-other",
+                1,
+                None,
+                Some(other_session.clone()),
+                OrchestrationEventPayload::SessionCompleted(SessionCompletedPayload {
+                    session_id: other_session.clone(),
+                    summary: Some("archived".to_owned()),
+                }),
+            ),
+        });
+
+        assert_eq!(
+            shell_state.archiving_session_id.as_ref(),
+            Some(&active_session)
+        );
+        assert_eq!(
+            shell_state.archive_session_confirm_session.as_ref(),
+            Some(&active_session)
+        );
+
+        shell_state.apply_ticket_picker_event(TicketPickerEvent::SessionArchiveFailed {
+            session_id: other_session,
+            message: "archive failed".to_owned(),
+        });
+
+        assert_eq!(
+            shell_state.archiving_session_id.as_ref(),
+            Some(&active_session)
+        );
+        assert_eq!(
+            shell_state.archive_session_confirm_session.as_ref(),
+            Some(&active_session)
+        );
     }
 
     #[test]

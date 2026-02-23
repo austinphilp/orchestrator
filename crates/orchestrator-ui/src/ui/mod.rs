@@ -3636,11 +3636,7 @@ impl UiShellState {
         let Some(session_id) = self.archive_session_confirm_session.take() else {
             return;
         };
-        let labels = session_display_labels(&self.domain, &session_id);
-        self.status_warning = Some(format!(
-            "session archive action for {} is handled outside the TUI loop",
-            labels.compact_label
-        ));
+        self.spawn_session_archive(session_id);
     }
 
     fn session_panel_rows(&self) -> Vec<SessionPanelRow> {
@@ -3976,6 +3972,73 @@ impl UiShellState {
                         .to_owned(),
                 );
             }
+        }
+    }
+
+    fn spawn_session_archive(&mut self, session_id: WorkerSessionId) {
+        let labels = session_display_labels(&self.domain, &session_id);
+        let compact_label = labels.compact_label;
+        if let Some(active_session_id) = self.archiving_session_id.as_ref() {
+            if active_session_id != &session_id {
+                let active_labels = session_display_labels(&self.domain, active_session_id);
+                self.status_warning = Some(format!(
+                    "session archive unavailable ({}): archive already running for {}",
+                    compact_label, active_labels.compact_label
+                ));
+                return;
+            }
+            self.status_warning = Some(format!(
+                "session archive already running ({})",
+                compact_label
+            ));
+            return;
+        }
+        if self.autopilot_archiving_sessions.contains(&session_id) {
+            self.status_warning = Some(format!(
+                "session archive already running ({})",
+                compact_label
+            ));
+            return;
+        }
+        let Some(provider) = self.ticket_picker_provider.clone() else {
+            self.status_warning = Some(format!(
+                "session archive unavailable ({}): ticket provider is not configured",
+                compact_label
+            ));
+            return;
+        };
+        let Some(sender) = self.ticket_picker_sender.clone() else {
+            self.status_warning = Some(format!(
+                "session archive unavailable ({}): ticket picker event channel is not available",
+                compact_label
+            ));
+            return;
+        };
+
+        match TokioHandle::try_current() {
+            Ok(handle) => {
+                self.archiving_session_id = Some(session_id.clone());
+                self.status_warning = Some(format!("archiving {}...", compact_label));
+                handle.spawn(async move {
+                    run_session_archive_task(provider, session_id, sender).await;
+                });
+            }
+            Err(_) => {
+                self.status_warning = Some(format!(
+                    "session archive unavailable ({}): tokio runtime is not active",
+                    compact_label
+                ));
+            }
+        }
+    }
+
+    fn clear_session_archive_state_for(&mut self, session_id: &WorkerSessionId) {
+        self.autopilot_archiving_sessions.remove(session_id);
+        if self.archiving_session_id.as_ref() == Some(session_id) {
+            self.archiving_session_id = None;
+        }
+        if self.archive_session_confirm_session.as_ref() == Some(session_id) {
+            self.archive_session_confirm_session = None;
         }
     }
 
@@ -6223,9 +6286,7 @@ impl UiShellState {
                 warning,
                 event,
             } => {
-                self.autopilot_archiving_sessions.remove(&session_id);
-                self.archiving_session_id = None;
-                self.archive_session_confirm_session = None;
+                self.clear_session_archive_state_for(&session_id);
                 self.apply_domain_event(event);
                 self.terminal_session_states.remove(&session_id);
                 self.session_info_diff_cache.remove(&session_id);
@@ -6254,9 +6315,7 @@ impl UiShellState {
                 session_id,
                 message,
             } => {
-                self.autopilot_archiving_sessions.remove(&session_id);
-                self.archiving_session_id = None;
-                self.archive_session_confirm_session = None;
+                self.clear_session_archive_state_for(&session_id);
                 self.publish_error_for_session(&session_id, "session-archive", message.as_str());
                 let labels = session_display_labels(&self.domain, &session_id);
                 self.status_warning = Some(format!(
@@ -8501,7 +8560,6 @@ fn edtui_key_input(code: KeyCode, modifiers: KeyModifiers) -> Option<edtui::even
     ))
 }
 
-#[allow(dead_code)]
 async fn run_session_archive_task(
     provider: Arc<dyn TicketPickerProvider>,
     session_id: WorkerSessionId,
