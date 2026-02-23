@@ -4504,15 +4504,23 @@ impl UiShellState {
     fn open_ticket_picker(&mut self) {
         self.enter_normal_mode();
         self.ticket_picker_overlay.open();
-        self.status_warning = Some(
-            "ticket operations are handled outside the TUI loop; picker is read-only here"
-                .to_owned(),
-        );
+        self.refresh_ticket_picker_overlay_from_projection();
+        if self.frontend_controller.is_some() {
+            self.submit_frontend_command_intent(FrontendCommandIntent::OpenTicketPicker);
+        } else {
+            self.status_warning = Some(
+                "ticket operations are handled outside the TUI loop; picker is read-only here"
+                    .to_owned(),
+            );
+        }
     }
 
     fn close_ticket_picker(&mut self) {
         self.ticket_picker_overlay.close();
         self.ticket_picker_create_refresh_deadline = None;
+        if self.frontend_controller.is_some() {
+            self.submit_frontend_command_intent(FrontendCommandIntent::CloseTicketPicker);
+        }
     }
 
     fn begin_create_ticket_from_picker(&mut self) {
@@ -4683,6 +4691,18 @@ impl UiShellState {
             .into_iter()
             .filter(|ticket| !active_ticket_ids.iter().any(|id| id == &ticket.ticket_id))
             .collect()
+    }
+
+    fn refresh_ticket_picker_overlay_from_projection(&mut self) {
+        let (tickets, projects) = ticket_picker_snapshot_from_projection(&self.domain);
+        let tickets = self.filtered_ticket_picker_tickets(tickets);
+        self.ticket_picker_overlay.loading = false;
+        self.ticket_picker_overlay.error = None;
+        self.ticket_picker_overlay.apply_tickets(
+            tickets,
+            projects,
+            &self.ticket_picker_priority_states,
+        );
     }
 
     fn active_ticket_ids_for_picker(&self) -> Vec<TicketingTicketId> {
@@ -7802,6 +7822,9 @@ impl UiShellState {
         if self.domain != snapshot.projection {
             self.replace_domain_projection(snapshot.projection, "frontend snapshot update");
             changed = true;
+            if self.ticket_picker_overlay.visible {
+                self.refresh_ticket_picker_overlay_from_projection();
+            }
         }
         let target_mode = match snapshot.application_mode {
             FrontendApplicationMode::Manual => ApplicationMode::Manual,
@@ -8852,7 +8875,7 @@ fn render_ticket_picker_overlay_text(overlay: &TicketPickerOverlayState) -> Stri
 
     if overlay.project_groups.is_empty() {
         lines.push("No unfinished tickets found.".to_owned());
-        return lines.join("\n");
+        return join_ticket_picker_overlay_lines(lines);
     }
 
     for (project_index, project_group) in overlay.project_groups.iter().enumerate() {
@@ -8941,7 +8964,27 @@ fn render_ticket_picker_overlay_text(overlay: &TicketPickerOverlayState) -> Stri
         lines.pop();
     }
 
-    lines.join("\n")
+    join_ticket_picker_overlay_lines(lines)
+}
+
+fn join_ticket_picker_overlay_lines(lines: Vec<String>) -> String {
+    lines
+        .into_iter()
+        .map(|line| sanitize_ticket_picker_overlay_line(line.as_str()))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn sanitize_ticket_picker_overlay_line(line: &str) -> String {
+    let mut sanitized = String::with_capacity(line.len());
+    for ch in line.chars() {
+        match ch {
+            '\u{2400}' => sanitized.push(' '),
+            _ if ch.is_control() => sanitized.push(' '),
+            _ => sanitized.push(ch),
+        }
+    }
+    sanitized
 }
 
 fn route_needs_input_modal_key(shell_state: &mut UiShellState, key: KeyEvent) -> RoutedInput {
@@ -12617,6 +12660,76 @@ fn render_which_key_overlay_text(overlay: &WhichKeyOverlayState) -> String {
             .map(|hint| format!("{:>8}  {}", hint.key, hint.description)),
     );
     lines.join("\n")
+}
+
+fn ticket_picker_snapshot_from_projection(
+    domain: &ProjectionState,
+) -> (Vec<TicketSummary>, Vec<String>) {
+    let mut project_by_ticket_id = HashMap::new();
+    let mut projects = HashSet::new();
+    for work_item in domain.work_items.values() {
+        let Some(ticket_id) = work_item.ticket_id.as_ref() else {
+            continue;
+        };
+        let Some(project_id) = work_item.project_id.as_ref() else {
+            continue;
+        };
+        let project = project_id.as_str().trim();
+        if project.is_empty() {
+            continue;
+        }
+        project_by_ticket_id.insert(ticket_id.as_str().to_owned(), project.to_owned());
+        projects.insert(project.to_owned());
+    }
+
+    let mut by_ticket_id = HashMap::new();
+    for event in domain.events.iter().rev() {
+        let OrchestrationEventPayload::TicketSynced(payload) = &event.payload else {
+            continue;
+        };
+        let ticket_id = payload.ticket_id.as_str().to_owned();
+        if by_ticket_id.contains_key(ticket_id.as_str()) {
+            continue;
+        }
+
+        by_ticket_id.insert(
+            ticket_id.clone(),
+            TicketSummary {
+                ticket_id: payload.ticket_id.clone().into(),
+                identifier: payload.identifier.clone(),
+                title: payload.title.clone(),
+                project: project_by_ticket_id.get(ticket_id.as_str()).cloned(),
+                state: payload.state.clone(),
+                url: String::new(),
+                assignee: payload.assignee.clone(),
+                priority: payload.priority,
+                labels: Vec::new(),
+                updated_at: event.occurred_at.clone(),
+            },
+        );
+    }
+
+    let mut tickets = by_ticket_id.into_values().collect::<Vec<_>>();
+    tickets.sort_by(|left, right| {
+        right
+            .updated_at
+            .cmp(&left.updated_at)
+            .then_with(|| left.identifier.cmp(&right.identifier))
+    });
+
+    for ticket in &tickets {
+        if let Some(project) = ticket.project.as_deref().map(str::trim) {
+            if !project.is_empty() {
+                projects.insert(project.to_owned());
+            }
+        }
+    }
+
+    let mut projects = projects.into_iter().collect::<Vec<_>>();
+    projects.sort_by(|left, right| {
+        normalize_ticket_project(left.as_str()).cmp(&normalize_ticket_project(right.as_str()))
+    });
+    (tickets, projects)
 }
 
 fn normalize_ticket_state(value: &str) -> String {

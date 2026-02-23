@@ -7422,6 +7422,25 @@ mod tests {
     }
 
     #[test]
+    fn ticket_picker_overlay_sanitizes_control_characters_in_lines() {
+        let mut overlay = TicketPickerOverlayState::default();
+        overlay.loading = true;
+        overlay.error = Some("failed\0 to load\u{2400}\r\ntickets".to_owned());
+
+        let mut ticket = sample_ticket_summary("issue-333", "AP-333", "Todo");
+        ticket.project = Some("Core\0Team".to_owned());
+        ticket.state = "Todo\u{2400}\nReady".to_owned();
+        ticket.title = "Fix\0 flaky\r\ntests".to_owned();
+        overlay.apply_tickets(vec![ticket], Vec::new(), &["Todo".to_owned()]);
+
+        let rendered = render_ticket_picker_overlay_text(&overlay);
+        assert!(rendered.contains("Loading unfinished tickets..."));
+        assert!(!rendered.contains('\0'));
+        assert!(!rendered.contains('\u{2400}'));
+        assert!(!rendered.contains('\r'));
+    }
+
+    #[test]
     fn ticket_picker_n_enters_new_ticket_mode() {
         let mut shell_state = UiShellState::new("ready".to_owned(), triage_projection());
         shell_state.ticket_picker_overlay.open();
@@ -7429,6 +7448,50 @@ mod tests {
         let routed = route_ticket_picker_key(&mut shell_state, key(KeyCode::Char('n')));
         assert!(matches!(routed, RoutedInput::Ignore));
         assert!(shell_state.ticket_picker_overlay.new_ticket_mode);
+    }
+
+    #[test]
+    fn open_ticket_picker_hydrates_from_projection_ticket_events() {
+        let ticket_id = TicketId::from_provider_uuid(TicketProvider::Linear, "issue-777");
+        let work_item_id = WorkItemId::new("wi-ticket-picker");
+        let mut projection = triage_projection();
+        projection.work_items.insert(
+            work_item_id.clone(),
+            WorkItemProjection {
+                profile_override: None,
+                id: work_item_id.clone(),
+                ticket_id: Some(ticket_id.clone()),
+                project_id: None,
+                workflow_state: Some(WorkflowState::Planning),
+                session_id: None,
+                worktree_id: None,
+                inbox_items: Vec::new(),
+                artifacts: Vec::new(),
+            },
+        );
+        projection.events.push(stored_event_for_test(
+            "evt-ticket-picker-sync",
+            1,
+            Some(work_item_id),
+            None,
+            OrchestrationEventPayload::TicketSynced(TicketSyncedPayload {
+                ticket_id,
+                identifier: "AP-777".to_owned(),
+                title: "Hydrate ticket picker from projection".to_owned(),
+                state: "Todo".to_owned(),
+                assignee: Some("Austin".to_owned()),
+                priority: Some(1),
+            }),
+        ));
+
+        let mut shell_state = UiShellState::new("ready".to_owned(), projection);
+        shell_state.open_ticket_picker();
+
+        assert!(!shell_state.ticket_picker_overlay.loading);
+        let rendered = render_ticket_picker_overlay_text(&shell_state.ticket_picker_overlay);
+        assert!(rendered.contains("AP-777"));
+        assert!(rendered.contains("Hydrate ticket picker from projection"));
+        assert!(!rendered.contains("Loading unfinished tickets..."));
     }
 
     #[test]
