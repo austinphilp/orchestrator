@@ -530,6 +530,126 @@ mod tests {
         }
     }
 
+    struct RecordingTicketArchiveProvider {
+        refreshed_tickets: Vec<TicketSummary>,
+        archived_ticket_ids: Arc<Mutex<Vec<TicketingTicketId>>>,
+    }
+
+    impl RecordingTicketArchiveProvider {
+        fn new(refreshed_tickets: Vec<TicketSummary>) -> Self {
+            Self {
+                refreshed_tickets,
+                archived_ticket_ids: Arc::new(Mutex::new(Vec::new())),
+            }
+        }
+
+        fn archived_ticket_ids(&self) -> Vec<TicketingTicketId> {
+            self.archived_ticket_ids
+                .lock()
+                .expect("archived ticket IDs lock")
+                .clone()
+        }
+    }
+
+    #[async_trait]
+    impl TicketPickerProvider for RecordingTicketArchiveProvider {
+        async fn list_unfinished_tickets(&self) -> Result<Vec<TicketSummary>, CoreError> {
+            Ok(self.refreshed_tickets.clone())
+        }
+
+        async fn start_or_resume_ticket(
+            &self,
+            _ticket: TicketSummary,
+            _repository_override: Option<PathBuf>,
+        ) -> Result<SelectedTicketFlowResult, CoreError> {
+            Err(CoreError::DependencyUnavailable(
+                "not used in recording ticket archive provider".to_owned(),
+            ))
+        }
+
+        async fn create_ticket_from_brief(
+            &self,
+            _request: CreateTicketFromPickerRequest,
+        ) -> Result<TicketSummary, CoreError> {
+            Err(CoreError::DependencyUnavailable(
+                "not used in recording ticket archive provider".to_owned(),
+            ))
+        }
+
+        async fn archive_ticket(&self, ticket: TicketSummary) -> Result<(), CoreError> {
+            self.archived_ticket_ids
+                .lock()
+                .expect("archived ticket IDs lock")
+                .push(ticket.ticket_id);
+            Ok(())
+        }
+
+        async fn reload_projection(&self) -> Result<ProjectionState, CoreError> {
+            Ok(ProjectionState::default())
+        }
+    }
+
+    struct FailingTicketArchiveProvider {
+        refreshed_tickets: Vec<TicketSummary>,
+        attempted_ticket_ids: Arc<Mutex<Vec<TicketingTicketId>>>,
+    }
+
+    impl FailingTicketArchiveProvider {
+        fn new(refreshed_tickets: Vec<TicketSummary>) -> Self {
+            Self {
+                refreshed_tickets,
+                attempted_ticket_ids: Arc::new(Mutex::new(Vec::new())),
+            }
+        }
+
+        fn attempted_ticket_ids(&self) -> Vec<TicketingTicketId> {
+            self.attempted_ticket_ids
+                .lock()
+                .expect("attempted ticket IDs lock")
+                .clone()
+        }
+    }
+
+    #[async_trait]
+    impl TicketPickerProvider for FailingTicketArchiveProvider {
+        async fn list_unfinished_tickets(&self) -> Result<Vec<TicketSummary>, CoreError> {
+            Ok(self.refreshed_tickets.clone())
+        }
+
+        async fn start_or_resume_ticket(
+            &self,
+            _ticket: TicketSummary,
+            _repository_override: Option<PathBuf>,
+        ) -> Result<SelectedTicketFlowResult, CoreError> {
+            Err(CoreError::DependencyUnavailable(
+                "not used in failing ticket archive provider".to_owned(),
+            ))
+        }
+
+        async fn create_ticket_from_brief(
+            &self,
+            _request: CreateTicketFromPickerRequest,
+        ) -> Result<TicketSummary, CoreError> {
+            Err(CoreError::DependencyUnavailable(
+                "not used in failing ticket archive provider".to_owned(),
+            ))
+        }
+
+        async fn archive_ticket(&self, ticket: TicketSummary) -> Result<(), CoreError> {
+            self.attempted_ticket_ids
+                .lock()
+                .expect("attempted ticket IDs lock")
+                .push(ticket.ticket_id);
+            Err(CoreError::DependencyUnavailable(
+                "ticket archive failed in recording provider".to_owned(),
+            ))
+        }
+
+        async fn reload_projection(&self) -> Result<ProjectionState, CoreError> {
+            Ok(ProjectionState::default())
+        }
+    }
+
     #[async_trait]
     impl TicketPickerProvider for AutopilotRecordingProvider {
         async fn list_unfinished_tickets(&self) -> Result<Vec<TicketSummary>, CoreError> {
@@ -741,6 +861,27 @@ mod tests {
         })
         .await
         .expect("session archive should complete");
+    }
+
+    async fn wait_for_ticket_picker_archive_completion(shell_state: &mut UiShellState) {
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                tokio::task::yield_now().await;
+                let _ = shell_state.tick_terminal_view_and_report();
+                if shell_state
+                    .ticket_picker_overlay
+                    .archiving_ticket_id
+                    .is_none()
+                    && shell_state
+                        .ticket_picker_active_archive_request_id
+                        .is_none()
+                {
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("ticket picker archive should complete");
     }
 
     #[derive(Default, Debug)]
@@ -8593,6 +8734,208 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn ticket_picker_archive_confirm_enter_archives_ticket_and_refreshes_overlay() {
+        let archived_ticket = sample_ticket_summary("issue-302", "AP-302", "Todo");
+        let refreshed_ticket = sample_ticket_summary("issue-303", "AP-303", "Todo");
+        let provider = Arc::new(RecordingTicketArchiveProvider::new(vec![
+            refreshed_ticket.clone()
+        ]));
+        let mut shell_state = UiShellState::new_with_integrations(
+            "ready".to_owned(),
+            triage_projection(),
+            None,
+            None,
+            Some(provider.clone()),
+            None,
+        );
+        shell_state.ticket_picker_overlay.open();
+        shell_state.ticket_picker_overlay.loading = false;
+        shell_state.ticket_picker_overlay.apply_tickets(
+            vec![archived_ticket.clone(), refreshed_ticket],
+            Vec::new(),
+            &["Todo".to_owned()],
+        );
+        shell_state.ticket_picker_overlay.move_selection(1);
+
+        let routed = route_ticket_picker_key(&mut shell_state, key(KeyCode::Char('x')));
+        assert!(matches!(routed, RoutedInput::Ignore));
+        let routed = route_key_press(&mut shell_state, key(KeyCode::Enter));
+        assert!(matches!(routed, RoutedInput::Ignore));
+        assert_eq!(
+            shell_state
+                .ticket_picker_overlay
+                .archiving_ticket_id
+                .as_ref(),
+            Some(&archived_ticket.ticket_id)
+        );
+
+        wait_for_ticket_picker_archive_completion(&mut shell_state).await;
+
+        assert_eq!(
+            provider.archived_ticket_ids(),
+            vec![archived_ticket.ticket_id.clone()]
+        );
+        assert!(shell_state
+            .ticket_picker_overlay
+            .archive_confirm_ticket
+            .is_none());
+        assert!(shell_state
+            .ticket_picker_overlay
+            .archiving_ticket_id
+            .is_none());
+        assert!(shell_state.ticket_picker_overlay.error.is_none());
+        let identifiers = shell_state
+            .ticket_picker_overlay
+            .tickets_snapshot()
+            .into_iter()
+            .map(|ticket| ticket.identifier)
+            .collect::<Vec<_>>();
+        assert_eq!(identifiers, vec!["AP-303".to_owned()]);
+        assert!(shell_state
+            .status_warning
+            .as_deref()
+            .is_some_and(|status| status.contains("archived AP-302")));
+    }
+
+    #[tokio::test]
+    async fn ticket_picker_archive_confirm_enter_surfaces_failure_and_stays_usable() {
+        let archived_ticket = sample_ticket_summary("issue-304", "AP-304", "Todo");
+        let provider = Arc::new(FailingTicketArchiveProvider::new(vec![
+            archived_ticket.clone()
+        ]));
+        let mut shell_state = UiShellState::new_with_integrations(
+            "ready".to_owned(),
+            triage_projection(),
+            None,
+            None,
+            Some(provider.clone()),
+            None,
+        );
+        shell_state.ticket_picker_overlay.open();
+        shell_state.ticket_picker_overlay.loading = false;
+        shell_state.ticket_picker_overlay.apply_tickets(
+            vec![archived_ticket.clone()],
+            Vec::new(),
+            &["Todo".to_owned()],
+        );
+        shell_state.ticket_picker_overlay.move_selection(1);
+
+        let routed = route_ticket_picker_key(&mut shell_state, key(KeyCode::Char('x')));
+        assert!(matches!(routed, RoutedInput::Ignore));
+        let routed = route_key_press(&mut shell_state, key(KeyCode::Enter));
+        assert!(matches!(routed, RoutedInput::Ignore));
+        assert_eq!(
+            shell_state
+                .ticket_picker_overlay
+                .archiving_ticket_id
+                .as_ref(),
+            Some(&archived_ticket.ticket_id)
+        );
+
+        wait_for_ticket_picker_archive_completion(&mut shell_state).await;
+
+        assert_eq!(
+            provider.attempted_ticket_ids(),
+            vec![archived_ticket.ticket_id.clone()]
+        );
+        assert!(shell_state
+            .ticket_picker_overlay
+            .archive_confirm_ticket
+            .is_none());
+        assert!(shell_state
+            .ticket_picker_overlay
+            .archiving_ticket_id
+            .is_none());
+        assert!(shell_state
+            .ticket_picker_overlay
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("ticket archive failed in recording provider")));
+        let warning = shell_state
+            .status_warning
+            .as_deref()
+            .expect("status warning after ticket archive failure");
+        assert!(warning.contains("ticket picker archive warning"));
+        assert!(warning.contains("ticket archive failed in recording provider"));
+        assert!(shell_state
+            .ticket_picker_overlay
+            .tickets_snapshot()
+            .iter()
+            .any(|ticket| ticket.identifier == "AP-304"));
+
+        let routed = route_ticket_picker_key(&mut shell_state, key(KeyCode::Char('x')));
+        assert!(matches!(routed, RoutedInput::Ignore));
+        assert!(shell_state
+            .ticket_picker_overlay
+            .archive_confirm_ticket
+            .is_some());
+    }
+
+    #[test]
+    fn ticket_picker_ignores_stale_archive_events_from_older_request() {
+        let active_ticket = sample_ticket_summary("issue-305", "AP-305", "Todo");
+        let visible_ticket = sample_ticket_summary("issue-306", "AP-306", "Todo");
+        let stale_ticket = sample_ticket_summary("issue-307", "AP-307", "Todo");
+
+        let mut shell_state = UiShellState::new("ready".to_owned(), triage_projection());
+        shell_state.ticket_picker_overlay.open();
+        shell_state.ticket_picker_overlay.loading = false;
+        shell_state.ticket_picker_overlay.apply_tickets(
+            vec![active_ticket.clone(), visible_ticket.clone()],
+            Vec::new(),
+            &["Todo".to_owned()],
+        );
+        shell_state.ticket_picker_overlay.archiving_ticket_id =
+            Some(active_ticket.ticket_id.clone());
+        shell_state.ticket_picker_overlay.archive_confirm_ticket = Some(active_ticket.clone());
+        shell_state.ticket_picker_archive_request_seq = 2;
+        shell_state.ticket_picker_active_archive_request_id = Some(2);
+
+        shell_state.apply_ticket_picker_event(TicketPickerEvent::TicketArchiveFailed {
+            request_id: 1,
+            ticket: stale_ticket.clone(),
+            message: "stale archive failure".to_owned(),
+            tickets: Some(vec![stale_ticket.clone()]),
+        });
+
+        assert_eq!(
+            shell_state
+                .ticket_picker_overlay
+                .archiving_ticket_id
+                .as_ref(),
+            Some(&active_ticket.ticket_id)
+        );
+        assert_eq!(shell_state.ticket_picker_active_archive_request_id, Some(2));
+        assert!(shell_state.ticket_picker_overlay.error.is_none());
+
+        shell_state.apply_ticket_picker_event(TicketPickerEvent::TicketArchived {
+            request_id: 1,
+            archived_ticket: stale_ticket,
+            tickets: Some(Vec::new()),
+            warning: Some("stale archive completion".to_owned()),
+        });
+
+        assert_eq!(
+            shell_state
+                .ticket_picker_overlay
+                .archiving_ticket_id
+                .as_ref(),
+            Some(&active_ticket.ticket_id)
+        );
+        assert_eq!(shell_state.ticket_picker_active_archive_request_id, Some(2));
+        assert!(shell_state.ticket_picker_overlay.error.is_none());
+        let identifiers = shell_state
+            .ticket_picker_overlay
+            .tickets_snapshot()
+            .into_iter()
+            .map(|ticket| ticket.identifier)
+            .collect::<Vec<_>>();
+        assert!(identifiers.contains(&active_ticket.identifier));
+        assert!(identifiers.contains(&visible_ticket.identifier));
+        assert!(!identifiers.contains(&"AP-307".to_owned()));
+    }
+
+    #[tokio::test]
     async fn run_ticket_picker_create_task_emits_created_event() {
         let mut created = sample_ticket_summary("issue-200", "AP-200", "Todo");
         created.assignee = None;
@@ -8875,15 +9218,17 @@ mod tests {
         });
         let (sender, mut receiver) = mpsc::channel(1);
 
-        run_ticket_picker_archive_task(provider, archived.clone(), sender).await;
+        run_ticket_picker_archive_task(provider, archived.clone(), 11, sender).await;
 
         let event = receiver.recv().await.expect("ticket picker event");
         match event {
             TicketPickerEvent::TicketArchived {
+                request_id,
                 archived_ticket,
                 tickets,
                 warning,
             } => {
+                assert_eq!(request_id, 11);
                 assert_eq!(archived_ticket.identifier, archived.identifier);
                 assert_eq!(tickets.unwrap_or_default(), refreshed);
                 assert!(warning.is_none());

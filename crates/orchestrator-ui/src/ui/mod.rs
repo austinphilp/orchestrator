@@ -2982,11 +2982,13 @@ enum TicketPickerEvent {
         message: String,
     },
     TicketArchived {
+        request_id: u64,
         archived_ticket: TicketSummary,
         tickets: Option<Vec<TicketSummary>>,
         warning: Option<String>,
     },
     TicketArchiveFailed {
+        request_id: u64,
         ticket: TicketSummary,
         message: String,
         tickets: Option<Vec<TicketSummary>>,
@@ -3151,6 +3153,8 @@ struct UiShellState {
     ticket_picker_priority_states: Vec<String>,
     ticket_picker_start_request_seq: u64,
     ticket_picker_active_start_request_id: Option<u64>,
+    ticket_picker_archive_request_seq: u64,
+    ticket_picker_active_archive_request_id: Option<u64>,
     startup_session_feed_opened: bool,
     worker_backend: Option<Arc<dyn WorkerBackend>>,
     frontend_controller: Option<Arc<dyn FrontendController>>,
@@ -3325,6 +3329,8 @@ impl UiShellState {
             ticket_picker_priority_states: runtime_config.ticket_picker_priority_states.clone(),
             ticket_picker_start_request_seq: 0,
             ticket_picker_active_start_request_id: None,
+            ticket_picker_archive_request_seq: 0,
+            ticket_picker_active_archive_request_id: None,
             startup_session_feed_opened: false,
             worker_backend,
             frontend_controller: None,
@@ -4658,6 +4664,7 @@ impl UiShellState {
             || self.ticket_picker_overlay.creating
             || self.ticket_picker_overlay.starting_ticket_id.is_some()
             || self.ticket_picker_overlay.archiving_ticket_id.is_some()
+            || self.ticket_picker_active_archive_request_id.is_some()
             || self.ticket_picker_overlay.archive_confirm_ticket.is_some()
         {
             return false;
@@ -4677,6 +4684,7 @@ impl UiShellState {
             || self.ticket_picker_overlay.new_ticket_mode
             || self.ticket_picker_overlay.starting_ticket_id.is_some()
             || self.ticket_picker_overlay.archiving_ticket_id.is_some()
+            || self.ticket_picker_active_archive_request_id.is_some()
         {
             return;
         }
@@ -4692,12 +4700,10 @@ impl UiShellState {
     }
 
     fn submit_ticket_picker_archive_confirmation(&mut self) {
-        if self.ticket_picker_overlay.archive_confirm_ticket.is_none() {
+        let Some(ticket) = self.ticket_picker_overlay.archive_confirm_ticket.take() else {
             return;
-        }
-        self.ticket_picker_overlay.archive_confirm_ticket = None;
-        self.status_warning =
-            Some("ticket archive is handled outside the TUI loop in frontend services".to_owned());
+        };
+        self.spawn_ticket_picker_archive(ticket);
     }
 
     fn submit_ticket_picker_repository_prompt(&mut self) {
@@ -4821,6 +4827,75 @@ impl UiShellState {
                 self.ticket_picker_overlay.starting_ticket_id = None;
                 self.ticket_picker_active_start_request_id = None;
                 let message = "ticket start unavailable: tokio runtime is not active".to_owned();
+                self.ticket_picker_overlay.error = Some(message.clone());
+                self.status_warning = Some(message);
+            }
+        }
+    }
+
+    fn spawn_ticket_picker_archive(&mut self, ticket: TicketSummary) {
+        let ticket_identifier = ticket.identifier.clone();
+        if let Some(active_ticket_id) = self.ticket_picker_overlay.archiving_ticket_id.as_ref() {
+            if active_ticket_id != &ticket.ticket_id {
+                self.status_warning = Some(format!(
+                    "ticket archive unavailable ({}): archive already running for {}",
+                    ticket_identifier,
+                    active_ticket_id.as_str()
+                ));
+                return;
+            }
+            self.status_warning = Some(format!(
+                "ticket archive already running ({})",
+                ticket_identifier
+            ));
+            return;
+        }
+        if self.ticket_picker_active_archive_request_id.is_some() {
+            self.status_warning = Some(format!(
+                "ticket archive already running ({})",
+                ticket_identifier
+            ));
+            return;
+        }
+
+        let Some(provider) = self.ticket_picker_provider.clone() else {
+            let message = format!(
+                "ticket archive unavailable ({}): ticket provider is not configured",
+                ticket_identifier
+            );
+            self.ticket_picker_overlay.error = Some(message.clone());
+            self.status_warning = Some(message);
+            return;
+        };
+        let Some(sender) = self.ticket_picker_sender.clone() else {
+            let message = format!(
+                "ticket archive unavailable ({}): ticket picker event channel is not available",
+                ticket_identifier
+            );
+            self.ticket_picker_overlay.error = Some(message.clone());
+            self.status_warning = Some(message);
+            return;
+        };
+
+        self.ticket_picker_archive_request_seq =
+            self.ticket_picker_archive_request_seq.wrapping_add(1);
+        let request_id = self.ticket_picker_archive_request_seq;
+        self.ticket_picker_active_archive_request_id = Some(request_id);
+        match TokioHandle::try_current() {
+            Ok(handle) => {
+                self.ticket_picker_overlay.archiving_ticket_id = Some(ticket.ticket_id.clone());
+                self.ticket_picker_overlay.error = None;
+                self.status_warning = Some(format!("archiving {}...", ticket_identifier));
+                handle.spawn(async move {
+                    run_ticket_picker_archive_task(provider, ticket, request_id, sender).await;
+                });
+            }
+            Err(_) => {
+                self.ticket_picker_active_archive_request_id = None;
+                let message = format!(
+                    "ticket archive unavailable ({}): tokio runtime is not active",
+                    ticket_identifier
+                );
                 self.ticket_picker_overlay.error = Some(message.clone());
                 self.status_warning = Some(message);
             }
@@ -6241,10 +6316,21 @@ impl UiShellState {
                 ));
             }
             TicketPickerEvent::TicketArchived {
+                request_id,
                 archived_ticket,
                 tickets,
                 warning,
             } => {
+                if request_id < self.ticket_picker_archive_request_seq {
+                    return;
+                }
+                if self
+                    .ticket_picker_active_archive_request_id
+                    .is_some_and(|active_id| active_id != request_id)
+                {
+                    return;
+                }
+                self.ticket_picker_active_archive_request_id = None;
                 self.ticket_picker_overlay.archiving_ticket_id = None;
                 self.ticket_picker_overlay.archive_confirm_ticket = None;
                 self.ticket_picker_overlay.error = None;
@@ -6265,10 +6351,21 @@ impl UiShellState {
                 self.status_warning = Some(status);
             }
             TicketPickerEvent::TicketArchiveFailed {
+                request_id,
                 ticket,
                 message,
                 tickets,
             } => {
+                if request_id < self.ticket_picker_archive_request_seq {
+                    return;
+                }
+                if self
+                    .ticket_picker_active_archive_request_id
+                    .is_some_and(|active_id| active_id != request_id)
+                {
+                    return;
+                }
+                self.ticket_picker_active_archive_request_id = None;
                 self.ticket_picker_overlay.archiving_ticket_id = None;
                 self.ticket_picker_overlay.archive_confirm_ticket = None;
                 self.ticket_picker_overlay.error = Some(message.clone());
@@ -8949,6 +9046,7 @@ async fn run_ticket_picker_create_task(
 async fn run_ticket_picker_archive_task(
     provider: Arc<dyn TicketPickerProvider>,
     ticket: TicketSummary,
+    request_id: u64,
     sender: mpsc::Sender<TicketPickerEvent>,
 ) {
     let archived_ticket = ticket.clone();
@@ -8959,6 +9057,7 @@ async fn run_ticket_picker_archive_task(
         };
         let _ = sender
             .send(TicketPickerEvent::TicketArchiveFailed {
+                request_id,
                 ticket: archived_ticket,
                 message: error.to_string(),
                 tickets,
@@ -8978,6 +9077,7 @@ async fn run_ticket_picker_archive_task(
 
     let _ = sender
         .send(TicketPickerEvent::TicketArchived {
+            request_id,
             archived_ticket,
             tickets,
             warning: (!warning.is_empty()).then(|| warning.join("; ")),
