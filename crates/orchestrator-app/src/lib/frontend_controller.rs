@@ -303,28 +303,153 @@ fn ensure_terminal_streams(
 
 fn apply_intent_to_snapshot(snapshot: &mut FrontendSnapshot, intent: &FrontendIntent) -> bool {
     match intent {
-        FrontendIntent::Command(command) => match command {
-            FrontendCommandIntent::SetApplicationModeAutopilot => {
-                if snapshot.application_mode != FrontendApplicationMode::Autopilot {
-                    snapshot.application_mode = FrontendApplicationMode::Autopilot;
-                    true
-                } else {
-                    false
-                }
-            }
-            FrontendCommandIntent::SetApplicationModeManual => {
-                if snapshot.application_mode != FrontendApplicationMode::Manual {
-                    snapshot.application_mode = FrontendApplicationMode::Manual;
-                    true
-                } else {
-                    false
-                }
-            }
-            _ => false,
-        },
+        FrontendIntent::Command(command) => apply_command_intent_to_snapshot(snapshot, *command),
         FrontendIntent::SendTerminalInput { .. } | FrontendIntent::RespondToNeedsInput { .. } => {
             false
         }
+    }
+}
+
+fn apply_command_intent_to_snapshot(
+    snapshot: &mut FrontendSnapshot,
+    command: FrontendCommandIntent,
+) -> bool {
+    match command {
+        FrontendCommandIntent::SetApplicationModeAutopilot => {
+            if snapshot.application_mode != FrontendApplicationMode::Autopilot {
+                snapshot.application_mode = FrontendApplicationMode::Autopilot;
+                true
+            } else {
+                false
+            }
+        }
+        FrontendCommandIntent::SetApplicationModeManual => {
+            if snapshot.application_mode != FrontendApplicationMode::Manual {
+                snapshot.application_mode = FrontendApplicationMode::Manual;
+                true
+            } else {
+                false
+            }
+        }
+        FrontendCommandIntent::EnterNormalMode
+        | FrontendCommandIntent::EnterInsertMode
+        | FrontendCommandIntent::ToggleGlobalSupervisorChat
+        | FrontendCommandIntent::OpenTerminalForSelected
+        | FrontendCommandIntent::OpenDiffInspectorForSelected
+        | FrontendCommandIntent::OpenTestInspectorForSelected
+        | FrontendCommandIntent::OpenPrInspectorForSelected
+        | FrontendCommandIntent::OpenChatInspectorForSelected
+        | FrontendCommandIntent::StartTerminalEscapeChord
+        | FrontendCommandIntent::QuitShell
+        | FrontendCommandIntent::FocusNextInbox
+        | FrontendCommandIntent::FocusPreviousInbox
+        | FrontendCommandIntent::CycleBatchNext
+        | FrontendCommandIntent::CycleBatchPrevious
+        | FrontendCommandIntent::JumpFirstInbox
+        | FrontendCommandIntent::JumpLastInbox
+        | FrontendCommandIntent::JumpBatchDecideOrUnblock
+        | FrontendCommandIntent::JumpBatchApprovals
+        | FrontendCommandIntent::JumpBatchReviewReady
+        | FrontendCommandIntent::JumpBatchFyiDigest
+        | FrontendCommandIntent::OpenTicketPicker
+        | FrontendCommandIntent::CloseTicketPicker
+        | FrontendCommandIntent::TicketPickerMoveNext
+        | FrontendCommandIntent::TicketPickerMovePrevious
+        | FrontendCommandIntent::TicketPickerFoldProject
+        | FrontendCommandIntent::TicketPickerUnfoldProject
+        | FrontendCommandIntent::TicketPickerStartSelected
+        | FrontendCommandIntent::ToggleWorktreeDiffModal
+        | FrontendCommandIntent::AdvanceTerminalWorkflowStage
+        | FrontendCommandIntent::ArchiveSelectedSession
+        | FrontendCommandIntent::OpenSessionOutputForSelectedInbox => false,
+    }
+}
+
+fn command_intent_notification(
+    command: FrontendCommandIntent,
+    snapshot_changed: bool,
+) -> Option<FrontendNotification> {
+    match command {
+        FrontendCommandIntent::SetApplicationModeAutopilot => {
+            if snapshot_changed {
+                None
+            } else {
+                Some(command_info_notification(
+                    command,
+                    "application mode is already autopilot",
+                ))
+            }
+        }
+        FrontendCommandIntent::SetApplicationModeManual => {
+            if snapshot_changed {
+                None
+            } else {
+                Some(command_info_notification(
+                    command,
+                    "application mode is already manual",
+                ))
+            }
+        }
+        FrontendCommandIntent::TicketPickerStartSelected => Some(command_warning_notification(
+            command,
+            "requires selected ticket context from the ticket picker; FrontendIntent::Command carries no ticket payload",
+        )),
+        FrontendCommandIntent::AdvanceTerminalWorkflowStage
+        | FrontendCommandIntent::ArchiveSelectedSession => {
+            Some(command_warning_notification(
+                command,
+                "requires selected session/inbox context; FrontendIntent::Command carries no UI selection payload",
+            ))
+        }
+        FrontendCommandIntent::EnterNormalMode
+        | FrontendCommandIntent::EnterInsertMode
+        | FrontendCommandIntent::ToggleGlobalSupervisorChat
+        | FrontendCommandIntent::OpenTerminalForSelected
+        | FrontendCommandIntent::OpenDiffInspectorForSelected
+        | FrontendCommandIntent::OpenTestInspectorForSelected
+        | FrontendCommandIntent::OpenPrInspectorForSelected
+        | FrontendCommandIntent::OpenChatInspectorForSelected
+        | FrontendCommandIntent::StartTerminalEscapeChord
+        | FrontendCommandIntent::QuitShell
+        | FrontendCommandIntent::FocusNextInbox
+        | FrontendCommandIntent::FocusPreviousInbox
+        | FrontendCommandIntent::CycleBatchNext
+        | FrontendCommandIntent::CycleBatchPrevious
+        | FrontendCommandIntent::JumpFirstInbox
+        | FrontendCommandIntent::JumpLastInbox
+        | FrontendCommandIntent::JumpBatchDecideOrUnblock
+        | FrontendCommandIntent::JumpBatchApprovals
+        | FrontendCommandIntent::JumpBatchReviewReady
+        | FrontendCommandIntent::JumpBatchFyiDigest
+        | FrontendCommandIntent::OpenTicketPicker
+        | FrontendCommandIntent::CloseTicketPicker
+        | FrontendCommandIntent::TicketPickerMoveNext
+        | FrontendCommandIntent::TicketPickerMovePrevious
+        | FrontendCommandIntent::TicketPickerFoldProject
+        | FrontendCommandIntent::TicketPickerUnfoldProject
+        | FrontendCommandIntent::ToggleWorktreeDiffModal
+        | FrontendCommandIntent::OpenSessionOutputForSelectedInbox => None,
+    }
+}
+
+fn command_info_notification(command: FrontendCommandIntent, detail: &str) -> FrontendNotification {
+    FrontendNotification {
+        level: FrontendNotificationLevel::Info,
+        message: format!("{}: {detail}", command.command_id()),
+        work_item_id: None,
+        session_id: None,
+    }
+}
+
+fn command_warning_notification(
+    command: FrontendCommandIntent,
+    detail: &str,
+) -> FrontendNotification {
+    FrontendNotification {
+        level: FrontendNotificationLevel::Warning,
+        message: format!("{}: {detail}", command.command_id()),
+        work_item_id: None,
+        session_id: None,
     }
 }
 
@@ -357,12 +482,22 @@ where
 
     async fn submit_intent(&self, intent: FrontendIntent) -> Result<(), CoreError> {
         match &intent {
-            FrontendIntent::Command(_) => {
-                let mut guard = self.snapshot.write().await;
-                if apply_intent_to_snapshot(&mut guard, &intent) {
-                    let _ = self
-                        .event_tx
-                        .send(FrontendEvent::SnapshotUpdated(guard.clone()));
+            FrontendIntent::Command(command) => {
+                let (snapshot_update, notification) = {
+                    let mut guard = self.snapshot.write().await;
+                    let snapshot_changed = apply_intent_to_snapshot(&mut guard, &intent);
+                    let snapshot_update =
+                        snapshot_changed.then(|| FrontendEvent::SnapshotUpdated(guard.clone()));
+                    let notification = command_intent_notification(*command, snapshot_changed)
+                        .map(FrontendEvent::Notification);
+                    (snapshot_update, notification)
+                };
+
+                if let Some(event) = snapshot_update {
+                    let _ = self.event_tx.send(event);
+                }
+                if let Some(event) = notification {
+                    let _ = self.event_tx.send(event);
                 }
             }
             FrontendIntent::SendTerminalInput { session_id, input } => {
@@ -395,6 +530,91 @@ where
 #[cfg(test)]
 mod frontend_controller_tests {
     use super::*;
+    use orchestrator_ticketing::{self, AddTicketCommentRequest, UpdateTicketStateRequest};
+    use std::sync::Arc;
+
+    struct FrontendControllerTestSupervisor;
+
+    #[async_trait::async_trait]
+    impl Supervisor for FrontendControllerTestSupervisor {
+        async fn health_check(&self) -> Result<(), CoreError> {
+            Ok(())
+        }
+    }
+
+    struct FrontendControllerTestGithub;
+
+    #[async_trait::async_trait]
+    impl GithubClient for FrontendControllerTestGithub {
+        async fn health_check(&self) -> Result<(), orchestrator_vcs_repos::CoreError> {
+            Ok(())
+        }
+    }
+
+    struct FrontendControllerTestTicketingProvider;
+
+    #[async_trait::async_trait]
+    impl orchestrator_ticketing::TicketingProvider for FrontendControllerTestTicketingProvider {
+        fn provider(&self) -> orchestrator_ticketing::TicketProvider {
+            orchestrator_ticketing::TicketProvider::Linear
+        }
+
+        async fn health_check(&self) -> Result<(), orchestrator_ticketing::CoreError> {
+            Ok(())
+        }
+
+        async fn list_tickets(
+            &self,
+            _query: orchestrator_ticketing::TicketQuery,
+        ) -> Result<Vec<orchestrator_ticketing::TicketSummary>, orchestrator_ticketing::CoreError>
+        {
+            Ok(Vec::new())
+        }
+
+        async fn create_ticket(
+            &self,
+            _request: orchestrator_ticketing::CreateTicketRequest,
+        ) -> Result<orchestrator_ticketing::TicketSummary, orchestrator_ticketing::CoreError>
+        {
+            Err(orchestrator_ticketing::CoreError::DependencyUnavailable(
+                "create_ticket is not required for frontend controller command-intent tests"
+                    .to_owned(),
+            ))
+        }
+
+        async fn update_ticket_state(
+            &self,
+            _request: UpdateTicketStateRequest,
+        ) -> Result<(), orchestrator_ticketing::CoreError> {
+            Ok(())
+        }
+
+        async fn add_comment(
+            &self,
+            _request: AddTicketCommentRequest,
+        ) -> Result<(), orchestrator_ticketing::CoreError> {
+            Ok(())
+        }
+    }
+
+    fn test_frontend_controller(
+    ) -> AppFrontendController<FrontendControllerTestSupervisor, FrontendControllerTestGithub> {
+        let app = Arc::new(App {
+            config: AppConfig::default(),
+            ticketing: Arc::new(FrontendControllerTestTicketingProvider),
+            supervisor: FrontendControllerTestSupervisor,
+            github: FrontendControllerTestGithub,
+        });
+        AppFrontendController::new(
+            app,
+            None,
+            FrontendSnapshot {
+                status: "ready".to_owned(),
+                projection: ProjectionState::default(),
+                application_mode: FrontendApplicationMode::Manual,
+            },
+        )
+    }
 
     #[test]
     fn apply_intent_updates_application_mode() {
@@ -419,6 +639,11 @@ mod frontend_controller_tests {
             &FrontendIntent::Command(FrontendCommandIntent::SetApplicationModeAutopilot),
         );
         assert!(!changed);
+        let notification =
+            command_intent_notification(FrontendCommandIntent::SetApplicationModeAutopilot, changed)
+                .expect("mode no-op should emit deterministic notification");
+        assert_eq!(notification.level, FrontendNotificationLevel::Info);
+        assert!(notification.message.contains("ui.app_mode.autopilot"));
         assert_eq!(
             snapshot.application_mode,
             FrontendApplicationMode::Autopilot
@@ -430,5 +655,90 @@ mod frontend_controller_tests {
         );
         assert!(changed);
         assert_eq!(snapshot.application_mode, FrontendApplicationMode::Manual);
+    }
+
+    #[test]
+    fn command_intent_notification_skips_ui_shell_commands() {
+        for command in [
+            FrontendCommandIntent::OpenTicketPicker,
+            FrontendCommandIntent::CloseTicketPicker,
+            FrontendCommandIntent::ToggleWorktreeDiffModal,
+            FrontendCommandIntent::OpenSessionOutputForSelectedInbox,
+        ] {
+            assert!(
+                command_intent_notification(command, false).is_none(),
+                "expected no controller notification for {}",
+                command.command_id()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn submit_intent_skips_notifications_for_ui_shell_commands() {
+        let controller = test_frontend_controller();
+        let mut subscription = controller.subscribe().await.expect("subscribe");
+        controller
+            .submit_intent(FrontendIntent::Command(
+                FrontendCommandIntent::OpenTicketPicker,
+            ))
+            .await
+            .expect("submit command intent");
+
+        let no_event = tokio::time::timeout(
+            std::time::Duration::from_millis(50),
+            subscription.next_event(),
+        )
+        .await;
+        assert!(no_event.is_err(), "expected no frontend event for UI-shell command");
+    }
+
+    #[tokio::test]
+    async fn submit_intent_emits_ticket_action_warning_notification() {
+        let controller = test_frontend_controller();
+        let mut subscription = controller.subscribe().await.expect("subscribe");
+        controller
+            .submit_intent(FrontendIntent::Command(
+                FrontendCommandIntent::TicketPickerStartSelected,
+            ))
+            .await
+            .expect("submit command intent");
+
+        let event = subscription
+            .next_event()
+            .await
+            .expect("subscription next event result")
+            .expect("subscription event");
+        let FrontendEvent::Notification(notification) = event else {
+            panic!("expected notification event");
+        };
+        assert_eq!(notification.level, FrontendNotificationLevel::Warning);
+        assert!(notification.message.contains("ui.ticket_picker.start_selected"));
+        assert!(notification.message.contains("requires selected ticket context"));
+    }
+
+    #[tokio::test]
+    async fn submit_intent_emits_workflow_action_warning_notification() {
+        let controller = test_frontend_controller();
+        let mut subscription = controller.subscribe().await.expect("subscribe");
+        controller
+            .submit_intent(FrontendIntent::Command(
+                FrontendCommandIntent::AdvanceTerminalWorkflowStage,
+            ))
+            .await
+            .expect("submit command intent");
+
+        let event = subscription
+            .next_event()
+            .await
+            .expect("subscription next event result")
+            .expect("subscription event");
+        let FrontendEvent::Notification(notification) = event else {
+            panic!("expected notification event");
+        };
+        assert_eq!(notification.level, FrontendNotificationLevel::Warning);
+        assert!(notification.message.contains("ui.terminal.workflow.advance"));
+        assert!(notification
+            .message
+            .contains("requires selected session/inbox context"));
     }
 }
