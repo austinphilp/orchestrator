@@ -799,6 +799,12 @@ mod tests {
             OrchestrationEventPayload::InboxItemResolved(_) => {
                 OrchestrationEventType::InboxItemResolved
             }
+            OrchestrationEventPayload::InboxLaneColorSet(_) => {
+                OrchestrationEventType::InboxLaneColorSet
+            }
+            OrchestrationEventPayload::InboxLaneColorsReset(_) => {
+                OrchestrationEventType::InboxLaneColorsReset
+            }
             OrchestrationEventPayload::UserResponded(_) => OrchestrationEventType::UserResponded,
             OrchestrationEventPayload::SupervisorQueryStarted(_) => {
                 OrchestrationEventType::SupervisorQueryStarted
@@ -9921,6 +9927,18 @@ mod tests {
             "ui.app_mode.manual"
         );
         assert_eq!(
+            command_id(UiCommand::CycleSelectedInboxLaneColor),
+            "ui.inbox_lane_color.cycle_selected"
+        );
+        assert_eq!(
+            command_id(UiCommand::ResetSelectedInboxLaneColor),
+            "ui.inbox_lane_color.reset_selected"
+        );
+        assert_eq!(
+            command_id(UiCommand::ResetAllInboxLaneColors),
+            "ui.inbox_lane_color.reset_all"
+        );
+        assert_eq!(
             command_id(UiCommand::StartTerminalEscapeChord),
             "ui.mode.terminal_escape_prefix"
         );
@@ -9948,6 +9966,9 @@ mod tests {
             UiCommand::JumpBatchApprovals,
             UiCommand::JumpBatchReviewReady,
             UiCommand::JumpBatchFyiDigest,
+            UiCommand::CycleSelectedInboxLaneColor,
+            UiCommand::ResetSelectedInboxLaneColor,
+            UiCommand::ResetAllInboxLaneColors,
             UiCommand::AdvanceTerminalWorkflowStage,
             UiCommand::ArchiveSelectedSession,
             UiCommand::OpenSessionOutputForSelectedInbox,

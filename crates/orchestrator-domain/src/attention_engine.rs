@@ -648,7 +648,9 @@ fn collect_timeline(
             | OrchestrationEventPayload::SupervisorQueryStarted(_)
             | OrchestrationEventPayload::SupervisorQueryChunk(_)
             | OrchestrationEventPayload::SupervisorQueryCancelled(_)
-            | OrchestrationEventPayload::SupervisorQueryFinished(_) => {}
+            | OrchestrationEventPayload::SupervisorQueryFinished(_)
+            | OrchestrationEventPayload::InboxLaneColorSet(_)
+            | OrchestrationEventPayload::InboxLaneColorsReset(_) => {}
         }
     }
 

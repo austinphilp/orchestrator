@@ -2,7 +2,8 @@ use std::sync::Arc;
 
 use crate::commands::UntypedCommandInvocation;
 use crate::controller::contracts::{
-    InboxPublishRequest, InboxResolveRequest, MergeQueueEvent, SessionWorkflowAdvanceOutcome,
+    InboxLaneColorsResetRequest, InboxLaneColorSetRequest, InboxPublishRequest,
+    InboxResolveRequest, MergeQueueEvent, SessionWorkflowAdvanceOutcome,
     SupervisorCommandContext, SupervisorCommandDispatcher, TicketPickerProvider,
 };
 use crate::events::StoredEventEnvelope;
@@ -55,6 +56,18 @@ pub enum InboxPublishRunnerEvent {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InboxResolveRunnerEvent {
     Resolved { event: Option<StoredEventEnvelope> },
+    Failed { message: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InboxLaneColorSetRunnerEvent {
+    Set { event: StoredEventEnvelope },
+    Failed { message: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InboxLaneColorsResetRunnerEvent {
+    Reset { event: StoredEventEnvelope },
     Failed { message: String },
 }
 
@@ -210,6 +223,58 @@ pub async fn run_resolve_inbox_item_task<E>(
             let _ = sender
                 .send(
                     InboxResolveRunnerEvent::Failed {
+                        message: sanitize_terminal_display_text(error.to_string().as_str()),
+                    }
+                    .into(),
+                )
+                .await;
+        }
+    }
+}
+
+pub async fn run_set_inbox_lane_color_task<E>(
+    provider: Arc<dyn TicketPickerProvider>,
+    request: InboxLaneColorSetRequest,
+    sender: mpsc::Sender<E>,
+) where
+    E: From<InboxLaneColorSetRunnerEvent> + Send + 'static,
+{
+    match provider.set_inbox_lane_color(request).await {
+        Ok(event) => {
+            let _ = sender
+                .send(InboxLaneColorSetRunnerEvent::Set { event }.into())
+                .await;
+        }
+        Err(error) => {
+            let _ = sender
+                .send(
+                    InboxLaneColorSetRunnerEvent::Failed {
+                        message: sanitize_terminal_display_text(error.to_string().as_str()),
+                    }
+                    .into(),
+                )
+                .await;
+        }
+    }
+}
+
+pub async fn run_reset_inbox_lane_colors_task<E>(
+    provider: Arc<dyn TicketPickerProvider>,
+    request: InboxLaneColorsResetRequest,
+    sender: mpsc::Sender<E>,
+) where
+    E: From<InboxLaneColorsResetRunnerEvent> + Send + 'static,
+{
+    match provider.reset_inbox_lane_colors(request).await {
+        Ok(event) => {
+            let _ = sender
+                .send(InboxLaneColorsResetRunnerEvent::Reset { event }.into())
+                .await;
+        }
+        Err(error) => {
+            let _ = sender
+                .send(
+                    InboxLaneColorsResetRunnerEvent::Failed {
                         message: sanitize_terminal_display_text(error.to_string().as_str()),
                     }
                     .into(),

@@ -5,6 +5,7 @@
 
 pub use orchestrator_domain::{
     ArtifactCreatedPayload, InboxItemCreatedPayload, InboxItemResolvedPayload, NewEventEnvelope,
+    InboxLaneColorsResetPayload, InboxLaneColorSetPayload,
     OrchestrationEventPayload, OrchestrationEventType, SessionBlockedPayload,
     SessionCheckpointPayload, SessionCompletedPayload, SessionCrashedPayload,
     SessionNeedsInputPayload, SessionSpawnedPayload, StoredEventEnvelope,
