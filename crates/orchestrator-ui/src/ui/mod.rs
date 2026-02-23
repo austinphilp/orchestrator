@@ -61,8 +61,6 @@ const TICKET_PICKER_EVENT_CHANNEL_CAPACITY: usize = 32;
 const TERMINAL_STREAM_EVENT_CHANNEL_CAPACITY: usize = 128;
 #[allow(dead_code)]
 const MERGE_REQUEST_RATE_LIMIT: Duration = Duration::from_secs(1);
-#[allow(dead_code)]
-const TICKET_PICKER_CREATE_REFRESH_INTERVAL: Duration = Duration::from_secs(1);
 const BACKGROUND_SESSION_DEFERRED_OUTPUT_MAX_BYTES: usize = 64 * 1024;
 const RESOLVED_ANIMATION_REFRESH_INTERVAL: Duration = Duration::from_secs(1);
 const PLANNING_WORKING_STATE_PERSIST_DEBOUNCE: Duration = Duration::from_millis(500);
@@ -2994,12 +2992,14 @@ enum TicketPickerEvent {
         tickets: Option<Vec<TicketSummary>>,
     },
     TicketCreated {
+        request_id: u64,
         created_ticket: TicketSummary,
         submit_mode: TicketCreateSubmitMode,
         tickets: Option<Vec<TicketSummary>>,
         warning: Option<String>,
     },
     TicketCreateFailed {
+        request_id: u64,
         message: String,
         tickets: Option<Vec<TicketSummary>>,
         warning: Option<String>,
@@ -3149,8 +3149,9 @@ struct UiShellState {
     ticket_picker_sender: Option<mpsc::Sender<TicketPickerEvent>>,
     ticket_picker_receiver: Option<mpsc::Receiver<TicketPickerEvent>>,
     ticket_picker_overlay: TicketPickerOverlayState,
-    ticket_picker_create_refresh_deadline: Option<Instant>,
     ticket_picker_priority_states: Vec<String>,
+    ticket_picker_create_request_seq: u64,
+    ticket_picker_active_create_request_id: Option<u64>,
     ticket_picker_start_request_seq: u64,
     ticket_picker_active_start_request_id: Option<u64>,
     ticket_picker_archive_request_seq: u64,
@@ -3325,8 +3326,9 @@ impl UiShellState {
             ticket_picker_sender,
             ticket_picker_receiver,
             ticket_picker_overlay: TicketPickerOverlayState::default(),
-            ticket_picker_create_refresh_deadline: None,
             ticket_picker_priority_states: runtime_config.ticket_picker_priority_states.clone(),
+            ticket_picker_create_request_seq: 0,
+            ticket_picker_active_create_request_id: None,
             ticket_picker_start_request_seq: 0,
             ticket_picker_active_start_request_id: None,
             ticket_picker_archive_request_seq: 0,
@@ -4583,17 +4585,14 @@ impl UiShellState {
         self.refresh_ticket_picker_overlay_from_projection();
         if self.frontend_controller.is_some() {
             self.submit_frontend_command_intent(FrontendCommandIntent::OpenTicketPicker);
-        } else {
-            self.status_warning = Some(
-                "ticket operations are handled outside the TUI loop; picker is read-only here"
-                    .to_owned(),
-            );
+        } else if self.ticket_picker_provider.is_none() {
+            self.status_warning =
+                Some("ticket picker unavailable: ticket provider is not configured".to_owned());
         }
     }
 
     fn close_ticket_picker(&mut self) {
         self.ticket_picker_overlay.close();
-        self.ticket_picker_create_refresh_deadline = None;
         if self.frontend_controller.is_some() {
             self.submit_frontend_command_intent(FrontendCommandIntent::CloseTicketPicker);
         }
@@ -4750,8 +4749,11 @@ impl UiShellState {
     }
 
     fn submit_created_ticket_from_picker(&mut self, submit_mode: TicketCreateSubmitMode) {
-        let _ = submit_mode;
         if !self.ticket_picker_overlay.visible || !self.ticket_picker_overlay.new_ticket_mode {
+            return;
+        }
+        if self.ticket_picker_overlay.creating {
+            self.status_warning = Some("ticket create already running".to_owned());
             return;
         }
         if !self.ticket_picker_overlay.can_submit_new_ticket() {
@@ -4768,18 +4770,45 @@ impl UiShellState {
             .trim()
             .to_owned();
         let selected_project = self.ticket_picker_overlay.selected_project_name();
-        self.ticket_picker_overlay.error = None;
-        self.ticket_picker_overlay.new_ticket_mode = false;
-        clear_editor_state(&mut self.ticket_picker_overlay.new_ticket_brief_editor);
-        self.ticket_picker_overlay.creating = false;
-        self.ticket_picker_create_refresh_deadline = None;
-        let _ = CreateTicketFromPickerRequest {
+        let request = CreateTicketFromPickerRequest {
             brief,
             selected_project,
             submit_mode,
         };
-        self.status_warning =
-            Some("ticket creation is handled outside the TUI loop in frontend services".to_owned());
+        let Some(provider) = self.ticket_picker_provider.clone() else {
+            let message = "ticket create unavailable: ticket provider is not configured".to_owned();
+            self.ticket_picker_overlay.error = Some(message.clone());
+            self.status_warning = Some(message);
+            return;
+        };
+        let Some(sender) = self.ticket_picker_sender.clone() else {
+            let message = "ticket create unavailable: ticket picker event channel is not available"
+                .to_owned();
+            self.ticket_picker_overlay.error = Some(message.clone());
+            self.status_warning = Some(message);
+            return;
+        };
+
+        match TokioHandle::try_current() {
+            Ok(handle) => {
+                self.ticket_picker_create_request_seq =
+                    self.ticket_picker_create_request_seq.wrapping_add(1);
+                let request_id = self.ticket_picker_create_request_seq;
+                self.ticket_picker_active_create_request_id = Some(request_id);
+                self.ticket_picker_overlay.creating = true;
+                self.ticket_picker_overlay.error = None;
+                self.status_warning = Some("creating ticket...".to_owned());
+                handle.spawn(async move {
+                    run_ticket_picker_create_task(provider, request, request_id, sender).await;
+                });
+            }
+            Err(_) => {
+                self.ticket_picker_active_create_request_id = None;
+                let message = "ticket create unavailable: tokio runtime is not active".to_owned();
+                self.ticket_picker_overlay.error = Some(message.clone());
+                self.status_warning = Some(message);
+            }
+        }
     }
 
     fn spawn_ticket_picker_start(
@@ -6385,13 +6414,25 @@ impl UiShellState {
                 ));
             }
             TicketPickerEvent::TicketCreated {
+                request_id,
                 created_ticket,
                 submit_mode,
                 tickets,
                 warning,
             } => {
+                if request_id < self.ticket_picker_create_request_seq {
+                    return;
+                }
+                if self
+                    .ticket_picker_active_create_request_id
+                    .is_some_and(|active_id| active_id != request_id)
+                {
+                    return;
+                }
+                self.ticket_picker_active_create_request_id = None;
                 self.ticket_picker_overlay.creating = false;
-                self.ticket_picker_create_refresh_deadline = None;
+                self.ticket_picker_overlay.new_ticket_mode = false;
+                clear_editor_state(&mut self.ticket_picker_overlay.new_ticket_brief_editor);
                 self.ticket_picker_overlay.error = None;
                 let mut display_tickets =
                     tickets.unwrap_or_else(|| self.ticket_picker_overlay.tickets_snapshot());
@@ -6422,12 +6463,22 @@ impl UiShellState {
                 self.schedule_session_info_summary_refresh_for_active_session();
             }
             TicketPickerEvent::TicketCreateFailed {
+                request_id,
                 message,
                 tickets,
                 warning,
             } => {
+                if request_id < self.ticket_picker_create_request_seq {
+                    return;
+                }
+                if self
+                    .ticket_picker_active_create_request_id
+                    .is_some_and(|active_id| active_id != request_id)
+                {
+                    return;
+                }
+                self.ticket_picker_active_create_request_id = None;
                 self.ticket_picker_overlay.creating = false;
-                self.ticket_picker_create_refresh_deadline = None;
                 self.ticket_picker_overlay.error = Some(message.clone());
                 if let Some(tickets) = tickets {
                     let tickets = self.filtered_ticket_picker_tickets(tickets);
@@ -8997,21 +9048,27 @@ async fn run_ticket_picker_start_task(
 async fn run_ticket_picker_create_task(
     provider: Arc<dyn TicketPickerProvider>,
     request: CreateTicketFromPickerRequest,
+    request_id: u64,
     sender: mpsc::Sender<TicketPickerEvent>,
 ) {
     let submit_mode = request.submit_mode.clone();
     let created_ticket = match provider.create_ticket_from_brief(request).await {
         Ok(ticket) => ticket,
         Err(error) => {
+            let mut warning = Vec::new();
             let tickets = match provider.list_unfinished_tickets().await {
                 Ok(tickets) => Some(tickets),
-                Err(_) => None,
+                Err(refresh_error) => {
+                    warning.push(format!("failed to refresh tickets: {refresh_error}"));
+                    None
+                }
             };
             let _ = sender
                 .send(TicketPickerEvent::TicketCreateFailed {
+                    request_id,
                     message: error.to_string(),
                     tickets,
-                    warning: None,
+                    warning: (!warning.is_empty()).then(|| warning.join("; ")),
                 })
                 .await;
             return;
@@ -9034,6 +9091,7 @@ async fn run_ticket_picker_create_task(
 
     let _ = sender
         .send(TicketPickerEvent::TicketCreated {
+            request_id,
             created_ticket,
             submit_mode,
             tickets,

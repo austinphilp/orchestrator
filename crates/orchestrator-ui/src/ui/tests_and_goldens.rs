@@ -8090,33 +8090,329 @@ mod tests {
             .contains("enter a brief description"));
     }
 
-    #[test]
-    fn ticket_picker_new_ticket_mode_shift_enter_submits_create_and_start() {
-        let mut shell_state = UiShellState::new("ready".to_owned(), triage_projection());
-        shell_state.ticket_picker_overlay.open();
+    #[tokio::test]
+    async fn ticket_picker_new_ticket_mode_enter_submits_create_only() {
+        #[derive(Default)]
+        struct RecordingCreateProvider {
+            create_requests: Arc<Mutex<Vec<CreateTicketFromPickerRequest>>>,
+        }
+
+        impl RecordingCreateProvider {
+            fn create_requests(&self) -> Vec<CreateTicketFromPickerRequest> {
+                self.create_requests
+                    .lock()
+                    .expect("create requests lock")
+                    .clone()
+            }
+        }
+
+        #[async_trait]
+        impl TicketPickerProvider for RecordingCreateProvider {
+            async fn list_unfinished_tickets(&self) -> Result<Vec<TicketSummary>, CoreError> {
+                Ok(vec![
+                    sample_ticket_summary("issue-401", "AP-401", "Todo"),
+                    sample_ticket_summary("issue-611", "AP-611", "Todo"),
+                ])
+            }
+
+            async fn start_or_resume_ticket(
+                &self,
+                _ticket: TicketSummary,
+                _repository_override: Option<PathBuf>,
+            ) -> Result<SelectedTicketFlowResult, CoreError> {
+                Err(CoreError::DependencyUnavailable(
+                    "start should not be called for create-only".to_owned(),
+                ))
+            }
+
+            async fn create_ticket_from_brief(
+                &self,
+                request: CreateTicketFromPickerRequest,
+            ) -> Result<TicketSummary, CoreError> {
+                self.create_requests
+                    .lock()
+                    .expect("create requests lock")
+                    .push(request);
+                Ok(sample_ticket_summary("issue-611", "AP-611", "Todo"))
+            }
+
+            async fn reload_projection(&self) -> Result<ProjectionState, CoreError> {
+                Ok(ProjectionState::default())
+            }
+        }
+
+        let provider = Arc::new(RecordingCreateProvider::default());
+        let mut shell_state = UiShellState::new_with_integrations(
+            "ready".to_owned(),
+            triage_projection(),
+            None,
+            None,
+            Some(provider.clone()),
+            None,
+        );
+        shell_state.open_ticket_picker();
+        shell_state.ticket_picker_overlay.loading = false;
+        shell_state.ticket_picker_overlay.apply_tickets(
+            vec![sample_ticket_summary("issue-401", "AP-401", "Todo")],
+            Vec::new(),
+            &["Todo".to_owned()],
+        );
+        shell_state.ticket_picker_overlay.move_selection(1);
         shell_state.ticket_picker_overlay.begin_new_ticket_mode();
-        assert_eq!(
-            shell_state
-                .ticket_picker_overlay
-                .new_ticket_brief_editor
-                .mode,
-            EditorMode::Insert
+        set_editor_state_text(
+            &mut shell_state.ticket_picker_overlay.new_ticket_brief_editor,
+            "create-only draft",
         );
 
-        route_ticket_picker_key(&mut shell_state, key(KeyCode::Char('a')));
-        route_ticket_picker_key(&mut shell_state, key(KeyCode::Esc));
-        route_ticket_picker_key(&mut shell_state, shift_key(KeyCode::Enter));
+        route_ticket_picker_key(&mut shell_state, key(KeyCode::Enter));
+        assert!(shell_state.ticket_picker_overlay.creating);
 
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                let _ = shell_state.tick_terminal_view_and_report();
+                if !shell_state.ticket_picker_overlay.creating {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("create-only flow should complete");
+
+        let requests = provider.create_requests();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].brief, "create-only draft");
+        assert_eq!(requests[0].selected_project.as_deref(), Some("Core"));
+        assert_eq!(requests[0].submit_mode, TicketCreateSubmitMode::CreateOnly);
+        assert!(!shell_state.ticket_picker_overlay.new_ticket_mode);
         assert!(
             editor_state_text(&shell_state.ticket_picker_overlay.new_ticket_brief_editor)
                 .is_empty()
         );
+        assert!(shell_state
+            .ticket_picker_overlay
+            .selected_ticket()
+            .is_some_and(|ticket| ticket.identifier == "AP-611"));
+    }
+
+    #[tokio::test]
+    async fn ticket_picker_new_ticket_mode_shift_enter_submits_create_and_start() {
+        #[derive(Default)]
+        struct RecordingCreateAndStartProvider {
+            create_requests: Arc<Mutex<Vec<CreateTicketFromPickerRequest>>>,
+            started_tickets: Arc<Mutex<Vec<TicketSummary>>>,
+        }
+
+        impl RecordingCreateAndStartProvider {
+            fn create_requests(&self) -> Vec<CreateTicketFromPickerRequest> {
+                self.create_requests
+                    .lock()
+                    .expect("create requests lock")
+                    .clone()
+            }
+
+            fn started_tickets(&self) -> Vec<TicketSummary> {
+                self.started_tickets
+                    .lock()
+                    .expect("started tickets lock")
+                    .clone()
+            }
+        }
+
+        #[async_trait]
+        impl TicketPickerProvider for RecordingCreateAndStartProvider {
+            async fn list_unfinished_tickets(&self) -> Result<Vec<TicketSummary>, CoreError> {
+                Ok(vec![sample_ticket_summary("issue-612", "AP-612", "Todo")])
+            }
+
+            async fn start_or_resume_ticket(
+                &self,
+                ticket: TicketSummary,
+                _repository_override: Option<PathBuf>,
+            ) -> Result<SelectedTicketFlowResult, CoreError> {
+                self.started_tickets
+                    .lock()
+                    .expect("started tickets lock")
+                    .push(ticket);
+                Err(CoreError::DependencyUnavailable(
+                    "start failed after create".to_owned(),
+                ))
+            }
+
+            async fn create_ticket_from_brief(
+                &self,
+                request: CreateTicketFromPickerRequest,
+            ) -> Result<TicketSummary, CoreError> {
+                self.create_requests
+                    .lock()
+                    .expect("create requests lock")
+                    .push(request);
+                Ok(sample_ticket_summary("issue-612", "AP-612", "Todo"))
+            }
+
+            async fn reload_projection(&self) -> Result<ProjectionState, CoreError> {
+                Ok(ProjectionState::default())
+            }
+        }
+
+        let provider = Arc::new(RecordingCreateAndStartProvider::default());
+        let mut shell_state = UiShellState::new_with_integrations(
+            "ready".to_owned(),
+            triage_projection(),
+            None,
+            None,
+            Some(provider.clone()),
+            None,
+        );
+        shell_state.open_ticket_picker();
+        shell_state.ticket_picker_overlay.loading = false;
+        shell_state.ticket_picker_overlay.apply_tickets(
+            vec![sample_ticket_summary("issue-401", "AP-401", "Todo")],
+            Vec::new(),
+            &["Todo".to_owned()],
+        );
+        shell_state.ticket_picker_overlay.move_selection(1);
+        shell_state.ticket_picker_overlay.begin_new_ticket_mode();
+        set_editor_state_text(
+            &mut shell_state.ticket_picker_overlay.new_ticket_brief_editor,
+            "create and start draft",
+        );
+
+        route_ticket_picker_key(&mut shell_state, shift_key(KeyCode::Enter));
+        assert!(shell_state.ticket_picker_overlay.creating);
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                let _ = shell_state.tick_terminal_view_and_report();
+                if !provider.started_tickets().is_empty() {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("create+start flow should attempt session start");
+
+        let requests = provider.create_requests();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].brief, "create and start draft");
+        assert_eq!(requests[0].selected_project.as_deref(), Some("Core"));
+        assert_eq!(
+            requests[0].submit_mode,
+            TicketCreateSubmitMode::CreateAndStart
+        );
+        assert_eq!(provider.started_tickets().len(), 1);
         assert!(!shell_state.ticket_picker_overlay.new_ticket_mode);
-        assert!(shell_state.ticket_picker_overlay.error.is_none());
+        assert!(shell_state
+            .ticket_picker_overlay
+            .error
+            .as_deref()
+            .is_some_and(|message| message.contains("start failed after create")));
+    }
+
+    #[tokio::test]
+    async fn ticket_picker_new_ticket_mode_create_failure_preserves_draft_context() {
+        #[derive(Default)]
+        struct FailingCreateProvider {
+            create_requests: Arc<Mutex<Vec<CreateTicketFromPickerRequest>>>,
+        }
+
+        impl FailingCreateProvider {
+            fn create_requests(&self) -> Vec<CreateTicketFromPickerRequest> {
+                self.create_requests
+                    .lock()
+                    .expect("create requests lock")
+                    .clone()
+            }
+        }
+
+        #[async_trait]
+        impl TicketPickerProvider for FailingCreateProvider {
+            async fn list_unfinished_tickets(&self) -> Result<Vec<TicketSummary>, CoreError> {
+                Ok(vec![sample_ticket_summary("issue-401", "AP-401", "Todo")])
+            }
+
+            async fn start_or_resume_ticket(
+                &self,
+                _ticket: TicketSummary,
+                _repository_override: Option<PathBuf>,
+            ) -> Result<SelectedTicketFlowResult, CoreError> {
+                Err(CoreError::DependencyUnavailable("not used".to_owned()))
+            }
+
+            async fn create_ticket_from_brief(
+                &self,
+                request: CreateTicketFromPickerRequest,
+            ) -> Result<TicketSummary, CoreError> {
+                self.create_requests
+                    .lock()
+                    .expect("create requests lock")
+                    .push(request);
+                Err(CoreError::DependencyUnavailable(
+                    "create failed in test provider".to_owned(),
+                ))
+            }
+
+            async fn reload_projection(&self) -> Result<ProjectionState, CoreError> {
+                Ok(ProjectionState::default())
+            }
+        }
+
+        let provider = Arc::new(FailingCreateProvider::default());
+        let mut shell_state = UiShellState::new_with_integrations(
+            "ready".to_owned(),
+            triage_projection(),
+            None,
+            None,
+            Some(provider.clone()),
+            None,
+        );
+        shell_state.open_ticket_picker();
+        shell_state.ticket_picker_overlay.loading = false;
+        shell_state.ticket_picker_overlay.apply_tickets(
+            vec![sample_ticket_summary("issue-401", "AP-401", "Todo")],
+            Vec::new(),
+            &["Todo".to_owned()],
+        );
+        shell_state.ticket_picker_overlay.move_selection(1);
+        shell_state.ticket_picker_overlay.begin_new_ticket_mode();
+        set_editor_state_text(
+            &mut shell_state.ticket_picker_overlay.new_ticket_brief_editor,
+            "failed draft",
+        );
+
+        route_ticket_picker_key(&mut shell_state, key(KeyCode::Enter));
+        assert!(shell_state.ticket_picker_overlay.creating);
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                let _ = shell_state.tick_terminal_view_and_report();
+                if !shell_state.ticket_picker_overlay.creating {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("create failure should be surfaced");
+
+        let requests = provider.create_requests();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].submit_mode, TicketCreateSubmitMode::CreateOnly);
+        assert!(shell_state.ticket_picker_overlay.new_ticket_mode);
+        assert_eq!(
+            editor_state_text(&shell_state.ticket_picker_overlay.new_ticket_brief_editor),
+            "failed draft"
+        );
+        assert!(shell_state
+            .ticket_picker_overlay
+            .error
+            .as_deref()
+            .is_some_and(|message| message.contains("create failed in test provider")));
         assert!(shell_state
             .status_warning
             .as_deref()
-            .is_some_and(|warning| warning.contains("handled outside the TUI loop")));
+            .is_some_and(|warning| warning.contains("ticket picker create warning")));
     }
 
     #[test]
@@ -8935,6 +9231,73 @@ mod tests {
         assert!(!identifiers.contains(&"AP-307".to_owned()));
     }
 
+    #[test]
+    fn ticket_picker_ignores_stale_create_events_from_older_request() {
+        let active_ticket = sample_ticket_summary("issue-705", "AP-705", "Todo");
+        let visible_ticket = sample_ticket_summary("issue-706", "AP-706", "Todo");
+        let stale_ticket = sample_ticket_summary("issue-707", "AP-707", "Todo");
+
+        let mut shell_state = UiShellState::new("ready".to_owned(), triage_projection());
+        shell_state.ticket_picker_overlay.open();
+        shell_state.ticket_picker_overlay.loading = false;
+        shell_state.ticket_picker_overlay.apply_tickets(
+            vec![active_ticket.clone(), visible_ticket.clone()],
+            Vec::new(),
+            &["Todo".to_owned()],
+        );
+        shell_state.ticket_picker_overlay.move_selection(1);
+        shell_state.ticket_picker_overlay.begin_new_ticket_mode();
+        set_editor_state_text(
+            &mut shell_state.ticket_picker_overlay.new_ticket_brief_editor,
+            "draft",
+        );
+        shell_state.ticket_picker_overlay.creating = true;
+        shell_state.ticket_picker_create_request_seq = 2;
+        shell_state.ticket_picker_active_create_request_id = Some(2);
+
+        shell_state.apply_ticket_picker_event(TicketPickerEvent::TicketCreated {
+            request_id: 1,
+            created_ticket: stale_ticket.clone(),
+            submit_mode: TicketCreateSubmitMode::CreateOnly,
+            tickets: Some(vec![stale_ticket.clone()]),
+            warning: Some("stale completion".to_owned()),
+        });
+
+        assert!(shell_state.ticket_picker_overlay.creating);
+        assert!(shell_state.ticket_picker_overlay.new_ticket_mode);
+        assert_eq!(
+            editor_state_text(&shell_state.ticket_picker_overlay.new_ticket_brief_editor),
+            "draft"
+        );
+        assert!(shell_state.ticket_picker_overlay.error.is_none());
+        assert_eq!(shell_state.ticket_picker_active_create_request_id, Some(2));
+
+        shell_state.apply_ticket_picker_event(TicketPickerEvent::TicketCreateFailed {
+            request_id: 1,
+            message: "stale create failure".to_owned(),
+            tickets: Some(vec![stale_ticket]),
+            warning: None,
+        });
+
+        assert!(shell_state.ticket_picker_overlay.creating);
+        assert!(shell_state.ticket_picker_overlay.new_ticket_mode);
+        assert_eq!(
+            editor_state_text(&shell_state.ticket_picker_overlay.new_ticket_brief_editor),
+            "draft"
+        );
+        assert!(shell_state.ticket_picker_overlay.error.is_none());
+        assert_eq!(shell_state.ticket_picker_active_create_request_id, Some(2));
+        let identifiers = shell_state
+            .ticket_picker_overlay
+            .tickets_snapshot()
+            .into_iter()
+            .map(|ticket| ticket.identifier)
+            .collect::<Vec<_>>();
+        assert!(identifiers.contains(&active_ticket.identifier));
+        assert!(identifiers.contains(&visible_ticket.identifier));
+        assert!(!identifiers.contains(&"AP-707".to_owned()));
+    }
+
     #[tokio::test]
     async fn run_ticket_picker_create_task_emits_created_event() {
         let mut created = sample_ticket_summary("issue-200", "AP-200", "Todo");
@@ -8953,6 +9316,7 @@ mod tests {
                 selected_project: Some("Core".to_owned()),
                 submit_mode: TicketCreateSubmitMode::CreateOnly,
             },
+            7,
             sender,
         )
         .await;
@@ -8960,11 +9324,13 @@ mod tests {
         let event = receiver.recv().await.expect("ticket picker event");
         match event {
             TicketPickerEvent::TicketCreated {
+                request_id,
                 created_ticket,
                 submit_mode,
                 tickets,
                 warning,
             } => {
+                assert_eq!(request_id, 7);
                 assert_eq!(created_ticket.identifier, created.identifier);
                 assert_eq!(submit_mode, TicketCreateSubmitMode::CreateOnly);
                 assert_eq!(tickets.unwrap_or_default(), refreshed);
@@ -8994,6 +9360,7 @@ mod tests {
 
         let created = sample_ticket_summary("issue-499", "AP-499", "Todo");
         shell_state.apply_ticket_picker_event(TicketPickerEvent::TicketCreated {
+            request_id: 1,
             created_ticket: created.clone(),
             submit_mode: TicketCreateSubmitMode::CreateOnly,
             tickets: Some(vec![
@@ -9022,6 +9389,7 @@ mod tests {
 
         let created = sample_ticket_summary("issue-498", "AP-498", "Todo");
         shell_state.apply_ticket_picker_event(TicketPickerEvent::TicketCreated {
+            request_id: 1,
             created_ticket: created,
             submit_mode: TicketCreateSubmitMode::CreateAndStart,
             tickets: Some(vec![sample_ticket_summary("issue-401", "AP-401", "Todo")]),
@@ -9052,6 +9420,7 @@ mod tests {
 
         let created = sample_ticket_summary("issue-599", "AP-599", "Todo");
         shell_state.apply_ticket_picker_event(TicketPickerEvent::TicketCreated {
+            request_id: 1,
             created_ticket: created,
             submit_mode: TicketCreateSubmitMode::CreateOnly,
             tickets: Some(vec![sample_ticket_summary("issue-501", "AP-501", "Todo")]),
