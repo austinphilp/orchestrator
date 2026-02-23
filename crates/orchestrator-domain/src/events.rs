@@ -4,7 +4,7 @@ use crate::adapters::{LlmFinishReason, LlmTokenUsage};
 use crate::identifiers::{
     ArtifactId, InboxItemId, ProjectId, TicketId, WorkItemId, WorkerSessionId, WorktreeId,
 };
-use crate::status::{ArtifactKind, InboxItemKind, WorkflowState};
+use crate::status::{ArtifactKind, InboxItemKind, InboxLane, InboxLaneColor, WorkflowState};
 use crate::workflow::WorkflowTransitionReason;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -25,6 +25,8 @@ pub enum OrchestrationEventType {
     WorkItemProfileOverrideCleared,
     InboxItemCreated,
     InboxItemResolved,
+    InboxLaneColorSet,
+    InboxLaneColorsReset,
     UserResponded,
     SupervisorQueryStarted,
     SupervisorQueryChunk,
@@ -159,6 +161,18 @@ pub struct InboxItemResolvedPayload {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InboxLaneColorSetPayload {
+    pub lane: InboxLane,
+    pub color: InboxLaneColor,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InboxLaneColorsResetPayload {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lane: Option<InboxLane>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UserRespondedPayload {
     pub session_id: Option<WorkerSessionId>,
     pub work_item_id: Option<WorkItemId>,
@@ -250,6 +264,8 @@ pub enum OrchestrationEventPayload {
     WorkItemProfileOverrideCleared(WorkItemProfileOverrideClearedPayload),
     InboxItemCreated(InboxItemCreatedPayload),
     InboxItemResolved(InboxItemResolvedPayload),
+    InboxLaneColorSet(InboxLaneColorSetPayload),
+    InboxLaneColorsReset(InboxLaneColorsResetPayload),
     UserResponded(UserRespondedPayload),
     SupervisorQueryStarted(SupervisorQueryStartedPayload),
     SupervisorQueryChunk(SupervisorQueryChunkPayload),
@@ -280,6 +296,8 @@ impl OrchestrationEventPayload {
             }
             Self::InboxItemCreated(_) => OrchestrationEventType::InboxItemCreated,
             Self::InboxItemResolved(_) => OrchestrationEventType::InboxItemResolved,
+            Self::InboxLaneColorSet(_) => OrchestrationEventType::InboxLaneColorSet,
+            Self::InboxLaneColorsReset(_) => OrchestrationEventType::InboxLaneColorsReset,
             Self::UserResponded(_) => OrchestrationEventType::UserResponded,
             Self::SupervisorQueryStarted(_) => OrchestrationEventType::SupervisorQueryStarted,
             Self::SupervisorQueryChunk(_) => OrchestrationEventType::SupervisorQueryChunk,

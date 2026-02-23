@@ -41,6 +41,7 @@ pub use commands::{
 pub use error::CoreError;
 pub use events::{
     ArtifactCreatedPayload, InboxItemCreatedPayload, InboxItemResolvedPayload, NewEventEnvelope,
+    InboxLaneColorsResetPayload, InboxLaneColorSetPayload,
     OrchestrationEventPayload, OrchestrationEventType, SessionBlockedPayload,
     SessionCheckpointPayload, SessionCompletedPayload, SessionCrashedPayload,
     SessionNeedsInputPayload, SessionSpawnedPayload, StoredEventEnvelope,
@@ -76,7 +77,10 @@ pub use runtime_contract::{
     SessionLifecycle, SpawnSpec, WorkerBackend, WorkerEventStream, WorkerEventSubscription,
     WorkerManagerConfig,
 };
-pub use status::{ArtifactKind, InboxItemKind, WorkerSessionStatus, WorkflowState};
+pub use status::{
+    ArtifactKind, InboxItemKind, InboxLane, InboxLaneColor, InboxLaneColorPreferences,
+    WorkerSessionStatus, WorkflowState,
+};
 pub use store::{
     ArtifactRecord, EventPrunePolicy, EventPruneReport, EventStore, RetrievalScope,
     RuntimeMappingRecord, SessionRecord, SqliteEventStore, StoredEventWithArtifacts, TicketRecord,
