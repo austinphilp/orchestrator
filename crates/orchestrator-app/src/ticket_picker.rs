@@ -4,8 +4,9 @@ use std::time::Duration;
 
 use crate::commands::{Command, CommandRegistry};
 use crate::controller::contracts::{
-    CiCheckStatus, CreateTicketFromPickerRequest, InboxPublishRequest, InboxResolveRequest,
-    MergeQueueCommandKind, MergeQueueEvent, SessionArchiveOutcome, SessionMergeFinalizeOutcome,
+    CiCheckStatus, CreateTicketFromPickerRequest, InboxLaneColorsResetRequest,
+    InboxLaneColorSetRequest, InboxPublishRequest, InboxResolveRequest, MergeQueueCommandKind,
+    MergeQueueEvent, SessionArchiveOutcome, SessionMergeFinalizeOutcome,
     SessionWorkflowAdvanceOutcome, SessionWorktreeDiff, SupervisorCommandContext,
     SupervisorCommandDispatcher, TicketPickerProvider,
 };
@@ -328,6 +329,34 @@ where
             .map_err(|error| {
                 CoreError::Configuration(format!(
                     "ticket picker task failed while resolving inbox item: {error}"
+                ))
+            })?
+    }
+
+    async fn set_inbox_lane_color(
+        &self,
+        request: InboxLaneColorSetRequest,
+    ) -> Result<StoredEventEnvelope, CoreError> {
+        let app = self.app.clone();
+        tokio::task::spawn_blocking(move || app.set_inbox_lane_color(&request))
+            .await
+            .map_err(|error| {
+                CoreError::Configuration(format!(
+                    "ticket picker task failed while setting inbox lane color: {error}"
+                ))
+            })?
+    }
+
+    async fn reset_inbox_lane_colors(
+        &self,
+        request: InboxLaneColorsResetRequest,
+    ) -> Result<StoredEventEnvelope, CoreError> {
+        let app = self.app.clone();
+        tokio::task::spawn_blocking(move || app.reset_inbox_lane_colors(&request))
+            .await
+            .map_err(|error| {
+                CoreError::Configuration(format!(
+                    "ticket picker task failed while resetting inbox lane colors: {error}"
                 ))
             })?
     }

@@ -283,6 +283,41 @@ impl<S: Supervisor, G: GithubClient> App<S, G> {
         Ok(Some(event))
     }
 
+    pub fn set_inbox_lane_color(
+        &self,
+        request: &InboxLaneColorSetRequest,
+    ) -> Result<StoredEventEnvelope, CoreError> {
+        let event = self.open_event_store()?.append(NewEventEnvelope {
+            event_id: format!("evt-inbox-lane-color-set-{}", now_nanos()),
+            occurred_at: now_timestamp(),
+            work_item_id: None,
+            session_id: None,
+            payload: OrchestrationEventPayload::InboxLaneColorSet(InboxLaneColorSetPayload {
+                lane: request.lane,
+                color: request.color,
+            }),
+            schema_version: DOMAIN_EVENT_SCHEMA_VERSION,
+        })?;
+        Ok(event)
+    }
+
+    pub fn reset_inbox_lane_colors(
+        &self,
+        request: &InboxLaneColorsResetRequest,
+    ) -> Result<StoredEventEnvelope, CoreError> {
+        let event = self.open_event_store()?.append(NewEventEnvelope {
+            event_id: format!("evt-inbox-lane-colors-reset-{}", now_nanos()),
+            occurred_at: now_timestamp(),
+            work_item_id: None,
+            session_id: None,
+            payload: OrchestrationEventPayload::InboxLaneColorsReset(
+                InboxLaneColorsResetPayload { lane: request.lane },
+            ),
+            schema_version: DOMAIN_EVENT_SCHEMA_VERSION,
+        })?;
+        Ok(event)
+    }
+
     pub async fn start_linear_polling(
         &self,
         linear_ticketing_provider: Option<&LinearTicketingProvider>,

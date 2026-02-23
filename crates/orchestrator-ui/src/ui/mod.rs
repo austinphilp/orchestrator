@@ -13,21 +13,25 @@ use crossterm::ExecutableCommand;
 use edtui::{EditorEventHandler, EditorMode, EditorState, EditorTheme, EditorView, Lines};
 pub use orchestrator_app::frontend::ui_boundary::{
     apply_event, attention_inbox_snapshot, command_ids, run_publish_inbox_item_task,
-    run_resolve_inbox_item_task, run_session_merge_finalize_task,
+    run_reset_inbox_lane_colors_task, run_resolve_inbox_item_task,
+    run_session_merge_finalize_task, run_set_inbox_lane_color_task,
     run_session_workflow_advance_task, run_start_pr_pipeline_polling_task,
     run_stop_pr_pipeline_polling_task, run_supervisor_command_task, run_supervisor_stream_task,
     ArtifactKind, ArtifactProjection, AttentionBatchKind, AttentionEngineConfig,
     AttentionInboxSnapshot, AttentionPriorityBand, BackendKind, BackendNeedsInputAnswer,
     BackendNeedsInputEvent, BackendNeedsInputOption, BackendNeedsInputQuestion, BackendOutputEvent,
     BackendTurnStateEvent, CiCheckStatus, Command, CommandRegistry,
+    ControllerInboxLaneColorsResetRunnerEvent, ControllerInboxLaneColorSetRunnerEvent,
     ControllerInboxPublishRunnerEvent, ControllerInboxResolveRunnerEvent,
     ControllerSupervisorStreamRunnerEvent, ControllerWorkflowAdvanceRunnerEvent, CoreError,
     CreateTicketFromPickerRequest, FrontendApplicationMode, FrontendCommandIntent,
     FrontendController, FrontendEvent, FrontendIntent, FrontendNotification,
     FrontendNotificationLevel, FrontendSnapshot, FrontendTerminalEvent, InboxItemId, InboxItemKind,
-    InboxPublishRequest, InboxResolveRequest, LlmChatRequest, LlmFinishReason, LlmMessage,
-    LlmProvider, LlmRateLimitState, LlmRole, LlmTokenUsage, MergeQueueCommandKind, MergeQueueEvent,
-    OrchestrationEventPayload, ProjectId, ProjectionState, RuntimeError, RuntimeResult,
+    InboxLane, InboxLaneColor, InboxLaneColorPreferences, InboxLaneColorsResetRequest,
+    InboxLaneColorSetRequest, InboxPublishRequest, InboxResolveRequest, LlmChatRequest,
+    LlmFinishReason, LlmMessage, LlmProvider, LlmRateLimitState, LlmRole, LlmTokenUsage,
+    MergeQueueCommandKind, MergeQueueEvent, OrchestrationEventPayload, ProjectId, ProjectionState,
+    RuntimeError, RuntimeResult,
     SelectedTicketFlowResult, SessionArchiveOutcome, SessionMergeFinalizeOutcome,
     SessionProjection, SessionRuntimeProjection, SessionWorkflowAdvanceOutcome,
     SessionWorktreeDiff, StoredEventEnvelope, SupervisorCommandContext,
@@ -325,6 +329,7 @@ pub struct UiState {
     pub status: String,
     pub inbox_rows: Vec<UiInboxRow>,
     pub inbox_batch_surfaces: Vec<UiBatchSurface>,
+    pub inbox_lane_colors: InboxLaneColorPreferences,
     pub selected_inbox_index: Option<usize>,
     pub selected_inbox_item_id: Option<InboxItemId>,
     pub selected_work_item_id: Option<WorkItemId>,
@@ -751,6 +756,7 @@ fn project_ui_state_with_attention(
 ) -> UiState {
     let inbox_rows = attention_projection.inbox_rows.clone();
     let inbox_batch_surfaces = attention_projection.inbox_batch_surfaces.clone();
+    let inbox_lane_colors = domain.inbox_lane_colors.clone();
 
     let selected_inbox_index = resolve_selected_inbox(
         preferred_selected_inbox,
@@ -781,6 +787,7 @@ fn project_ui_state_with_attention(
         status: status.to_owned(),
         inbox_rows,
         inbox_batch_surfaces,
+        inbox_lane_colors,
         selected_inbox_index,
         selected_inbox_item_id,
         selected_work_item_id,
@@ -3039,6 +3046,18 @@ enum TicketPickerEvent {
     InboxItemResolveFailed {
         message: String,
     },
+    InboxLaneColorSet {
+        event: StoredEventEnvelope,
+    },
+    InboxLaneColorSetFailed {
+        message: String,
+    },
+    InboxLaneColorsReset {
+        event: StoredEventEnvelope,
+    },
+    InboxLaneColorsResetFailed {
+        message: String,
+    },
 }
 
 impl From<ControllerWorkflowAdvanceRunnerEvent> for TicketPickerEvent {
@@ -3079,6 +3098,32 @@ impl From<ControllerInboxResolveRunnerEvent> for TicketPickerEvent {
             }
             ControllerInboxResolveRunnerEvent::Failed { message } => {
                 Self::InboxItemResolveFailed { message }
+            }
+        }
+    }
+}
+
+impl From<ControllerInboxLaneColorSetRunnerEvent> for TicketPickerEvent {
+    fn from(value: ControllerInboxLaneColorSetRunnerEvent) -> Self {
+        match value {
+            ControllerInboxLaneColorSetRunnerEvent::Set { event } => {
+                Self::InboxLaneColorSet { event }
+            }
+            ControllerInboxLaneColorSetRunnerEvent::Failed { message } => {
+                Self::InboxLaneColorSetFailed { message }
+            }
+        }
+    }
+}
+
+impl From<ControllerInboxLaneColorsResetRunnerEvent> for TicketPickerEvent {
+    fn from(value: ControllerInboxLaneColorsResetRunnerEvent) -> Self {
+        match value {
+            ControllerInboxLaneColorsResetRunnerEvent::Reset { event } => {
+                Self::InboxLaneColorsReset { event }
+            }
+            ControllerInboxLaneColorsResetRunnerEvent::Failed { message } => {
+                Self::InboxLaneColorsResetFailed { message }
             }
         }
     }
@@ -3531,6 +3576,34 @@ impl UiShellState {
         }
     }
 
+    fn cycle_selected_inbox_lane_color(&mut self) {
+        let ui_state = self.ui_state();
+        let Some(lane) = selected_inbox_lane(&ui_state) else {
+            self.status_warning =
+                Some("inbox lane color update unavailable: select an inbox item first".to_owned());
+            return;
+        };
+
+        let current = ui_state.inbox_lane_colors.color_for_lane(lane);
+        let next = next_inbox_lane_color(current);
+        self.spawn_set_inbox_lane_color(InboxLaneColorSetRequest { lane, color: next });
+    }
+
+    fn reset_selected_inbox_lane_color(&mut self) {
+        let ui_state = self.ui_state();
+        let Some(lane) = selected_inbox_lane(&ui_state) else {
+            self.status_warning =
+                Some("inbox lane color reset unavailable: select an inbox item first".to_owned());
+            return;
+        };
+
+        self.spawn_reset_inbox_lane_colors(InboxLaneColorsResetRequest { lane: Some(lane) });
+    }
+
+    fn reset_all_inbox_lane_colors(&mut self) {
+        self.spawn_reset_inbox_lane_colors(InboxLaneColorsResetRequest { lane: None });
+    }
+
     fn find_next_inbox_session_selection_index(
         &self,
         session_id: &WorkerSessionId,
@@ -3966,6 +4039,50 @@ impl UiShellState {
             Err(_) => {
                 self.status_warning =
                     Some("inbox resolution unavailable: tokio runtime is not active".to_owned());
+            }
+        }
+    }
+
+    fn spawn_set_inbox_lane_color(&mut self, request: InboxLaneColorSetRequest) {
+        let Some(provider) = self.ticket_picker_provider.clone() else {
+            return;
+        };
+        let Some(sender) = self.ticket_picker_sender.clone() else {
+            return;
+        };
+
+        match TokioHandle::try_current() {
+            Ok(handle) => {
+                handle.spawn(async move {
+                    run_set_inbox_lane_color_task(provider, request, sender).await;
+                });
+            }
+            Err(_) => {
+                self.status_warning = Some(
+                    "inbox lane color update unavailable: tokio runtime is not active".to_owned(),
+                );
+            }
+        }
+    }
+
+    fn spawn_reset_inbox_lane_colors(&mut self, request: InboxLaneColorsResetRequest) {
+        let Some(provider) = self.ticket_picker_provider.clone() else {
+            return;
+        };
+        let Some(sender) = self.ticket_picker_sender.clone() else {
+            return;
+        };
+
+        match TokioHandle::try_current() {
+            Ok(handle) => {
+                handle.spawn(async move {
+                    run_reset_inbox_lane_colors_task(provider, request, sender).await;
+                });
+            }
+            Err(_) => {
+                self.status_warning = Some(
+                    "inbox lane color reset unavailable: tokio runtime is not active".to_owned(),
+                );
             }
         }
     }
@@ -6611,6 +6728,26 @@ impl UiShellState {
             TicketPickerEvent::InboxItemResolveFailed { message } => {
                 self.status_warning = Some(format!(
                     "inbox resolve warning: {}",
+                    compact_focus_card_text(message.as_str())
+                ));
+            }
+            TicketPickerEvent::InboxLaneColorSet { event } => {
+                self.apply_domain_event(event);
+                self.status_warning = Some("inbox lane color updated".to_owned());
+            }
+            TicketPickerEvent::InboxLaneColorSetFailed { message } => {
+                self.status_warning = Some(format!(
+                    "inbox lane color warning: {}",
+                    compact_focus_card_text(message.as_str())
+                ));
+            }
+            TicketPickerEvent::InboxLaneColorsReset { event } => {
+                self.apply_domain_event(event);
+                self.status_warning = Some("inbox lane colors reset".to_owned());
+            }
+            TicketPickerEvent::InboxLaneColorsResetFailed { message } => {
+                self.status_warning = Some(format!(
+                    "inbox lane color reset warning: {}",
                     compact_focus_card_text(message.as_str())
                 ));
             }
@@ -9874,7 +10011,7 @@ impl Ui {
                         sessions_area,
                     );
 
-                    let inbox_text = render_inbox_panel(&ui_state);
+                    let inbox_text = render_inbox_panel_text(&ui_state, shell_state.ui_theme());
                     let inbox_block = Block::default().title("inbox").borders(Borders::ALL);
                     frame.render_widget(Paragraph::new(inbox_text).block(inbox_block), inbox_area);
                     if let Some(session_id) = shell_state.active_terminal_session_id().cloned() {
@@ -10249,9 +10386,19 @@ fn bottom_bar_style(mode: UiMode) -> Style {
     }
 }
 
+#[cfg(test)]
 fn render_inbox_panel(ui_state: &UiState) -> String {
+    render_inbox_panel_text(ui_state, UiTheme::Default)
+        .lines
+        .iter()
+        .map(render_plain_text_line)
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn render_inbox_panel_text(ui_state: &UiState, theme: UiTheme) -> Text<'static> {
     if ui_state.inbox_rows.is_empty() {
-        return "No inbox items.".to_owned();
+        return Text::from("No inbox items.");
     }
 
     let mut lines = Vec::new();
@@ -10270,8 +10417,11 @@ fn render_inbox_panel(ui_state: &UiState) -> String {
         })
         .collect::<Vec<_>>();
     if !batch_lane_summary.is_empty() {
-        lines.push(format!("Batch lanes: {}", batch_lane_summary.join(" | ")));
-        lines.push(String::new());
+        lines.push(Line::from(format!(
+            "Batch lanes: {}",
+            batch_lane_summary.join(" | ")
+        )));
+        lines.push(Line::from(String::new()));
     }
 
     let mut wrote_lane_section = false;
@@ -10281,9 +10431,18 @@ fn render_inbox_panel(ui_state: &UiState) -> String {
         .filter(|surface| surface.total_count > 0)
     {
         if wrote_lane_section {
-            lines.push(String::new());
+            lines.push(Line::from(String::new()));
         }
-        lines.push(format!("{}:", surface.kind.heading_label()));
+        let lane = inbox_lane_from_batch_kind(surface.kind);
+        let lane_style = lane_style_for_theme(
+            ui_state.inbox_lane_colors.color_for_lane(lane),
+            theme,
+            false,
+        );
+        lines.push(Line::from(Span::styled(
+            format!("{}:", surface.kind.heading_label()),
+            lane_style,
+        )));
         wrote_lane_section = true;
 
         for (index, row) in ui_state.inbox_rows.iter().enumerate() {
@@ -10297,11 +10456,69 @@ fn render_inbox_panel(ui_state: &UiState) -> String {
             };
             let resolved = if row.resolved { "x" } else { " " };
             let display_title = sanitize_inbox_display_title(&row.title);
-            lines.push(format!("{selected} [{resolved}] {}", display_title));
+            let prefix = format!("{selected} [{resolved}] ");
+            let prefix_style = lane_style_for_theme(
+                ui_state.inbox_lane_colors.color_for_lane(lane),
+                theme,
+                Some(index) == ui_state.selected_inbox_index,
+            );
+            lines.push(Line::from(vec![
+                Span::styled(prefix, prefix_style),
+                Span::raw(display_title),
+            ]));
         }
     }
 
-    lines.join("\n")
+    Text::from(lines)
+}
+
+fn inbox_lane_from_batch_kind(kind: AttentionBatchKind) -> InboxLane {
+    match kind {
+        AttentionBatchKind::DecideOrUnblock => InboxLane::DecideOrUnblock,
+        AttentionBatchKind::Approvals => InboxLane::Approvals,
+        AttentionBatchKind::ReviewReady => InboxLane::ReviewReady,
+        AttentionBatchKind::FyiDigest => InboxLane::FyiDigest,
+    }
+}
+
+fn selected_inbox_lane(ui_state: &UiState) -> Option<InboxLane> {
+    let index = ui_state.selected_inbox_index?;
+    let row = ui_state.inbox_rows.get(index)?;
+    Some(inbox_lane_from_batch_kind(row.batch_kind))
+}
+
+fn next_inbox_lane_color(color: InboxLaneColor) -> InboxLaneColor {
+    match color {
+        InboxLaneColor::Crimson => InboxLaneColor::Amber,
+        InboxLaneColor::Amber => InboxLaneColor::Emerald,
+        InboxLaneColor::Emerald => InboxLaneColor::Azure,
+        InboxLaneColor::Azure => InboxLaneColor::Violet,
+        InboxLaneColor::Violet => InboxLaneColor::Slate,
+        InboxLaneColor::Slate => InboxLaneColor::Crimson,
+    }
+}
+
+fn lane_style_for_theme(color: InboxLaneColor, theme: UiTheme, is_selected: bool) -> Style {
+    let fg = match (theme, color) {
+        (UiTheme::Default, InboxLaneColor::Crimson) => Color::Rgb(170, 45, 68),
+        (UiTheme::Default, InboxLaneColor::Amber) => Color::Rgb(145, 97, 0),
+        (UiTheme::Default, InboxLaneColor::Emerald) => Color::Rgb(37, 123, 83),
+        (UiTheme::Default, InboxLaneColor::Azure) => Color::Rgb(0, 93, 163),
+        (UiTheme::Default, InboxLaneColor::Violet) => Color::Rgb(105, 57, 153),
+        (UiTheme::Default, InboxLaneColor::Slate) => Color::Rgb(72, 82, 96),
+        (UiTheme::Nord, InboxLaneColor::Crimson) => Color::Rgb(191, 97, 106),
+        (UiTheme::Nord, InboxLaneColor::Amber) => Color::Rgb(235, 203, 139),
+        (UiTheme::Nord, InboxLaneColor::Emerald) => Color::Rgb(163, 190, 140),
+        (UiTheme::Nord, InboxLaneColor::Azure) => Color::Rgb(129, 161, 193),
+        (UiTheme::Nord, InboxLaneColor::Violet) => Color::Rgb(180, 142, 173),
+        (UiTheme::Nord, InboxLaneColor::Slate) => Color::Rgb(140, 152, 169),
+    };
+
+    if is_selected {
+        Style::default().fg(fg).add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(fg)
+    }
 }
 
 fn sanitize_inbox_display_title(title: &str) -> String {
@@ -13286,6 +13503,9 @@ enum UiCommand {
     JumpBatchApprovals,
     JumpBatchReviewReady,
     JumpBatchFyiDigest,
+    CycleSelectedInboxLaneColor,
+    ResetSelectedInboxLaneColor,
+    ResetAllInboxLaneColors,
     OpenTicketPicker,
     CloseTicketPicker,
     TicketPickerMoveNext,
@@ -13303,7 +13523,7 @@ enum UiCommand {
 }
 
 impl UiCommand {
-    const ALL: [Self; 33] = [
+    const ALL: [Self; 36] = [
         Self::EnterNormalMode,
         Self::EnterInsertMode,
         Self::ToggleGlobalSupervisorChat,
@@ -13323,6 +13543,9 @@ impl UiCommand {
         Self::JumpBatchApprovals,
         Self::JumpBatchReviewReady,
         Self::JumpBatchFyiDigest,
+        Self::CycleSelectedInboxLaneColor,
+        Self::ResetSelectedInboxLaneColor,
+        Self::ResetAllInboxLaneColors,
         Self::OpenTicketPicker,
         Self::CloseTicketPicker,
         Self::TicketPickerMoveNext,
@@ -13360,6 +13583,9 @@ impl UiCommand {
             Self::JumpBatchApprovals => "ui.jump_batch.approvals",
             Self::JumpBatchReviewReady => "ui.jump_batch.review_ready",
             Self::JumpBatchFyiDigest => "ui.jump_batch.fyi_digest",
+            Self::CycleSelectedInboxLaneColor => "ui.inbox_lane_color.cycle_selected",
+            Self::ResetSelectedInboxLaneColor => "ui.inbox_lane_color.reset_selected",
+            Self::ResetAllInboxLaneColors => "ui.inbox_lane_color.reset_all",
             Self::OpenTicketPicker => "ui.ticket_picker.open",
             Self::CloseTicketPicker => "ui.ticket_picker.close",
             Self::TicketPickerMoveNext => "ui.ticket_picker.move_next",
@@ -13398,6 +13624,9 @@ impl UiCommand {
             Self::JumpBatchApprovals => "Jump to Approvals lane",
             Self::JumpBatchReviewReady => "Jump to PR Reviews lane",
             Self::JumpBatchFyiDigest => "Jump to FYI Digest lane",
+            Self::CycleSelectedInboxLaneColor => "Cycle selected lane color",
+            Self::ResetSelectedInboxLaneColor => "Reset selected lane color",
+            Self::ResetAllInboxLaneColors => "Reset all lane colors",
             Self::OpenTicketPicker => "Open ticket picker",
             Self::CloseTicketPicker => "Close ticket picker",
             Self::TicketPickerMoveNext => "Move to next ticket picker row",
@@ -13475,6 +13704,9 @@ fn default_keymap_config() -> KeymapConfig {
                     binding(&["z", "2"], UiCommand::JumpBatchApprovals),
                     binding(&["z", "3"], UiCommand::JumpBatchReviewReady),
                     binding(&["z", "4"], UiCommand::JumpBatchFyiDigest),
+                    binding(&["z", "c"], UiCommand::CycleSelectedInboxLaneColor),
+                    binding(&["z", "r"], UiCommand::ResetSelectedInboxLaneColor),
+                    binding(&["z", "R"], UiCommand::ResetAllInboxLaneColors),
                     binding(&["v", "d"], UiCommand::OpenDiffInspectorForSelected),
                     binding(&["v", "t"], UiCommand::OpenTestInspectorForSelected),
                     binding(&["v", "p"], UiCommand::OpenPrInspectorForSelected),
@@ -14098,6 +14330,18 @@ fn dispatch_command(shell_state: &mut UiShellState, command: UiCommand) -> bool 
         }
         UiCommand::JumpBatchFyiDigest => {
             shell_state.jump_to_batch(InboxBatchKind::FyiDigest);
+            false
+        }
+        UiCommand::CycleSelectedInboxLaneColor => {
+            shell_state.cycle_selected_inbox_lane_color();
+            false
+        }
+        UiCommand::ResetSelectedInboxLaneColor => {
+            shell_state.reset_selected_inbox_lane_color();
+            false
+        }
+        UiCommand::ResetAllInboxLaneColors => {
+            shell_state.reset_all_inbox_lane_colors();
             false
         }
         UiCommand::OpenTicketPicker => {
