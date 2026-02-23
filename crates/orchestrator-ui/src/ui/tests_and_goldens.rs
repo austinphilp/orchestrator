@@ -4968,6 +4968,249 @@ mod tests {
     }
 
     #[test]
+    fn tick_runtime_drains_terminal_events_without_direct_poller_calls() {
+        let backend = Arc::new(ManualTerminalBackend::default());
+        let mut shell_state = UiShellState::new_with_integrations(
+            "ready".to_owned(),
+            sample_projection(true),
+            None,
+            None,
+            None,
+            Some(backend),
+        );
+        shell_state.open_terminal_and_enter_mode();
+        let session_id = WorkerSessionId::new("sess-1");
+        let sender = shell_state
+            .terminal_session_sender
+            .clone()
+            .expect("terminal sender");
+        sender
+            .try_send(TerminalSessionEvent::Output {
+                session_id: session_id.clone(),
+                output: BackendOutputEvent {
+                    stream: BackendOutputStream::Stdout,
+                    bytes: b"runtime-drained output\n".to_vec(),
+                },
+            })
+            .expect("queue terminal output event");
+
+        assert!(shell_state.tick_terminal_view_and_report());
+
+        let rendered = render_terminal_transcript_entries(
+            shell_state
+                .terminal_session_states
+                .get(&session_id)
+                .expect("terminal view state"),
+        )
+        .into_iter()
+        .map(|line| line.text)
+        .collect::<Vec<_>>()
+        .join("\n");
+        assert!(rendered.contains("runtime-drained output"));
+    }
+
+    #[test]
+    fn tick_runtime_drains_ticket_picker_events_without_direct_poller_calls() {
+        let provider = Arc::new(RecordingTicketPickerProvider::default());
+        let mut shell_state = UiShellState::new_with_integrations(
+            "ready".to_owned(),
+            sample_projection(true),
+            None,
+            None,
+            Some(provider),
+            None,
+        );
+        shell_state.ticket_picker_overlay.open();
+        let sender = shell_state
+            .ticket_picker_sender
+            .clone()
+            .expect("ticket picker sender");
+        sender
+            .try_send(TicketPickerEvent::TicketsLoaded {
+                tickets: vec![sample_ticket_summary("runtime-drain", "AP-348", "Todo")],
+                projects: vec!["Core".to_owned()],
+            })
+            .expect("queue ticket picker load event");
+
+        assert!(shell_state.tick_terminal_view_and_report());
+
+        let tickets = shell_state.ticket_picker_overlay.tickets_snapshot();
+        assert!(!shell_state.ticket_picker_overlay.loading);
+        assert_eq!(tickets.len(), 1);
+        assert_eq!(tickets[0].identifier, "AP-348");
+    }
+
+    #[test]
+    fn tick_runtime_drains_merge_queue_events_without_direct_poller_calls() {
+        let provider = Arc::new(RecordingTicketPickerProvider::default());
+        let mut shell_state = UiShellState::new_with_integrations(
+            "ready".to_owned(),
+            sample_projection(true),
+            None,
+            None,
+            Some(provider),
+            None,
+        );
+        let sender = shell_state
+            .merge_event_sender
+            .clone()
+            .expect("merge event sender");
+        shell_state.status_warning = Some("merge queued for review session sess-1".to_owned());
+
+        sender
+            .try_send(MergeQueueEvent::Completed {
+                session_id: WorkerSessionId::new("sess-1"),
+                kind: MergeQueueCommandKind::Merge,
+                completed: false,
+                merge_conflict: false,
+                base_branch: None,
+                head_branch: None,
+                ci_checks: Vec::new(),
+                ci_failures: Vec::new(),
+                ci_has_failures: false,
+                ci_status_error: None,
+                error: None,
+            })
+            .expect("queue merge event");
+
+        assert!(shell_state.tick_terminal_view_and_report());
+        assert_eq!(
+            shell_state.status_warning.as_deref(),
+            Some("merge pending for review session sess-1 (waiting for checks or merge queue)")
+        );
+    }
+
+    #[test]
+    fn tick_runtime_drains_session_summary_events_without_direct_poller_calls() {
+        let mut shell_state = UiShellState::new_with_supervisor(
+            "ready".to_owned(),
+            sample_projection(true),
+            Some(Arc::new(TestLlmProvider::new(Vec::new()))),
+        );
+        let session_id = WorkerSessionId::new("sess-1");
+        shell_state.session_info_summary_cache.insert(
+            session_id.clone(),
+            SessionInfoSummaryCache {
+                text: None,
+                loading: true,
+                error: Some("stale error".to_owned()),
+                context_fingerprint: Some("ctx-1".to_owned()),
+            },
+        );
+        let sender = shell_state
+            .session_info_summary_sender
+            .clone()
+            .expect("summary sender");
+        sender
+            .try_send(SessionInfoSummaryEvent::Completed {
+                session_id: session_id.clone(),
+                summary: "session summary from async channel".to_owned(),
+                context_fingerprint: "ctx-1".to_owned(),
+            })
+            .expect("queue summary event");
+
+        assert!(shell_state.tick_terminal_view_and_report());
+
+        let cache = shell_state
+            .session_info_summary_cache
+            .get(&session_id)
+            .expect("summary cache");
+        assert_eq!(
+            cache.text.as_deref(),
+            Some("session summary from async channel")
+        );
+        assert!(!cache.loading);
+        assert_eq!(cache.error, None);
+    }
+
+    #[test]
+    fn tick_runtime_skips_legacy_terminal_channel_when_frontend_streaming_is_enabled() {
+        let backend = Arc::new(ManualTerminalBackend::default());
+        let mut shell_state = UiShellState::new_with_integrations(
+            "ready".to_owned(),
+            sample_projection(true),
+            None,
+            None,
+            None,
+            Some(backend),
+        );
+        shell_state.open_terminal_and_enter_mode();
+        shell_state.set_frontend_terminal_streaming_enabled(true);
+
+        let session_id = WorkerSessionId::new("sess-1");
+        let sender = shell_state
+            .terminal_session_sender
+            .clone()
+            .expect("terminal sender");
+        sender
+            .try_send(TerminalSessionEvent::Output {
+                session_id: session_id.clone(),
+                output: BackendOutputEvent {
+                    stream: BackendOutputStream::Stdout,
+                    bytes: b"legacy terminal channel output\n".to_vec(),
+                },
+            })
+            .expect("queue terminal output event");
+
+        assert!(!shell_state.tick_terminal_view_and_report());
+        let rendered_before_legacy_poll_reenabled = shell_state
+            .terminal_session_states
+            .get(&session_id)
+            .map(render_terminal_transcript_entries)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|line| line.text)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(!rendered_before_legacy_poll_reenabled.contains("legacy terminal channel output"));
+
+        shell_state.set_frontend_terminal_streaming_enabled(false);
+        assert!(shell_state.tick_terminal_view_and_report());
+        let rendered_after_legacy_poll_reenabled = render_terminal_transcript_entries(
+            shell_state
+                .terminal_session_states
+                .get(&session_id)
+                .expect("terminal view state"),
+        )
+        .into_iter()
+        .map(|line| line.text)
+        .collect::<Vec<_>>()
+        .join("\n");
+        assert!(rendered_after_legacy_poll_reenabled.contains("legacy terminal channel output"));
+    }
+
+    #[test]
+    fn tick_runtime_still_drains_ticket_picker_channel_when_frontend_streaming_is_enabled() {
+        let provider = Arc::new(RecordingTicketPickerProvider::default());
+        let mut shell_state = UiShellState::new_with_integrations(
+            "ready".to_owned(),
+            sample_projection(true),
+            None,
+            None,
+            Some(provider),
+            None,
+        );
+        shell_state.set_frontend_terminal_streaming_enabled(true);
+        shell_state.ticket_picker_overlay.open();
+
+        let sender = shell_state
+            .ticket_picker_sender
+            .clone()
+            .expect("ticket picker sender");
+        sender
+            .try_send(TicketPickerEvent::TicketsLoaded {
+                tickets: vec![sample_ticket_summary("runtime-drain", "AP-348", "Todo")],
+                projects: vec!["Core".to_owned()],
+            })
+            .expect("queue ticket picker load event");
+
+        assert!(shell_state.tick_terminal_view_and_report());
+        let tickets = shell_state.ticket_picker_overlay.tickets_snapshot();
+        assert_eq!(tickets.len(), 1);
+        assert_eq!(tickets[0].identifier, "AP-348");
+    }
+
+    #[test]
     fn background_output_flushes_when_refresh_interval_elapses() {
         let backend = Arc::new(ManualTerminalBackend::default());
         let mut projection = sample_projection(true);

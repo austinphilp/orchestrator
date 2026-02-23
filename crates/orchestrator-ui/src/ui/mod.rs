@@ -7770,7 +7770,17 @@ impl UiShellState {
     }
 
     fn drain_async_events_and_report(&mut self) -> bool {
-        false
+        let mut changed = false;
+        // Frontend-controller mode delivers terminal stream events via FrontendEvent::TerminalSession.
+        // Keep the legacy UI-owned terminal channel disabled in that mode to avoid duplicate output.
+        if !self.frontend_terminal_streaming_enabled {
+            changed |= self.poll_terminal_session_events();
+        }
+        changed |= self.poll_ticket_picker_events();
+        changed |= self.poll_merge_queue_events();
+        changed |= self.poll_session_info_summary_events();
+        changed |= self.run_sparse_reconcile_fallbacks();
+        changed
     }
 
     fn poll_frontend_events_and_report(
