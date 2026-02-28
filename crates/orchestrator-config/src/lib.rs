@@ -10,7 +10,7 @@ const DEFAULT_TICKETING_PROVIDER: &str = "ticketing.linear";
 const DEFAULT_HARNESS_PROVIDER: &str = "harness.codex";
 const DEFAULT_VCS_PROVIDER: &str = "vcs.git_cli";
 const DEFAULT_VCS_REPO_PROVIDER: &str = "vcs_repos.github_gh_cli";
-const DEFAULT_SUPERVISOR_MODEL: &str = "c/claude-haiku-4.5";
+const DEFAULT_SUPERVISOR_MODEL: &str = "anthropic/claude-haiku-4.5";
 const DEFAULT_OPENROUTER_BASE_URL: &str = "https://openrouter.ai/api/v1";
 const DEFAULT_LINEAR_API_URL: &str = "https://api.linear.app/graphql";
 const DEFAULT_LINEAR_SYNC_INTERVAL_SECS: u64 = 60;
@@ -897,7 +897,19 @@ fn normalize_config(config: &mut OrchestratorConfig) -> Result<bool, ConfigError
 }
 
 pub fn normalize_supervisor_model(value: &mut String) -> bool {
-    normalize_non_empty_string(value, default_supervisor_model())
+    let mut changed = normalize_non_empty_string(value, default_supervisor_model());
+
+    let migrated = match value.as_str() {
+        "c/claude-haiku-4.5" | "antropic/claude-haiku-4.5" => "anthropic/claude-haiku-4.5",
+        _ => return changed,
+    };
+
+    if value != migrated {
+        *value = migrated.to_owned();
+        changed = true;
+    }
+
+    changed
 }
 
 pub fn normalize_database_config(config: &mut DatabaseConfigToml) -> bool {
@@ -1498,5 +1510,35 @@ merge_poll_backoff_multiplier = 0
         assert_eq!(parsed.linear.sync_states, vec!["Ready", "In Progress"]);
 
         remove_temp_path(&root);
+    }
+
+    #[test]
+    fn load_from_path_migrates_legacy_and_typo_supervisor_models() {
+        let cases = [
+            ("c/claude-haiku-4.5", "anthropic/claude-haiku-4.5"),
+            ("antropic/claude-haiku-4.5", "anthropic/claude-haiku-4.5"),
+        ];
+
+        for (raw_model, expected_model) in cases {
+            let root = unique_temp_dir("supervisor-model-migration");
+            let path = root.join("config.toml");
+            write_config_file(
+                &path,
+                format!(
+                    "workspace = '/tmp/work'\nevent_store_path = '/tmp/events.db'\nticketing_provider='ticketing.linear'\nharness_provider='harness.codex'\nvcs_provider='vcs.git_cli'\nvcs_repo_provider='vcs_repos.github_gh_cli'\n\n[supervisor]\nmodel = '{raw_model}'\nopenrouter_base_url = 'https://openrouter.ai/api/v1'\n"
+                )
+                .as_str(),
+            );
+
+            let config = load_from_path(&path).expect("load and migrate model");
+            assert_eq!(config.supervisor.model, expected_model);
+
+            let persisted = std::fs::read_to_string(&path).expect("read persisted config");
+            let parsed: OrchestratorConfig =
+                toml::from_str(&persisted).expect("parse persisted config");
+            assert_eq!(parsed.supervisor.model, expected_model);
+
+            remove_temp_path(&root);
+        }
     }
 }

@@ -52,7 +52,7 @@ vcs_provider = "vcs.git_cli"
 vcs_repo_provider = "vcs_repos.github_gh_cli"
 
 [supervisor]
-model = "c/claude-haiku-4.5"
+model = "anthropic/claude-haiku-4.5"
 openrouter_base_url = "https://openrouter.ai/api/v1"
 
 [linear]

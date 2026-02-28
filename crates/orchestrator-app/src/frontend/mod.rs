@@ -72,7 +72,6 @@ pub mod ui_boundary {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, Hash)]
 pub enum FrontendApplicationMode {
     Manual,
-    Autopilot,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -138,7 +137,6 @@ pub enum FrontendCommandIntent {
     OpenTestInspectorForSelected,
     OpenPrInspectorForSelected,
     OpenChatInspectorForSelected,
-    StartTerminalEscapeChord,
     QuitShell,
     FocusNextInbox,
     FocusPreviousInbox,
@@ -161,12 +159,10 @@ pub enum FrontendCommandIntent {
     AdvanceTerminalWorkflowStage,
     ArchiveSelectedSession,
     OpenSessionOutputForSelectedInbox,
-    SetApplicationModeAutopilot,
-    SetApplicationModeManual,
 }
 
 impl FrontendCommandIntent {
-    pub const ALL: [Self; 33] = [
+    pub const ALL: [Self; 30] = [
         Self::EnterNormalMode,
         Self::EnterInsertMode,
         Self::ToggleGlobalSupervisorChat,
@@ -175,7 +171,6 @@ impl FrontendCommandIntent {
         Self::OpenTestInspectorForSelected,
         Self::OpenPrInspectorForSelected,
         Self::OpenChatInspectorForSelected,
-        Self::StartTerminalEscapeChord,
         Self::QuitShell,
         Self::FocusNextInbox,
         Self::FocusPreviousInbox,
@@ -198,8 +193,6 @@ impl FrontendCommandIntent {
         Self::AdvanceTerminalWorkflowStage,
         Self::ArchiveSelectedSession,
         Self::OpenSessionOutputForSelectedInbox,
-        Self::SetApplicationModeAutopilot,
-        Self::SetApplicationModeManual,
     ];
 
     pub const fn command_id(self) -> &'static str {
@@ -220,7 +213,6 @@ impl FrontendCommandIntent {
             Self::OpenChatInspectorForSelected => {
                 crate::commands::ids::UI_OPEN_CHAT_INSPECTOR_FOR_SELECTED
             }
-            Self::StartTerminalEscapeChord => "ui.mode.terminal_escape_prefix",
             Self::QuitShell => "ui.shell.quit",
             Self::FocusNextInbox => crate::commands::ids::UI_FOCUS_NEXT_INBOX,
             Self::FocusPreviousInbox => "ui.focus_previous_inbox",
@@ -243,8 +235,6 @@ impl FrontendCommandIntent {
             Self::AdvanceTerminalWorkflowStage => "ui.terminal.workflow.advance",
             Self::ArchiveSelectedSession => "ui.terminal.archive_selected_session",
             Self::OpenSessionOutputForSelectedInbox => "ui.open_session_output_for_selected_inbox",
-            Self::SetApplicationModeAutopilot => "ui.app_mode.autopilot",
-            Self::SetApplicationModeManual => "ui.app_mode.manual",
         }
     }
 }
@@ -289,7 +279,7 @@ mod tests {
             .map(|intent| intent.command_id())
             .collect::<Vec<_>>();
         let unique = ids.iter().copied().collect::<HashSet<_>>();
-        assert_eq!(ids.len(), 33);
+        assert_eq!(ids.len(), 30);
         assert_eq!(unique.len(), ids.len());
     }
 
