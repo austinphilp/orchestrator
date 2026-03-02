@@ -39,6 +39,17 @@ const DEFAULT_DATABASE_SYNCHRONOUS: &str = "NORMAL";
 const DEFAULT_DATABASE_CHUNK_EVENT_FLUSH_MS: u64 = 250;
 const DEFAULT_UI_THEME: &str = "nord";
 const DEFAULT_UI_TRANSCRIPT_LINE_LIMIT: usize = 100;
+const DEFAULT_WEB_ENABLED: bool = false;
+const DEFAULT_WEB_BIND_HOST: &str = "127.0.0.1";
+const DEFAULT_WEB_PORT: u16 = 8765;
+const DEFAULT_WEB_WS_HEARTBEAT_SECS: u64 = 20;
+const DEFAULT_WEB_MAX_WS_MESSAGE_BYTES: usize = 262_144;
+const DEFAULT_WEB_CORS_ALLOWED_ORIGINS: &[&str] = &[
+    "http://127.0.0.1:5173",
+    "http://localhost:5173",
+    "http://127.0.0.1:3000",
+    "http://localhost:3000",
+];
 const DEFAULT_TICKET_PICKER_PRIORITY_STATES: &[&str] =
     &["In Progress", "Final Approval", "Todo", "Backlog"];
 
@@ -83,6 +94,8 @@ pub struct OrchestratorConfig {
     pub database: DatabaseConfigToml,
     #[serde(default)]
     pub ui: UiConfigToml,
+    #[serde(default)]
+    pub web: WebConfigToml,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -123,6 +136,16 @@ pub struct UiViewConfig {
     pub merge_poll_base_interval_secs: u64,
     pub merge_poll_max_backoff_secs: u64,
     pub merge_poll_backoff_multiplier: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WebRuntimeConfig {
+    pub enabled: bool,
+    pub bind_host: String,
+    pub port: u16,
+    pub cors_allowed_origins: Vec<String>,
+    pub ws_heartbeat_secs: u64,
+    pub max_ws_message_bytes: usize,
 }
 
 impl OrchestratorConfig {
@@ -168,6 +191,17 @@ impl OrchestratorConfig {
             merge_poll_base_interval_secs: self.ui.merge_poll_base_interval_secs,
             merge_poll_max_backoff_secs: self.ui.merge_poll_max_backoff_secs,
             merge_poll_backoff_multiplier: self.ui.merge_poll_backoff_multiplier,
+        }
+    }
+
+    pub fn web_runtime(&self) -> WebRuntimeConfig {
+        WebRuntimeConfig {
+            enabled: self.web.enabled,
+            bind_host: self.web.bind_host.clone(),
+            port: self.web.port,
+            cors_allowed_origins: self.web.cors_allowed_origins.clone(),
+            ws_heartbeat_secs: self.web.ws_heartbeat_secs,
+            max_ws_message_bytes: self.web.max_ws_message_bytes,
         }
     }
 }
@@ -559,6 +593,35 @@ impl Default for UiConfigToml {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WebConfigToml {
+    #[serde(default = "default_web_enabled")]
+    pub enabled: bool,
+    #[serde(default = "default_web_bind_host")]
+    pub bind_host: String,
+    #[serde(default = "default_web_port")]
+    pub port: u16,
+    #[serde(default = "default_web_cors_allowed_origins")]
+    pub cors_allowed_origins: Vec<String>,
+    #[serde(default = "default_web_ws_heartbeat_secs")]
+    pub ws_heartbeat_secs: u64,
+    #[serde(default = "default_web_max_ws_message_bytes")]
+    pub max_ws_message_bytes: usize,
+}
+
+impl Default for WebConfigToml {
+    fn default() -> Self {
+        Self {
+            enabled: default_web_enabled(),
+            bind_host: default_web_bind_host(),
+            port: default_web_port(),
+            cors_allowed_origins: default_web_cors_allowed_origins(),
+            ws_heartbeat_secs: default_web_ws_heartbeat_secs(),
+            max_ws_message_bytes: default_web_max_ws_message_bytes(),
+        }
+    }
+}
+
 fn default_supervisor_model() -> String {
     DEFAULT_SUPERVISOR_MODEL.to_owned()
 }
@@ -695,6 +758,33 @@ fn default_ui_merge_poll_backoff_multiplier() -> u64 {
     2
 }
 
+fn default_web_enabled() -> bool {
+    DEFAULT_WEB_ENABLED
+}
+
+fn default_web_bind_host() -> String {
+    DEFAULT_WEB_BIND_HOST.to_owned()
+}
+
+fn default_web_port() -> u16 {
+    DEFAULT_WEB_PORT
+}
+
+fn default_web_cors_allowed_origins() -> Vec<String> {
+    DEFAULT_WEB_CORS_ALLOWED_ORIGINS
+        .iter()
+        .map(|origin| (*origin).to_owned())
+        .collect()
+}
+
+fn default_web_ws_heartbeat_secs() -> u64 {
+    DEFAULT_WEB_WS_HEARTBEAT_SECS
+}
+
+fn default_web_max_ws_message_bytes() -> usize {
+    DEFAULT_WEB_MAX_WS_MESSAGE_BYTES
+}
+
 impl Default for OrchestratorConfig {
     fn default() -> Self {
         Self {
@@ -712,6 +802,7 @@ impl Default for OrchestratorConfig {
             runtime: RuntimeConfigToml::default(),
             database: DatabaseConfigToml::default(),
             ui: UiConfigToml::default(),
+            web: WebConfigToml::default(),
         }
     }
 }
@@ -892,6 +983,7 @@ fn normalize_config(config: &mut OrchestratorConfig) -> Result<bool, ConfigError
 
     changed |= normalize_database_config(&mut config.database);
     changed |= normalize_ui_config(&mut config.ui);
+    changed |= normalize_web_config(&mut config.web);
 
     Ok(changed)
 }
@@ -1002,6 +1094,36 @@ pub fn normalize_ui_config(config: &mut UiConfigToml) -> bool {
     let normalized_merge_poll_backoff_multiplier = config.merge_poll_backoff_multiplier.clamp(1, 8);
     if normalized_merge_poll_backoff_multiplier != config.merge_poll_backoff_multiplier {
         config.merge_poll_backoff_multiplier = normalized_merge_poll_backoff_multiplier;
+        changed = true;
+    }
+
+    changed
+}
+
+pub fn normalize_web_config(config: &mut WebConfigToml) -> bool {
+    let mut changed = false;
+
+    changed |= normalize_non_empty_string(&mut config.bind_host, default_web_bind_host());
+    changed |= normalize_string_vec(&mut config.cors_allowed_origins);
+    if config.cors_allowed_origins.is_empty() {
+        config.cors_allowed_origins = default_web_cors_allowed_origins();
+        changed = true;
+    }
+
+    if config.port == 0 {
+        config.port = default_web_port();
+        changed = true;
+    }
+
+    let normalized_ws_heartbeat_secs = config.ws_heartbeat_secs.clamp(5, 120);
+    if normalized_ws_heartbeat_secs != config.ws_heartbeat_secs {
+        config.ws_heartbeat_secs = normalized_ws_heartbeat_secs;
+        changed = true;
+    }
+
+    let normalized_max_ws_message_bytes = config.max_ws_message_bytes.clamp(1024, 8_388_608);
+    if normalized_max_ws_message_bytes != config.max_ws_message_bytes {
+        config.max_ws_message_bytes = normalized_max_ws_message_bytes;
         changed = true;
     }
 
@@ -1396,6 +1518,17 @@ mod tests {
                 merge_poll_max_backoff_secs: 180,
                 merge_poll_backoff_multiplier: 3,
             },
+            web: WebConfigToml {
+                enabled: true,
+                bind_host: "127.0.0.1".to_owned(),
+                port: 9911,
+                cors_allowed_origins: vec![
+                    "http://127.0.0.1:5173".to_owned(),
+                    "http://localhost:5173".to_owned(),
+                ],
+                ws_heartbeat_secs: 11,
+                max_ws_message_bytes: 64_000,
+            },
             ..OrchestratorConfig::default()
         };
 
@@ -1404,6 +1537,7 @@ mod tests {
         let git = config.git_runtime();
         let database = config.database_runtime();
         let ui = config.ui_view();
+        let web = config.web_runtime();
 
         assert_eq!(providers.ticketing_provider, "ticketing.shortcut");
         assert_eq!(providers.harness_provider, "harness.opencode");
@@ -1431,6 +1565,15 @@ mod tests {
         assert_eq!(ui.merge_poll_base_interval_secs, 8);
         assert_eq!(ui.merge_poll_max_backoff_secs, 180);
         assert_eq!(ui.merge_poll_backoff_multiplier, 3);
+        assert!(web.enabled);
+        assert_eq!(web.bind_host, "127.0.0.1");
+        assert_eq!(web.port, 9911);
+        assert_eq!(
+            web.cors_allowed_origins,
+            vec!["http://127.0.0.1:5173", "http://localhost:5173"]
+        );
+        assert_eq!(web.ws_heartbeat_secs, 11);
+        assert_eq!(web.max_ws_message_bytes, 64_000);
     }
 
     #[test]
@@ -1471,6 +1614,13 @@ session_info_background_refresh_secs = 3
 merge_poll_base_interval_secs = 1
 merge_poll_max_backoff_secs = 9999
 merge_poll_backoff_multiplier = 0
+
+[web]
+bind_host = " "
+port = 0
+cors_allowed_origins = ["  ", "http://localhost:5173  "]
+ws_heartbeat_secs = 1
+max_ws_message_bytes = 99999999
 "#,
         );
 
@@ -1500,6 +1650,14 @@ merge_poll_backoff_multiplier = 0
         assert_eq!(config.ui.merge_poll_base_interval_secs, 5);
         assert_eq!(config.ui.merge_poll_max_backoff_secs, 900);
         assert_eq!(config.ui.merge_poll_backoff_multiplier, 1);
+        assert_eq!(config.web.bind_host, "127.0.0.1");
+        assert_eq!(config.web.port, 8765);
+        assert_eq!(
+            config.web.cors_allowed_origins,
+            vec!["http://localhost:5173"]
+        );
+        assert_eq!(config.web.ws_heartbeat_secs, 5);
+        assert_eq!(config.web.max_ws_message_bytes, 8_388_608);
 
         let persisted = std::fs::read_to_string(&path).expect("read persisted config");
         let parsed: OrchestratorConfig =
@@ -1508,6 +1666,12 @@ merge_poll_backoff_multiplier = 0
         assert_eq!(parsed.database.max_connections, 64);
         assert_eq!(parsed.ui.merge_poll_max_backoff_secs, 900);
         assert_eq!(parsed.linear.sync_states, vec!["Ready", "In Progress"]);
+        assert_eq!(parsed.web.bind_host, "127.0.0.1");
+        assert_eq!(parsed.web.port, 8765);
+        assert_eq!(
+            parsed.web.cors_allowed_origins,
+            vec!["http://localhost:5173"]
+        );
 
         remove_temp_path(&root);
     }
