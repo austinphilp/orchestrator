@@ -1,0 +1,12 @@
+services:
+  web-ui:
+    build:
+      context: .
+      dockerfile: docker/web/Dockerfile
+    container_name: orchestrator-web-ui
+    ports:
+      - "5173:80"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+

@@ -159,6 +159,8 @@
     codeMirror: {
       compose: null,
       composeContext: null,
+      ticketBrief: null,
+      ticketBriefHost: null,
     },
   };
 
@@ -950,9 +952,61 @@
     state.codeMirror.compose = editor;
   }
 
+  function destroyTicketBriefCodeMirror() {
+    const editor = state.codeMirror.ticketBrief;
+    if (!editor) return;
+    try {
+      editor.toTextArea();
+    } catch {
+      // ignore teardown errors from detached nodes
+    }
+    state.codeMirror.ticketBrief = null;
+    state.codeMirror.ticketBriefHost = null;
+  }
+
+  function ensureTicketBriefCodeMirror() {
+    const host = document.getElementById("ticket-create-editor");
+    if (!host || !window.CodeMirror) {
+      destroyTicketBriefCodeMirror();
+      return;
+    }
+
+    if (state.codeMirror.ticketBrief && state.codeMirror.ticketBriefHost === host) {
+      return;
+    }
+    destroyTicketBriefCodeMirror();
+
+    const editor = window.CodeMirror.fromTextArea(host, {
+      mode: "text/plain",
+      lineWrapping: true,
+      viewportMargin: 8,
+      keyMap: "vim",
+    });
+    editor.setSize("100%", "160px");
+    editor.on("change", (cm) => {
+      state.ticketPicker.newTicketBrief = cm.getValue();
+    });
+    editor.setValue(state.ticketPicker.newTicketBrief || "");
+    state.codeMirror.ticketBrief = editor;
+    state.codeMirror.ticketBriefHost = host;
+  }
+
+  function ticketBriefEditorInInsertMode() {
+    const editor = state.codeMirror.ticketBrief;
+    if (!editor) return false;
+    return Boolean(editor.state?.vim?.insertMode);
+  }
+
   function isCodeMirrorTarget(target) {
     if (!target || !target.closest) return false;
     return Boolean(target.closest(".CodeMirror"));
+  }
+
+  function isEscapeAlias(event) {
+    if (event.key === "Escape") return true;
+    return Boolean(
+      event.ctrlKey && !event.metaKey && !event.altKey && event.key === "["
+    );
   }
 
   function syncComposeEditorFromState() {
@@ -1025,6 +1079,36 @@
       event.preventDefault();
     }
     if (isCodeMirrorTarget(event.target)) {
+      const ticketCreateEditorActive =
+        state.ticketPicker.visible &&
+        state.ticketPicker.newTicketMode &&
+        state.codeMirror.ticketBrief &&
+        event.target.closest(".overlay-panel");
+      if (ticketCreateEditorActive) {
+        if (event.key === "Enter" && event.shiftKey && !event.ctrlKey && !event.metaKey) {
+          event.preventDefault();
+          await submitCreateTicketFromPicker("create_and_start");
+          render();
+          return;
+        }
+        if (event.key === "Enter" && !event.shiftKey && !event.ctrlKey && !event.metaKey) {
+          event.preventDefault();
+          await submitCreateTicketFromPicker("create_only");
+          render();
+          return;
+        }
+        if (isEscapeAlias(event)) {
+          if (ticketBriefEditorInInsertMode()) {
+            return;
+          }
+          event.preventDefault();
+          cancelCreateTicketFromPicker();
+          render();
+          return;
+        }
+        return;
+      }
+
       const composeEditorActive =
         state.mode === "insert" &&
         !state.ticketPicker.visible &&
@@ -1032,7 +1116,9 @@
         !state.diffModal.visible &&
         !activeNeedsInputComposer();
       if (composeEditorActive) {
-        if (event.key === "Enter" && !event.shiftKey && !event.ctrlKey && !event.metaKey) {
+        const ctrlEnter = event.key === "Enter" && event.ctrlKey && !event.metaKey && !event.altKey;
+        const plainEnter = event.key === "Enter" && !event.shiftKey && !event.ctrlKey && !event.metaKey;
+        if (plainEnter || ctrlEnter) {
           event.preventDefault();
           const handled = await handleInsertModeKey(event);
           if (handled) render();
@@ -1087,7 +1173,22 @@
       return;
     }
 
-    if (event.key === "Escape") {
+    if (state.mode === "normal" && state.centerPanel === "terminal") {
+      if (!event.ctrlKey && !event.metaKey && !event.altKey && event.shiftKey) {
+        if (event.key === "J") {
+          els.centerBody.scrollTop += 80;
+          event.preventDefault();
+          return;
+        }
+        if (event.key === "K") {
+          els.centerBody.scrollTop -= 80;
+          event.preventDefault();
+          return;
+        }
+      }
+    }
+
+    if (isEscapeAlias(event)) {
       event.preventDefault();
       state.mode = "normal";
       state.keySequence = [];
@@ -1132,7 +1233,7 @@
     }
 
     const token = keyToken(event);
-    if (event.key === "Escape" || token === "q" || token === "D") {
+    if (isEscapeAlias(event) || token === "q" || token === "D") {
       state.diffModal.visible = false;
       return true;
     }
@@ -1201,7 +1302,7 @@
       return handleTicketPickerCreateKey(event);
     }
 
-    if (event.key === "Escape") {
+    if (isEscapeAlias(event)) {
       closeTicketPicker();
       return true;
     }
@@ -1242,7 +1343,7 @@
   }
 
   async function handleTicketPickerRepositoryPromptKey(event) {
-    if (event.key === "Escape") {
+    if (isEscapeAlias(event)) {
       cancelTicketPickerRepositoryPrompt();
       return true;
     }
@@ -1271,7 +1372,10 @@
   }
 
   async function handleTicketPickerCreateKey(event) {
-    if (event.key === "Escape") {
+    if (isEscapeAlias(event)) {
+      if (ticketBriefEditorInInsertMode()) {
+        return true;
+      }
       cancelCreateTicketFromPicker();
       return true;
     }
@@ -1287,11 +1391,6 @@
       await submitCreateTicketFromPicker("create_only");
       return true;
     }
-    if (event.key === "Backspace") {
-      state.ticketPicker.newTicketBrief = state.ticketPicker.newTicketBrief.slice(0, -1);
-      return true;
-    }
-
     const token = keyToken(event);
     if (token === "up" || token === "k") {
       moveTicketPickerProjectSelection(-1);
@@ -1306,15 +1405,11 @@
       return true;
     }
 
-    if (event.key.length === 1) {
-      state.ticketPicker.newTicketBrief += event.key;
-      return true;
-    }
     return true;
   }
 
   async function handleArchiveConfirmKey(event) {
-    if (event.key === "Escape") {
+    if (isEscapeAlias(event)) {
       cancelArchiveConfirm();
       return true;
     }
@@ -1341,7 +1436,7 @@
       return handleNeedsInputNoteInsertKey(event);
     }
 
-    if (event.key === "Escape") {
+    if (isEscapeAlias(event)) {
       state.mode = "normal";
       return true;
     }
@@ -1421,7 +1516,7 @@
       return true;
     }
 
-    if (event.key === "Escape") {
+    if (isEscapeAlias(event)) {
       toggleNeedsInputNoteMode(false);
       return true;
     }
@@ -1445,12 +1540,16 @@
   }
 
   async function handleInsertModeKey(event) {
-    if (event.ctrlKey || event.metaKey || event.altKey) {
+    const ctrlEnter = event.key === "Enter" && event.ctrlKey && !event.metaKey && !event.altKey;
+    if ((event.ctrlKey || event.metaKey || event.altKey) && !ctrlEnter) {
       return false;
     }
 
     if (state.globalChat.visible) {
       syncComposeStateFromEditor();
+      if (event.ctrlKey) {
+        return false;
+      }
       if (event.key === "Enter") {
         await submitGlobalChatQuery();
         return true;
@@ -1537,8 +1636,11 @@
         state.mode = "insert";
         return;
       case "ui.supervisor_chat.toggle":
-        state.globalChat.visible = !state.globalChat.visible;
         if (state.globalChat.visible) {
+          await cancelGlobalChatStreamIfActive();
+          state.globalChat.visible = false;
+        } else {
+          state.globalChat.visible = true;
           state.centerPanel = "chat";
         }
         return;
@@ -1734,6 +1836,7 @@
     state.ticketPicker.projectGroups = [];
     state.ticketPicker.rowRefs = [];
     state.ticketPicker.selectedRowIndex = 0;
+    destroyTicketBriefCodeMirror();
   }
 
   function moveTicketPickerSelection(delta) {
@@ -1757,6 +1860,7 @@
     state.ticketPicker.newTicketBrief = "";
     state.ticketPicker.creating = false;
     state.ticketPicker.error = null;
+    destroyTicketBriefCodeMirror();
   }
 
   function moveTicketPickerProjectSelection(delta) {
@@ -1942,12 +2046,12 @@
   async function submitTicketPickerRepositoryPrompt() {
     const prompt = state.ticketPicker.repositoryPrompt;
     if (!prompt) return;
-    const path = String(prompt.path || "").trim();
-    if (!path) {
-      state.ticketPicker.error = "repository path cannot be empty";
+    const normalizedPath = normalizeRepositoryOverrideInput(prompt.path);
+    if (!normalizedPath.ok) {
+      state.ticketPicker.error = normalizedPath.error;
       return;
     }
-    const result = await startTicketWithOptionalRepositoryOverride(prompt.ticket, path);
+    const result = await startTicketWithOptionalRepositoryOverride(prompt.ticket, normalizedPath.path);
     if (!result) return;
     state.ticketPicker.repositoryPrompt = null;
     state.warning = `${result.action || "started"}: ${
@@ -1957,6 +2061,21 @@
     state.centerPanel = "terminal";
     if (result.session_id) state.activeSessionId = result.session_id;
     await refreshSnapshot();
+  }
+
+  function normalizeRepositoryOverrideInput(raw) {
+    const path = String(raw || "").trim();
+    if (!path) {
+      return { ok: false, error: "repository path cannot be empty" };
+    }
+    if (path === "~" || path.startsWith("~/") || path.startsWith("~\\")) {
+      return {
+        ok: false,
+        error:
+          "repository path with '~' is not supported in web UI; use an absolute or relative path",
+      };
+    }
+    return { ok: true, path };
   }
 
   function isRepositoryPromptError(error) {
@@ -1987,6 +2106,9 @@
   async function submitCreateTicketFromPicker(submitMode) {
     if (!state.ticketPicker.visible || !state.ticketPicker.newTicketMode) return;
     if (state.ticketPicker.creating) return;
+    if (state.codeMirror.ticketBrief) {
+      state.ticketPicker.newTicketBrief = state.codeMirror.ticketBrief.getValue();
+    }
     const brief = String(state.ticketPicker.newTicketBrief || "").trim();
     if (!brief) {
       state.ticketPicker.error = "enter a brief description before creating a ticket";
@@ -2006,6 +2128,7 @@
       state.warning = `created ${createdTicket?.identifier || "ticket"}`;
       state.ticketPicker.newTicketMode = false;
       state.ticketPicker.newTicketBrief = "";
+      destroyTicketBriefCodeMirror();
       await refreshSnapshot();
 
       if (submitMode === "create_and_start" && createdTicket) {
@@ -2930,15 +3053,24 @@
       els.ticketPickerBody.innerHTML = `
         <div class="inbox-lane-title">Create Ticket</div>
         <p class="ticket-meta">Enter: create only • Shift+Enter: create + start • Esc: cancel</p>
+        <p class="ticket-meta">Vim mode: use i/Esc for insert/normal</p>
         ${creating}
         ${error}
         <div class="inbox-lane-title">Project (${escapeHtml(selectedProject)})</div>
         ${projectsHtml}
         <div class="inbox-lane-title">Brief</div>
-        <pre class="monospace">${escapeHtml(state.ticketPicker.newTicketBrief || "")}</pre>
+        <textarea id="ticket-create-editor" class="ticket-create-editor">${escapeHtml(
+          state.ticketPicker.newTicketBrief || ""
+        )}</textarea>
       `;
+      ensureTicketBriefCodeMirror();
+      if (state.codeMirror.ticketBrief) {
+        state.codeMirror.ticketBrief.refresh();
+        state.codeMirror.ticketBrief.focus();
+      }
       return;
     }
+    destroyTicketBriefCodeMirror();
 
     if (state.ticketPicker.loading) {
       els.ticketPickerBody.innerHTML = '<p class="muted">Loading tickets...</p>';

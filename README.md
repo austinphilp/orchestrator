@@ -31,6 +31,18 @@ cargo run -p orchestrator
 cargo run -p orchestrator-web
 ```
 
+Web UI via Docker (with Rust backend on host):
+
+```bash
+# 1) Start the Rust backend on host (enable web + bind to 0.0.0.0:8765)
+cargo run -p orchestrator-web
+
+# 2) Start the web client container (served on http://127.0.0.1:5173)
+docker compose -f docker-compose.web.yml up -d --build
+```
+
+The container serves static assets and proxies `/v1/*` (including websocket `/v1/ws`) to `host.docker.internal:8765`.
+
 Configuration:
 - Set `ORCHESTRATOR_CONFIG` to a path containing TOML config (for example `/path/to/config.toml`).
 - If `ORCHESTRATOR_CONFIG` is not set, the app defaults to `~/.config/orchestrator/config.toml`.

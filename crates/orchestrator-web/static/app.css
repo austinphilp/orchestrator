@@ -399,6 +399,11 @@ body {
   color: var(--muted);
 }
 
+.ticket-create-editor {
+  width: 100%;
+  min-height: 140px;
+}
+
 .warning {
   color: var(--warn);
 }
