@@ -1,5 +1,29 @@
 use orchestrator_domain::{BackendEvent, BackendNeedsInputAnswer, RuntimeError};
 
+const FRONTEND_PROJECTION_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
+
+struct StreamSessionSlotGuard {
+    slots: std::sync::Arc<std::sync::Mutex<std::collections::HashSet<WorkerSessionId>>>,
+    session_id: WorkerSessionId,
+}
+
+impl StreamSessionSlotGuard {
+    fn new(
+        slots: std::sync::Arc<std::sync::Mutex<std::collections::HashSet<WorkerSessionId>>>,
+        session_id: WorkerSessionId,
+    ) -> Self {
+        Self { slots, session_id }
+    }
+}
+
+impl Drop for StreamSessionSlotGuard {
+    fn drop(&mut self) {
+        if let Ok(mut slots) = self.slots.lock() {
+            slots.remove(&self.session_id);
+        }
+    }
+}
+
 pub struct AppFrontendController<S: Supervisor, G: GithubClient> {
     app: std::sync::Arc<App<S, G>>,
     worker_backend: Option<std::sync::Arc<dyn WorkerBackend + Send + Sync>>,
@@ -60,14 +84,16 @@ impl<S: Supervisor, G: GithubClient> AppFrontendController<S, G> {
         let worker_backend = self.worker_backend.clone();
         let snapshot = self.snapshot.clone();
         let event_tx = self.event_tx.clone();
-        let poll_interval = std::time::Duration::from_secs(
-            app.config.runtime.pr_pipeline_poll_interval_secs.max(1),
-        );
+        // Frontend snapshots and terminal stream attachment need low latency.
+        // Do not couple this loop to PR pipeline polling cadence.
+        let poll_interval = FRONTEND_PROJECTION_POLL_INTERVAL;
 
         let task = tokio::spawn(async move {
             let mut ticker = tokio::time::interval(poll_interval);
             ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-            let mut terminal_streamed_sessions = std::collections::HashSet::new();
+            let terminal_streamed_sessions = std::sync::Arc::new(std::sync::Mutex::new(
+                std::collections::HashSet::new(),
+            ));
             loop {
                 tokio::select! {
                     _ = shutdown_rx.changed() => {
@@ -105,11 +131,12 @@ impl<S: Supervisor, G: GithubClient> AppFrontendController<S, G> {
                         if guard.projection == projection {
                             drop(guard);
                             ensure_terminal_streams(
+                                app.clone(),
                                 worker_backend.as_ref(),
                                 &event_tx,
                                 &mut shutdown_rx,
                                 &projection,
-                                &mut terminal_streamed_sessions,
+                                terminal_streamed_sessions.clone(),
                             );
                             continue;
                         }
@@ -118,11 +145,12 @@ impl<S: Supervisor, G: GithubClient> AppFrontendController<S, G> {
                         let projection_for_streams = guard.projection.clone();
                         drop(guard);
                         ensure_terminal_streams(
+                            app.clone(),
                             worker_backend.as_ref(),
                             &event_tx,
                             &mut shutdown_rx,
                             &projection_for_streams,
-                            &mut terminal_streamed_sessions,
+                            terminal_streamed_sessions.clone(),
                         );
                     }
                 }
@@ -196,13 +224,17 @@ impl<S: Supervisor, G: GithubClient> AppFrontendController<S, G> {
     }
 }
 
-fn ensure_terminal_streams(
+fn ensure_terminal_streams<S, G>(
+    app: std::sync::Arc<App<S, G>>,
     worker_backend: Option<&std::sync::Arc<dyn WorkerBackend + Send + Sync>>,
     event_tx: &tokio::sync::broadcast::Sender<FrontendEvent>,
     shutdown_rx: &mut tokio::sync::watch::Receiver<bool>,
     projection: &ProjectionState,
-    streamed_sessions: &mut std::collections::HashSet<WorkerSessionId>,
-) {
+    streamed_sessions: std::sync::Arc<std::sync::Mutex<std::collections::HashSet<WorkerSessionId>>>,
+) where
+    S: Supervisor + Send + Sync + 'static,
+    G: GithubClient + Send + Sync + 'static,
+{
     let Some(worker_backend) = worker_backend.cloned() else {
         return;
     };
@@ -214,7 +246,22 @@ fn ensure_terminal_streams(
         ) {
             continue;
         }
-        if !streamed_sessions.insert(session_id.clone()) {
+        {
+            let Ok(mut slots) = streamed_sessions.lock() else {
+                continue;
+            };
+            if !slots.insert(session_id.clone()) {
+                continue;
+            }
+        }
+
+        if matches!(
+            session.status,
+            Some(WorkerSessionStatus::WaitingForUser | WorkerSessionStatus::Blocked)
+        ) {
+            if let Ok(mut slots) = streamed_sessions.lock() {
+                slots.remove(session_id);
+            }
             continue;
         }
 
@@ -224,13 +271,59 @@ fn ensure_terminal_streams(
             session_id: RuntimeSessionId::from(stream_session_id.clone()),
             backend: backend_kind,
         };
+        let app_for_task = app.clone();
         let worker_backend_for_task = worker_backend.clone();
         let mut stream_shutdown_rx = shutdown_rx.clone();
         let stream_event_tx = event_tx.clone();
+        let streamed_sessions_for_task = streamed_sessions.clone();
         tokio::spawn(async move {
+            let _slot_guard = StreamSessionSlotGuard::new(
+                streamed_sessions_for_task,
+                stream_session_id.clone(),
+            );
             let mut stream = match worker_backend_for_task.subscribe(&handle).await {
                 Ok(stream) => stream,
                 Err(error) => {
+                    if is_output_stream_closed_error(&error) {
+                        let reason = error.to_string();
+                        let app_for_mark = app_for_task.clone();
+                        let session_for_mark = stream_session_id.clone();
+                        let mark_result = tokio::task::spawn_blocking(move || {
+                            app_for_mark.mark_session_crashed(&session_for_mark, reason.as_str())
+                        })
+                        .await;
+                        if let Err(mark_error) = mark_result {
+                            let _ = stream_event_tx.send(FrontendEvent::Notification(
+                                FrontendNotification {
+                                    level: FrontendNotificationLevel::Warning,
+                                    message: format!(
+                                        "failed to reconcile closed runtime stream for session '{}': {mark_error}",
+                                        stream_session_id.as_str()
+                                    ),
+                                    work_item_id: None,
+                                    session_id: Some(stream_session_id.clone()),
+                                },
+                            ));
+                        } else if let Ok(Err(mark_error)) = mark_result {
+                            let _ = stream_event_tx.send(FrontendEvent::Notification(
+                                FrontendNotification {
+                                    level: FrontendNotificationLevel::Warning,
+                                    message: format!(
+                                        "failed to persist closed runtime stream state for session '{}': {mark_error}",
+                                        stream_session_id.as_str()
+                                    ),
+                                    work_item_id: None,
+                                    session_id: Some(stream_session_id.clone()),
+                                },
+                            ));
+                        }
+                        let _ = stream_event_tx.send(FrontendEvent::TerminalSession(
+                            FrontendTerminalEvent::StreamEnded {
+                                session_id: stream_session_id,
+                            },
+                        ));
+                        return;
+                    }
                     let _ = stream_event_tx.send(FrontendEvent::TerminalSession(
                         FrontendTerminalEvent::StreamFailed {
                             session_id: stream_session_id,
@@ -301,6 +394,13 @@ fn ensure_terminal_streams(
     }
 }
 
+fn is_output_stream_closed_error(error: &RuntimeError) -> bool {
+    matches!(
+        error,
+        RuntimeError::Process(message) if message.contains("output stream is closed")
+    )
+}
+
 fn apply_intent_to_snapshot(snapshot: &mut FrontendSnapshot, intent: &FrontendIntent) -> bool {
     match intent {
         FrontendIntent::Command(command) => apply_command_intent_to_snapshot(snapshot, *command),
@@ -311,26 +411,10 @@ fn apply_intent_to_snapshot(snapshot: &mut FrontendSnapshot, intent: &FrontendIn
 }
 
 fn apply_command_intent_to_snapshot(
-    snapshot: &mut FrontendSnapshot,
+    _snapshot: &mut FrontendSnapshot,
     command: FrontendCommandIntent,
 ) -> bool {
     match command {
-        FrontendCommandIntent::SetApplicationModeAutopilot => {
-            if snapshot.application_mode != FrontendApplicationMode::Autopilot {
-                snapshot.application_mode = FrontendApplicationMode::Autopilot;
-                true
-            } else {
-                false
-            }
-        }
-        FrontendCommandIntent::SetApplicationModeManual => {
-            if snapshot.application_mode != FrontendApplicationMode::Manual {
-                snapshot.application_mode = FrontendApplicationMode::Manual;
-                true
-            } else {
-                false
-            }
-        }
         FrontendCommandIntent::EnterNormalMode
         | FrontendCommandIntent::EnterInsertMode
         | FrontendCommandIntent::ToggleGlobalSupervisorChat
@@ -339,7 +423,6 @@ fn apply_command_intent_to_snapshot(
         | FrontendCommandIntent::OpenTestInspectorForSelected
         | FrontendCommandIntent::OpenPrInspectorForSelected
         | FrontendCommandIntent::OpenChatInspectorForSelected
-        | FrontendCommandIntent::StartTerminalEscapeChord
         | FrontendCommandIntent::QuitShell
         | FrontendCommandIntent::FocusNextInbox
         | FrontendCommandIntent::FocusPreviousInbox
@@ -367,29 +450,9 @@ fn apply_command_intent_to_snapshot(
 
 fn command_intent_notification(
     command: FrontendCommandIntent,
-    snapshot_changed: bool,
+    _snapshot_changed: bool,
 ) -> Option<FrontendNotification> {
     match command {
-        FrontendCommandIntent::SetApplicationModeAutopilot => {
-            if snapshot_changed {
-                None
-            } else {
-                Some(command_info_notification(
-                    command,
-                    "application mode is already autopilot",
-                ))
-            }
-        }
-        FrontendCommandIntent::SetApplicationModeManual => {
-            if snapshot_changed {
-                None
-            } else {
-                Some(command_info_notification(
-                    command,
-                    "application mode is already manual",
-                ))
-            }
-        }
         FrontendCommandIntent::TicketPickerStartSelected => Some(command_warning_notification(
             command,
             "requires selected ticket context from the ticket picker; FrontendIntent::Command carries no ticket payload",
@@ -409,7 +472,6 @@ fn command_intent_notification(
         | FrontendCommandIntent::OpenTestInspectorForSelected
         | FrontendCommandIntent::OpenPrInspectorForSelected
         | FrontendCommandIntent::OpenChatInspectorForSelected
-        | FrontendCommandIntent::StartTerminalEscapeChord
         | FrontendCommandIntent::QuitShell
         | FrontendCommandIntent::FocusNextInbox
         | FrontendCommandIntent::FocusPreviousInbox
@@ -429,15 +491,6 @@ fn command_intent_notification(
         | FrontendCommandIntent::TicketPickerUnfoldProject
         | FrontendCommandIntent::ToggleWorktreeDiffModal
         | FrontendCommandIntent::OpenSessionOutputForSelectedInbox => None,
-    }
-}
-
-fn command_info_notification(command: FrontendCommandIntent, detail: &str) -> FrontendNotification {
-    FrontendNotification {
-        level: FrontendNotificationLevel::Info,
-        message: format!("{}: {detail}", command.command_id()),
-        work_item_id: None,
-        session_id: None,
     }
 }
 
@@ -501,20 +554,43 @@ where
                 }
             }
             FrontendIntent::SendTerminalInput { session_id, input } => {
-                self.submit_terminal_input_intent(session_id, input.as_str())
-                    .await?;
+                let result = self
+                    .submit_terminal_input_intent(session_id, input.as_str())
+                    .await;
+                if let Err(error) = &result {
+                    let _ = self
+                        .event_tx
+                        .send(FrontendEvent::Notification(FrontendNotification {
+                            level: FrontendNotificationLevel::Error,
+                            message: format!("terminal input dispatch failed: {error}"),
+                            work_item_id: None,
+                            session_id: Some(session_id.clone()),
+                        }));
+                }
+                result?;
             }
             FrontendIntent::RespondToNeedsInput {
                 session_id,
                 prompt_id,
                 answers,
             } => {
-                self.submit_needs_input_response_intent(
+                let result = self.submit_needs_input_response_intent(
                     session_id,
                     prompt_id.as_str(),
                     answers.as_slice(),
                 )
-                .await?;
+                .await;
+                if let Err(error) = &result {
+                    let _ = self
+                        .event_tx
+                        .send(FrontendEvent::Notification(FrontendNotification {
+                            level: FrontendNotificationLevel::Error,
+                            message: format!("needs-input response dispatch failed: {error}"),
+                            work_item_id: None,
+                            session_id: Some(session_id.clone()),
+                        }));
+                }
+                result?;
             }
         }
         Ok(())
@@ -626,34 +702,9 @@ mod frontend_controller_tests {
 
         let changed = apply_intent_to_snapshot(
             &mut snapshot,
-            &FrontendIntent::Command(FrontendCommandIntent::SetApplicationModeAutopilot),
-        );
-        assert!(changed);
-        assert_eq!(
-            snapshot.application_mode,
-            FrontendApplicationMode::Autopilot
-        );
-
-        let changed = apply_intent_to_snapshot(
-            &mut snapshot,
-            &FrontendIntent::Command(FrontendCommandIntent::SetApplicationModeAutopilot),
+            &FrontendIntent::Command(FrontendCommandIntent::OpenTicketPicker),
         );
         assert!(!changed);
-        let notification =
-            command_intent_notification(FrontendCommandIntent::SetApplicationModeAutopilot, changed)
-                .expect("mode no-op should emit deterministic notification");
-        assert_eq!(notification.level, FrontendNotificationLevel::Info);
-        assert!(notification.message.contains("ui.app_mode.autopilot"));
-        assert_eq!(
-            snapshot.application_mode,
-            FrontendApplicationMode::Autopilot
-        );
-
-        let changed = apply_intent_to_snapshot(
-            &mut snapshot,
-            &FrontendIntent::Command(FrontendCommandIntent::SetApplicationModeManual),
-        );
-        assert!(changed);
         assert_eq!(snapshot.application_mode, FrontendApplicationMode::Manual);
     }
 
@@ -740,5 +791,49 @@ mod frontend_controller_tests {
         assert!(notification
             .message
             .contains("requires selected session/inbox context"));
+    }
+
+    #[tokio::test]
+    async fn submit_terminal_input_failure_emits_error_notification() {
+        let controller = test_frontend_controller();
+        let mut subscription = controller.subscribe().await.expect("subscribe");
+
+        let error = controller
+            .submit_intent(FrontendIntent::SendTerminalInput {
+                session_id: WorkerSessionId::new("sess-1"),
+                input: "advance workflow".to_owned(),
+            })
+            .await
+            .expect_err("terminal input should fail without worker backend");
+        assert!(error.to_string().contains("worker backend is not configured"));
+
+        let event = subscription
+            .next_event()
+            .await
+            .expect("subscription next event result")
+            .expect("subscription event");
+        let FrontendEvent::Notification(notification) = event else {
+            panic!("expected notification event");
+        };
+        assert_eq!(notification.level, FrontendNotificationLevel::Error);
+        assert!(notification.message.contains("terminal input dispatch failed"));
+        assert!(notification
+            .message
+            .contains("worker backend is not configured"));
+        assert_eq!(
+            notification.session_id.as_ref().map(|id| id.as_str()),
+            Some("sess-1")
+        );
+    }
+
+    #[test]
+    fn output_stream_closed_error_classifier_matches_expected_runtime_error() {
+        let closed = RuntimeError::Process(
+            "worker session output stream is closed: sess-linear-123".to_owned(),
+        );
+        assert!(is_output_stream_closed_error(&closed));
+
+        let other = RuntimeError::Process("worker session is not running".to_owned());
+        assert!(!is_output_stream_closed_error(&other));
     }
 }

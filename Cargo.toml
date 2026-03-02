@@ -8,6 +8,7 @@ members = [
     "crates/orchestrator-supervisor",
     "crates/orchestrator-ticketing",
     "crates/orchestrator-ui",
+    "crates/orchestrator-web",
     "crates/orchestrator-vcs",
     "crates/orchestrator-vcs-repos",
     "crates/orchestrator-worker-eventbus",
@@ -35,7 +36,7 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 rusqlite = { version = "0.32", features = ["bundled"] }
 thiserror = "2.0"
-tokio = { version = "1.44", features = ["macros", "rt-multi-thread", "sync", "time"] }
+tokio = { version = "1.44", features = ["macros", "rt-multi-thread", "signal", "sync", "time"] }
 toml = "0.8"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
@@ -45,3 +46,6 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 time = { version = "0.3", features = ["parsing"] }
 r2d2 = "0.8"
 r2d2_sqlite = "0.25"
+axum = { version = "0.8", features = ["ws", "json"] }
+tower-http = { version = "0.6", features = ["cors"] }
+futures-util = "0.3"

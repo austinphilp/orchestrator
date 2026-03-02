@@ -1,0 +1,24 @@
+[package]
+name = "orchestrator-web"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+axum.workspace = true
+futures-util.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tower-http.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+orchestrator-app = { path = "../orchestrator-app" }
+orchestrator-domain = { path = "../orchestrator-domain" }
+orchestrator-harness = { path = "../orchestrator-harness" }
+orchestrator-supervisor = { path = "../orchestrator-supervisor" }
+orchestrator-ticketing = { path = "../orchestrator-ticketing" }
+orchestrator-ui = { path = "../orchestrator-ui" }
+orchestrator-vcs = { path = "../orchestrator-vcs" }
+orchestrator-vcs-repos = { path = "../orchestrator-vcs-repos" }

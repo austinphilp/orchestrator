@@ -14,6 +14,7 @@ Rust workspace for the Orchestrator bootstrap architecture.
 - `orchestrator-worker-runtime`: runtime composition facade for app wiring.
 - `orchestrator-harness`: harness contracts, provider factory, and OpenCode/Codex provider implementations.
 - `orchestrator-ui`: minimal ratatui-based interface loop.
+- `orchestrator-web`: REST + WebSocket service for web client integrations.
 - `orchestrator-supervisor`: OpenRouter supervisor adapter.
 - `orchestrator-ticketing`: ticketing contracts, provider factory, and Linear/Shortcut implementations.
 - `orchestrator-vcs`: local git operations contracts, provider factory, and git CLI implementation.
@@ -27,6 +28,7 @@ cargo test --workspace
 cargo ci-check
 cargo ci-test
 cargo run -p orchestrator
+cargo run -p orchestrator-web
 ```
 
 Configuration:
@@ -52,7 +54,7 @@ vcs_provider = "vcs.git_cli"
 vcs_repo_provider = "vcs_repos.github_gh_cli"
 
 [supervisor]
-model = "c/claude-haiku-4.5"
+model = "anthropic/claude-haiku-4.5"
 openrouter_base_url = "https://openrouter.ai/api/v1"
 
 [linear]
@@ -110,6 +112,14 @@ ticket_picker_priority_states = ["In Progress", "Final Approval", "Todo", "Backl
 transcript_line_limit = 100
 background_session_refresh_secs = 15
 session_info_background_refresh_secs = 15
+
+[web]
+enabled = true
+bind_host = "127.0.0.1"
+port = 8765
+cors_allowed_origins = ["http://127.0.0.1:5173", "http://localhost:5173"]
+ws_heartbeat_secs = 20
+max_ws_message_bytes = 262144
 ```
 
 Directory layout defaults:

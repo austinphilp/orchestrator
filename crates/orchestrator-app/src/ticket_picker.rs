@@ -28,15 +28,14 @@ use tracing::warn;
 use crate::events::StoredEventEnvelope;
 use crate::App;
 
-pub struct AppTicketPickerProvider<S, G, V>
+pub struct AppTicketPickerProvider<S, G>
 where
     S: Supervisor + 'static,
     G: GithubClient + 'static,
-    V: VcsProvider + 'static,
 {
     app: Arc<App<S, G>>,
     ticketing: Arc<dyn TicketingProvider + Send + Sync>,
-    vcs: Arc<V>,
+    vcs: Arc<dyn VcsProvider + Send + Sync>,
     worker_backend: Arc<dyn WorkerBackend + Send + Sync>,
     pr_pipeline_polling: Mutex<Option<PrPipelinePollingControl>>,
 }
@@ -47,16 +46,15 @@ struct PrPipelinePollingControl {
     task: tokio::task::JoinHandle<()>,
 }
 
-impl<S, G, V> AppTicketPickerProvider<S, G, V>
+impl<S, G> AppTicketPickerProvider<S, G>
 where
     S: Supervisor + 'static,
     G: GithubClient + 'static,
-    V: VcsProvider + 'static,
 {
     pub fn new(
         app: Arc<App<S, G>>,
         ticketing: Arc<dyn TicketingProvider + Send + Sync>,
-        vcs: Arc<V>,
+        vcs: Arc<dyn VcsProvider + Send + Sync>,
         worker_backend: Arc<dyn WorkerBackend + Send + Sync>,
     ) -> Self {
         Self {
@@ -70,11 +68,10 @@ where
 }
 
 #[async_trait]
-impl<S, G, V> TicketPickerProvider for AppTicketPickerProvider<S, G, V>
+impl<S, G> TicketPickerProvider for AppTicketPickerProvider<S, G>
 where
     S: Supervisor + LlmProvider + Send + Sync + 'static,
     G: GithubClient + CodeHostProvider + Send + Sync + 'static,
-    V: VcsProvider + Send + Sync + 'static,
 {
     async fn list_unfinished_tickets(&self) -> Result<Vec<TicketSummary>, CoreError> {
         let mut tickets = self

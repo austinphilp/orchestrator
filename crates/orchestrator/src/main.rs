@@ -2,8 +2,8 @@ use anyhow::Result;
 use orchestrator_app::composition::runtime_config_slices;
 use orchestrator_app::events::OrchestrationEventPayload;
 use orchestrator_app::{
-    load_app_config_from_env, App, AppConfig, AppError, AppFrontendController, FrontendController,
-    WorkerManagerBackend,
+    load_app_config_from_env, App, AppConfig, AppError, AppFrontendController,
+    AppTicketPickerProvider, FrontendController, WorkerManagerBackend,
 };
 use orchestrator_domain::{
     BackendKind, CoreError, EventPrunePolicy, SpawnSpec, SqliteEventStore, TicketProvider,
@@ -68,7 +68,7 @@ async fn main() -> Result<()> {
         runtime_config.supervisor.openrouter_base_url.clone(),
     )?;
     // Build once at startup so invalid provider keys/binary settings fail fast.
-    let _vcs = build_vcs_provider(&config, &config.vcs_provider)?;
+    let vcs = build_vcs_provider(&config, &config.vcs_provider)?;
     let github = build_vcs_repo_provider(&config, &config.vcs_repo_provider)?;
     let (ticketing, linear_ticketing) =
         build_ticketing_provider(&config, &config.ticketing_provider)?;
@@ -96,9 +96,16 @@ async fn main() -> Result<()> {
         &state,
     ));
     frontend_controller.start().await?;
+    let ticket_picker_provider = Arc::new(AppTicketPickerProvider::new(
+        Arc::clone(&app),
+        ticketing,
+        vcs,
+        worker_backend,
+    ));
     let mut ui =
         Ui::init_with_view_config(runtime_config.ui_view, runtime_config.supervisor.model)?
-            .with_frontend_controller(frontend_controller.clone());
+            .with_frontend_controller(frontend_controller.clone())
+            .with_ticket_picker_provider(ticket_picker_provider);
     app.start_linear_polling(linear_ticketing.as_deref())
         .await?;
     let frontend_snapshot = frontend_controller.snapshot().await?;

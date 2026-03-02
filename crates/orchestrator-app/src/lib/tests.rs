@@ -666,6 +666,16 @@ mod tests {
     }
 
     #[test]
+    fn planning_to_implementing_instruction_requires_exiting_planning_mode() {
+        let (_, _, _, instruction) = App::<Healthy, Healthy>::workflow_advance_target(
+            &WorkflowState::Planning,
+        )
+        .expect("resolve workflow advance target");
+        let instruction = instruction.expect("planning->implementing instruction");
+        assert!(instruction.contains("End planning mode"));
+    }
+
+    #[test]
     fn config_parses_from_toml_file() {
         let home = unique_temp_dir("parse");
         let config_path = home.join("config.toml");

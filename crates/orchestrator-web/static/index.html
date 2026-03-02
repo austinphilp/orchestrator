@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Orchestrator Web UI</title>
+    <link rel="stylesheet" href="/app.css" />
+  </head>
+  <body>
+    <div id="app" class="app-shell">
+      <header class="top-bar">
+        <div class="title-block">
+          <h1>orchestrator</h1>
+          <p id="status-line">connecting...</p>
+        </div>
+        <div class="connection-block">
+          <span id="connection-state" class="pill">offline</span>
+          <span id="mode-state" class="pill">NORMAL</span>
+        </div>
+      </header>
+
+      <main class="main-grid">
+        <section class="pane inbox-pane">
+          <div class="pane-header">Inbox</div>
+          <div id="inbox-list" class="pane-body"></div>
+        </section>
+
+        <section class="pane center-pane">
+          <div class="pane-header" id="center-title">Terminal</div>
+          <div id="center-body" class="pane-body monospace"></div>
+          <div id="compose-row" class="compose-row hidden">
+            <label for="compose-input">input</label>
+            <input id="compose-input" type="text" autocomplete="off" spellcheck="false" />
+          </div>
+        </section>
+
+        <section class="pane sessions-pane">
+          <div class="pane-header">Sessions</div>
+          <div id="sessions-list" class="pane-body"></div>
+        </section>
+      </main>
+
+      <footer class="bottom-bar">
+        <div id="warning-line">ready</div>
+        <div id="hint-line" class="muted">j/k: move • i: insert • s: ticket picker • c: chat • Esc: normal</div>
+      </footer>
+
+      <div id="ticket-picker" class="overlay hidden" aria-hidden="true">
+        <div class="overlay-panel">
+          <div class="overlay-header">
+            <strong>Ticket Picker</strong>
+            <button id="ticket-picker-close" type="button">close</button>
+          </div>
+          <div class="overlay-body" id="ticket-picker-body"></div>
+          <div class="overlay-footer">j/k move • Enter start • x archive • Esc close</div>
+        </div>
+      </div>
+
+      <div id="diff-modal" class="overlay hidden" aria-hidden="true">
+        <div class="overlay-panel wide">
+          <div class="overlay-header">
+            <strong>Worktree Diff</strong>
+            <button id="diff-close" type="button">close</button>
+          </div>
+          <pre id="diff-content" class="overlay-body monospace"></pre>
+        </div>
+      </div>
+
+      <div id="archive-confirm" class="overlay hidden" aria-hidden="true">
+        <div class="overlay-panel">
+          <div class="overlay-header">
+            <strong id="archive-confirm-title">Archive Session</strong>
+          </div>
+          <div class="overlay-body">
+            <p id="archive-confirm-message">Archive selected session?</p>
+          </div>
+          <div class="overlay-footer">
+            <button id="archive-confirm-yes" type="button">archive (y)</button>
+            <button id="archive-confirm-no" type="button">cancel (n)</button>
+          </div>
+        </div>
+      </div>
+
+      <div id="needs-input-modal" class="overlay hidden" aria-hidden="true">
+        <div class="overlay-panel wide needs-input-panel">
+          <div class="overlay-header">
+            <strong id="needs-input-title">Needs Input</strong>
+            <button id="needs-input-close" type="button">close</button>
+          </div>
+          <div id="needs-input-body" class="overlay-body needs-input-body"></div>
+          <div id="needs-input-footer" class="overlay-footer"></div>
+        </div>
+      </div>
+
+      <div id="toast" class="toast hidden"></div>
+    </div>
+
+    <script src="/app.js"></script>
+  </body>
+</html>
