@@ -1075,7 +1075,7 @@ async fn dispatch_ws_message(
             let _ = send_json_message(&outbound, &envelope).await;
         }
         Err(error) => {
-            let _ = send_dispatch_error(&outbound, request_id, error.to_string()).await;
+            let _ = send_dispatch_error(&outbound, request_id, core_error_payload(&error)).await;
         }
     }
 }
@@ -1128,22 +1128,47 @@ fn response_ok_envelope(request_id: Option<String>, payload: Value) -> WsServerE
     }
 }
 
-fn response_error_envelope(request_id: Option<String>, message: String) -> WsServerEnvelope {
+fn response_error_envelope(request_id: Option<String>, payload: Value) -> WsServerEnvelope {
     WsServerEnvelope {
         request_id,
         event_id: None,
         message_type: "response.error".to_owned(),
-        payload: json!({ "message": message }),
+        payload,
     }
 }
 
 async fn send_dispatch_error(
     outbound: &mpsc::Sender<Message>,
     request_id: Option<String>,
-    message: String,
+    payload: Value,
 ) -> Result<(), ()> {
-    let envelope = response_error_envelope(request_id, message);
+    let envelope = response_error_envelope(request_id, payload);
     send_json_message(outbound, &envelope).await.map_err(|_| ())
+}
+
+fn core_error_payload(error: &CoreError) -> Value {
+    match error {
+        CoreError::MissingProjectRepositoryMapping {
+            provider: _provider,
+            project,
+        } => json!({
+            "message": error.to_string(),
+            "code": "missing_project_repository_mapping",
+            "project_id": project,
+        }),
+        CoreError::InvalidMappedRepository {
+            provider: _provider,
+            project,
+            repository_path,
+            reason: _reason,
+        } => json!({
+            "message": error.to_string(),
+            "code": "invalid_mapped_repository",
+            "project_id": project,
+            "repository_path_hint": repository_path,
+        }),
+        _ => json!({ "message": error.to_string() }),
+    }
 }
 
 async fn send_json_message(

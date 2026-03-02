@@ -5,6 +5,10 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Orchestrator Web UI</title>
     <link rel="stylesheet" href="/app.css" />
+    <link
+      rel="stylesheet"
+      href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.20/codemirror.min.css"
+    />
   </head>
   <body>
     <div id="app" class="app-shell">
@@ -30,7 +34,7 @@
           <div id="center-body" class="pane-body monospace"></div>
           <div id="compose-row" class="compose-row hidden">
             <label for="compose-input">input</label>
-            <input id="compose-input" type="text" autocomplete="off" spellcheck="false" />
+            <textarea id="compose-input" autocomplete="off" spellcheck="false"></textarea>
           </div>
         </section>
 
@@ -52,7 +56,7 @@
             <button id="ticket-picker-close" type="button">close</button>
           </div>
           <div class="overlay-body" id="ticket-picker-body"></div>
-          <div class="overlay-footer">j/k move • Enter start • x archive • Esc close</div>
+          <div class="overlay-footer">j/k move • h/l fold/unfold • Enter start • x archive • Esc close</div>
         </div>
       </div>
 
@@ -62,7 +66,10 @@
             <strong>Worktree Diff</strong>
             <button id="diff-close" type="button">close</button>
           </div>
-          <pre id="diff-content" class="overlay-body monospace"></pre>
+          <div class="overlay-body diff-layout">
+            <div id="diff-files" class="diff-files"></div>
+            <pre id="diff-content" class="diff-detail monospace"></pre>
+          </div>
         </div>
       </div>
 
@@ -93,8 +100,11 @@
       </div>
 
       <div id="toast" class="toast hidden"></div>
+      <div id="which-key-overlay" class="which-key hidden"></div>
     </div>
 
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.20/codemirror.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.20/keymap/vim.min.js"></script>
     <script src="/app.js"></script>
   </body>
 </html>
