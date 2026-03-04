@@ -646,6 +646,14 @@ fn summarize_event_payload(payload: &OrchestrationEventPayload, max_chars: usize
             inbox.inbox_item_id.as_str(),
             inbox.work_item_id.as_str()
         ),
+        OrchestrationEventPayload::InboxLaneColorSet(payload) => format!(
+            "inbox lane {:?} color set to {:?}",
+            payload.lane, payload.color
+        ),
+        OrchestrationEventPayload::InboxLaneColorsReset(payload) => match payload.lane {
+            Some(lane) => format!("inbox lane {:?} color reset", lane),
+            None => "all inbox lane colors reset".to_owned(),
+        },
         OrchestrationEventPayload::UserResponded(response) => {
             format!(
                 "user responded: {}",

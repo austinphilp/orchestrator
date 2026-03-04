@@ -1,9 +1,12 @@
 use crate::events::{
-    InboxItemCreatedPayload, InboxItemResolvedPayload, NewEventEnvelope, OrchestrationEventPayload,
-    SessionCompletedPayload, SessionCrashedPayload, StoredEventEnvelope, WorkflowTransitionPayload,
+    InboxItemCreatedPayload, InboxItemResolvedPayload, InboxLaneColorsResetPayload,
+    InboxLaneColorSetPayload, NewEventEnvelope, OrchestrationEventPayload,
+    SessionCompletedPayload, SessionCrashedPayload, StoredEventEnvelope,
+    WorkflowTransitionPayload,
 };
 use crate::controller::contracts::{
-    InboxPublishRequest, InboxResolveRequest, SessionArchiveOutcome, SessionMergeFinalizeOutcome,
+    InboxLaneColorsResetRequest, InboxLaneColorSetRequest, InboxPublishRequest,
+    InboxResolveRequest, SessionArchiveOutcome, SessionMergeFinalizeOutcome,
     SessionWorkflowAdvanceOutcome, SessionWorktreeDiff, SupervisorCommandContext,
     SupervisorCommandDispatcher,
 };

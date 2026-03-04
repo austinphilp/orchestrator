@@ -528,6 +528,8 @@ fn render_event_type(event_type: &OrchestrationEventType) -> &'static str {
         OrchestrationEventType::WorkflowTransition => "workflow_transition",
         OrchestrationEventType::InboxItemCreated => "inbox_item_created",
         OrchestrationEventType::InboxItemResolved => "inbox_item_resolved",
+        OrchestrationEventType::InboxLaneColorSet => "inbox_lane_color_set",
+        OrchestrationEventType::InboxLaneColorsReset => "inbox_lane_colors_reset",
         OrchestrationEventType::UserResponded => "user_responded",
         OrchestrationEventType::SupervisorQueryStarted => "supervisor_query_started",
         OrchestrationEventType::SupervisorQueryChunk => "supervisor_query_chunk",

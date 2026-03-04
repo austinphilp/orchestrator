@@ -156,6 +156,18 @@ pub fn apply_event(state: &mut ProjectionState, event: StoredEventEnvelope) {
                 item.resolved = true;
             }
         }
+        OrchestrationEventPayload::InboxLaneColorSet(payload) => {
+            state
+                .inbox_lane_colors
+                .set_lane_color(payload.lane, payload.color);
+        }
+        OrchestrationEventPayload::InboxLaneColorsReset(payload) => {
+            if let Some(lane) = payload.lane {
+                state.inbox_lane_colors.reset_lane(lane);
+            } else {
+                state.inbox_lane_colors.reset_all();
+            }
+        }
         OrchestrationEventPayload::TicketSynced(_)
         | OrchestrationEventPayload::TicketDetailsSynced(_)
         | OrchestrationEventPayload::UserResponded(_)

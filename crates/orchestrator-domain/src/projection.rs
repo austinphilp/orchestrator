@@ -6,7 +6,9 @@ use crate::events::{OrchestrationEventPayload, StoredEventEnvelope};
 use crate::identifiers::{
     ArtifactId, InboxItemId, ProjectId, TicketId, WorkItemId, WorkerSessionId, WorktreeId,
 };
-use crate::status::{ArtifactKind, InboxItemKind, WorkerSessionStatus, WorkflowState};
+use crate::status::{
+    ArtifactKind, InboxItemKind, InboxLaneColorPreferences, WorkerSessionStatus, WorkflowState,
+};
 use crate::store::RetrievalScope;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -60,6 +62,7 @@ pub struct ProjectionState {
     pub sessions: HashMap<WorkerSessionId, SessionProjection>,
     pub session_runtime: HashMap<WorkerSessionId, SessionRuntimeProjection>,
     pub inbox_items: HashMap<InboxItemId, InboxItemProjection>,
+    pub inbox_lane_colors: InboxLaneColorPreferences,
     pub artifacts: HashMap<ArtifactId, ArtifactProjection>,
     pub events: Vec<StoredEventEnvelope>,
 }
@@ -209,6 +212,18 @@ pub fn apply_event(state: &mut ProjectionState, event: StoredEventEnvelope) {
         OrchestrationEventPayload::InboxItemResolved(payload) => {
             if let Some(item) = state.inbox_items.get_mut(&payload.inbox_item_id) {
                 item.resolved = true;
+            }
+        }
+        OrchestrationEventPayload::InboxLaneColorSet(payload) => {
+            state
+                .inbox_lane_colors
+                .set_lane_color(payload.lane, payload.color);
+        }
+        OrchestrationEventPayload::InboxLaneColorsReset(payload) => {
+            if let Some(lane) = payload.lane {
+                state.inbox_lane_colors.reset_lane(lane);
+            } else {
+                state.inbox_lane_colors.reset_all();
             }
         }
         OrchestrationEventPayload::TicketSynced(_)

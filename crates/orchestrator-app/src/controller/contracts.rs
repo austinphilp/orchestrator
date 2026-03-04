@@ -3,8 +3,8 @@ use std::path::PathBuf;
 use crate::commands::{SupervisorQueryContextArgs, UntypedCommandInvocation};
 use async_trait::async_trait;
 use orchestrator_domain::{
-    CoreError, InboxItemId, InboxItemKind, LlmResponseStream, SelectedTicketFlowResult, WorkItemId,
-    WorkerSessionId, WorkflowState,
+    CoreError, InboxItemId, InboxItemKind, InboxLane, InboxLaneColor, LlmResponseStream,
+    SelectedTicketFlowResult, WorkItemId, WorkerSessionId, WorkflowState,
 };
 use orchestrator_ticketing::TicketSummary;
 use tokio::sync::mpsc;
@@ -119,6 +119,22 @@ pub trait TicketPickerProvider: Send + Sync {
             "inbox resolution is not supported by this ticket provider".to_owned(),
         ))
     }
+    async fn set_inbox_lane_color(
+        &self,
+        _request: InboxLaneColorSetRequest,
+    ) -> Result<StoredEventEnvelope, CoreError> {
+        Err(CoreError::DependencyUnavailable(
+            "inbox lane color updates are not supported by this ticket provider".to_owned(),
+        ))
+    }
+    async fn reset_inbox_lane_colors(
+        &self,
+        _request: InboxLaneColorsResetRequest,
+    ) -> Result<StoredEventEnvelope, CoreError> {
+        Err(CoreError::DependencyUnavailable(
+            "inbox lane color resets are not supported by this ticket provider".to_owned(),
+        ))
+    }
     async fn start_pr_pipeline_polling(
         &self,
         _sender: mpsc::Sender<MergeQueueEvent>,
@@ -148,6 +164,17 @@ pub struct InboxPublishRequest {
 pub struct InboxResolveRequest {
     pub inbox_item_id: InboxItemId,
     pub work_item_id: WorkItemId,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InboxLaneColorSetRequest {
+    pub lane: InboxLane,
+    pub color: InboxLaneColor,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InboxLaneColorsResetRequest {
+    pub lane: Option<InboxLane>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

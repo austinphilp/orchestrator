@@ -21,22 +21,27 @@ pub mod ui_boundary {
         SupervisorQueryContextArgs, UntypedCommandInvocation,
     };
     pub use crate::controller::action_runners::{
+        run_reset_inbox_lane_colors_task, run_set_inbox_lane_color_task,
         run_publish_inbox_item_task, run_resolve_inbox_item_task, run_session_merge_finalize_task,
         run_session_workflow_advance_task, run_start_pr_pipeline_polling_task,
         run_stop_pr_pipeline_polling_task, run_supervisor_command_task, run_supervisor_stream_task,
         InboxPublishRunnerEvent as ControllerInboxPublishRunnerEvent,
+        InboxLaneColorsResetRunnerEvent as ControllerInboxLaneColorsResetRunnerEvent,
+        InboxLaneColorSetRunnerEvent as ControllerInboxLaneColorSetRunnerEvent,
         InboxResolveRunnerEvent as ControllerInboxResolveRunnerEvent,
         SupervisorStreamRunnerEvent as ControllerSupervisorStreamRunnerEvent,
         WorkflowAdvanceRunnerEvent as ControllerWorkflowAdvanceRunnerEvent,
     };
     pub use crate::controller::contracts::{
-        CiCheckStatus, CreateTicketFromPickerRequest, InboxPublishRequest, InboxResolveRequest,
+        CiCheckStatus, CreateTicketFromPickerRequest, InboxLaneColorsResetRequest,
+        InboxLaneColorSetRequest, InboxPublishRequest, InboxResolveRequest,
         MergeQueueCommandKind, MergeQueueEvent, SessionArchiveOutcome, SessionMergeFinalizeOutcome,
         SessionWorkflowAdvanceOutcome, SessionWorktreeDiff, SupervisorCommandContext,
         SupervisorCommandDispatcher, TicketCreateSubmitMode, TicketPickerProvider,
     };
     pub use crate::events::{
         InboxItemCreatedPayload, InboxItemResolvedPayload, NewEventEnvelope,
+        InboxLaneColorsResetPayload, InboxLaneColorSetPayload,
         OrchestrationEventPayload, OrchestrationEventType, SessionBlockedPayload,
         SessionCheckpointPayload, SessionCompletedPayload, SessionNeedsInputPayload,
         StoredEventEnvelope, SupervisorQueryFinishedPayload, TicketDetailsSyncedPayload,
@@ -49,6 +54,7 @@ pub mod ui_boundary {
     };
     pub use orchestrator_domain::{
         ArtifactId, ArtifactKind, CoreError, InboxItemId, InboxItemKind, LlmChatRequest,
+        InboxLane, InboxLaneColor, InboxLaneColorPreferences,
         LlmFinishReason, LlmMessage, LlmProvider, LlmProviderKind, LlmRateLimitState,
         LlmResponseStream, LlmResponseSubscription, LlmRole, LlmStreamChunk, LlmTokenUsage,
         ProjectId, SelectedTicketFlowResult, SessionLifecycle, TicketId, TicketProvider,
